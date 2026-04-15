@@ -1,3 +1,7 @@
+// growth — AI Revenue System by AxisOne
+// Multi-tenancy data model — tenant_id on every table
+// Prisma ORM with PostgreSQL (Cloud SQL)
+
 generator client {
   provider = "prisma-client-js"
 }
@@ -7,26 +11,444 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// Multi-tenancy foundation
-model Organization {
-  id        String   @id @default(cuid())
-  name      String
-  slug      String   @unique
-  plan      String   @default("free")
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  users     User[]
+// ─────────────────────────────────────────────
+// MULTI-TENANCY ROOT
+// ─────────────────────────────────────────────
+
+model Tenant {
+  id                  String   @id @default(uuid())
+  name                String
+  slug                String   @unique
+  planTier            String   @default("free") @map("plan_tier")
+  blueprintId         String?  @map("blueprint_id")
+  aiPermissions       Json     @default("{}") @map("ai_permissions")
+  confidenceThreshold Int      @default(70) @map("confidence_threshold")
+  settings            Json     @default("{}")
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  blueprint       Blueprint?       @relation(fields: [blueprintId], references: [id])
+  users           User[]
+  contacts        Contact[]
+  brainSnapshots  BrainSnapshot[]
+  objectives      Objective[]
+  decisions       Decision[]
+  actions         Action[]
+  outcomes        Outcome[]
+  auditLogs       AuditLog[]
+  strategyWeights StrategyWeight[]
+  pipelines       Pipeline[]
+  customers       Customer[]
+  conversations   Conversation[]
+  escalations     Escalation[]
+  knowledgeBase   KnowledgeBase[]
+  aiAgentConfigs  AiAgentConfig[]
+  contactStates   ContactState[]
+
+  @@map("tenants")
 }
 
 model User {
-  id             String       @id @default(cuid())
-  email          String       @unique
-  name           String?
-  role           String       @default("member")
-  organizationId String
-  organization   Organization @relation(fields: [organizationId], references: [id])
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
+  id        String   @id @default(uuid())
+  email     String   @unique
+  name      String?
+  role      String   @default("member")
+  tenantId  String   @map("tenant_id")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
-  @@index([organizationId])
+  tenant              Tenant       @relation(fields: [tenantId], references: [id])
+  resolvedEscalations Escalation[] @relation("ResolvedByUser")
+
+  @@index([tenantId])
+  @@map("users")
+}
+
+// ─────────────────────────────────────────────
+// BLUEPRINTS (global, growth-owned)
+// ─────────────────────────────────────────────
+
+model Blueprint {
+  id                String   @id @default(uuid())
+  vertical          String
+  customerModel     Json     @map("customer_model")
+  journeys          Json
+  strategyTemplates Json     @map("strategy_templates")
+  isActive          Boolean  @default(true) @map("is_active")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  tenants    Tenant[]
+  objectives Objective[]
+
+  @@map("blueprints")
+}
+
+// ─────────────────────────────────────────────
+// BRAIN SERVICE (UNDERSTAND phase)
+// ─────────────────────────────────────────────
+
+model BrainSnapshot {
+  id              String   @id @default(uuid())
+  tenantId        String   @map("tenant_id")
+  companyTruth    Json     @map("company_truth")
+  behavioralModel Json     @map("behavioral_model")
+  outcomeModel    Json     @map("outcome_model")
+  version         Int      @default(1)
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId])
+  @@index([tenantId, version])
+  @@map("brain_snapshots")
+}
+
+// ─────────────────────────────────────────────
+// CONTACTS & STATE
+// ─────────────────────────────────────────────
+
+model Contact {
+  id               String   @id @default(uuid())
+  tenantId         String   @map("tenant_id")
+  email            String?
+  phone            String?
+  firstName        String?  @map("first_name")
+  lastName         String?  @map("last_name")
+  externalIds      Json     @default("{}") @map("external_ids")
+  dataQualityScore Float    @default(0) @map("data_quality_score")
+  segment          String?
+  lifecycleStage   String   @default("new") @map("lifecycle_stage")
+  source           String?
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  tenant        Tenant         @relation(fields: [tenantId], references: [id])
+  contactStates ContactState[]
+  decisions     Decision[]
+  outcomes      Outcome[]
+  pipelineCards PipelineCard[]
+  customer      Customer?
+  conversations Conversation[]
+  escalations   Escalation[]
+  actions       Action[]
+
+  @@index([tenantId])
+  @@index([tenantId, email])
+  @@index([tenantId, lifecycleStage])
+  @@index([tenantId, segment])
+  @@index([tenantId, dataQualityScore])
+  @@index([tenantId, source])
+  @@map("contacts")
+}
+
+model ContactState {
+  id              String   @id @default(uuid())
+  tenantId        String   @map("tenant_id")
+  contactId       String   @map("contact_id")
+  objectiveId     String   @map("objective_id")
+  subObjectives   Json     @default("[]") @map("sub_objectives")
+  strategyCurrent String?  @map("strategy_current")
+  confidenceScore Float    @default(0) @map("confidence_score")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  tenant    Tenant    @relation(fields: [tenantId], references: [id])
+  contact   Contact   @relation(fields: [contactId], references: [id])
+  objective Objective @relation(fields: [objectiveId], references: [id])
+
+  @@unique([contactId, objectiveId])
+  @@index([tenantId])
+  @@index([contactId])
+  @@map("contact_states")
+}
+
+// ─────────────────────────────────────────────
+// DECISION ENGINE (DECIDE phase)
+// ─────────────────────────────────────────────
+
+model Objective {
+  id               String   @id @default(uuid())
+  tenantId         String   @map("tenant_id")
+  name             String
+  type             String
+  successCondition Json     @map("success_condition")
+  subObjectives    Json     @default("[]") @map("sub_objectives")
+  blueprintId      String?  @map("blueprint_id")
+  isActive         Boolean  @default(true) @map("is_active")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  tenant        Tenant         @relation(fields: [tenantId], references: [id])
+  blueprint     Blueprint?     @relation(fields: [blueprintId], references: [id])
+  contactStates ContactState[]
+  outcomes      Outcome[]
+
+  @@index([tenantId])
+  @@index([tenantId, type])
+  @@map("objectives")
+}
+
+model Decision {
+  id               String   @id @default(uuid())
+  tenantId         String   @map("tenant_id")
+  contactId        String   @map("contact_id")
+  strategySelected String   @map("strategy_selected")
+  actionType       String   @map("action_type")
+  confidence       Float
+  reasoning        String?
+  metadata         Json     @default("{}")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  tenant  Tenant   @relation(fields: [tenantId], references: [id])
+  contact Contact  @relation(fields: [contactId], references: [id])
+  actions Action[]
+
+  @@index([tenantId])
+  @@index([tenantId, contactId])
+  @@index([tenantId, createdAt])
+  @@map("decisions")
+}
+
+// ─────────────────────────────────────────────
+// AGENT DISPATCHER (EXECUTE phase)
+// ─────────────────────────────────────────────
+
+model Action {
+  id           String    @id @default(uuid())
+  tenantId     String    @map("tenant_id")
+  decisionId   String    @map("decision_id")
+  contactId    String    @map("contact_id")
+  agentType    String    @map("agent_type")
+  channel      String?
+  payload      Json      @default("{}")
+  status       String    @default("pending")
+  sentAt       DateTime? @map("sent_at")
+  deliveredAt  DateTime? @map("delivered_at")
+  failedAt     DateTime? @map("failed_at")
+  errorMessage String?   @map("error_message")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id])
+  decision Decision @relation(fields: [decisionId], references: [id])
+  contact  Contact  @relation(fields: [contactId], references: [id])
+
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@index([tenantId, createdAt])
+  @@index([decisionId])
+  @@map("actions")
+}
+
+// ─────────────────────────────────────────────
+// LEARNING SERVICE (LEARN phase)
+// ─────────────────────────────────────────────
+
+model Outcome {
+  id             String   @id @default(uuid())
+  tenantId       String   @map("tenant_id")
+  contactId      String   @map("contact_id")
+  objectiveId    String   @map("objective_id")
+  result         String
+  reasonCategory String?  @map("reason_category")
+  metadata       Json     @default("{}")
+  recordedAt     DateTime @default(now()) @map("recorded_at")
+
+  tenant    Tenant    @relation(fields: [tenantId], references: [id])
+  contact   Contact   @relation(fields: [contactId], references: [id])
+  objective Objective @relation(fields: [objectiveId], references: [id])
+
+  @@index([tenantId])
+  @@index([tenantId, objectiveId])
+  @@index([tenantId, result])
+  @@map("outcomes")
+}
+
+model StrategyWeight {
+  id           String   @id @default(uuid())
+  tenantId     String   @map("tenant_id")
+  strategyType String   @map("strategy_type")
+  segment      String?
+  winRate      Float    @default(0) @map("win_rate")
+  sampleSize   Int      @default(0) @map("sample_size")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@unique([tenantId, strategyType, segment])
+  @@index([tenantId])
+  @@map("strategy_weights")
+}
+
+// ─────────────────────────────────────────────
+// AUDIT LOG (immutable)
+// ─────────────────────────────────────────────
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  tenantId   String   @map("tenant_id")
+  actor      String
+  actionType String   @map("action_type")
+  payload    Json     @default("{}")
+  reasoning  String?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId])
+  @@index([tenantId, actionType])
+  @@index([tenantId, createdAt])
+  @@map("audit_log")
+}
+
+// ─────────────────────────────────────────────
+// EXTENDED: Pipelines
+// ─────────────────────────────────────────────
+
+model Pipeline {
+  id                 String   @id @default(uuid())
+  tenantId           String   @map("tenant_id")
+  name               String
+  description        String?
+  color              String   @default("#6366F1")
+  sourceType         String?  @map("source_type")
+  audienceConditions Json     @default("[]") @map("audience_conditions")
+  stages             Json     @default("[]")
+  salesTarget        Float?   @map("sales_target")
+  isActive           Boolean  @default(true) @map("is_active")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant         @relation(fields: [tenantId], references: [id])
+  cards  PipelineCard[]
+
+  @@index([tenantId])
+  @@map("pipelines")
+}
+
+model PipelineCard {
+  id         String   @id @default(uuid())
+  pipelineId String   @map("pipeline_id")
+  contactId  String   @map("contact_id")
+  stage      String
+  dealAmount Float?   @map("deal_amount")
+  confidence Float    @default(0)
+  enteredAt  DateTime @default(now()) @map("entered_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  pipeline Pipeline @relation(fields: [pipelineId], references: [id])
+  contact  Contact  @relation(fields: [contactId], references: [id])
+
+  @@index([pipelineId])
+  @@index([contactId])
+  @@index([pipelineId, stage])
+  @@map("pipeline_cards")
+}
+
+// ─────────────────────────────────────────────
+// EXTENDED: Customers, Conversations, Escalations
+// ─────────────────────────────────────────────
+
+model Customer {
+  id          String   @id @default(uuid())
+  tenantId    String   @map("tenant_id")
+  contactId   String   @unique @map("contact_id")
+  plan        String?
+  mrr         Float    @default(0)
+  ltv         Float    @default(0)
+  healthScore Float    @default(50) @map("health_score")
+  status      String   @default("active")
+  since       DateTime @default(now())
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id])
+  contact Contact @relation(fields: [contactId], references: [id])
+
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@index([tenantId, healthScore])
+  @@map("customers")
+}
+
+model Conversation {
+  id            String    @id @default(uuid())
+  tenantId      String    @map("tenant_id")
+  contactId     String    @map("contact_id")
+  channel       String
+  messages      Json      @default("[]")
+  aiTagged      Boolean   @default(false) @map("ai_tagged")
+  lastMessageAt DateTime? @map("last_message_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id])
+  contact Contact @relation(fields: [contactId], references: [id])
+
+  @@index([tenantId])
+  @@index([tenantId, contactId])
+  @@index([tenantId, lastMessageAt])
+  @@map("conversations")
+}
+
+model Escalation {
+  id            String    @id @default(uuid())
+  tenantId      String    @map("tenant_id")
+  contactId     String    @map("contact_id")
+  severity      String    @default("medium")
+  triggerType   String    @map("trigger_type")
+  triggerReason String?   @map("trigger_reason")
+  aiSuggestion  String?   @map("ai_suggestion")
+  status        String    @default("open")
+  resolvedBy    String?   @map("resolved_by")
+  resolvedAt    DateTime? @map("resolved_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  tenant   Tenant  @relation(fields: [tenantId], references: [id])
+  contact  Contact @relation(fields: [contactId], references: [id])
+  resolver User?   @relation("ResolvedByUser", fields: [resolvedBy], references: [id])
+
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@index([tenantId, severity])
+  @@map("escalations")
+}
+
+// ─────────────────────────────────────────────
+// EXTENDED: Knowledge Base & AI Config
+// ─────────────────────────────────────────────
+
+model KnowledgeBase {
+  id        String   @id @default(uuid())
+  tenantId  String   @map("tenant_id")
+  category  String
+  fields    Json     @default("{}")
+  aiTrained Boolean  @default(false) @map("ai_trained")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId])
+  @@unique([tenantId, category])
+  @@map("knowledge_base")
+}
+
+model AiAgentConfig {
+  id           String   @id @default(uuid())
+  tenantId     String   @map("tenant_id")
+  agentName    String   @default("AI Agent") @map("agent_name")
+  tone         String   @default("professional")
+  writingStyle String   @default("concise") @map("writing_style")
+  emojiUsage   Boolean  @default(false) @map("emoji_usage")
+  language     String   @default("en")
+  guardrails   Json     @default("{}")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId])
+  @@map("ai_agent_config")
 }
