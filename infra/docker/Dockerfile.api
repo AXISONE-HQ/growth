@@ -5,9 +5,10 @@ WORKDIR /app
 FROM base AS deps
 COPY package.json package-lock.json* ./
 COPY apps/api/package.json ./apps/api/
+COPY apps/web/package.json ./apps/web/
 COPY packages/shared/package.json ./packages/shared/
 COPY packages/db/package.json ./packages/db/
-RUN npm ci --workspace=apps/api
+RUN npm ci
 
 FROM base AS builder
 COPY --from=deps /app/node_modules ./node_modules
