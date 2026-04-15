@@ -1,0 +1,45 @@
+# Cloud Build  growth API
+# Triggers: push to main branch
+steps:
+  # Build the Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/growth-images/growth-api:$SHORT_SHA'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/growth-images/growth-api:latest'
+      - '-f'
+      - 'infra/docker/Dockerfile.api'
+      - '.'
+
+  # Push the image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - '--all-tags'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/growth-images/growth-api'
+
+  # Deploy to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'growth-api'
+      - '--image'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/growth-images/growth-api:$SHORT_SHA'
+      - '--region'
+      - 'us-central1'
+      - '--platform'
+      - 'managed'
+      - '--allow-unauthenticated'
+      - '--set-env-vars'
+      - 'NODE_ENV=production'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+images:
+  - 'us-central1-docker.pkg.dev/$PROJECT_ID/growth-images/growth-api:$SHORT_SHA'
+  - 'us-central1-docker.pkg.dev/$PROJECT_ID/growth-images/growth-api:latest'
