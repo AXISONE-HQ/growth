@@ -1,6 +1,6 @@
-## Cloud Build — API Production Deployment
-## Trigger: manual approval after staging verification
-## Deploys to: growth-api Cloud Run service
+## Cloud Build — API Staging Deployment
+## Trigger: push to main branch (automatic)
+## Deploys to: growth-api-staging Cloud Run service
 
 steps:
   # Build the Docker image
@@ -10,7 +10,7 @@ steps:
       - '-t'
       - 'us-central1-docker.pkg.dev/$PROJECT_ID/growth-images/growth-api:$SHORT_SHA'
       - '-t'
-      - 'us-central1-docker.pkg.dev/$PROJECT_ID/growth-images/growth-api:latest'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/growth-images/growth-api:staging'
       - '-f'
       - 'infra/docker/Dockerfile.api'
       - '.'
@@ -22,13 +22,13 @@ steps:
       - '--all-tags'
       - 'us-central1-docker.pkg.dev/$PROJECT_ID/growth-images/growth-api'
 
-  # Deploy to Cloud Run (production)
+  # Deploy to Cloud Run (staging)
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
       - 'run'
       - 'deploy'
-      - 'growth-api'
+      - 'growth-api-staging'
       - '--image'
       - 'us-central1-docker.pkg.dev/$PROJECT_ID/growth-images/growth-api:$SHORT_SHA'
       - '--region'
@@ -37,21 +37,17 @@ steps:
       - 'managed'
       - '--allow-unauthenticated'
       - '--set-env-vars'
-      - 'NODE_ENV=production'
+      - 'NODE_ENV=staging'
       - '--update-secrets'
-      - 'DATABASE_URL=growth-db-url-production:latest,REDIS_URL=growth-redis-url-production:latest,ANTHROPIC_API_KEY=growth-anthropic-key:latest,SENDGRID_API_KEY=growth-sendgrid-key:latest,TWILIO_AUTH_TOKEN=growth-twilio-token:latest,STRIPE_SECRET_KEY=growth-stripe-key-production:latest,NANGO_SECRET_KEY=growth-nango-key:latest'
+      - 'DATABASE_URL=growth-db-url-staging:latest,REDIS_URL=growth-redis-url-staging:latest,ANTHROPIC_API_KEY=growth-anthropic-key:latest,SENDGRID_API_KEY=growth-sendgrid-key:latest,TWILIO_AUTH_TOKEN=growth-twilio-token:latest,STRIPE_SECRET_KEY=growth-stripe-key-staging:latest,NANGO_SECRET_KEY=growth-nango-key:latest'
       - '--max-instances'
-      - '10'
-      - '--min-instances'
-      - '1'
+      - '2'
       - '--memory'
-      - '1Gi'
-      - '--cpu'
-      - '1'
+      - '512Mi'
 
 options:
   logging: CLOUD_LOGGING_ONLY
 
 images:
   - 'us-central1-docker.pkg.dev/$PROJECT_ID/growth-images/growth-api:$SHORT_SHA'
-  - 'us-central1-docker.pkg.dev/$PROJECT_ID/growth-images/growth-api:latest'
+  - 'us-central1-docker.pkg.dev/$PROJECT_ID/growth-images/growth-api:staging'
