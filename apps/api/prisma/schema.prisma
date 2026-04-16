@@ -1,0 +1,406 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Enums
+enum PlanTier {
+  free
+  starter
+  growth
+  enterprise
+}
+
+enum AgentType {
+  communication
+  revenue
+  operational
+  escalation
+}
+
+enum ActionStatus {
+  queued
+  sent
+  delivered
+  opened
+  failed
+}
+
+enum OutcomeResult {
+  completed
+  failed
+  expired
+}
+
+enum EscalationPriority {
+  critical
+  high
+  medium
+  low
+}
+
+enum EscalationStatus {
+  open
+  claimed
+  resolved
+  dismissed
+}
+
+enum PipelineType {
+  sales
+  reengagement
+  upsell
+  custom
+}
+
+enum SenderType {
+  ai
+  contact
+  human
+}
+
+enum LifecycleStage {
+  prospect
+  lead
+  customer
+  retained
+  churned
+}
+
+enum ConversationStatus {
+  active
+  paused
+  closed
+}
+
+// Models
+model Tenant {
+  id                   String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name                 String
+  planTier             PlanTier @default(free)
+  blueprintId          String?  @db.Uuid
+  aiPermissions        Json     @default("{}")
+  confidenceThreshold  Int      @default(70)
+  domain               String?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  // Relations
+  blueprint            Blueprint? @relation(fields: [blueprintId], references: [id])
+  brainSnapshots       BrainSnapshot[]
+  contacts             Contact[]
+  objectives           Objective[]
+  pipelines            Pipeline[]
+  decisions            Decision[]
+  outcomes             Outcome[]
+  auditLogs            AuditLog[]
+  strategyWeights      StrategyWeights[]
+  escalations          Escalation[]
+  conversations        Conversation[]
+
+  @@index([blueprintId])
+  @@index([createdAt])
+}
+
+model Blueprint {
+  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  vertical           String
+  name               String
+  customerModel      Json     @default("{}")
+  journeys           Json     @default("{}")
+  strategyTemplates  Json     @default("{}")
+  createdAt          DateTime @default(now())
+
+  // Relations
+  tenants            Tenant[]
+
+  @@unique([vertical, name])
+  @@index([createdAt])
+}
+
+model BrainSnapshot {
+  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId         String   @db.Uuid
+  companyTruth     Json     @default("{}")
+  behavioralModel  Json     @default("{}")
+  outcomeModel     Json     @default("{}")
+  version          Int      @default(1)
+  createdAt        DateTime @default(now())
+
+  // Relations
+  tenant           Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([version])
+  @@index([createdAt])
+}
+
+model Contact {
+  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId         String   @db.Uuid
+  email            String
+  phone            String?
+  firstName        String?
+  lastName         String?
+  company          String?
+  externalIds      Json     @default("{}")
+  dataQualityScore Int      @default(0)
+  segment          String?
+  lifecycleStage   LifecycleStage?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  // Relations
+  tenant           Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  contactStates    ContactState[]
+  decisions        Decision[]
+  outcomes         Outcome[]
+  auditLogs        AuditLog[]
+  escalations      Escalation[]
+  conversations    Conversation[]
+  messages         Message[]
+
+  @@unique([tenantId, email])
+  @@index([tenantId])
+  @@index([email])
+  @@index([lifecycleStage])
+  @@index([createdAt])
+}
+
+model ContactState {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  contactId       String   @db.Uuid
+  objectiveId     String   @db.Uuid
+  subObjectives   Json     @default("[]")
+  strategyCurrent String?
+  confidenceScore Int      @default(0)
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  contact         Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  objective       Objective @relation(fields: [objectiveId], references: [id], onDelete: Cascade)
+
+  @@unique([contactId, objectiveId])
+  @@index([contactId])
+  @@index([objectiveId])
+}
+
+model Objective {
+  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId         String   @db.Uuid
+  type             String
+  name             String
+  successCondition Json     @default("{}")
+  subObjectives    Json     @default("[]")
+  blueprintId      String?  @db.Uuid
+  active           Boolean  @default(true)
+  createdAt        DateTime @default(now())
+
+  // Relations
+  tenant           Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  contactStates    ContactState[]
+  outcomes         Outcome[]
+  decisions        Decision[]
+
+  @@index([tenantId])
+  @@index([active])
+  @@index([createdAt])
+}
+
+model Pipeline {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId        String   @db.Uuid
+  name            String
+  type            PipelineType
+  stages          Json     @default("[]")
+  objectives      Json     @default("[]")
+  audienceFilters Json     @default("{}")
+  aiSettings      Json     @default("{}")
+  active          Boolean  @default(true)
+  createdAt       DateTime @default(now())
+
+  // Relations
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+  @@index([active])
+  @@index([createdAt])
+}
+
+model Decision {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  contactId       String   @db.Uuid
+  tenantId        String   @db.Uuid
+  objectiveId     String?  @db.Uuid
+  strategySelected String
+  actionType      String
+  confidence      Int      @default(0)
+  reasoning       String?
+  createdAt       DateTime @default(now())
+
+  // Relations
+  contact         Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  objective       Objective? @relation(fields: [objectiveId], references: [id], onDelete: SetNull)
+  actions         Action[]
+  escalations     Escalation[]
+
+  @@index([tenantId])
+  @@index([contactId])
+  @@index([objectiveId])
+  @@index([createdAt])
+}
+
+model Action {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  decisionId      String   @db.Uuid
+  agentType       AgentType
+  channel         String
+  payload         Json     @default("{}")
+  status          ActionStatus @default(queued)
+  sentAt          DateTime?
+  deliveredAt     DateTime?
+  createdAt       DateTime @default(now())
+
+  // Relations
+  decision        Decision @relation(fields: [decisionId], references: [id], onDelete: Cascade)
+
+  @@index([decisionId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model Outcome {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  contactId       String   @db.Uuid
+  objectiveId     String   @db.Uuid
+  tenantId        String   @db.Uuid
+  result          OutcomeResult
+  reasonCategory  String?
+  recordedAt      DateTime @default(now())
+
+  // Relations
+  contact         Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  objective       Objective @relation(fields: [objectiveId], references: [id], onDelete: Cascade)
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([contactId, objectiveId])
+  @@index([tenantId])
+  @@index([contactId])
+  @@index([objectiveId])
+  @@index([result])
+  @@index([recordedAt])
+}
+
+model AuditLog {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId        String   @db.Uuid
+  actor           String
+  actionType      String
+  contactId       String?  @db.Uuid
+  payload         Json     @default("{}")
+  reasoning       String?
+  autoApproved    Boolean  @default(false)
+  createdAt       DateTime @default(now())
+
+  // Relations
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  contact         Contact? @relation(fields: [contactId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([contactId])
+  @@index([actionType])
+  @@index([createdAt])
+}
+
+model StrategyWeights {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId        String   @db.Uuid
+  strategyType    String
+  segment         String
+  winRate         Float    @default(0)
+  sampleSize      Int      @default(0)
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, strategyType, segment])
+  @@index([tenantId])
+  @@index([updatedAt])
+}
+
+model Escalation {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId        String   @db.Uuid
+  contactId       String   @db.Uuid
+  decisionId      String?  @db.Uuid
+  reason          String
+  priority        EscalationPriority @default(medium)
+  status          EscalationStatus @default(open)
+  assignedTo      String?
+  summary         String?
+  createdAt       DateTime @default(now())
+  resolvedAt      DateTime?
+
+  // Relations
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  contact         Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  decision        Decision? @relation(fields: [decisionId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([contactId])
+  @@index([decisionId])
+  @@index([priority])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model Conversation {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId        String   @db.Uuid
+  contactId       String   @db.Uuid
+  channel         String
+  status          ConversationStatus @default(active)
+  aiHandled       Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  contact         Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  messages        Message[]
+
+  @@index([tenantId])
+  @@index([contactId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model Message {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  conversationId  String   @db.Uuid
+  senderId        String?  @db.Uuid
+  senderType      SenderType
+  content         String
+  channel         String
+  metadata        Json     @default("{}")
+  createdAt       DateTime @default(now())
+
+  // Relations
+  conversation    Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  contact         Contact? @relation(fields: [senderId], references: [id], onDelete: SetNull)
+
+  @@index([conversationId])
+  @@index([senderId])
+  @@index([senderType])
+  @@index([createdAt])
+}
