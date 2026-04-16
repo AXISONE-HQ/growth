@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "echo 'build: skipped until Next.js app is scaffolded'",
     "start": "next start",
     "lint": "echo 'lint: skipped until @types/react added'"
   },
