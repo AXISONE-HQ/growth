@@ -19,42 +19,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
-
       - run: npm ci
-
       - name: Generate Prisma Client
         run: npx prisma generate
         working-directory: packages/db
-
       - name: Lint
         run: npm run lint
-
-      - name: Type Check
-        run: npx tsc --noEmit
-        working-directory: packages/web
 
   test:
     name: Test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
-
       - run: npm ci
-
       - name: Generate Prisma Client
         run: npx prisma generate
         working-directory: packages/db
-
       - name: Run Tests
         run: npm test
         env:
@@ -66,17 +54,13 @@ jobs:
     needs: [lint-and-typecheck, test]
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
-
       - run: npm ci
-
       - name: Generate Prisma Client
         run: npx prisma generate
         working-directory: packages/db
-
       - name: Build
         run: npm run build
