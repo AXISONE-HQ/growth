@@ -1,636 +1,575 @@
 'use client';
 
 import {
-  BookOpen, Brain, Building2, Package, Users, Target,
-  TrendingUp, Clock, CheckCircle, AlertTriangle, RefreshCw,
-  ChevronDown, ChevronRight, Search, Filter, Upload,
-  FileText, Globe, Sparkles, BarChart3, Edit3, Plus,
-  ArrowUpRight, Shield, Zap, Database, Eye, Star
+  Building2, Package, Shield, HelpCircle, Plus, Edit3, Trash2,
+  Save, X, Upload, FileText, Globe, Eye, ChevronDown, ChevronRight,
+  AlertTriangle, CheckCircle
 } from 'lucide-react';
 import { useState } from 'react';
 
-/* ── Mock Data ────────────────────────────────────── */
+/* ── Types ───────────────────────────────────────────── */
 
-const brainHealth = {
-  overall: 92,
-  lastUpdated: '2 minutes ago',
-  totalFacts: 1247,
-  sourcesConnected: 6,
-  learningVelocity: '+12% this week',
+interface Product {
+  id: number;
+  name: string;
+  category: string;
+  price: string;
+  description: string;
+  sku: string;
+}
+
+interface FAQ {
+  id: number;
+  question: string;
+  answer: string;
+}
+
+interface Document {
+  id: number;
+  name: string;
+  type: string;
+  size: string;
+  uploadedAt: string;
+}
+
+/* ── Mock Data ───────────────────────────────────────── */
+
+const initialCompanyInfo = {
+  vision: 'To empower every business with AI-driven revenue intelligence that thinks, acts, and learns autonomously.',
+  mission: 'We build the AI Revenue System that eliminates guesswork from sales, marketing, and customer success — so teams can focus on what matters.',
+  websiteUrl: 'https://www.axisone.io',
 };
 
-const companyTruth = {
-  products: [
-    {
-      id: 1, name: 'Growth Suite Pro', category: 'SaaS Platform', price: '$299/mo',
-      description: 'Full AI revenue automation with all channels, unlimited contacts, and advanced analytics.',
-      lastVerified: '1 day ago', confidence: 98,
-    },
-    {
-      id: 2, name: 'Growth Starter', category: 'SaaS Platform', price: '$99/mo',
-      description: 'Essential AI revenue tools for small teams. Up to 1,000 contacts, 3 channels.',
-      lastVerified: '1 day ago', confidence: 97,
-    },
-    {
-      id: 3, name: 'Blueprint Add-on: SaaS', category: 'Blueprint', price: '$49/mo',
-      description: 'Industry intelligence pack for SaaS companies with tailored strategies and benchmarks.',
-      lastVerified: '3 days ago', confidence: 95,
-    },
-    {
-      id: 4, name: 'Enterprise Custom', category: 'Custom Plan', price: 'Custom',
-      description: 'White-glove setup with dedicated AI tuning, custom integrations, and SLA.',
-      lastVerified: '5 days ago', confidence: 91,
-    },
-  ],
-  positioning: {
-    tagline: 'AI Revenue System that thinks, acts, and learns',
-    icp: 'B2B companies with 10-500 employees, $1M-$50M ARR',
-    differentiators: [
-      'Autonomous AI decisions with full transparency',
-      'Living Business Brain that improves over time',
-      'Industry Blueprints for instant domain expertise',
-      'Complete audit trail of every AI action',
-    ],
-    competitors: ['HubSpot', 'Outreach', 'Salesloft', 'Apollo'],
-  },
-  constraints: [
-    { rule: 'Never discount more than 20% without approval', category: 'Pricing', active: true },
-    { rule: 'Always mention 14-day free trial in first touchpoint', category: 'Sales', active: true },
-    { rule: 'Do not contact prospects before 8am or after 7pm local time', category: 'Compliance', active: true },
-    { rule: 'Enterprise deals require VP+ title confirmation', category: 'Qualification', active: true },
-    { rule: 'GDPR opt-in must be verified for EU contacts', category: 'Compliance', active: true },
-  ],
-};
+const initialDocuments: Document[] = [
+  { id: 1, name: 'Brand Guidelines 2025.pdf', type: 'PDF', size: '2.4 MB', uploadedAt: 'Apr 10, 2025' },
+  { id: 2, name: 'Product Pricing Sheet.xlsx', type: 'Excel', size: '340 KB', uploadedAt: 'Apr 8, 2025' },
+  { id: 3, name: 'Sales Playbook v3.docx', type: 'Word', size: '1.1 MB', uploadedAt: 'Mar 28, 2025' },
+];
 
-const blueprintData = {
-  name: 'SaaS B2B Blueprint',
-  version: '2.4',
-  vertical: 'Software as a Service',
-  lastUpdated: 'Apr 10, 2025',
-  journeys: [
-    { name: 'Trial → Paid', stages: 5, avgDays: 14, conversion: '23%' },
-    { name: 'Free → Pro', stages: 4, avgDays: 30, conversion: '12%' },
-    { name: 'Pro → Enterprise', stages: 6, avgDays: 90, conversion: '8%' },
-    { name: 'Churned → Win-back', stages: 3, avgDays: 45, conversion: '15%' },
-  ],
-  strategies: [
-    { name: 'Direct Conversion', bestFor: 'High-intent, decision-maker engaged', winRate: '34%' },
-    { name: 'Trust Building', bestFor: 'Early stage, needs social proof', winRate: '28%' },
-    { name: 'Guided Assistance', bestFor: 'Technical buyer, needs demo/POC', winRate: '31%' },
-    { name: 'Re-engagement', bestFor: 'Gone cold, needs new value prop', winRate: '19%' },
+const initialProducts: Product[] = [
+  { id: 1, name: 'Growth Suite Pro', category: 'SaaS Platform', price: '$299/mo', description: 'Full AI revenue automation with all channels, unlimited contacts, and advanced analytics.', sku: 'GSP-001' },
+  { id: 2, name: 'Growth Starter', category: 'SaaS Platform', price: '$99/mo', description: 'Essential AI revenue tools for small teams. Up to 1,000 contacts, 3 channels.', sku: 'GS-001' },
+  { id: 3, name: 'Blueprint Add-on: SaaS', category: 'Blueprint', price: '$49/mo', description: 'Industry intelligence pack for SaaS companies with tailored strategies and benchmarks.', sku: 'BP-SAAS-001' },
+  { id: 4, name: 'Enterprise Custom', category: 'Custom Plan', price: 'Custom', description: 'White-glove setup with dedicated AI tuning, custom integrations, and SLA.', sku: 'ENT-001' },
+];
+
+const initialWarranties = {
+  warrantyPolicy: 'All SaaS subscriptions include a 30-day money-back guarantee. No questions asked. Enterprise plans include a 90-day satisfaction guarantee with dedicated support. Hardware add-ons carry a standard 1-year limited warranty.',
+  financingTerms: 'Annual plans receive a 20% discount vs monthly billing. Enterprise clients may request net-30 or net-60 payment terms with approved credit. We do not offer financing through third-party lenders. All pricing is in USD.',
+  rules: [
+    'Never promise warranty extensions without manager approval',
+    'Do not offer financing terms below net-30 without VP sign-off',
+    'Always disclose the 30-day money-back guarantee on first contact',
+    'Refund requests after 30 days require case-by-case review',
+    'Enterprise SLA terms must reference the signed contract',
   ],
 };
 
-const behavioralInsights = [
-  { metric: 'Best Send Time', value: 'Tue/Thu 10am', trend: 'stable', confidence: 89 },
-  { metric: 'Top Channel', value: 'Email → SMS follow-up', trend: 'up', confidence: 92 },
-  { metric: 'Avg Response Time', value: '2.4 hours', trend: 'down', confidence: 87 },
-  { metric: 'Decision Maker Rate', value: '67% reached', trend: 'up', confidence: 84 },
-  { metric: 'Multi-touch Avg', value: '4.2 touches to convert', trend: 'stable', confidence: 91 },
-  { metric: 'Objection Pattern', value: 'Price → ROI reframe works 73%', trend: 'up', confidence: 86 },
+const initialFAQs: FAQ[] = [
+  { id: 1, question: 'What is the difference between Growth Starter and Growth Suite Pro?', answer: 'Growth Starter includes up to 1,000 contacts and 3 channels, while Growth Suite Pro offers unlimited contacts, all channels, and advanced analytics including AI strategy optimization.' },
+  { id: 2, question: 'How does the AI make decisions?', answer: 'The AI uses a 5-phase loop: Ingest data → Understand via the Business Brain → Decide the best action → Execute autonomously → Learn from outcomes. Every decision is logged in the Audit Trail for full transparency.' },
+  { id: 3, question: 'Is there a free trial?', answer: 'Yes, we offer a 14-day free trial on all plans. No credit card required. You get full access to all features during the trial period.' },
+  { id: 4, question: 'Can I cancel anytime?', answer: 'Yes. Monthly plans can be cancelled at any time with no penalty. Annual plans can be cancelled and will remain active until the end of the billing period. We offer a 30-day money-back guarantee.' },
+  { id: 5, question: 'How does data security work?', answer: 'All data is encrypted at rest and in transit. We use Google Cloud Platform with SOC 2 compliance. Each tenant\'s data is fully isolated. We never share or sell customer data.' },
 ];
 
-const dataSources = [
-  { name: 'HubSpot CRM', status: 'connected', lastSync: '2 min ago', records: '2,847', health: 98 },
-  { name: 'Website Forms', status: 'connected', lastSync: '5 min ago', records: '1,203', health: 95 },
-  { name: 'CSV Import (Apr)', status: 'processed', lastSync: '2 days ago', records: '450', health: 100 },
-  { name: 'Stripe Billing', status: 'connected', lastSync: '15 min ago', records: '892', health: 97 },
-  { name: 'Google Ads', status: 'connected', lastSync: '1 hr ago', records: '3,241', health: 94 },
-  { name: 'Intercom Chat', status: 'pending', lastSync: 'Never', records: '0', health: 0 },
+/* ── Tabs Config ──────────────────────────────────────── */
+
+const tabs = [
+  { id: 'company-truth', label: 'Company Truth', icon: Building2 },
+  { id: 'products', label: 'Products', icon: Package },
+  { id: 'warranties', label: 'Warranties & Financing', icon: Shield },
+  { id: 'faq', label: 'FAQ', icon: HelpCircle },
 ];
 
-const recentLearnings = [
-  { id: 1, type: 'strategy', insight: 'Direct Conversion win rate increased 4.2% for Enterprise segment after adding ROI calculator link to proposals.', time: '1 hour ago', impact: 'high' },
-  { id: 2, type: 'behavioral', insight: 'SMS follow-up within 30 min of email open increases response rate by 2.8x for Mid-Market contacts.', time: '3 hours ago', impact: 'high' },
-  { id: 3, type: 'channel', insight: 'WhatsApp outperforms email by 45% for re-engagement of contacts silent >30 days.', time: '6 hours ago', impact: 'medium' },
-  { id: 4, type: 'timing', insight: 'Thursday 10-11am consistently highest engagement window. Wednesday close second.', time: '1 day ago', impact: 'medium' },
-  { id: 5, type: 'content', insight: 'Case study mentions increase reply rate by 34% compared to feature-focused messages.', time: '2 days ago', impact: 'high' },
-];
-
-/* ── Component ────────────────────────────────────── */
+/* ── Main Component ──────────────────────────────────── */
 
 export default function KnowledgeCenterPage() {
-  const [activeTab, setActiveTab] = useState<'overview' | 'company' | 'blueprint' | 'learning' | 'sources'>('overview');
-  const [expandedProduct, setExpandedProduct] = useState<number | null>(null);
+  const [activeTab, setActiveTab] = useState('company-truth');
 
-  const tabs = [
-    { id: 'overview' as const, label: 'Overview', icon: Brain },
-    { id: 'company' as const, label: 'Company Truth', icon: Building2 },
-    { id: 'blueprint' as const, label: 'Blueprint', icon: BookOpen },
-    { id: 'learning' as const, label: 'Learning', icon: TrendingUp },
-    { id: 'sources' as const, label: 'Data Sources', icon: Database },
-  ];
+  // Company Truth state
+  const [companyInfo, setCompanyInfo] = useState(initialCompanyInfo);
+  const [editingCompany, setEditingCompany] = useState(false);
+  const [companyDraft, setCompanyDraft] = useState(initialCompanyInfo);
+  const [documents, setDocuments] = useState(initialDocuments);
 
+  // Products state
+  const [products, setProducts] = useState(initialProducts);
+  const [editingProduct, setEditingProduct] = useState<number | null>(null);
+  const [showAddProduct, setShowAddProduct] = useState(false);
+  const [productDraft, setProductDraft] = useState<Product>({ id: 0, name: '', category: '', price: '', description: '', sku: '' });
+
+  // Warranties state
+  const [warranties, setWarranties] = useState(initialWarranties);
+  const [editingWarranties, setEditingWarranties] = useState(false);
+  const [warrantiesDraft, setWarrantiesDraft] = useState(initialWarranties);
+  const [newRule, setNewRule] = useState('');
+
+  // FAQ state
+  const [faqs, setFaqs] = useState(initialFAQs);
+  const [editingFaq, setEditingFaq] = useState<number | null>(null);
+  const [showAddFaq, setShowAddFaq] = useState(false);
+  const [faqDraft, setFaqDraft] = useState<FAQ>({ id: 0, question: '', answer: '' });
+  const [expandedFaq, setExpandedFaq] = useState<number | null>(null);
+
+  /* ── Company Truth Handlers ── */
+  const saveCompanyInfo = () => {
+    setCompanyInfo(companyDraft);
+    setEditingCompany(false);
+  };
+  const cancelCompanyEdit = () => {
+    setCompanyDraft(companyInfo);
+    setEditingCompany(false);
+  };
+  const removeDocument = (id: number) => {
+    setDocuments(documents.filter(d => d.id !== id));
+  };
+
+  /* ── Product Handlers ── */
+  const saveProduct = () => {
+    if (editingProduct !== null) {
+      setProducts(products.map(p => p.id === editingProduct ? { ...productDraft, id: editingProduct } : p));
+      setEditingProduct(null);
+    } else {
+      const newId = Math.max(...products.map(p => p.id), 0) + 1;
+      setProducts([...products, { ...productDraft, id: newId }]);
+      setShowAddProduct(false);
+    }
+    setProductDraft({ id: 0, name: '', category: '', price: '', description: '', sku: '' });
+  };
+  const startEditProduct = (p: Product) => {
+    setProductDraft(p);
+    setEditingProduct(p.id);
+    setShowAddProduct(false);
+  };
+  const deleteProduct = (id: number) => {
+    setProducts(products.filter(p => p.id !== id));
+    if (editingProduct === id) { setEditingProduct(null); setProductDraft({ id: 0, name: '', category: '', price: '', description: '', sku: '' }); }
+  };
+  const cancelProductEdit = () => {
+    setEditingProduct(null);
+    setShowAddProduct(false);
+    setProductDraft({ id: 0, name: '', category: '', price: '', description: '', sku: '' });
+  };
+
+  /* ── Warranties Handlers ── */
+  const saveWarranties = () => {
+    setWarranties(warrantiesDraft);
+    setEditingWarranties(false);
+  };
+  const cancelWarrantiesEdit = () => {
+    setWarrantiesDraft(warranties);
+    setEditingWarranties(false);
+    setNewRule('');
+  };
+  const addRule = () => {
+    if (newRule.trim()) {
+      setWarrantiesDraft({ ...warrantiesDraft, rules: [...warrantiesDraft.rules, newRule.trim()] });
+      setNewRule('');
+    }
+  };
+  const removeRule = (index: number) => {
+    setWarrantiesDraft({ ...warrantiesDraft, rules: warrantiesDraft.rules.filter((_, i) => i !== index) });
+  };
+
+  /* ── FAQ Handlers ── */
+  const saveFaq = () => {
+    if (editingFaq !== null) {
+      setFaqs(faqs.map(f => f.id === editingFaq ? { ...faqDraft, id: editingFaq } : f));
+      setEditingFaq(null);
+    } else {
+      const newId = Math.max(...faqs.map(f => f.id), 0) + 1;
+      setFaqs([...faqs, { ...faqDraft, id: newId }]);
+      setShowAddFaq(false);
+    }
+    setFaqDraft({ id: 0, question: '', answer: '' });
+  };
+  const startEditFaq = (f: FAQ) => {
+    setFaqDraft(f);
+    setEditingFaq(f.id);
+    setShowAddFaq(false);
+  };
+  const deleteFaq = (id: number) => {
+    setFaqs(faqs.filter(f => f.id !== id));
+    if (editingFaq === id) { setEditingFaq(null); setFaqDraft({ id: 0, question: '', answer: '' }); }
+  };
+  const cancelFaqEdit = () => {
+    setEditingFaq(null);
+    setShowAddFaq(false);
+    setFaqDraft({ id: 0, question: '', answer: '' });
+  };
+
+  /* ── Render ── */
   return (
-    <div className="p-6 max-w-[1400px]">
-      {/* Header */}
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <div className="flex items-center gap-3 mb-1">
-            <Brain className="w-6 h-6 text-indigo-500" />
-            <h2 className="text-xl font-semibold text-gray-900">Business Brain</h2>
-            <span className="flex items-center gap-1.5 text-[13px] text-emerald-600 bg-emerald-50 px-2.5 py-1 rounded-full">
-              <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-              Learning
-            </span>
-          </div>
-          <p className="text-sm text-gray-500">Your AI&apos;s understanding of your business, market, and customers</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <button className="flex items-center gap-2 px-3 py-2 text-sm border border-gray-200 rounded-lg hover:bg-gray-50 transition-all">
-            <Upload className="w-4 h-4 text-gray-400" />
-            Upload Knowledge
-          </button>
-          <button className="flex items-center gap-2 px-3 py-2 text-sm bg-indigo-500 text-white rounded-lg hover:bg-indigo-600 transition-all">
-            <RefreshCw className="w-4 h-4" />
-            Sync Brain
-          </button>
-        </div>
-      </div>
+    <div className="p-6 space-y-6">
 
-      {/* Brain Health Summary */}
-      <div className="grid grid-cols-5 gap-4 mb-6">
-        {[
-          { label: 'Brain Health', value: `${brainHealth.overall}%`, icon: Brain, color: 'indigo' },
-          { label: 'Total Facts', value: brainHealth.totalFacts.toLocaleString(), icon: Database, color: 'blue' },
-          { label: 'Sources', value: brainHealth.sourcesConnected, icon: Globe, color: 'emerald' },
-          { label: 'Last Updated', value: brainHealth.lastUpdated, icon: Clock, color: 'amber' },
-          { label: 'Learning Rate', value: brainHealth.learningVelocity, icon: TrendingUp, color: 'violet' },
-        ].map((stat) => {
-          const Icon = stat.icon;
-          return (
-            <div key={stat.label} className="bg-white border border-gray-200 rounded-xl p-4">
-              <div className="flex items-center gap-2 mb-2">
-                <Icon className={`w-4 h-4 text-${stat.color}-500`} />
-                <span className="text-[12px] text-gray-500 font-medium">{stat.label}</span>
-              </div>
-              <div className="text-lg font-semibold text-gray-900">{stat.value}</div>
-            </div>
-          );
-        })}
-      </div>
-
-      {/* Tabs */}
-      <div className="flex gap-1 mb-6 border-b border-gray-200">
-        {tabs.map((tab) => {
-          const Icon = tab.icon;
+      {/* ── Tab Bar (Pipelines style) ── */}
+      <div className="flex gap-1 bg-gray-100 p-1 rounded-lg w-fit">
+        {tabs.map(t => {
+          const Icon = t.icon;
           return (
             <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
-              className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-all ${
-                activeTab === tab.id
-                  ? 'border-indigo-500 text-indigo-600'
-                  : 'border-transparent text-gray-500 hover:text-gray-700'
+              key={t.id}
+              onClick={() => setActiveTab(t.id)}
+              className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-all ${
+                activeTab === t.id ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
               }`}
             >
               <Icon className="w-4 h-4" />
-              {tab.label}
+              {t.label}
             </button>
           );
         })}
       </div>
 
-      {/* Tab Content */}
-      {activeTab === 'overview' && (
-        <div className="grid grid-cols-2 gap-6">
-          {/* Recent Learnings */}
-          <div className="bg-white border border-gray-200 rounded-xl">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
-              <div className="flex items-center gap-2">
-                <Sparkles className="w-4 h-4 text-indigo-500" />
-                <h3 className="font-semibold text-gray-900 text-sm">Recent Learnings</h3>
+      {/* ══════════════════════════════════════════════════ */}
+      {/* TAB 1 — Company Truth                            */}
+      {/* ══════════════════════════════════════════════════ */}
+      {activeTab === 'company-truth' && (
+        <div className="space-y-6">
+
+          {/* Company Info Card */}
+          <div className="bg-white border border-gray-200 rounded-xl p-6">
+            <div className="flex items-center justify-between mb-6">
+              <div>
+                <h2 className="text-lg font-semibold text-gray-900">Company Information</h2>
+                <p className="text-sm text-gray-500 mt-1">Core company details the AI uses for context in every interaction</p>
               </div>
-              <span className="text-[11px] text-gray-400">Auto-discovered</span>
+              {!editingCompany ? (
+                <button onClick={() => { setCompanyDraft(companyInfo); setEditingCompany(true); }} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 transition-colors">
+                  <Edit3 className="w-4 h-4" /> Edit
+                </button>
+              ) : (
+                <div className="flex gap-2">
+                  <button onClick={cancelCompanyEdit} className="flex items-center gap-2 px-4 py-2 border border-gray-300 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-50 transition-colors">
+                    <X className="w-4 h-4" /> Cancel
+                  </button>
+                  <button onClick={saveCompanyInfo} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 transition-colors">
+                    <Save className="w-4 h-4" /> Save
+                  </button>
+                </div>
+              )}
             </div>
-            <div className="divide-y divide-gray-50">
-              {recentLearnings.map((learning) => (
-                <div key={learning.id} className="px-5 py-3">
-                  <div className="flex items-start gap-3">
-                    <div className={`mt-0.5 w-2 h-2 rounded-full flex-shrink-0 ${
-                      learning.impact === 'high' ? 'bg-emerald-500' : 'bg-amber-400'
-                    }`} />
-                    <div>
-                      <p className="text-sm text-gray-700 leading-relaxed">{learning.insight}</p>
-                      <div className="flex items-center gap-3 mt-1.5">
-                        <span className="text-[11px] text-gray-400">{learning.time}</span>
-                        <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
-                          learning.type === 'strategy' ? 'bg-indigo-50 text-indigo-600'
-                            : learning.type === 'behavioral' ? 'bg-violet-50 text-violet-600'
-                            : learning.type === 'channel' ? 'bg-blue-50 text-blue-600'
-                            : learning.type === 'timing' ? 'bg-amber-50 text-amber-600'
-                            : 'bg-emerald-50 text-emerald-600'
-                        }`}>
-                          {learning.type}
-                        </span>
+
+            <div className="space-y-5">
+              {/* Vision */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Vision</label>
+                {editingCompany ? (
+                  <textarea value={companyDraft.vision} onChange={e => setCompanyDraft({ ...companyDraft, vision: e.target.value })} rows={3} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none" />
+                ) : (
+                  <p className="text-sm text-gray-600 bg-gray-50 rounded-lg px-4 py-3">{companyInfo.vision}</p>
+                )}
+              </div>
+              {/* Mission */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Mission</label>
+                {editingCompany ? (
+                  <textarea value={companyDraft.mission} onChange={e => setCompanyDraft({ ...companyDraft, mission: e.target.value })} rows={3} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none" />
+                ) : (
+                  <p className="text-sm text-gray-600 bg-gray-50 rounded-lg px-4 py-3">{companyInfo.mission}</p>
+                )}
+              </div>
+              {/* Website URL */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Website URL</label>
+                {editingCompany ? (
+                  <div className="flex items-center gap-2">
+                    <Globe className="w-4 h-4 text-gray-400" />
+                    <input type="url" value={companyDraft.websiteUrl} onChange={e => setCompanyDraft({ ...companyDraft, websiteUrl: e.target.value })} className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none" />
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2 bg-gray-50 rounded-lg px-4 py-3">
+                    <Globe className="w-4 h-4 text-indigo-500" />
+                    <a href={companyInfo.websiteUrl} target="_blank" rel="noopener noreferrer" className="text-sm text-indigo-600 hover:underline">{companyInfo.websiteUrl}</a>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Documents Card */}
+          <div className="bg-white border border-gray-200 rounded-xl p-6">
+            <div className="flex items-center justify-between mb-6">
+              <div>
+                <h2 className="text-lg font-semibold text-gray-900">Reference Documents</h2>
+                <p className="text-sm text-gray-500 mt-1">Upload documents the AI will use as additional context (brand guides, playbooks, pricing sheets)</p>
+              </div>
+              <button className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 transition-colors">
+                <Upload className="w-4 h-4" /> Upload Document
+              </button>
+            </div>
+
+            {/* Upload Drop Zone */}
+            <div className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center mb-6 hover:border-indigo-400 transition-colors cursor-pointer">
+              <Upload className="w-8 h-8 text-gray-400 mx-auto mb-2" />
+              <p className="text-sm text-gray-600 font-medium">Drag and drop files here, or click to browse</p>
+              <p className="text-xs text-gray-400 mt-1">PDF, DOCX, XLSX, TXT — Max 10MB per file</p>
+            </div>
+
+            {/* Document List */}
+            {documents.length > 0 && (
+              <div className="space-y-2">
+                {documents.map(doc => (
+                  <div key={doc.id} className="flex items-center justify-between px-4 py-3 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors">
+                    <div className="flex items-center gap-3">
+                      <FileText className="w-5 h-5 text-indigo-500" />
+                      <div>
+                        <p className="text-sm font-medium text-gray-900">{doc.name}</p>
+                        <p className="text-xs text-gray-400">{doc.type} · {doc.size} · Uploaded {doc.uploadedAt}</p>
                       </div>
                     </div>
+                    <div className="flex items-center gap-2">
+                      <button className="p-1.5 text-gray-400 hover:text-indigo-600 rounded-md hover:bg-white transition-colors"><Eye className="w-4 h-4" /></button>
+                      <button onClick={() => removeDocument(doc.id)} className="p-1.5 text-gray-400 hover:text-red-600 rounded-md hover:bg-white transition-colors"><Trash2 className="w-4 h-4" /></button>
+                    </div>
                   </div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Behavioral Insights */}
-          <div className="bg-white border border-gray-200 rounded-xl">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
-              <div className="flex items-center gap-2">
-                <BarChart3 className="w-4 h-4 text-violet-500" />
-                <h3 className="font-semibold text-gray-900 text-sm">Behavioral Insights</h3>
+                ))}
               </div>
-              <span className="text-[11px] text-gray-400">Updated continuously</span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ══════════════════════════════════════════════════ */}
+      {/* TAB 2 — Products                                 */}
+      {/* ══════════════════════════════════════════════════ */}
+      {activeTab === 'products' && (
+        <div className="space-y-6">
+          <div className="bg-white border border-gray-200 rounded-xl p-6">
+            <div className="flex items-center justify-between mb-6">
+              <div>
+                <h2 className="text-lg font-semibold text-gray-900">Products</h2>
+                <p className="text-sm text-gray-500 mt-1">Manage your product catalog — the AI references these for pricing, descriptions, and recommendations</p>
+              </div>
+              {!showAddProduct && editingProduct === null && (
+                <button onClick={() => { setShowAddProduct(true); setProductDraft({ id: 0, name: '', category: '', price: '', description: '', sku: '' }); }} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 transition-colors">
+                  <Plus className="w-4 h-4" /> Add Product
+                </button>
+              )}
             </div>
-            <div className="divide-y divide-gray-50">
-              {behavioralInsights.map((insight, i) => (
-                <div key={i} className="px-5 py-3 flex items-center justify-between">
+
+            {/* Add / Edit Product Form */}
+            {(showAddProduct || editingProduct !== null) && (
+              <div className="border border-indigo-200 bg-indigo-50/50 rounded-xl p-5 mb-6">
+                <h3 className="text-sm font-semibold text-gray-900 mb-4">{editingProduct !== null ? 'Edit Product' : 'New Product'}</h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
-                    <div className="text-[12px] text-gray-500 font-medium">{insight.metric}</div>
-                    <div className="text-sm font-medium text-gray-900 mt-0.5">{insight.value}</div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Product Name</label>
+                    <input value={productDraft.name} onChange={e => setProductDraft({ ...productDraft, name: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none" placeholder="e.g. Growth Suite Pro" />
                   </div>
-                  <div className="flex items-center gap-3">
-                    <div className={`flex items-center gap-1 text-[11px] ${
-                      insight.trend === 'up' ? 'text-emerald-600'
-                        : insight.trend === 'down' ? 'text-red-500'
-                        : 'text-gray-400'
-                    }`}>
-                      {insight.trend === 'up' && <ArrowUpRight className="w-3 h-3" />}
-                      {insight.trend === 'up' ? 'Improving' : insight.trend === 'down' ? 'Declining' : 'Stable'}
-                    </div>
-                    <div className="w-10 bg-gray-100 rounded-full h-1.5">
-                      <div
-                        className="bg-indigo-500 h-1.5 rounded-full"
-                        style={{ width: `${insight.confidence}%` }}
-                      />
-                    </div>
-                    <span className="text-[11px] text-gray-400 w-8">{insight.confidence}%</span>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Category</label>
+                    <input value={productDraft.category} onChange={e => setProductDraft({ ...productDraft, category: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none" placeholder="e.g. SaaS Platform" />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Price</label>
+                    <input value={productDraft.price} onChange={e => setProductDraft({ ...productDraft, price: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none" placeholder="e.g. $299/mo" />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">SKU</label>
+                    <input value={productDraft.sku} onChange={e => setProductDraft({ ...productDraft, sku: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none" placeholder="e.g. GSP-001" />
+                  </div>
+                  <div className="md:col-span-2">
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Description</label>
+                    <textarea value={productDraft.description} onChange={e => setProductDraft({ ...productDraft, description: e.target.value })} rows={3} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none" placeholder="Describe the product for the AI..." />
                   </div>
                 </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Strategy Performance */}
-          <div className="bg-white border border-gray-200 rounded-xl col-span-2">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
-              <div className="flex items-center gap-2">
-                <Target className="w-4 h-4 text-emerald-500" />
-                <h3 className="font-semibold text-gray-900 text-sm">Strategy Performance</h3>
+                <div className="flex justify-end gap-2 mt-4">
+                  <button onClick={cancelProductEdit} className="px-4 py-2 border border-gray-300 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-50 transition-colors">Cancel</button>
+                  <button onClick={saveProduct} disabled={!productDraft.name.trim()} className="px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                    <span className="flex items-center gap-2"><Save className="w-4 h-4" /> {editingProduct !== null ? 'Update' : 'Save'}</span>
+                  </button>
+                </div>
               </div>
-              <span className="text-[11px] text-gray-400">From Blueprint + Learning</span>
-            </div>
-            <div className="grid grid-cols-4 divide-x divide-gray-100">
-              {blueprintData.strategies.map((strategy, i) => (
-                <div key={i} className="px-5 py-4">
-                  <div className="text-sm font-semibold text-gray-900 mb-1">{strategy.name}</div>
-                  <div className="text-[12px] text-gray-500 mb-3">{strategy.bestFor}</div>
-                  <div className="flex items-center gap-2">
-                    <div className="flex-1 bg-gray-100 rounded-full h-2">
-                      <div
-                        className="bg-indigo-500 h-2 rounded-full"
-                        style={{ width: strategy.winRate }}
-                      />
+            )}
+
+            {/* Product List */}
+            <div className="space-y-3">
+              {products.map(p => (
+                <div key={p.id} className={`border rounded-xl p-4 transition-colors ${editingProduct === p.id ? 'border-indigo-300 bg-indigo-50/30' : 'border-gray-200 hover:border-gray-300'}`}>
+                  <div className="flex items-start justify-between">
+                    <div className="flex-1">
+                      <div className="flex items-center gap-3 mb-1">
+                        <h3 className="text-sm font-semibold text-gray-900">{p.name}</h3>
+                        <span className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">{p.category}</span>
+                        <span className="text-xs font-semibold text-indigo-600">{p.price}</span>
+                      </div>
+                      <p className="text-sm text-gray-500">{p.description}</p>
+                      <p className="text-xs text-gray-400 mt-1">SKU: {p.sku}</p>
                     </div>
-                    <span className="text-sm font-semibold text-gray-900">{strategy.winRate}</span>
+                    <div className="flex items-center gap-1 ml-4">
+                      <button onClick={() => startEditProduct(p)} className="p-1.5 text-gray-400 hover:text-indigo-600 rounded-md hover:bg-gray-100 transition-colors"><Edit3 className="w-4 h-4" /></button>
+                      <button onClick={() => deleteProduct(p.id)} className="p-1.5 text-gray-400 hover:text-red-600 rounded-md hover:bg-gray-100 transition-colors"><Trash2 className="w-4 h-4" /></button>
+                    </div>
                   </div>
                 </div>
               ))}
+              {products.length === 0 && (
+                <div className="text-center py-12 text-gray-400">
+                  <Package className="w-10 h-10 mx-auto mb-3 opacity-50" />
+                  <p className="text-sm font-medium">No products yet</p>
+                  <p className="text-xs mt-1">Click "Add Product" to create your first product</p>
+                </div>
+              )}
             </div>
           </div>
         </div>
       )}
 
-      {activeTab === 'company' && (
+      {/* ══════════════════════════════════════════════════ */}
+      {/* TAB 3 — Warranties & Financing                   */}
+      {/* ══════════════════════════════════════════════════ */}
+      {activeTab === 'warranties' && (
         <div className="space-y-6">
-          {/* Products & Pricing */}
-          <div className="bg-white border border-gray-200 rounded-xl">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
-              <div className="flex items-center gap-2">
-                <Package className="w-4 h-4 text-indigo-500" />
-                <h3 className="font-semibold text-gray-900 text-sm">Products &amp; Pricing</h3>
+          <div className="bg-white border border-gray-200 rounded-xl p-6">
+            <div className="flex items-center justify-between mb-6">
+              <div>
+                <h2 className="text-lg font-semibold text-gray-900">Warranties & Financing</h2>
+                <p className="text-sm text-gray-500 mt-1">Define guardrails for how the AI discusses warranty policies, refunds, and financing options</p>
               </div>
-              <button className="flex items-center gap-1.5 text-[12px] text-indigo-600 hover:text-indigo-700">
-                <Plus className="w-3.5 h-3.5" /> Add Product
-              </button>
-            </div>
-            <div className="divide-y divide-gray-50">
-              {companyTruth.products.map((product) => (
-                <div key={product.id}>
-                  <button
-                    onClick={() => setExpandedProduct(expandedProduct === product.id ? null : product.id)}
-                    className="w-full px-5 py-3.5 flex items-center justify-between hover:bg-gray-50/50 transition-all"
-                  >
-                    <div className="flex items-center gap-3">
-                      <div className="w-8 h-8 rounded-lg bg-indigo-50 flex items-center justify-center">
-                        <Package className="w-4 h-4 text-indigo-500" />
-                      </div>
-                      <div className="text-left">
-                        <div className="text-sm font-medium text-gray-900">{product.name}</div>
-                        <div className="text-[12px] text-gray-500">{product.category}</div>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-4">
-                      <span className="text-sm font-semibold text-gray-900">{product.price}</span>
-                      <div className="flex items-center gap-1">
-                        <div className="w-8 bg-gray-100 rounded-full h-1.5">
-                          <div className="bg-emerald-500 h-1.5 rounded-full" style={{ width: `${product.confidence}%` }} />
-                        </div>
-                        <span className="text-[11px] text-gray-400">{product.confidence}%</span>
-                      </div>
-                      <ChevronDown className={`w-4 h-4 text-gray-400 transition-transform ${expandedProduct === product.id ? 'rotate-180' : ''}`} />
-                    </div>
+              {!editingWarranties ? (
+                <button onClick={() => { setWarrantiesDraft(warranties); setEditingWarranties(true); }} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 transition-colors">
+                  <Edit3 className="w-4 h-4" /> Edit
+                </button>
+              ) : (
+                <div className="flex gap-2">
+                  <button onClick={cancelWarrantiesEdit} className="flex items-center gap-2 px-4 py-2 border border-gray-300 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-50 transition-colors">
+                    <X className="w-4 h-4" /> Cancel
                   </button>
-                  {expandedProduct === product.id && (
-                    <div className="px-5 pb-4 pl-[68px]">
-                      <p className="text-sm text-gray-600 leading-relaxed mb-2">{product.description}</p>
-                      <div className="flex items-center gap-3 text-[11px] text-gray-400">
-                        <span>Last verified: {product.lastVerified}</span>
-                        <button className="text-indigo-600 hover:text-indigo-700 flex items-center gap-1">
-                          <Edit3 className="w-3 h-3" /> Edit
-                        </button>
-                      </div>
+                  <button onClick={saveWarranties} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 transition-colors">
+                    <Save className="w-4 h-4" /> Save
+                  </button>
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-6">
+              {/* Warranty Policy */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Warranty Policy</label>
+                {editingWarranties ? (
+                  <textarea value={warrantiesDraft.warrantyPolicy} onChange={e => setWarrantiesDraft({ ...warrantiesDraft, warrantyPolicy: e.target.value })} rows={4} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none" />
+                ) : (
+                  <p className="text-sm text-gray-600 bg-gray-50 rounded-lg px-4 py-3">{warranties.warrantyPolicy}</p>
+                )}
+              </div>
+
+              {/* Financing Terms */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Financing Terms</label>
+                {editingWarranties ? (
+                  <textarea value={warrantiesDraft.financingTerms} onChange={e => setWarrantiesDraft({ ...warrantiesDraft, financingTerms: e.target.value })} rows={4} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none" />
+                ) : (
+                  <p className="text-sm text-gray-600 bg-gray-50 rounded-lg px-4 py-3">{warranties.financingTerms}</p>
+                )}
+              </div>
+
+              {/* AI Guardrail Rules */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">AI Guardrail Rules</label>
+                <p className="text-xs text-gray-400 mb-3">The AI will strictly follow these rules when discussing warranties and financing</p>
+
+                <div className="space-y-2">
+                  {(editingWarranties ? warrantiesDraft.rules : warranties.rules).map((rule, i) => (
+                    <div key={i} className="flex items-center gap-3 px-4 py-2.5 bg-amber-50 border border-amber-200 rounded-lg">
+                      <AlertTriangle className="w-4 h-4 text-amber-500 flex-shrink-0" />
+                      <span className="text-sm text-gray-700 flex-1">{rule}</span>
+                      {editingWarranties && (
+                        <button onClick={() => removeRule(i)} className="p-1 text-gray-400 hover:text-red-500 transition-colors"><X className="w-4 h-4" /></button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+
+                {editingWarranties && (
+                  <div className="flex gap-2 mt-3">
+                    <input value={newRule} onChange={e => setNewRule(e.target.value)} onKeyDown={e => e.key === 'Enter' && addRule()} placeholder="Add a new guardrail rule..." className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none" />
+                    <button onClick={addRule} disabled={!newRule.trim()} className="px-4 py-2 bg-amber-500 text-white text-sm font-medium rounded-lg hover:bg-amber-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                      <Plus className="w-4 h-4" />
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ══════════════════════════════════════════════════ */}
+      {/* TAB 4 — FAQ                                      */}
+      {/* ══════════════════════════════════════════════════ */}
+      {activeTab === 'faq' && (
+        <div className="space-y-6">
+          <div className="bg-white border border-gray-200 rounded-xl p-6">
+            <div className="flex items-center justify-between mb-6">
+              <div>
+                <h2 className="text-lg font-semibold text-gray-900">Frequently Asked Questions</h2>
+                <p className="text-sm text-gray-500 mt-1">Provide Q&A pairs the AI uses to answer customer questions accurately</p>
+              </div>
+              {!showAddFaq && editingFaq === null && (
+                <button onClick={() => { setShowAddFaq(true); setFaqDraft({ id: 0, question: '', answer: '' }); }} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 transition-colors">
+                  <Plus className="w-4 h-4" /> Add FAQ
+                </button>
+              )}
+            </div>
+
+            {/* Add / Edit FAQ Form */}
+            {(showAddFaq || editingFaq !== null) && (
+              <div className="border border-indigo-200 bg-indigo-50/50 rounded-xl p-5 mb-6">
+                <h3 className="text-sm font-semibold text-gray-900 mb-4">{editingFaq !== null ? 'Edit FAQ' : 'New FAQ'}</h3>
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Question</label>
+                    <input value={faqDraft.question} onChange={e => setFaqDraft({ ...faqDraft, question: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none" placeholder="e.g. What is the difference between plans?" />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Answer</label>
+                    <textarea value={faqDraft.answer} onChange={e => setFaqDraft({ ...faqDraft, answer: e.target.value })} rows={4} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none" placeholder="Provide the answer the AI should give..." />
+                  </div>
+                </div>
+                <div className="flex justify-end gap-2 mt-4">
+                  <button onClick={cancelFaqEdit} className="px-4 py-2 border border-gray-300 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-50 transition-colors">Cancel</button>
+                  <button onClick={saveFaq} disabled={!faqDraft.question.trim() || !faqDraft.answer.trim()} className="px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                    <span className="flex items-center gap-2"><Save className="w-4 h-4" /> {editingFaq !== null ? 'Update' : 'Save'}</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* FAQ Accordion List */}
+            <div className="space-y-2">
+              {faqs.map(f => (
+                <div key={f.id} className="border border-gray-200 rounded-xl overflow-hidden transition-colors hover:border-gray-300">
+                  <div className="flex items-center justify-between px-4 py-3 cursor-pointer" onClick={() => setExpandedFaq(expandedFaq === f.id ? null : f.id)}>
+                    <div className="flex items-center gap-3 flex-1">
+                      {expandedFaq === f.id ? <ChevronDown className="w-4 h-4 text-gray-400" /> : <ChevronRight className="w-4 h-4 text-gray-400" />}
+                      <span className="text-sm font-medium text-gray-900">{f.question}</span>
+                    </div>
+                    <div className="flex items-center gap-1 ml-4" onClick={e => e.stopPropagation()}>
+                      <button onClick={() => startEditFaq(f)} className="p-1.5 text-gray-400 hover:text-indigo-600 rounded-md hover:bg-gray-100 transition-colors"><Edit3 className="w-4 h-4" /></button>
+                      <button onClick={() => deleteFaq(f.id)} className="p-1.5 text-gray-400 hover:text-red-600 rounded-md hover:bg-gray-100 transition-colors"><Trash2 className="w-4 h-4" /></button>
+                    </div>
+                  </div>
+                  {expandedFaq === f.id && (
+                    <div className="px-4 pb-4 pt-0 ml-7">
+                      <p className="text-sm text-gray-600 bg-gray-50 rounded-lg px-4 py-3">{f.answer}</p>
                     </div>
                   )}
                 </div>
               ))}
-            </div>
-          </div>
-
-          {/* Positioning */}
-          <div className="bg-white border border-gray-200 rounded-xl">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
-              <div className="flex items-center gap-2">
-                <Star className="w-4 h-4 text-amber-500" />
-                <h3 className="font-semibold text-gray-900 text-sm">Positioning &amp; ICP</h3>
-              </div>
-              <button className="flex items-center gap-1.5 text-[12px] text-indigo-600 hover:text-indigo-700">
-                <Edit3 className="w-3.5 h-3.5" /> Edit
-              </button>
-            </div>
-            <div className="p-5 space-y-4">
-              <div>
-                <div className="text-[12px] text-gray-500 font-medium mb-1">Tagline</div>
-                <div className="text-sm text-gray-900">{companyTruth.positioning.tagline}</div>
-              </div>
-              <div>
-                <div className="text-[12px] text-gray-500 font-medium mb-1">Ideal Customer Profile</div>
-                <div className="text-sm text-gray-900">{companyTruth.positioning.icp}</div>
-              </div>
-              <div>
-                <div className="text-[12px] text-gray-500 font-medium mb-1.5">Differentiators</div>
-                <div className="flex flex-wrap gap-2">
-                  {companyTruth.positioning.differentiators.map((d, i) => (
-                    <span key={i} className="text-[12px] bg-indigo-50 text-indigo-700 px-2.5 py-1 rounded-full">{d}</span>
-                  ))}
+              {faqs.length === 0 && (
+                <div className="text-center py-12 text-gray-400">
+                  <HelpCircle className="w-10 h-10 mx-auto mb-3 opacity-50" />
+                  <p className="text-sm font-medium">No FAQs yet</p>
+                  <p className="text-xs mt-1">Click "Add FAQ" to create your first question and answer</p>
                 </div>
-              </div>
-              <div>
-                <div className="text-[12px] text-gray-500 font-medium mb-1.5">Known Competitors</div>
-                <div className="flex flex-wrap gap-2">
-                  {companyTruth.positioning.competitors.map((c, i) => (
-                    <span key={i} className="text-[12px] bg-gray-100 text-gray-600 px-2.5 py-1 rounded-full">{c}</span>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Business Rules / Constraints */}
-          <div className="bg-white border border-gray-200 rounded-xl">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
-              <div className="flex items-center gap-2">
-                <Shield className="w-4 h-4 text-red-500" />
-                <h3 className="font-semibold text-gray-900 text-sm">Business Rules &amp; Constraints</h3>
-              </div>
-              <button className="flex items-center gap-1.5 text-[12px] text-indigo-600 hover:text-indigo-700">
-                <Plus className="w-3.5 h-3.5" /> Add Rule
-              </button>
-            </div>
-            <div className="divide-y divide-gray-50">
-              {companyTruth.constraints.map((constraint, i) => (
-                <div key={i} className="px-5 py-3 flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <div className={`w-2 h-2 rounded-full ${constraint.active ? 'bg-emerald-500' : 'bg-gray-300'}`} />
-                    <span className="text-sm text-gray-700">{constraint.rule}</span>
-                  </div>
-                  <span className="text-[11px] bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">{constraint.category}</span>
-                </div>
-              ))}
+              )}
             </div>
           </div>
         </div>
       )}
 
-      {activeTab === 'blueprint' && (
-        <div className="space-y-6">
-          {/* Blueprint Info */}
-          <div className="bg-white border border-gray-200 rounded-xl">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
-              <div className="flex items-center gap-2">
-                <BookOpen className="w-4 h-4 text-indigo-500" />
-                <h3 className="font-semibold text-gray-900 text-sm">{blueprintData.name}</h3>
-                <span className="text-[11px] bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded-full">v{blueprintData.version}</span>
-              </div>
-              <div className="text-[12px] text-gray-400">
-                {blueprintData.vertical} &middot; Updated {blueprintData.lastUpdated}
-              </div>
-            </div>
-          </div>
-
-          {/* Customer Journeys */}
-          <div className="bg-white border border-gray-200 rounded-xl">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
-              <div className="flex items-center gap-2">
-                <Target className="w-4 h-4 text-emerald-500" />
-                <h3 className="font-semibold text-gray-900 text-sm">Customer Journeys</h3>
-              </div>
-            </div>
-            <div className="grid grid-cols-4 divide-x divide-gray-100">
-              {blueprintData.journeys.map((journey, i) => (
-                <div key={i} className="p-5">
-                  <div className="text-sm font-semibold text-gray-900 mb-2">{journey.name}</div>
-                  <div className="space-y-1.5 text-[12px]">
-                    <div className="flex justify-between text-gray-500">
-                      <span>Stages</span>
-                      <span className="text-gray-900 font-medium">{journey.stages}</span>
-                    </div>
-                    <div className="flex justify-between text-gray-500">
-                      <span>Avg Duration</span>
-                      <span className="text-gray-900 font-medium">{journey.avgDays} days</span>
-                    </div>
-                    <div className="flex justify-between text-gray-500">
-                      <span>Conversion</span>
-                      <span className="text-emerald-600 font-semibold">{journey.conversion}</span>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Strategies from Blueprint */}
-          <div className="bg-white border border-gray-200 rounded-xl">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
-              <div className="flex items-center gap-2">
-                <Zap className="w-4 h-4 text-amber-500" />
-                <h3 className="font-semibold text-gray-900 text-sm">Strategy Templates</h3>
-              </div>
-              <span className="text-[11px] text-gray-400">Blueprint-defined, AI-optimized</span>
-            </div>
-            <div className="divide-y divide-gray-50">
-              {blueprintData.strategies.map((strategy, i) => (
-                <div key={i} className="px-5 py-3.5 flex items-center justify-between">
-                  <div>
-                    <div className="text-sm font-medium text-gray-900">{strategy.name}</div>
-                    <div className="text-[12px] text-gray-500 mt-0.5">{strategy.bestFor}</div>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <div className="flex items-center gap-2">
-                      <div className="w-20 bg-gray-100 rounded-full h-2">
-                        <div className="bg-indigo-500 h-2 rounded-full" style={{ width: strategy.winRate }} />
-                      </div>
-                      <span className="text-sm font-semibold text-gray-900 w-10">{strategy.winRate}</span>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {activeTab === 'learning' && (
-        <div className="space-y-6">
-          {/* All Learnings */}
-          <div className="bg-white border border-gray-200 rounded-xl">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
-              <div className="flex items-center gap-2">
-                <Sparkles className="w-4 h-4 text-indigo-500" />
-                <h3 className="font-semibold text-gray-900 text-sm">AI-Discovered Insights</h3>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="text-[12px] text-gray-500">{recentLearnings.length} insights this week</span>
-              </div>
-            </div>
-            <div className="divide-y divide-gray-50">
-              {recentLearnings.map((learning) => (
-                <div key={learning.id} className="px-5 py-4">
-                  <div className="flex items-start gap-3">
-                    <div className={`mt-1 p-1 rounded-md ${
-                      learning.impact === 'high' ? 'bg-emerald-50' : 'bg-amber-50'
-                    }`}>
-                      {learning.impact === 'high' ? (
-                        <TrendingUp className={`w-3.5 h-3.5 ${learning.impact === 'high' ? 'text-emerald-500' : 'text-amber-500'}`} />
-                      ) : (
-                        <BarChart3 className="w-3.5 h-3.5 text-amber-500" />
-                      )}
-                    </div>
-                    <div className="flex-1">
-                      <p className="text-sm text-gray-700 leading-relaxed">{learning.insight}</p>
-                      <div className="flex items-center gap-3 mt-2">
-                        <span className="text-[11px] text-gray-400">{learning.time}</span>
-                        <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
-                          learning.type === 'strategy' ? 'bg-indigo-50 text-indigo-600'
-                            : learning.type === 'behavioral' ? 'bg-violet-50 text-violet-600'
-                            : learning.type === 'channel' ? 'bg-blue-50 text-blue-600'
-                            : learning.type === 'timing' ? 'bg-amber-50 text-amber-600'
-                            : 'bg-emerald-50 text-emerald-600'
-                        }`}>
-                          {learning.type}
-                        </span>
-                        <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
-                          learning.impact === 'high' ? 'bg-emerald-50 text-emerald-600' : 'bg-gray-100 text-gray-500'
-                        }`}>
-                          {learning.impact} impact
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Behavioral Patterns */}
-          <div className="bg-white border border-gray-200 rounded-xl">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
-              <div className="flex items-center gap-2">
-                <Eye className="w-4 h-4 text-violet-500" />
-                <h3 className="font-semibold text-gray-900 text-sm">Behavioral Patterns</h3>
-              </div>
-            </div>
-            <div className="grid grid-cols-3 divide-x divide-gray-100">
-              {behavioralInsights.slice(0, 3).map((insight, i) => (
-                <div key={i} className="p-5">
-                  <div className="text-[12px] text-gray-500 font-medium mb-1">{insight.metric}</div>
-                  <div className="text-lg font-semibold text-gray-900 mb-2">{insight.value}</div>
-                  <div className="flex items-center gap-2">
-                    <div className="flex-1 bg-gray-100 rounded-full h-1.5">
-                      <div className="bg-violet-500 h-1.5 rounded-full" style={{ width: `${insight.confidence}%` }} />
-                    </div>
-                    <span className="text-[11px] text-gray-400">{insight.confidence}% confidence</span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {activeTab === 'sources' && (
-        <div className="space-y-6">
-          {/* Connected Sources */}
-          <div className="bg-white border border-gray-200 rounded-xl">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
-              <div className="flex items-center gap-2">
-                <Database className="w-4 h-4 text-blue-500" />
-                <h3 className="font-semibold text-gray-900 text-sm">Data Sources</h3>
-              </div>
-              <button className="flex items-center gap-1.5 text-[12px] text-indigo-600 hover:text-indigo-700">
-                <Plus className="w-3.5 h-3.5" /> Connect Source
-              </button>
-            </div>
-            <div className="divide-y divide-gray-50">
-              {dataSources.map((source, i) => (
-                <div key={i} className="px-5 py-3.5 flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <div className={`w-2.5 h-2.5 rounded-full ${
-                      source.status === 'connected' ? 'bg-emerald-500'
-                        : source.status === 'processed' ? 'bg-blue-500'
-                        : 'bg-gray-300'
-                    }`} />
-                    <div>
-                      <div className="text-sm font-medium text-gray-900">{source.name}</div>
-                      <div className="text-[12px] text-gray-500">
-                        {source.records} records &middot; Last sync: {source.lastSync}
-                      </div>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-4">
-                    <span className={`text-[11px] px-2 py-0.5 rounded-full font-medium ${
-                      source.status === 'connected' ? 'bg-emerald-50 text-emerald-600'
-                        : source.status === 'processed' ? 'bg-blue-50 text-blue-600'
-                        : 'bg-gray-100 text-gray-500'
-                    }`}>
-                      {source.status}
-                    </span>
-                    {source.health > 0 && (
-                      <div className="flex items-center gap-1.5">
-                        <div className="w-12 bg-gray-100 rounded-full h-1.5">
-                          <div
-                            className={`h-1.5 rounded-full ${source.health > 90 ? 'bg-emerald-500' : 'bg-amber-400'}`}
-                            style={{ width: `${source.health}%` }}
-                          />
-                        </div>
-                        <span className="text-[11px] text-gray-400">{source.health}%</span>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
