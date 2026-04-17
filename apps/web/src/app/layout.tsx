@@ -15,7 +15,11 @@ import {
   Search,
   Pause,
   Bell,
+  LogOut,
+  ChevronDown,
+  Shield,
 } from 'lucide-react';
+import { useState, useRef, useEffect } from 'react';
 
 const navItems = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -25,13 +29,12 @@ const navItems = [
   { href: '/customers', label: 'Customers', icon: Users },
   { href: '/audit', label: 'Audit Log', icon: FileText },
   { href: '/knowledge', label: 'Knowledge Center', icon: BookOpen },
-  { href: '/settings', label: 'Settings', icon: Settings },
+  { href: '/settings', label: 'Settings', icon: Settings, adminOnly: true },
 ];
 
 const pageTitle: Record<string, string> = {
   '/dashboard': 'Dashboard',
   '/pipelines': 'Pipelines',
-  '/pipelines/create': 'Create Pipeline',
   '/conversations': 'Conversations',
   '/escalations': 'Escalations',
   '/customers': 'Customers',
@@ -40,9 +43,47 @@ const pageTitle: Record<string, string> = {
   '/settings': 'Settings',
 };
 
+// Mock user for now — will be replaced by Firebase AuthContext
+const mockUser = {
+  name: 'Fred Binette',
+  email: 'fred@axisone.io',
+  role: 'admin' as 'admin' | 'member',
+  company: 'AxisOne',
+  initials: 'FB',
+};
+
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const currentTitle = pageTitle[pathname] || 'Dashboard';
+  const isLoginPage = pathname === '/login';
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  // Close menu when clicking outside
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
+        setUserMenuOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const handleLogout = () => {
+    // TODO: Firebase signOut(auth)
+    console.log('Logout');
+    window.location.href = '/login';
+  };
+
+  // Login page — no sidebar, no top bar
+  if (isLoginPage) {
+    return (
+      <html lang="en">
+        <body>{children}</body>
+      </html>
+    );
+  }
 
   return (
     <html lang="en">
@@ -62,6 +103,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             {navItems.map((item) => {
               const Icon = item.icon;
               const isActive = pathname === item.href || pathname.startsWith(item.href + '/');
+
+              // Hide admin-only items from members
+              if (item.adminOnly && mockUser.role !== 'admin') {
+                return null;
+              }
+
               return (
                 <Link
                   key={item.href}
@@ -84,16 +131,51 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             })}
           </div>
 
-          {/* Tenant Footer */}
-          <div className="p-4 border-t border-white/10">
-            <div className="flex items-center gap-2.5 p-2 rounded-lg">
-              <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center text-white text-[13px] font-semibold">
-                AC
-              </div>
-              <div>
-                <div className="text-[13px] font-medium text-white">Acme Consulting</div>
-                <div className="text-[11px] text-white/50">Growth Plan</div>
-              </div>
+          {/* User Footer */}
+          <div className="p-4 border-t border-white/10" ref={menuRef}>
+            <div className="relative">
+              <button
+                onClick={() => setUserMenuOpen(!userMenuOpen)}
+                className="w-full flex items-center gap-2.5 p-2 rounded-lg hover:bg-slate-800 transition-colors"
+              >
+                <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center text-white text-[13px] font-semibold">
+                  {mockUser.initials}
+                </div>
+                <div className="flex-1 text-left">
+                  <div className="text-[13px] font-medium text-white">{mockUser.name}</div>
+                  <div className="text-[11px] text-white/50 flex items-center gap-1">
+                    {mockUser.role === 'admin' && <Shield className="w-3 h-3" />}
+                    {mockUser.role === 'admin' ? 'Admin' : 'Member'} &middot; {mockUser.company}
+                  </div>
+                </div>
+                <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform ${userMenuOpen ? 'rotate-180' : ''}`} />
+              </button>
+
+              {/* Dropdown Menu */}
+              {userMenuOpen && (
+                <div className="absolute bottom-full left-0 right-0 mb-2 bg-slate-900 border border-slate-700 rounded-lg shadow-xl overflow-hidden">
+                  <div className="px-3 py-2 border-b border-slate-700">
+                    <div className="text-[12px] text-slate-400">{mockUser.email}</div>
+                  </div>
+                  {mockUser.role === 'admin' && (
+                    <Link
+                      href="/settings"
+                      onClick={() => setUserMenuOpen(false)}
+                      className="flex items-center gap-2 px-3 py-2.5 text-sm text-slate-300 hover:bg-slate-800 transition-colors"
+                    >
+                      <Settings className="w-4 h-4" />
+                      Settings
+                    </Link>
+                  )}
+                  <button
+                    onClick={handleLogout}
+                    className="w-full flex items-center gap-2 px-3 py-2.5 text-sm text-red-400 hover:bg-slate-800 transition-colors"
+                  >
+                    <LogOut className="w-4 h-4" />
+                    Sign out
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </nav>
@@ -119,24 +201,22 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                   className="border-none bg-transparent outline-none text-sm font-[inherit] text-gray-900 w-full placeholder:text-gray-400"
                 />
                 <span className="text-[11px] text-gray-400 border border-gray-200 rounded px-1.5 py-[1px] flex-shrink-0">
-                  âK
+                  ⌘K
                 </span>
               </div>
             </div>
 
             <div className="flex items-center gap-3">
-              <button className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-amber-500 bg-white text-amber-600 text-[13px] hover:bg-amber-500/10 transition-all">
-                <Pause className="w-4 h-4" />
-                Pause growth
+              <button className="relative p-2 rounded-lg hover:bg-gray-100 transition-colors">
+                <Bell className="w-5 h-5 text-gray-500" />
+                <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-red-500 rounded-full" />
               </button>
-              <button className="relative flex items-center gap-1.5 px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-700 text-[13px] hover:bg-gray-100 transition-all">
-                <Bell className="w-4 h-4" />
-                <span className="absolute top-1 right-1 w-2 h-2 bg-red-500 rounded-full border-2 border-white" />
+              <button className="p-2 rounded-lg hover:bg-gray-100 transition-colors">
+                <Pause className="w-5 h-5 text-gray-500" />
               </button>
             </div>
           </header>
 
-          {/* Page Content */}
           {children}
         </main>
       </body>
