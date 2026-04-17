@@ -5,7 +5,7 @@ import {
   Save, X, Upload, FileText, Globe, Eye, ChevronDown, ChevronRight,
   AlertTriangle, CheckCircle, Loader2, RefreshCw
 } from 'lucide-react';
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   knowledgeApi,
   type CompanyInfo,
@@ -58,6 +58,77 @@ export default function KnowledgeCenterPage() {
   const [editingCompany, setEditingCompany] = useState(false);
   const [companyDraft, setCompanyDraft] = useState({ vision: '', mission: '', websiteUrl: '' });
   const [documents, setDocuments] = useState<KnowledgeDocument[]>([]);
+  const [isDragging, setIsDragging] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // File upload constants
+  const ALLOWED_TYPES = ['application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'text/plain', 'text/csv'];
+  const ALLOWED_EXTENSIONS = ['.pdf', '.docx', '.xlsx', '.txt', '.csv'];
+  const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+
+  const handleFiles = async (files: FileList | File[]) => {
+    const fileArray = Array.from(files);
+    setIsUploading(true);
+    let successCount = 0;
+    let errorMessages: string[] = [];
+
+    for (const file of fileArray) {
+      // Validate file type
+      const ext = '.' + file.name.split('.').pop()?.toLowerCase();
+      if (!ALLOWED_TYPES.includes(file.type) && !ALLOWED_EXTENSIONS.includes(ext)) {
+        errorMessages.push(`${file.name}: unsupported file type`);
+        continue;
+      }
+      // Validate file size
+      if (file.size > MAX_FILE_SIZE) {
+        errorMessages.push(`${file.name}: exceeds 10MB limit`);
+        continue;
+      }
+      try {
+        const doc = await knowledgeApi.createDocument({
+          name: file.name,
+          type: file.type || ext,
+          sizeBytes: file.size,
+        });
+        setDocuments(prev => [...prev, doc]);
+        successCount++;
+      } catch (err) {
+        errorMessages.push(`${file.name}: upload failed`);
+      }
+    }
+
+    setIsUploading(false);
+    if (successCount > 0) {
+      showToast(`${successCount} document${successCount > 1 ? 's' : ''} uploaded`, 'success');
+    }
+    if (errorMessages.length > 0) {
+      showToast(errorMessages.join(', '), 'error');
+    }
+    // Reset file input
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+    if (e.dataTransfer.files.length > 0) {
+      handleFiles(e.dataTransfer.files);
+    }
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  };
 
   // ââ Products state ââ
   const [products, setProducts] = useState<Product[]>([]);
@@ -520,12 +591,28 @@ export default function KnowledgeCenterPage() {
                 <h2 className="text-lg font-semibold text-gray-900">Reference Documents</h2>
                 <p className="text-sm text-gray-500 mt-1">Upload documents the AI will use as additional context (brand guides, playbooks, pricing sheets)</p>
               </div>
-              <button className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 transition-colors">
-                <Upload className="w-4 h-4" /> Upload Document
+              <button onClick={() => fileInputRef.current?.click()} disabled={isUploading} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-50">
+                <Upload className="w-4 h-4" /> {isUploading ? 'Uploading...' : 'Upload Document'}
               </button>
             </div>
 
-            <div className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center mb-6 hover:border-indigo-400 transition-colors cursor-pointer">
+            <input
+              type="file"
+              ref={fileInputRef}
+              onChange={(e) => e.target.files && handleFiles(e.target.files)}
+              multiple
+              accept=".pdf,.docx,.xlsx,.txt,.csv"
+              className="hidden"
+            />
+            <div
+              onDrop={handleDrop}
+              onDragOver={handleDragOver}
+              onDragEnter={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onClick={() => fileInputRef.current?.click()}
+              className={`border-2 border-dashed rounded-lg p-8 text-center mb-6 transition-colors cursor-pointer ${
+                isDragging ? 'border-indigo-500 bg-indigo-50' : 'border-gray-300 hover:border-indigo-400'
+              }`}>
               <Upload className="w-8 h-8 text-gray-400 mx-auto mb-2" />
               <p className="text-sm text-gray-600 font-medium">Drag and drop files here, or click to browse</p>
               <p className="text-xs text-gray-400 mt-1">PDF, DOCX, XLSX, TXT â Max 10MB per file</p>
