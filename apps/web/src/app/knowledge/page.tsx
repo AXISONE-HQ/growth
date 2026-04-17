@@ -15,7 +15,7 @@ import {
   type KnowledgeDocument,
 } from '@/lib/api';
 
-/* ââ Tabs Config ââââââââââââââââââââââââââââââââââââââ */
+/* ââ Tabs Config ââââââââââââââââââââââââââââââââââââââââ */
 
 const tabs = [
   { id: 'company-truth', label: 'Company Truth', icon: Building2 },
@@ -81,65 +81,446 @@ export default function KnowledgeCenterPage() {
   const [faqDraft, setFaqDraft] = useState({ question: '', answer: '' });
   const [expandedFaq, setExpandedFaq] = useState<string | null>(null);
 
-  /* ââ Data Loading ââââââââââââââââââââââââââââââââââââââ $.ÈØ]YÛÜN	ÝØ\[IË]N	ÕØ\[HÛXÞIËÛÛ[Ø\[QYÛÛ[JNÂÙ]Ø\[Y\ÊØÜX]YJNÂBËÈ\Ù\[[Ú[È\\ÂY
-[[Ú[ÖÌJHÂÛÛÝ\]YH]ØZ]ÛÝÛYÙP\K\]TÛXÞJÈY[[Ú[ÖÌKYÛÛ[[[Ú[ÑYÛÛ[JNÂÙ][[Ú[ÊÝ\]YJNÂH[ÙHY
-[[Ú[ÑYÛÛ[[J
-JHÂÛÛÝÜX]YH]ØZ]ÛÝÛYÙP\KÜX]TÛXÞJÈØ]YÛÜN	Ù[[Ú[ÉË]N	Ñ[[Ú[È\\ÉËÛÛ[[[Ú[ÑYÛÛ[JNÂÙ][[Ú[ÊØÜX]YJNÂBÙ]Y][ÕØ\[Y\Ê[ÙJNÂÚÝÕØ\Ý
-	ÔÛXÚY\ÈØ]Y	ÊNÂHØ]Ú
-JHÂÚÝÕØ\Ý
-	ÑZ[YÈØ]HÛXÚY\ÉË	Ù\ÜÊNÂBÙ]Ø][Ê[ÙJNÂNÂÛÛÝØ[Ù[Ø\[Y\ÑY]H
+  /* ââ Data Loading ââââââââââââââââââââââââââââââââââââââ */
 
-HOÂÙ]Y][ÕØ\[Y\Ê[ÙJNÂÙ]]Ô[J	ÉÊNÂNÂÛÛÝY[HH\Þ[È
+  const loadCompanyData = useCallback(async () => {
+    try {
+      const [info, docs] = await Promise.all([
+        knowledgeApi.getCompanyInfo(),
+        knowledgeApi.listDocuments({ limit: 50 }),
+      ]);
+      setCompanyInfo(info);
+      setDocuments(docs.documents);
+    } catch (e) {
+      console.error('Failed to load company data:', e);
+      showToast('Failed to load company data', 'error');
+    }
+  }, []);
 
-HOÂY
-[]Ô[K[J
-JH]\ÂÙ]Ø][ÊYJNÂHÂÛÛÝÜX]YH]ØZ]ÛÝÛYÙP\KÜX]TÛXÞJÂØ]YÛÜN	Ü[IË]N]Ô[K[J
-KÛÛ[]Ô[K[J
-KÛÜÜ\[\Ë[ÝJNÂÙ][\ÊË[\ËÜX]YJNÂÙ]]Ô[J	ÉÊNÂÚÝÕØ\Ý
-	Ô[HYY	ÊNÂHØ]Ú
-JHÂÚÝÕØ\Ý
-	ÑZ[YÈY[IË	Ù\ÜÊNÂBÙ]Ø][Ê[ÙJNÂNÂÛÛÝ[[ÝT[HH\Þ[È
-YÝ[ÊHOÂÙ]Ø][ÊYJNÂHÂ]ØZ]ÛÝÛYÙP\K[]TÛXÞJY
-NÂÙ][\Ê[\Ë[\OYOOHY
-JNÂÚÝÕØ\Ý
-	Ô[H[[ÝY	ÊNÂHØ]Ú
-JHÂÚÝÕØ\Ý
-	ÑZ[YÈ[[ÝH[IË	Ù\ÜÊNÂBÙ]Ø][Ê[ÙJNÂNÂÊ8¥ 8¥ TH[\È8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 
-ÂÛÛÝØ]Q\HH\Þ[È
+  const loadProducts = useCallback(async () => {
+    try {
+      const res = await knowledgeApi.listProducts({ limit: 100 });
+      setProducts(res.products);
+    } catch (e) {
+      console.error('Failed to load products:', e);
+      showToast('Failed to load products', 'error');
+    }
+  }, []);
 
-HOÂY
-Y\QY]Y\Ý[Û[J
-HY\QY[ÝÙ\[J
-JH]\ÂÙ]Ø][ÊYJNÂHÂY
-Y][Ñ\JHÂÛÛÝ\]YH]ØZ]ÛÝÛYÙP\K\]QTJÂYY][Ñ\K]Y\Ý[Û\QY]Y\Ý[Û[ÝÙ\\QY[ÝÙ\JNÂÙ]\\Ê\\ËX\
-OYOOHY][Ñ\HÈ\]YJNÂÙ]Y][Ñ\J[
-NÂÚÝÕØ\Ý
-	ÑTH\]Y	ÊNÂH[ÙHÂÛÛÝÜX]YH]ØZ]ÛÝÛYÙP\KÜX]QTJÂ]Y\Ý[Û\QY]Y\Ý[Û[ÝÙ\\QY[ÝÙ\ÛÜÜ\\\Ë[ÝJNÂÙ]\\ÊË\\ËÜX]YJNÂÙ]ÚÝÐY\J[ÙJNÂÚÝÕØ\Ý
-	ÑTHÜX]Y	ÊNÂBÙ]\QY
-È]Y\Ý[Û	ÉË[ÝÙ\	ÉÈJNÂHØ]Ú
-JHÂÚÝÕØ\Ý
-	ÑZ[YÈØ]HTIË	Ù\ÜÊNÂBÙ]Ø][Ê[ÙJNÂNÂÛÛÝÝ\Y]\HH
-TJHOÂÙ]\QY
-È]Y\Ý[Û]Y\Ý[Û[ÝÙ\[ÝÙ\JNÂÙ]Y][Ñ\JY
-NÂÙ]ÚÝÐY\J[ÙJNÂNÂÛÛÝ[]Q\HH\Þ[È
-YÝ[ÊHOÂÙ]Ø][ÊYJNÂHÂ]ØZ]ÛÝÛYÙP\K[]QTJY
-NÂÙ]\\Ê\\Ë[\OYOOHY
-JNÂY
-Y][Ñ\HOOHY
-HÂÙ]Y][Ñ\J[
-NÂÙ]\QY
-È]Y\Ý[Û	ÉË[ÝÙ\	ÉÈJNÂBÚÝÕØ\Ý
-	ÑTH[]Y	ÊNÂHØ]Ú
-JHÂÚÝÕØ\Ý
-	ÑZ[YÈ[]HTIË	Ù\ÜÊNÂBÙ]Ø][Ê[ÙJNÂNÂÛÛÝØ[Ù[\QY]H
+  const loadPolicies = useCallback(async () => {
+    try {
+      const [w, f, r] = await Promise.all([
+        knowledgeApi.listPolicies({ category: 'warranty', limit: 50 }),
+        knowledgeApi.listPolicies({ category: 'financing', limit: 50 }),
+        knowledgeApi.listPolicies({ category: 'rule', limit: 50 }),
+      ]);
+      setWarranties(w.policies);
+      setFinancing(f.policies);
+      setRules(r.policies);
+    } catch (e) {
+      console.error('Failed to load policies:', e);
+      showToast('Failed to load policies', 'error');
+    }
+  }, []);
 
-HOÂÙ]Y][Ñ\J[
-NÂÙ]ÚÝÐY\J[ÙJNÂÙ]\QY
-È]Y\Ý[Û	ÉË[ÝÙ\	ÉÈJNÂNÂÊ8¥ 8¥ ØY[ÈØÜY[8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 
-ÂY
-ØY[ÊHÂ]\
-]Û\ÜÓ[YOH^][\ËXÙ[\\ÝYKXÙ[\Z[ZVÍH]Û\ÜÓ[YOH^^XÛÛ][\ËXÙ[\Ø\LÈØY\Û\ÜÓ[YOHËNN^Z[YÛËML[[X]K\Ü[ÏÛ\ÜÓ[YOH^\ÛH^YÜ^KMLØY[ÈÛÝÛYÙHÙ[\ÜÙ]Ù]
-NÂBÊ8¥ 8¥ [\8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 	colors">
+  const loadFAQs = useCallback(async () => {
+    try {
+      const res = await knowledgeApi.listFAQs({ limit: 100 });
+      setFaqs(res.faqs);
+    } catch (e) {
+      console.error('Failed to load FAQs:', e);
+      showToast('Failed to load FAQs', 'error');
+    }
+  }, []);
+
+  // Initial load
+  useEffect(() => {
+    const loadAll = async () => {
+      setLoading(true);
+      await Promise.all([loadCompanyData(), loadProducts(), loadPolicies(), loadFAQs()]);
+      setLoading(false);
+    };
+    loadAll();
+  }, [loadCompanyData, loadProducts, loadPolicies, loadFAQs]);
+
+  /* ââ Company Truth Handlers ââââââââââââââââââââââââââââ */
+
+  const saveCompanyInfo = async () => {
+    setSaving(true);
+    try {
+      const updated = await knowledgeApi.updateCompanyInfo({
+        vision: companyDraft.vision,
+        mission: companyDraft.mission,
+        websiteUrl: companyDraft.websiteUrl || null,
+      });
+      setCompanyInfo(updated);
+      setEditingCompany(false);
+      showToast('Company info saved');
+    } catch (e) {
+      showToast('Failed to save company info', 'error');
+    }
+    setSaving(false);
+  };
+
+  const cancelCompanyEdit = () => {
+    setCompanyDraft({
+      vision: companyInfo?.vision || '',
+      mission: companyInfo?.mission || '',
+      websiteUrl: companyInfo?.websiteUrl || '',
+    });
+    setEditingCompany(false);
+  };
+
+  const startCompanyEdit = () => {
+    setCompanyDraft({
+      vision: companyInfo?.vision || '',
+      mission: companyInfo?.mission || '',
+      websiteUrl: companyInfo?.websiteUrl || '',
+    });
+    setEditingCompany(true);
+  };
+
+  const removeDocument = async (id: string) => {
+    setSaving(true);
+    try {
+      await knowledgeApi.deleteDocument(id);
+      setDocuments(documents.filter(d => d.id !== id));
+      showToast('Document removed');
+    } catch (e) {
+      showToast('Failed to remove document', 'error');
+    }
+    setSaving(false);
+  };
+
+  /* ââ Product Handlers ââââââââââââââââââââââââââââââââââ */
+
+  const saveProduct = async () => {
+    if (!productDraft.name.trim()) return;
+    setSaving(true);
+    try {
+      if (editingProduct) {
+        const updated = await knowledgeApi.updateProduct({
+          id: editingProduct,
+          name: productDraft.name,
+          category: productDraft.category || undefined,
+          price: productDraft.price || undefined,
+          description: productDraft.description || undefined,
+          sku: productDraft.sku || undefined,
+        });
+        setProducts(products.map(p => p.id === editingProduct ? updated : p));
+        setEditingProduct(null);
+        showToast('Product updated');
+      } else {
+        const created = await knowledgeApi.createProduct({
+          name: productDraft.name,
+          category: productDraft.category || undefined,
+          price: productDraft.price || undefined,
+          description: productDraft.description || undefined,
+          sku: productDraft.sku || undefined,
+        });
+        setProducts([...products, created]);
+        setShowAddProduct(false);
+        showToast('Product created');
+      }
+      setProductDraft({ name: '', category: '', price: '', description: '', sku: '' });
+    } catch (e) {
+      showToast('Failed to save product', 'error');
+    }
+    setSaving(false);
+  };
+
+  const startEditProduct = (p: Product) => {
+    setProductDraft({
+      name: p.name,
+      category: p.category || '',
+      price: p.price || '',
+      description: p.description || '',
+      sku: p.sku || '',
+    });
+    setEditingProduct(p.id);
+    setShowAddProduct(false);
+  };
+
+  const deleteProduct = async (id: string) => {
+    setSaving(true);
+    try {
+      await knowledgeApi.deleteProduct(id);
+      setProducts(products.filter(p => p.id !== id));
+      if (editingProduct === id) {
+        setEditingProduct(null);
+        setProductDraft({ name: '', category: '', price: '', description: '', sku: '' });
+      }
+      showToast('Product deleted');
+    } catch (e) {
+      showToast('Failed to delete product', 'error');
+    }
+    setSaving(false);
+  };
+
+  const cancelProductEdit = () => {
+    setEditingProduct(null);
+    setShowAddProduct(false);
+    setProductDraft({ name: '', category: '', price: '', description: '', sku: '' });
+  };
+
+  /* ââ Warranties & Financing Handlers âââââââââââââââââââ */
+
+  const startWarrantiesEdit = () => {
+    setWarrantyDraft({
+      title: 'Warranty Policy',
+      content: warranties[0]?.content || '',
+    });
+    setFinancingDraft({
+      title: 'Financing Terms',
+      content: financing[0]?.content || '',
+    });
+    setEditingWarranties(true);
+  };
+
+  const saveWarranties = async () => {
+    setSaving(true);
+    try {
+      // Upsert warranty policy
+      if (warranties[0]) {
+        const updated = await knowledgeApi.updatePolicy({ id: warranties[0].id, content: warrantyDraft.content });
+        setWarranties([updated]);
+      } else if (warrantyDraft.content.trim()) {
+        const created = await knowledgeApi.createPolicy({ category: 'warranty', title: 'Warranty Policy', content: warrantyDraft.content });
+        setWarranties([created]);
+      }
+
+      // Upsert financing terms
+      if (financing[0]) {
+        const updated = await knowledgeApi.updatePolicy({ id: financing[0].id, content: financingDraft.content });
+        setFinancing([updated]);
+      } else if (financingDraft.content.trim()) {
+        const created = await knowledgeApi.createPolicy({ category: 'financing', title: 'Financing Terms', content: financingDraft.content });
+        setFinancing([created]);
+      }
+
+      setEditingWarranties(false);
+      showToast('Policies saved');
+    } catch (e) {
+      showToast('Failed to save policies', 'error');
+    }
+    setSaving(false);
+  };
+
+  const cancelWarrantiesEdit = () => {
+    setEditingWarranties(false);
+    setNewRule('');
+  };
+
+  const addRule = async () => {
+    if (!newRule.trim()) return;
+    setSaving(true);
+    try {
+      const created = await knowledgeApi.createPolicy({
+        category: 'rule',
+        title: newRule.trim(),
+        content: newRule.trim(),
+        sortOrder: rules.length,
+      });
+      setRules([...rules, created]);
+      setNewRule('');
+      showToast('Rule added');
+    } catch (e) {
+      showToast('Failed to add rule', 'error');
+    }
+    setSaving(false);
+  };
+
+  const removeRule = async (id: string) => {
+    setSaving(true);
+    try {
+      await knowledgeApi.deletePolicy(id);
+      setRules(rules.filter(r => r.id !== id));
+      showToast('Rule removed');
+    } catch (e) {
+      showToast('Failed to remove rule', 'error');
+    }
+    setSaving(false);
+  };
+
+  /* ââ FAQ Handlers ââââââââââââââââââââââââââââââââââââââ */
+
+  const saveFaq = async () => {
+    if (!faqDraft.question.trim() || !faqDraft.answer.trim()) return;
+    setSaving(true);
+    try {
+      if (editingFaq) {
+        const updated = await knowledgeApi.updateFAQ({
+          id: editingFaq,
+          question: faqDraft.question,
+          answer: faqDraft.answer,
+        });
+        setFaqs(faqs.map(f => f.id === editingFaq ? updated : f));
+        setEditingFaq(null);
+        showToast('FAQ updated');
+      } else {
+        const created = await knowledgeApi.createFAQ({
+          question: faqDraft.question,
+          answer: faqDraft.answer,
+          sortOrder: faqs.length,
+        });
+        setFaqs([...faqs, created]);
+        setShowAddFaq(false);
+        showToast('FAQ created');
+      }
+      setFaqDraft({ question: '', answer: '' });
+    } catch (e) {
+      showToast('Failed to save FAQ', 'error');
+    }
+    setSaving(false);
+  };
+
+  const startEditFaq = (f: FAQ) => {
+    setFaqDraft({ question: f.question, answer: f.answer });
+    setEditingFaq(f.id);
+    setShowAddFaq(false);
+  };
+
+  const deleteFaq = async (id: string) => {
+    setSaving(true);
+    try {
+      await knowledgeApi.deleteFAQ(id);
+      setFaqs(faqs.filter(f => f.id !== id));
+      if (editingFaq === id) {
+        setEditingFaq(null);
+        setFaqDraft({ question: '', answer: '' });
+      }
+      showToast('FAQ deleted');
+    } catch (e) {
+      showToast('Failed to delete FAQ', 'error');
+    }
+    setSaving(false);
+  };
+
+  const cancelFaqEdit = () => {
+    setEditingFaq(null);
+    setShowAddFaq(false);
+    setFaqDraft({ question: '', answer: '' });
+  };
+
+  /* ââ Loading Screen ââââââââââââââââââââââââââââââââââââ */
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-[60vh]">
+        <div className="flex flex-col items-center gap-3">
+          <Loader2 className="w-8 h-8 text-indigo-500 animate-spin" />
+          <p className="text-sm text-gray-500">Loading Knowledge Center...</p>
+        </div>
+      </div>
+    );
+  }
+
+  /* ââ Render ââââââââââââââââââââââââââââââââââââââââââââ */
+  return (
+    <div className="p-6 space-y-6">
+      {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
+
+      {/* Saving overlay indicator */}
+      {saving && (
+        <div className="fixed top-4 right-4 z-50 flex items-center gap-2 px-3 py-2 bg-white border border-gray-200 rounded-lg shadow-md text-sm text-gray-600">
+          <Loader2 className="w-4 h-4 animate-spin text-indigo-500" />
+          Saving...
+        </div>
+      )}
+
+      {/* ââ Tab Bar ââ */}
+      <div className="flex gap-1 bg-gray-100 p-1 rounded-lg w-fit">
+        {tabs.map(t => {
+          const Icon = t.icon;
+          return (
+            <button
+              key={t.id}
+              onClick={() => setActiveTab(t.id)}
+              className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-all ${
+                activeTab === t.id ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              <Icon className="w-4 h-4" />
+              {t.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* ââââââââââââââââââââââââââââââââââââââââââââââââââ */}
+      {/* TAB 1 â Company Truth                            */}
+      {/* ââââââââââââââââââââââââââââââââââââââââââââââââââ */}
+      {activeTab === 'company-truth' && (
+        <div className="space-y-6">
+          {/* Company Info Card */}
+          <div className="bg-white border border-gray-200 rounded-xl p-6">
+            <div className="flex items-center justify-between mb-6">
+              <div>
+                <h2 className="text-lg font-semibold text-gray-900">Company Information</h2>
+                <p className="text-sm text-gray-500 mt-1">Core company details the AI uses for context in every interaction</p>
+              </div>
+              {!editingCompany ? (
+                <button onClick={startCompanyEdit} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 transition-colors">
+                  <Edit3 className="w-4 h-4" /> Edit
+                </button>
+              ) : (
+                <div className="flex gap-2">
+                  <button onClick={cancelCompanyEdit} className="flex items-center gap-2 px-4 py-2 border border-gray-300 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-50 transition-colors">
+                    <X className="w-4 h-4" /> Cancel
+                  </button>
+                  <button onClick={saveCompanyInfo} disabled={saving} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-50">
+                    {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />} Save
+                  </button>
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-5">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Vision</label>
+                {editingCompany ? (
+                  <textarea value={companyDraft.vision} onChange={e => setCompanyDraft({ ...companyDraft, vision: e.target.value })} rows={3} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none" />
+                ) : (
+                  <p className="text-sm text-gray-600 bg-gray-50 rounded-lg px-4 py-3">{companyInfo?.vision || 'Not set'}</p>
+                )}
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Mission</label>
+                {editingCompany ? (
+                  <textarea value={companyDraft.mission} onChange={e => setCompanyDraft({ ...companyDraft, mission: e.target.value })} rows={3} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none" />
+                ) : (
+                  <p className="text-sm text-gray-600 bg-gray-50 rounded-lg px-4 py-3">{companyInfo?.mission || 'Not set'}</p>
+                )}
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Website URL</label>
+                {editingCompany ? (
+                  <div className="flex items-center gap-2">
+                    <Globe className="w-4 h-4 text-gray-400" />
+                    <input type="url" value={companyDraft.websiteUrl} onChange={e => setCompanyDraft({ ...companyDraft, websiteUrl: e.target.value })} className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none" />
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2 bg-gray-50 rounded-lg px-4 py-3">
+                    <Globe className="w-4 h-4 text-indigo-500" />
+                    {companyInfo?.websiteUrl ? (
+                      <a href={companyInfo.websiteUrl} target="_blank" rel="noopener noreferrer" className="text-sm text-indigo-600 hover:underline">{companyInfo.websiteUrl}</a>
+                    ) : (
+                      <span className="text-sm text-gray-400">Not set</span>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Documents Card */}
+          <div className="bg-white border border-gray-200 rounded-xl p-6">
+            <div className="flex items-center justify-between mb-6">
+              <div>
+                <h2 className="text-lg font-semibold text-gray-900">Reference Documents</h2>
+                <p className="text-sm text-gray-500 mt-1">Upload documents the AI will use as additional context (brand guides, playbooks, pricing sheets)</p>
+              </div>
+              <button className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 transition-colors">
                 <Upload className="w-4 h-4" /> Upload Document
               </button>
             </div>
@@ -181,8 +562,8 @@ NÂBÊ8¥ 8¥ [\8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥
         </div>
       )}
 
-      {/* ââââââââââââââââââââââââââââââââââââââââââââââââââ $/}
-      {/* TAB 2 â Products                                   */}
+      {/* ââââââââââââââââââââââââââââââââââââââââââââââââââ */}
+      {/* TAB 2 â Products                                 */}
       {/* ââââââââââââââââââââââââââââââââââââââââââââââââââ */}
       {activeTab === 'products' && (
         <div className="space-y-6">
@@ -199,7 +580,7 @@ NÂBÊ8¥ 8¥ [\8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥
               )}
             </div>
 
-             {(showAddProduct || editingProduct !== null) && (
+            {(showAddProduct || editingProduct !== null) && (
               <div className="border border-indigo-200 bg-indigo-50/50 rounded-xl p-5 mb-6">
                 <h3 className="text-sm font-semibold text-gray-900 mb-4">{editingProduct !== null ? 'Edit Product' : 'New Product'}</h3>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -222,7 +603,7 @@ NÂBÊ8¥ 8¥ [\8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥
                   <div className="md:col-span-2">
                     <label className="block text-xs font-medium text-gray-600 mb-1">Description</label>
                     <textarea value={productDraft.description} onChange={e => setProductDraft({ ...productDraft, description: e.target.value })} rows={3} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none" placeholder="Describe the product for the AI..." />
-                    </div>
+                  </div>
                 </div>
                 <div className="flex justify-end gap-2 mt-4">
                   <button onClick={cancelProductEdit} className="px-4 py-2 border border-gray-300 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-50 transition-colors">Cancel</button>
@@ -242,17 +623,17 @@ NÂBÊ8¥ 8¥ [\8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥
                   <div className="flex items-start justify-between">
                     <div className="flex-1">
                       <div className="flex items-center gap-3 mb-1">
-                        <h3 className="text-sm font-semibold text-gray-900">{@.name}</h3>
+                        <h3 className="text-sm font-semibold text-gray-900">{p.name}</h3>
                         {p.category && <span className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">{p.category}</span>}
-                        {p.price && <span className="text-xs font-semibold text-indigo-600">{@.price}</span>}
-                       </div>
-                        {@.description && <p className="text-sm text-gray-500">{@.description}</p>}
-                        {@.sku && <p className="text-xs text-gray-400 mt-1">SKU: {@.sku}</p>}
+                        {p.price && <span className="text-xs font-semibold text-indigo-600">{p.price}</span>}
                       </div>
-                      <div className="flex items-center gap-1 ml-4">
-                        <button onClick={() => startEditProduct(p)} className="p-1.5 text-gray-400 hover:text-indigo-600 rounded-md hover:bg-gray-100 transition-colors"><Edit3 className="w-4 h-4" /></button>
-                        <button onClick={() => deleteProduct(p.id)} className="p-1.5 text-gray-400 hover:text-red-600 rounded-md hover:bg-gray-100 transition-colors"><Trash2 className="w-4 h-4" /></button>
-                      </div>
+                      {p.description && <p className="text-sm text-gray-500">{p.description}</p>}
+                      {p.sku && <p className="text-xs text-gray-400 mt-1">SKU: {p.sku}</p>}
+                    </div>
+                    <div className="flex items-center gap-1 ml-4">
+                      <button onClick={() => startEditProduct(p)} className="p-1.5 text-gray-400 hover:text-indigo-600 rounded-md hover:bg-gray-100 transition-colors"><Edit3 className="w-4 h-4" /></button>
+                      <button onClick={() => deleteProduct(p.id)} className="p-1.5 text-gray-400 hover:text-red-600 rounded-md hover:bg-gray-100 transition-colors"><Trash2 className="w-4 h-4" /></button>
+                    </div>
                   </div>
                 </div>
               ))}
@@ -268,10 +649,10 @@ NÂBÊ8¥ 8¥ [\8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥
         </div>
       )}
 
-      {/* ââââââââââââââââââââââââââââââââââââââââââââââââââ $/}
-      {/* TAB 3 â Warranties & Financing                    */}
-      {/* ââââââââââââââââââââââââââââââââââââââââââââââââââ $/}
-      {(activeTab === 'warranties') && (
+      {/* ââââââââââââââââââââââââââââââââââââââââââââââââââ */}
+      {/* TAB 3 â Warranties & Financing                   */}
+      {/* ââââââââââââââââââââââââââââââââââââââââââââââââââ */}
+      {activeTab === 'warranties' && (
         <div className="space-y-6">
           <div className="bg-white border border-gray-200 rounded-xl p-6">
             <div className="flex items-center justify-between mb-6">
@@ -279,7 +660,7 @@ NÂBÊ8¥ 8¥ [\8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥
                 <h2 className="text-lg font-semibold text-gray-900">Warranties & Financing</h2>
                 <p className="text-sm text-gray-500 mt-1">Define guardrails for how the AI discusses warranty policies, refunds, and financing options</p>
               </div>
-              {!editingWarranties ? (
+              {!editingWarranties ? (
                 <button onClick={startWarrantiesEdit} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 transition-colors">
                   <Edit3 className="w-4 h-4" /> Edit
                 </button>
@@ -352,8 +733,8 @@ NÂBÊ8¥ 8¥ [\8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥
         </div>
       )}
 
-      {/* ââââââââââââââââââââââââââââââââââââââââââââââââââ $/}
-      {/* TAB 4 â FAQ                                        */}
+      {/* ââââââââââââââââââââââââââââââââââââââââââââââââââ */}
+      {/* TAB 4 â FAQ                                      */}
       {/* ââââââââââââââââââââââââââââââââââââââââââââââââââ */}
       {activeTab === 'faq' && (
         <div className="space-y-6">
@@ -361,7 +742,7 @@ NÂBÊ8¥ 8¥ [\8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥
             <div className="flex items-center justify-between mb-6">
               <div>
                 <h2 className="text-lg font-semibold text-gray-900">Frequently Asked Questions</h2>
-                <p className="text-sm text-gray-500 mt-1">Provide Q&A pairs the AI uses to answer customer,questions accurately</p>
+                <p className="text-sm text-gray-500 mt-1">Provide Q&A pairs the AI uses to answer customer questions accurately</p>
               </div>
               {!showAddFaq && editingFaq === null && (
                 <button onClick={() => { setShowAddFaq(true); setFaqDraft({ question: '', answer: '' }); }} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 transition-colors">
@@ -370,7 +751,7 @@ NÂBÊ8¥ 8¥ [\8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥
               )}
             </div>
 
-            #{(showAddFaq || editingFaq !== null) && (
+            {(showAddFaq || editingFaq !== null) && (
               <div className="border border-indigo-200 bg-indigo-50/50 rounded-xl p-5 mb-6">
                 <h3 className="text-sm font-semibold text-gray-900 mb-4">{editingFaq !== null ? 'Edit FAQ' : 'New FAQ'}</h3>
                 <div className="space-y-4">
@@ -427,4 +808,5 @@ NÂBÊ8¥ 8¥ [\8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥ 8¥
         </div>
       )}
     </div>
-  
+  );
+}
