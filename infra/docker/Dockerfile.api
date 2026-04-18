@@ -14,14 +14,14 @@ FROM base AS builder
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npm run build --workspace=apps/api
+RUN npx prisma generate --schema=apps/api/prisma/schema.prisma
 
 FROM base AS runner
 ENV NODE_ENV=production
 RUN addgroup --system --gid 1001 nodejs && adduser --system --uid 1001 growth
 COPY --from=builder /app/apps/api/dist ./dist
 COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/apps/api/prisma ./prisma
 USER growth
 EXPOSE 8080
 ENV PORT=8080
-CMD ["sh", "-c", "npx prisma generate --schema=prisma/schema.prisma && node dist/index.js"]
+CMD ["node", "dist/index.js"]
