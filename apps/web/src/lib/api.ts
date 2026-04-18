@@ -201,14 +201,14 @@ export const knowledgeApi = {
 
 // Conversations API (stub - will be wired to backend)
 export const conversationsApi = {
-  list: async (params?: { limit?: number }) => {
+  list: async (params?: { limit?: number }): Promise<any> => {
     try {
       return await trpcQuery('conversations.list', params);
     } catch {
       return [];
     }
   },
-  getById: async (id: string) => {
+  getById: async (id: string): Promise<any> => {
     try {
       return await trpcQuery('conversations.getById', { id });
     } catch {
