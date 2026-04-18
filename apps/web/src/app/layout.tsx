@@ -17,6 +17,7 @@ import {
   Bell,
   LogOut,
   Shield,
+  ChevronDown,
 } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
 import { AuthProvider, useAuth } from '@/lib/AuthContext';
