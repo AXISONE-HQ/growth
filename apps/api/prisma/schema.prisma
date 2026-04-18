@@ -102,6 +102,7 @@ model Tenant {
   outcomes             Outcome[]
   auditLogs            AuditLog[]
   strategyWeights      StrategyWeights[]
+  competitors    Competitor[]
   escalations          Escalation[]
   conversations        Conversation[]
 
@@ -402,5 +403,82 @@ model Message {
   @@index([conversationId])
   @@index([senderId])
   @@index([senderType])
+  @@index([createdAt])
+}
+
+
+enum CompetitorStatus {
+  active
+  inactive
+  archived
+}
+
+enum NewsSentiment {
+  positive
+  negative
+  neutral
+}
+
+model Competitor {
+  id             String           @id @default(uuid()) @db.Uuid
+  tenantId       String           @db.Uuid
+  name           String
+  website        String
+  description    String?
+  logoUrl        String?
+  employeeCount  Int?
+  customerCount  Int?
+  annualRevenue  String?
+  segment        String?
+  status         CompetitorStatus @default(active)
+  metadata       Json             @default("{}")
+  lastAnalyzedAt DateTime?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  tenant         Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  battleCards    CompetitorBattleCard[]
+  news           CompetitorNews[]
+
+  @@unique([tenantId, website])
+  @@index([tenantId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model CompetitorBattleCard {
+  id              String     @id @default(uuid()) @db.Uuid
+  competitorId    String     @db.Uuid
+  overview        String
+  strengths       Json       @default("[]")
+  weaknesses      Json       @default("[]")
+  differentiators Json       @default("[]")
+  objections      Json       @default("[]")
+  talkingPoints   Json       @default("[]")
+  version         Int        @default(1)
+  generatedAt     DateTime   @default(now())
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+  competitor      Competitor @relation(fields: [competitorId], references: [id], onDelete: Cascade)
+
+  @@index([competitorId])
+  @@index([version])
+  @@index([createdAt])
+}
+
+model CompetitorNews {
+  id             String        @id @default(uuid()) @db.Uuid
+  competitorId   String        @db.Uuid
+  title          String
+  summary        String
+  sourceUrl      String?
+  publishedAt    DateTime?
+  sentiment      NewsSentiment @default(neutral)
+  relevanceScore Float         @default(0)
+  createdAt      DateTime      @default(now())
+  competitor     Competitor    @relation(fields: [competitorId], references: [id], onDelete: Cascade)
+
+  @@index([competitorId])
+  @@index([sentiment])
+  @@index([publishedAt])
   @@index([createdAt])
 }
