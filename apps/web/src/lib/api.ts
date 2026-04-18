@@ -198,3 +198,21 @@ export const knowledgeApi = {
   deleteDocument: (id: string) =>
     trpcMutation<KnowledgeDocument>('knowledge.deleteDocument', { id }),
 };
+
+// Conversations API (stub - will be wired to backend)
+export const conversationsApi = {
+  list: async (params?: { limit?: number }) => {
+    try {
+      return await trpcQuery('conversations.list', params);
+    } catch {
+      return [];
+    }
+  },
+  getById: async (id: string) => {
+    try {
+      return await trpcQuery('conversations.getById', { id });
+    } catch {
+      return null;
+    }
+  },
+};
