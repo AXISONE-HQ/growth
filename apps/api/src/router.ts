@@ -606,6 +606,463 @@ const dashboardRouter = router({
 });
 
 // ============================================================================
+// KNOWLEDGE CENTER ROUTER
+// ============================================================================
+
+const knowledgeRouter = router({
+  getCompanyInfo: protectedProcedure.query(async ({ ctx }) => {
+    let info = await ctx.prisma.companyInfo.findUnique({ where: { tenantId: ctx.tenantId } });
+    if (!info) { info = await ctx.prisma.companyInfo.create({ data: { tenantId: ctx.tenantId } }); }
+    return info;
+  }),
+
+  updateCompanyInfo: protectedProcedure
+    .input(z.object({ vision: z.string().optional(), mission: z.string().optional(), websiteUrl: z.string().url().optional().nullable() }))
+    .mutation(async ({ ctx, input }) => {
+      return ctx.prisma.companyInfo.upsert({ where: { tenantId: ctx.tenantId }, update: input, create: { tenantId: ctx.tenantId, ...input } });
+    }),
+
+  listProducts: protectedProcedure
+    .input(z.object({ page: z.number().min(1).default(1), limit: z.number().min(1).max(100).default(20), category: z.string().optional(), search: z.string().optional() }))
+    .query(async ({ ctx, input }) => {
+      const skip = (input.page - 1) * input.limit;
+      const where = { tenantId: ctx.tenantId, active: true, ...(input.category && { category: input.category }), ...(input.search && { OR: [{ name: { contains: input.search, mode: "insensitive" as const } }, { sku: { contains: input.search, mode: "insensitive" as const } }] }) };
+      const [products, total] = await Promise.all([ctx.prisma.product.findMany({ where, skip, take: input.limit, orderBy: { createdAt: "desc" } }), ctx.prisma.product.count({ where })]);
+      return { products, pagination: { page: input.page, limit: input.limit, total, pages: Math.ceil(total / input.limit) } };
+    }),
+
+  createProduct: protectedProcedure
+    .input(z.object({ name: z.string().min(1), category: z.string().optional(), price: z.string().optional(), description: z.string().optional(), sku: z.string().optional() }))
+    .mutation(async ({ ctx, input }) => { return ctx.prisma.product.create({ data: { ...input, tenantId: ctx.tenantId } }); }),
+
+  updateProduct: protectedProcedure
+    .input(z.object({ id: z.string().uuid(), name: z.string().optional(), category: z.string().optional(), price: z.string().optional(), description: z.string().optional(), sku: z.string().optional(), active: z.boolean().optional() }))
+    .mutation(async ({ ctx, input }) => {
+      const { id, ...data } = input;
+      const existing = await ctx.prisma.product.findFirst({ where: { id, tenantId: ctx.tenantId } });
+      if (!existing) throw new Error("Product not found");
+      return ctx.prisma.product.update({ where: { id }, data });
+    }),
+
+  deleteProduct: protectedProcedure
+    .input(z.object({ id: z.string().uuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const existing = await ctx.prisma.product.findFirst({ where: { id: input.id, tenantId: ctx.tenantId } });
+      if (!existing) throw new Error("Product not found");
+      return ctx.prisma.product.update({ where: { id: input.id }, data: { active: false } });
+    }),
+
+  listPolicies: protectedProcedure
+    .input(z.object({ category: z.enum(["warranty", "financing", "rule"]).optional(), page: z.number().min(1).default(1), limit: z.number().min(1).max(100).default(50) }))
+    .query(async ({ ctx, input }) => {
+      const skip = (input.page - 1) * input.limit;
+      const where = { tenantId: ctx.tenantId, active: true, ...(input.category && { category: input.category }) };
+      const [policies, total] = await Promise.all([ctx.prisma.policyRule.findMany({ where, skip, take: input.limit, orderBy: { sortOrder: "asc" } }), ctx.prisma.policyRule.count({ where })]);
+      return { policies, pagination: { page: input.page, limit: input.limit, total, pages: Math.ceil(total / input.limit) } };
+    }),
+
+  createPolicy: protectedProcedure
+    .input(z.object({ category: z.enum(["warranty", "financing", "rule"]), title: z.string().min(1), content: z.string().min(1), sortOrder: z.number().default(0) }))
+    .mutation(async ({ ctx, input }) => { return ctx.prisma.policyRule.create({ data: { ...input, tenantId: ctx.tenantId } }); }),
+
+  updatePolicy: protectedProcedure
+    .input(z.object({ id: z.string().uuid(), category: z.enum(["warranty", "financing", "rule"]).optional(), title: z.string().optional(), content: z.string().optional(), sortOrder: z.number().optional(), active: z.boolean().optional() }))
+    .mutation(async ({ ctx, input }) => {
+      const { id, ...data } = input;
+      const existing = await ctx.prisma.policyRule.findFirst({ where: { id, tenantId: ctx.tenantId } });
+      if (!existing) throw new Error("Policy not found");
+      return ctx.prisma.policyRule.update({ where: { id }, data });
+    }),
+
+  deletePolicy: protectedProcedure
+    .input(z.object({ id: z.string().uuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const existing = await ctx.prisma.policyRule.findFirst({ where: { id: input.id, tenantId: ctx.tenantId } });
+      if (!existing) throw new Error("Policy not found");
+      return ctx.prisma.policyRule.update({ where: { id: input.id }, data: { active: false } });
+    }),
+
+  listFAQs: protectedProcedure
+    .input(z.object({ page: z.number().min(1).default(1), limit: z.number().min(1).max(100).default(50), search: z.string().optional() }))
+    .query(async ({ ctx, input }) => {
+      const skip = (input.page - 1) * input.limit;
+      const where = { tenantId: ctx.tenantId, active: true, ...(input.search && { OR: [{ question: { contains: input.search, mode: "insensitive" as const } }, { answer: { contains: input.search, mode: "insensitive" as const } }] }) };
+      const [faqs, total] = await Promise.all([ctx.prisma.fAQ.findMany({ where, skip, take: input.limit, orderBy: { sortOrder: "asc" } }), ctx.prisma.fAQ.count({ where })]);
+      return { faqs, pagination: { page: input.page, limit: input.limit, total, pages: Math.ceil(total / input.limit) } };
+    }),
+
+  createFAQ: protectedProcedure
+    .input(z.object({ question: z.string().min(1), answer: z.string().min(1), sortOrder: z.number().default(0) }))
+    .mutation(async ({ ctx, input }) => { return ctx.prisma.fAQ.create({ data: { ...input, tenantId: ctx.tenantId } }); }),
+
+  updateFAQ: protectedProcedure
+    .input(z.object({ id: z.string().uuid(), question: z.string().optional(), answer: z.string().optional(), sortOrder: z.number().optional(), active: z.boolean().optional() }))
+    .mutation(async ({ ctx, input }) => {
+      const { id, ...data } = input;
+      const existing = await ctx.prisma.fAQ.findFirst({ where: { id, tenantId: ctx.tenantId } });
+      if (!existing) throw new Error("FAQ not found");
+      return ctx.prisma.fAQ.update({ where: { id }, data });
+    }),
+
+  deleteFAQ: protectedProcedure
+    .input(z.object({ id: z.string().uuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const existing = await ctx.prisma.fAQ.findFirst({ where: { id: input.id, tenantId: ctx.tenantId } });
+      if (!existing) throw new Error("FAQ not found");
+      return ctx.prisma.fAQ.update({ where: { id: input.id }, data: { active: false } });
+    }),
+
+  listDocuments: protectedProcedure
+    .input(z.object({ page: z.number().min(1).default(1), limit: z.number().min(1).max(100).default(20), type: z.string().optional() }))
+    .query(async ({ ctx, input }) => {
+      const skip = (input.page - 1) * input.limit;
+      const where = { tenantId: ctx.tenantId, ...(input.type && { type: input.type }) };
+      const [documents, total] = await Promise.all([ctx.prisma.knowledgeDocument.findMany({ where, skip, take: input.limit, orderBy: { uploadedAt: "desc" } }), ctx.prisma.knowledgeDocument.count({ where })]);
+      return { documents, pagination: { page: input.page, limit: input.limit, total, pages: Math.ceil(total / input.limit) } };
+    }),
+
+  createDocument: protectedProcedure
+    .input(z.object({ name: z.string().min(1), type: z.string().min(1), sizeBytes: z.number().default(0), gcsPath: z.string().optional() }))
+    .mutation(async ({ ctx, input }) => { return ctx.prisma.knowledgeDocument.create({ data: { ...input, tenantId: ctx.tenantId } }); }),
+
+  deleteDocument: protectedProcedure
+    .input(z.object({ id: z.string().uuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const existing = await ctx.prisma.knowledgeDocument.findFirst({ where: { id: input.id, tenantId: ctx.tenantId } });
+      if (!existing) throw new Error("Document not found");
+      return ctx.prisma.knowledgeDocument.delete({ where: { id: input.id } });
+    }),
+});
+
+// ============================================================================
+// COMPETITORS ROUTER
+// ============================================================================
+
+const competitorsRouter = router({
+  // ---- List all competitors for the tenant ----
+  list: protectedProcedure
+    .input(
+      z.object({
+        page: z.number().min(1).default(1),
+        limit: z.number().min(1).max(100).default(20),
+        search: z.string().optional(),
+        status: z.enum(["active", "inactive", "archived"]).optional(),
+      })
+    )
+    .query(async ({ ctx, input }) => {
+      const skip = (input.page - 1) * input.limit;
+
+      const where = {
+        tenantId: ctx.tenantId,
+        ...(input.status && { status: input.status }),
+        ...(input.search && {
+          OR: [
+            { name: { contains: input.search, mode: "insensitive" as const } },
+            { website: { contains: input.search, mode: "insensitive" as const } },
+          ],
+        }),
+      };
+
+      const [competitors, total] = await Promise.all([
+        ctx.prisma.competitor.findMany({
+          where,
+          skip,
+          take: input.limit,
+          orderBy: { createdAt: "desc" },
+          include: {
+            battleCards: {
+              orderBy: { version: "desc" },
+              take: 1,
+            },
+            _count: {
+              select: { news: true },
+            },
+          },
+        }),
+        ctx.prisma.competitor.count({ where }),
+      ]);
+
+      return {
+        competitors,
+        pagination: {
+          page: input.page,
+          limit: input.limit,
+          total,
+          pages: Math.ceil(total / input.limit),
+        },
+      };
+    }),
+
+  // ---- Get single competitor with full detail ----
+  getById: protectedProcedure
+    .input(z.object({ id: z.string().uuid() }))
+    .query(async ({ ctx, input }) => {
+      const competitor = await ctx.prisma.competitor.findFirst({
+        where: {
+          id: input.id,
+          tenantId: ctx.tenantId,
+        },
+        include: {
+          battleCards: {
+            orderBy: { version: "desc" },
+            take: 1,
+          },
+          news: {
+            orderBy: { publishedAt: "desc" },
+            take: 10,
+          },
+        },
+      });
+
+      if (!competitor) {
+        throw new Error("Competitor not found");
+      }
+
+      return competitor;
+    }),
+
+  // ---- Create a competitor (manual add) ----
+  create: protectedProcedure
+    .input(
+      z.object({
+        name: z.string().min(1),
+        website: z.string().url(),
+        description: z.string().optional(),
+        employeeCount: z.number().optional(),
+        customerCount: z.number().optional(),
+        annualRevenue: z.string().optional(),
+        segment: z.string().optional(),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      return ctx.prisma.competitor.create({
+        data: {
+          ...input,
+          tenantId: ctx.tenantId,
+        },
+      });
+    }),
+
+  // ---- Update competitor ----
+  update: protectedProcedure
+    .input(
+      z.object({
+        id: z.string().uuid(),
+        name: z.string().optional(),
+        website: z.string().url().optional(),
+        description: z.string().optional(),
+        employeeCount: z.number().optional().nullable(),
+        customerCount: z.number().optional().nullable(),
+        annualRevenue: z.string().optional().nullable(),
+        segment: z.string().optional(),
+        status: z.enum(["active", "inactive", "archived"]).optional(),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      const { id, ...data } = input;
+
+      const existing = await ctx.prisma.competitor.findFirst({
+        where: { id, tenantId: ctx.tenantId },
+      });
+
+      if (!existing) {
+        throw new Error("Competitor not found");
+      }
+
+      return ctx.prisma.competitor.update({
+        where: { id },
+        data,
+      });
+    }),
+
+  // ---- Delete (archive) a competitor ----
+  delete: protectedProcedure
+    .input(z.object({ id: z.string().uuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const existing = await ctx.prisma.competitor.findFirst({
+        where: { id: input.id, tenantId: ctx.tenantId },
+      });
+
+      if (!existing) {
+        throw new Error("Competitor not found");
+      }
+
+      return ctx.prisma.competitor.update({
+        where: { id: input.id },
+        data: { status: "archived" },
+      });
+    }),
+
+  // ---- Get battle card for a competitor ----
+  getBattleCard: protectedProcedure
+    .input(z.object({ competitorId: z.string().uuid() }))
+    .query(async ({ ctx, input }) => {
+      // Verify tenant owns the competitor
+      const competitor = await ctx.prisma.competitor.findFirst({
+        where: { id: input.competitorId, tenantId: ctx.tenantId },
+      });
+
+      if (!competitor) {
+        throw new Error("Competitor not found");
+      }
+
+      const battleCard = await ctx.prisma.competitorBattleCard.findFirst({
+        where: { competitorId: input.competitorId },
+        orderBy: { version: "desc" },
+      });
+
+      return battleCard;
+    }),
+
+  // ---- Create / update battle card ----
+  upsertBattleCard: protectedProcedure
+    .input(
+      z.object({
+        competitorId: z.string().uuid(),
+        overview: z.string(),
+        strengths: z.array(z.string()).default([]),
+        weaknesses: z.array(z.string()).default([]),
+        differentiators: z.array(z.string()).default([]),
+        objections: z.array(z.object({
+          objection: z.string(),
+          rebuttal: z.string(),
+        })).default([]),
+        talkingPoints: z.array(z.string()).default([]),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      // Verify tenant owns the competitor
+      const competitor = await ctx.prisma.competitor.findFirst({
+        where: { id: input.competitorId, tenantId: ctx.tenantId },
+      });
+
+      if (!competitor) {
+        throw new Error("Competitor not found");
+      }
+
+      // Get current max version
+      const latest = await ctx.prisma.competitorBattleCard.findFirst({
+        where: { competitorId: input.competitorId },
+        orderBy: { version: "desc" },
+      });
+
+      const nextVersion = (latest?.version ?? 0) + 1;
+
+      return ctx.prisma.competitorBattleCard.create({
+        data: {
+          competitorId: input.competitorId,
+          overview: input.overview,
+          strengths: input.strengths,
+          weaknesses: input.weaknesses,
+          differentiators: input.differentiators,
+          objections: input.objections,
+          talkingPoints: input.talkingPoints,
+          version: nextVersion,
+          generatedAt: new Date(),
+        },
+      });
+    }),
+
+  // ---- List news for a competitor ----
+  listNews: protectedProcedure
+    .input(
+      z.object({
+        competitorId: z.string().uuid(),
+        page: z.number().min(1).default(1),
+        limit: z.number().min(1).max(50).default(10),
+      })
+    )
+    .query(async ({ ctx, input }) => {
+      // Verify tenant owns the competitor
+      const competitor = await ctx.prisma.competitor.findFirst({
+        where: { id: input.competitorId, tenantId: ctx.tenantId },
+      });
+
+      if (!competitor) {
+        throw new Error("Competitor not found");
+      }
+
+      const skip = (input.page - 1) * input.limit;
+
+      const [news, total] = await Promise.all([
+        ctx.prisma.competitorNews.findMany({
+          where: { competitorId: input.competitorId },
+          skip,
+          take: input.limit,
+          orderBy: { publishedAt: "desc" },
+        }),
+        ctx.prisma.competitorNews.count({
+          where: { competitorId: input.competitorId },
+        }),
+      ]);
+
+      return {
+        news,
+        pagination: {
+          page: input.page,
+          limit: input.limit,
+          total,
+          pages: Math.ceil(total / input.limit),
+        },
+      };
+    }),
+
+  // ---- Add news item ----
+  addNews: protectedProcedure
+    .input(
+      z.object({
+        competitorId: z.string().uuid(),
+        title: z.string().min(1),
+        summary: z.string(),
+        sourceUrl: z.string().url().optional(),
+        publishedAt: z.string().datetime().optional(),
+        sentiment: z.enum(["positive", "negative", "neutral"]).default("neutral"),
+        relevanceScore: z.number().min(0).max(1).default(0.5),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      const competitor = await ctx.prisma.competitor.findFirst({
+        where: { id: input.competitorId, tenantId: ctx.tenantId },
+      });
+
+      if (!competitor) {
+        throw new Error("Competitor not found");
+      }
+
+      return ctx.prisma.competitorNews.create({
+        data: {
+          ...input,
+          publishedAt: input.publishedAt ? new Date(input.publishedAt) : null,
+        },
+      });
+    }),
+
+  // ---- Dashboard stats for competitor intelligence ----
+  getStats: protectedProcedure.query(async ({ ctx }) => {
+    const [totalCompetitors, activeCompetitors, totalNews] = await Promise.all([
+      ctx.prisma.competitor.count({ where: { tenantId: ctx.tenantId } }),
+      ctx.prisma.competitor.count({ where: { tenantId: ctx.tenantId, status: "active" } }),
+      ctx.prisma.competitorNews.count({
+        where: { competitor: { tenantId: ctx.tenantId } },
+      }),
+    ]);
+
+    const recentNews = await ctx.prisma.competitorNews.findMany({
+      where: { competitor: { tenantId: ctx.tenantId } },
+      orderBy: { publishedAt: "desc" },
+      take: 5,
+      include: { competitor: { select: { name: true } } },
+    });
+
+    return {
+      totalCompetitors,
+      activeCompetitors,
+      totalNews,
+      recentNews,
+    };
+  }),
+});
+// ============================================================================
 // ROOT ROUTER
 // ============================================================================
 
@@ -619,6 +1076,8 @@ export const appRouter = router({
   brain: brainRouter,
   objectives: objectivesRouter,
   dashboard: dashboardRouter,
+  knowledge: knowledgeRouter,
+  competitors: competitorsRouter,
 });
 
 export type AppRouter = typeof appRouter;

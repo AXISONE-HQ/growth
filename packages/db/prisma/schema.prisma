@@ -452,3 +452,4 @@ model AiAgentConfig {
   @@index([tenantId])
   @@map("ai_agent_config")
 }
+
