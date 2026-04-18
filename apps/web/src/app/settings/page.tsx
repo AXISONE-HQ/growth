@@ -6,7 +6,8 @@ import {
   CheckCircle, AlertTriangle, Sparkles, Link, ToggleLeft,
   ToggleRight, Save, RefreshCw, Lock, Eye, Plug
 } from 'lucide-react';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { settingsApi } from '@/lib/api';
 
 /* ─── Component ─────────────────────────────────────── */
 export default function SettingsPage() {

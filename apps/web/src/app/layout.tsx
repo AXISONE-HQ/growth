@@ -16,8 +16,6 @@ import {
   Pause,
   Bell,
   LogOut,
-  ChevronDown,
-  Shield,
 } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
 import { AuthProvider, useAuth } from '@/lib/AuthContext';
@@ -30,12 +28,13 @@ const navItems = [
   { href: '/customers', label: 'Customers', icon: Users },
   { href: '/audit', label: 'Audit Log', icon: FileText },
   { href: '/knowledge', label: 'Knowledge Center', icon: BookOpen },
-  { href: '/settings', label: 'Settings', icon: Settings, adminOnly: true },
+  { href: '/settings', label: 'Settings', icon: Settings },
 ];
 
 const pageTitle: Record<string, string> = {
   '/dashboard': 'Dashboard',
   '/pipelines': 'Pipelines',
+  '/pipelines/create': 'Create Pipeline',
   '/conversations': 'Conversations',
   '/escalations': 'Escalations',
   '/customers': 'Customers',
@@ -53,16 +52,10 @@ function AppShell({ children }: { children: React.ReactNode }) {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
-  // Close menu when clicking outside
-  useEffect(() => {
-    function handleClickOutside(event: MouseEvent) {
-      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
-        setUserMenuOpen(false);
-      }
-    }
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
+  // Allow login page without auth
+  if (pathname === '/login') {
+    return <>{children}</>;
+  }
 
   const handleLogout = async () => {
     setUserMenuOpen(false);

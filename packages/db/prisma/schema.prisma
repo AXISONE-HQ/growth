@@ -46,6 +46,7 @@ model Tenant {
   aiAgentConfigs  AiAgentConfig[]
   contactStates   ContactState[]
 
+  tenantSettings  TenantSettings[]
   @@map("tenants")
 }
 
