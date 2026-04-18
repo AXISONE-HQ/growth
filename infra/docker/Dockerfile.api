@@ -17,6 +17,7 @@ RUN npm run build --workspace=apps/api
 RUN npx prisma generate --schema=apps/api/prisma/schema.prisma
 
 FROM base AS runner
+RUN apk add --no-cache openssl
 ENV NODE_ENV=production
 RUN addgroup --system --gid 1001 nodejs && adduser --system --uid 1001 growth
 COPY --from=builder /app/apps/api/dist ./dist
