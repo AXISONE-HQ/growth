@@ -9,7 +9,7 @@
 
 const API_BASE =
   process.env.NEXT_PUBLIC_API_URL ||
-  'https://growth-api-1086551891973.us-central1.run.app';
+  'https://growth-web-1086551891973.us-central1.run.app';
 
 // Dev tenant ID — replace with Firebase Auth context in production
 const DEV_TENANT_ID = '00000000-0000-0000-0000-000000000001';
@@ -182,4 +182,72 @@ export const knowledgeApi = {
 
   deleteDocument: (id: string) =>
     trpcMutation<KnowledgeDocument>('knowledge.deleteDocument', { id }),
+};
+
+/* ── Conversations API helpers ──────────────────────────────── */
+
+export interface Conversation {
+  id: string;
+  tenantId: string;
+  contactId: string;
+  channel: string;
+  status: string;
+  aiHandled: boolean;
+  createdAt: string;
+  updatedAt: string;
+  messages?: ConversationMessage[];
+}
+
+export interface ConversationMessage {
+  id: string;
+  conversationId: string;
+  senderId: string;
+  senderType: 'human' | 'ai' | 'system';
+  content: string;
+  channel: string;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+}
+
+export const conversationsApi = {
+  list: (params?: { contactId?: string; channel?: string; status?: string; limit?: number; offset?: number }) =>
+    trpcQuery<{ conversations: Conversation[]; total: number }>('conversations.list', params || {}),
+
+  getById: (id: string) =>
+    trpcQuery<Conversation>('conversations.getById', { id }),
+
+  create: (data: { contactId: string; channel: string; status?: string }) =>
+    trpcMutation<Conversation>('conversations.create', data),
+
+  addMessage: (data: { conversationId: string; senderId: string; senderType: 'human' | 'ai' | 'system'; content: string; metadata?: Record<string, unknown> }) =>
+    trpcMutation<ConversationMessage>('conversations.addMessage', data),
+
+  updateStatus: (data: { id: string; status: string; aiHandled?: boolean }) =>
+    trpcMutation<Conversation>('conversations.updateStatus', data),
+};
+
+/* ── Settings API helpers ──────────────────────────────── */
+
+export interface TenantSetting {
+  id: string;
+  tenantId: string;
+  category: string;
+  key: string;
+  value: unknown;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const settingsApi = {
+  listByCategory: (category: string) =>
+    trpcQuery<TenantSetting[]>('settings.listByCategory', { category }),
+
+  get: (category: string, key: string) =>
+    trpcQuery<TenantSetting | null>('settings.get', { category, key }),
+
+  upsert: (data: { category: string; key: string; value: unknown }) =>
+    trpcMutation<TenantSetting>('settings.upsert', data),
+
+  delete: (category: string, key: string) =>
+    trpcMutation<TenantSetting>('settings.delete', { category, key }),
 };

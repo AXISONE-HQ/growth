@@ -5,7 +5,8 @@ import {
   Send, ChevronDown, MoreHorizontal, Paperclip, Sparkles, User,
   ArrowUpRight, CheckCheck, AlertTriangle, Zap, Star, Archive
 } from 'lucide-react';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { conversationsApi } from '@/lib/api';
 
 /* ─── Mock Data ─────────────────────────────────────── */
 const conversations = [
@@ -137,8 +138,24 @@ export default function ConversationsPage() {
   const [channelFilter, setChannelFilter] = useState('All');
   const [statusFilter, setStatusFilter] = useState('All');
   const [searchQuery, setSearchQuery] = useState('');
+  const [apiConversations, setApiConversations] = useState<any[] | null>(null);
+  const [loading, setLoading] = useState(true);
 
-  const filtered = conversations.filter((c) => {
+  useEffect(() => {
+    conversationsApi.list({ limit: 50 })
+      .then((data) => {
+        if (data.conversations && data.conversations.length > 0) {
+          setApiConversations(data.conversations);
+        }
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, []);
+
+  // Use API data when available, fall back to demo data
+  const activeConversations = apiConversations || conversations;
+
+  const filtered = activeConversations.filter((c) => {
     if (channelFilter !== 'All' && c.channel !== channelFilter) return false;
     if (statusFilter === 'Unread' && !c.unread) return false;
     if (statusFilter === 'AI Handled' && !c.aiHandled) return false;
@@ -159,7 +176,7 @@ export default function ConversationsPage() {
           <div className="flex items-center justify-between mb-3">
             <h2 className="text-lg font-semibold text-gray-900">Conversations</h2>
             <span className="text-xs bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded-full font-medium">
-              {conversations.length} active
+              {activeConversations.length} active
             </span>
           </div>
           <div className="relative mb-3">
