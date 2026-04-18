@@ -9,8 +9,8 @@ async function getFirebaseAdmin() {
   if (firebaseAdmin) return firebaseAdmin;
   try {
     firebaseAdmin = await import("firebase-admin");
-    if (firebaseAdmin.getApps().length === 0) {
-      firebaseAdmin.initializeApp({
+    if ((firebaseAdmin as any).getApps().length === 0) {
+      (firebaseAdmin as any).initializeApp({
         projectId: process.env.FIREBASE_PROJECT_ID || "growth-493400",
       });
     }

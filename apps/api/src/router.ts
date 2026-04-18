@@ -1,6 +1,7 @@
 import { healthCheck, generateMessage, classifyIntent, scoreConfidence, selectStrategy, MODELS } from "./services/ai.js";
 import { z } from "zod";
 import { router, publicProcedure, protectedProcedure } from "./trpc.js";
+import { TRPCError } from "@trpc/server";
 
 // ============================================================================
 // CONTACTS ROUTER
@@ -809,7 +810,7 @@ const dashboardRouter = router({
     // Calculate escalation rate
     const totalEscalations = escalations.length;
     const resolvedEscalations = escalations.filter(
-      (e) => e.status === "resolved"
+      (e: any) => e.status === "resolved"
     ).length;
     const escalationRate =
       totalEscalations > 0 ? (resolvedEscalations / totalEscalations) * 100 : 0;
