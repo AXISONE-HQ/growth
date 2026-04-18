@@ -16,6 +16,7 @@ import {
   Pause,
   Bell,
   LogOut,
+  Shield,
 } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
 import { AuthProvider, useAuth } from '@/lib/AuthContext';
