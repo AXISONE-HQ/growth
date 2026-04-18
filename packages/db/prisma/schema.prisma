@@ -46,6 +46,7 @@ model Tenant {
   aiAgentConfigs  AiAgentConfig[]
   contactStates   ContactState[]
 
+  tenantSettings  TenantSettings[]
   @@map("tenants")
 }
 
@@ -451,4 +452,21 @@ model AiAgentConfig {
 
   @@index([tenantId])
   @@map("ai_agent_config")
+}
+
+model TenantSettings {
+  id        String   @id @default(uuid())
+  tenantId  String   @map("tenant_id")
+  category  String
+  key       String
+  value     Json     @default("{}")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, category, key])
+  @@index([tenantId])
+  @@index([category])
+  @@map("tenant_settings")
 }

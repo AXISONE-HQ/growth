@@ -2,7 +2,7 @@
 
 import './globals.css';
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import {
   LayoutDashboard,
   Activity,
@@ -16,10 +16,8 @@ import {
   Pause,
   Bell,
   LogOut,
-  ChevronDown,
-  Shield,
 } from 'lucide-react';
-import { useState, useRef, useEffect } from 'react';
+import { AuthProvider, useAuth } from '@/lib/AuthContext';
 
 const navItems = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -29,12 +27,13 @@ const navItems = [
   { href: '/customers', label: 'Customers', icon: Users },
   { href: '/audit', label: 'Audit Log', icon: FileText },
   { href: '/knowledge', label: 'Knowledge Center', icon: BookOpen },
-  { href: '/settings', label: 'Settings', icon: Settings, adminOnly: true },
+  { href: '/settings', label: 'Settings', icon: Settings },
 ];
 
 const pageTitle: Record<string, string> = {
   '/dashboard': 'Dashboard',
   '/pipelines': 'Pipelines',
+  '/pipelines/create': 'Create Pipeline',
   '/conversations': 'Conversations',
   '/escalations': 'Escalations',
   '/customers': 'Customers',
@@ -43,182 +42,152 @@ const pageTitle: Record<string, string> = {
   '/settings': 'Settings',
 };
 
-// Mock user for now — will be replaced by Firebase AuthContext
-const mockUser = {
-  name: 'Fred Binette',
-  email: 'fred@axisone.io',
-  role: 'admin' as 'admin' | 'member',
-  company: 'AxisOne',
-  initials: 'FB',
-};
-
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+function AuthGate({ children }: { children: React.ReactNode }) {
+  const { user, loading, logout } = useAuth();
   const pathname = usePathname();
-  const currentTitle = pageTitle[pathname] || 'Dashboard';
-  const isLoginPage = pathname === '/login';
-  const [userMenuOpen, setUserMenuOpen] = useState(false);
-  const menuRef = useRef<HTMLDivElement>(null);
+  const router = useRouter();
 
-  // Close menu when clicking outside
-  useEffect(() => {
-    function handleClickOutside(event: MouseEvent) {
-      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
-        setUserMenuOpen(false);
-      }
-    }
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
+  // Allow login page without auth
+  if (pathname === '/login') {
+    return <>{children}</>;
+  }
 
-  const handleLogout = () => {
-    // TODO: Firebase signOut(auth)
-    console.log('Logout');
-    window.location.href = '/login';
-  };
-
-  // Login page — no sidebar, no top bar
-  if (isLoginPage) {
+  // Show loading spinner while checking auth
+  if (loading) {
     return (
-      <html lang="en">
-        <body>{children}</body>
-      </html>
+      <div className="flex items-center justify-center min-h-screen bg-gray-50">
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-indigo-500 flex items-center justify-center animate-pulse">
+            <Activity className="w-6 h-6 text-white" />
+          </div>
+          <p className="text-sm text-gray-500">Loading...</p>
+        </div>
+      </div>
     );
   }
 
+  // Redirect to login if not authenticated
+  if (!user) {
+    if (typeof window !== 'undefined') {
+      router.push('/login');
+    }
+    return null;
+  }
+
+  const currentTitle = pageTitle[pathname] || 'Dashboard';
+
+  return (
+    <div className="flex min-h-screen">
+      {/* Sidebar */}
+      <nav className="fixed top-0 left-0 bottom-0 w-60 bg-black border-r border-slate-800 flex flex-col z-50">
+        {/* Logo */}
+        <div className="px-6 py-5 border-b border-white/10 flex items-center gap-2.5">
+          <div className="w-7 h-7 rounded-lg bg-indigo-500 flex items-center justify-center">
+            <Activity className="w-4 h-4 text-white" />
+          </div>
+          <span className="text-white font-semibold text-base tracking-tight">growth</span>
+        </div>
+
+        {/* Navigation */}
+        <div className="flex-1 p-3 flex flex-col gap-0.5">
+          {navItems.map((item) => {
+            const Icon = item.icon;
+            const isActive = pathname === item.href || pathname.startsWith(item.href + '/');
+            return (
+              <Link
+                key={item.href}
+                href={item.href}
+                className={`flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-sm transition-all ${
+                  isActive
+                    ? 'bg-indigo-500 text-white'
+                    : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'
+                }`}
+              >
+                <Icon className="w-[18px] h-[18px] flex-shrink-0" />
+                {item.label}
+                {item.badge && (
+                  <span className="ml-auto text-[11px] font-semibold px-[7px] py-[2px] rounded-full bg-red-500 text-white">
+                    {item.badge}
+                  </span>
+                )}
+              </Link>
+            );
+          })}
+        </div>
+
+        {/* User Footer */}
+        <div className="p-4 border-t border-white/10">
+          <div className="flex items-center gap-2.5 p-2 rounded-lg">
+            <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center text-white text-[13px] font-semibold">
+              {user.initials}
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="text-[13px] font-medium text-white truncate">{user.displayName || user.email}</div>
+              <div className="text-[11px] text-white/50">{user.role === 'admin' ? 'Admin' : 'Member'}</div>
+            </div>
+            <button
+              onClick={() => { logout(); router.push('/login'); }}
+              className="text-slate-500 hover:text-white transition-colors"
+              title="Sign out"
+            >
+              <LogOut className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      </nav>
+
+      {/* Main Content */}
+      <main className="ml-60 flex-1 min-h-screen">
+        {/* Top Bar */}
+        <header className="flex items-center justify-between px-8 py-3 border-b border-gray-200 bg-white sticky top-0 z-40">
+          <div className="flex items-center gap-4">
+            <h1 className="text-lg font-semibold text-gray-900">{currentTitle}</h1>
+            <div className="flex items-center gap-1.5 text-[13px] text-emerald-600 bg-emerald-50 px-2.5 py-1 rounded-full">
+              <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse-slow" />
+              growth is active
+            </div>
+          </div>
+
+          <div className="flex-1 max-w-[480px] mx-6">
+            <div className="flex items-center gap-2 px-3.5 py-2 rounded-lg border border-gray-200 bg-gray-50 focus-within:border-indigo-500 focus-within:bg-white focus-within:ring-[3px] focus-within:ring-indigo-500/10 transition-all">
+              <Search className="w-4 h-4 text-gray-400 flex-shrink-0" />
+              <input
+                type="text"
+                placeholder="Search contacts, decisions, actions..."
+                className="border-none bg-transparent outline-none text-sm font-[inherit] text-gray-900 w-full placeholder:text-gray-400"
+              />
+              <span className="text-[11px] text-gray-400 border border-gray-200 rounded px-1.5 py-[1px] flex-shrink-0">
+                ⌘K
+              </span>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <button className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-amber-500 bg-white text-amber-600 text-[13px] hover:bg-amber-500/10 transition-all">
+              <Pause className="w-4 h-4" />
+              Pause growth
+            </button>
+            <button className="relative flex items-center gap-1.5 px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-700 text-[13px] hover:bg-gray-100 transition-all">
+              <Bell className="w-4 h-4" />
+              <span className="absolute top-1 right-1 w-2 h-2 bg-red-500 rounded-full border-2 border-white" />
+            </button>
+          </div>
+        </header>
+
+        {/* Page Content */}
+        {children}
+      </main>
+    </div>
+  );
+}
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <body className="flex min-h-screen">
-        {/* Sidebar */}
-        <nav className="fixed top-0 left-0 bottom-0 w-60 bg-black border-r border-slate-800 flex flex-col z-50">
-          {/* Logo */}
-          <div className="px-6 py-5 border-b border-white/10 flex items-center gap-2.5">
-            <div className="w-7 h-7 rounded-lg bg-indigo-500 flex items-center justify-center">
-              <Activity className="w-4 h-4 text-white" />
-            </div>
-            <span className="text-white font-semibold text-base tracking-tight">growth</span>
-          </div>
-
-          {/* Navigation */}
-          <div className="flex-1 p-3 flex flex-col gap-0.5">
-            {navItems.map((item) => {
-              const Icon = item.icon;
-              const isActive = pathname === item.href || pathname.startsWith(item.href + '/');
-
-              // Hide admin-only items from members
-              if (item.adminOnly && mockUser.role !== 'admin') {
-                return null;
-              }
-
-              return (
-                <Link
-                  key={item.href}
-                  href={item.href}
-                  className={`flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-sm transition-all ${
-                    isActive
-                      ? 'bg-indigo-500 text-white'
-                      : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'
-                  }`}
-                >
-                  <Icon className="w-[18px] h-[18px] flex-shrink-0" />
-                  {item.label}
-                  {item.badge && (
-                    <span className="ml-auto text-[11px] font-semibold px-[7px] py-[2px] rounded-full bg-red-500 text-white">
-                      {item.badge}
-                    </span>
-                  )}
-                </Link>
-              );
-            })}
-          </div>
-
-          {/* User Footer */}
-          <div className="p-4 border-t border-white/10" ref={menuRef}>
-            <div className="relative">
-              <button
-                onClick={() => setUserMenuOpen(!userMenuOpen)}
-                className="w-full flex items-center gap-2.5 p-2 rounded-lg hover:bg-slate-800 transition-colors"
-              >
-                <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center text-white text-[13px] font-semibold">
-                  {mockUser.initials}
-                </div>
-                <div className="flex-1 text-left">
-                  <div className="text-[13px] font-medium text-white">{mockUser.name}</div>
-                  <div className="text-[11px] text-white/50 flex items-center gap-1">
-                    {mockUser.role === 'admin' && <Shield className="w-3 h-3" />}
-                    {mockUser.role === 'admin' ? 'Admin' : 'Member'} &middot; {mockUser.company}
-                  </div>
-                </div>
-                <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform ${userMenuOpen ? 'rotate-180' : ''}`} />
-              </button>
-
-              {/* Dropdown Menu */}
-              {userMenuOpen && (
-                <div className="absolute bottom-full left-0 right-0 mb-2 bg-slate-900 border border-slate-700 rounded-lg shadow-xl overflow-hidden">
-                  <div className="px-3 py-2 border-b border-slate-700">
-                    <div className="text-[12px] text-slate-400">{mockUser.email}</div>
-                  </div>
-                  {mockUser.role === 'admin' && (
-                    <Link
-                      href="/settings"
-                      onClick={() => setUserMenuOpen(false)}
-                      className="flex items-center gap-2 px-3 py-2.5 text-sm text-slate-300 hover:bg-slate-800 transition-colors"
-                    >
-                      <Settings className="w-4 h-4" />
-                      Settings
-                    </Link>
-                  )}
-                  <button
-                    onClick={handleLogout}
-                    className="w-full flex items-center gap-2 px-3 py-2.5 text-sm text-red-400 hover:bg-slate-800 transition-colors"
-                  >
-                    <LogOut className="w-4 h-4" />
-                    Sign out
-                  </button>
-                </div>
-              )}
-            </div>
-          </div>
-        </nav>
-
-        {/* Main Content */}
-        <main className="ml-60 flex-1 min-h-screen">
-          {/* Top Bar */}
-          <header className="flex items-center justify-between px-8 py-3 border-b border-gray-200 bg-white sticky top-0 z-40">
-            <div className="flex items-center gap-4">
-              <h1 className="text-lg font-semibold text-gray-900">{currentTitle}</h1>
-              <div className="flex items-center gap-1.5 text-[13px] text-emerald-600 bg-emerald-50 px-2.5 py-1 rounded-full">
-                <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse-slow" />
-                growth is active
-              </div>
-            </div>
-
-            <div className="flex-1 max-w-[480px] mx-6">
-              <div className="flex items-center gap-2 px-3.5 py-2 rounded-lg border border-gray-200 bg-gray-50 focus-within:border-indigo-500 focus-within:bg-white focus-within:ring-[3px] focus-within:ring-indigo-500/10 transition-all">
-                <Search className="w-4 h-4 text-gray-400 flex-shrink-0" />
-                <input
-                  type="text"
-                  placeholder="Search contacts, decisions, actions..."
-                  className="border-none bg-transparent outline-none text-sm font-[inherit] text-gray-900 w-full placeholder:text-gray-400"
-                />
-                <span className="text-[11px] text-gray-400 border border-gray-200 rounded px-1.5 py-[1px] flex-shrink-0">
-                  ⌘K
-                </span>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-3">
-              <button className="relative p-2 rounded-lg hover:bg-gray-100 transition-colors">
-                <Bell className="w-5 h-5 text-gray-500" />
-                <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-red-500 rounded-full" />
-              </button>
-              <button className="p-2 rounded-lg hover:bg-gray-100 transition-colors">
-                <Pause className="w-5 h-5 text-gray-500" />
-              </button>
-            </div>
-          </header>
-
-          {children}
-        </main>
+      <body>
+        <AuthProvider>
+          <AuthGate>{children}</AuthGate>
+        </AuthProvider>
       </body>
     </html>
   );
