@@ -216,3 +216,22 @@ export const conversationsApi = {
     }
   },
 };
+
+
+// Settings API (stub - will be wired to backend)
+export const settingsApi = {
+  get: async (): Promise<any> => {
+    try {
+      return await trpcQuery('settings.get');
+    } catch {
+      return null;
+    }
+  },
+  update: async (data: any): Promise<any> => {
+    try {
+      return await trpcMutation('settings.update', data);
+    } catch {
+      return null;
+    }
+  },
+};
