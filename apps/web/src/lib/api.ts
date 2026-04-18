@@ -235,3 +235,109 @@ export const settingsApi = {
     }
   },
 };
+/* ── Competitor Intelligence API helpers ──────────────────── */
+
+// Types matching the Prisma models
+export interface Competitor {
+  id: string;
+  tenantId: string;
+  name: string;
+  website: string;
+  description: string | null;
+  logoUrl: string | null;
+  employeeCount: number | null;
+  customerCount: number | null;
+  annualRevenue: string | null;
+  segment: string | null;
+  status: 'active' | 'inactive' | 'archived';
+  metadata: Record<string, unknown>;
+  lastAnalyzedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  battleCards?: CompetitorBattleCard[];
+  news?: CompetitorNews[];
+  _count?: { news: number };
+}
+
+export interface CompetitorBattleCard {
+  id: string;
+  competitorId: string;
+  overview: string;
+  strengths: string[];
+  weaknesses: string[];
+  differentiators: string[];
+  objections: string[];
+  talkingPoints: string[];
+  version: number;
+  generatedAt: string;
+  createdAt: string;
+}
+
+export interface CompetitorNews {
+  id: string;
+  competitorId: string;
+  title: string;
+  summary: string;
+  sourceUrl: string | null;
+  publishedAt: string | null;
+  sentiment: 'positive' | 'negative' | 'neutral';
+  relevanceScore: number;
+  createdAt: string;
+}
+
+export interface CompetitorStats {
+  totalCompetitors: number;
+  activeCompetitors: number;
+  totalNews: number;
+  recentNews: CompetitorNews[];
+}
+
+export const competitorsApi = {
+  // List competitors with search, filter, pagination
+  list: (params?: { page?: number; limit?: number; search?: string; status?: string }) =>
+    trpcQuery<{ competitors: Competitor[]; pagination: { page: number; limit: number; total: number; pages: number } }>(
+      'competitors.list', params || {}
+    ),
+
+  // Get single competitor with full battle cards and news
+  getById: (id: string) =>
+    trpcQuery<Competitor>('competitors.getById', { id }),
+
+  // Get battle card for a competitor
+  getBattleCard: (competitorId: string) =>
+    trpcQuery<CompetitorBattleCard | null>('competitors.getBattleCard', { competitorId }),
+
+  // List news for a competitor
+  listNews: (params: { competitorId: string; page?: number; limit?: number }) =>
+    trpcQuery<{ news: CompetitorNews[]; pagination: { page: number; limit: number; total: number; pages: number } }>(
+      'competitors.listNews', params
+    ),
+
+  // Get dashboard stats
+  getStats: () =>
+    trpcQuery<CompetitorStats>('competitors.getStats'),
+
+  // Create a new competitor
+  create: (data: { name: string; website: string; description?: string; segment?: string }) =>
+    trpcMutation<Competitor>('competitors.create', data),
+
+  // Update a competitor
+  update: (data: { id: string; name?: string; website?: string; description?: string; status?: string; segment?: string }) =>
+    trpcMutation<Competitor>('competitors.update', data),
+
+  // Delete (archive) a competitor
+  delete: (id: string) =>
+    trpcMutation<Competitor>('competitors.delete', { id }),
+
+  // Create or update battle card
+  upsertBattleCard: (data: {
+    competitorId: string; overview: string; strengths: string[];
+    weaknesses: string[]; differentiators: string[]; objections: string[]; talkingPoints: string[];
+  }) => trpcMutation<CompetitorBattleCard>('competitors.upsertBattleCard', data),
+
+  // Add news item
+  addNews: (data: {
+    competitorId: string; title: string; summary: string;
+    sourceUrl?: string; publishedAt?: string; sentiment?: string;
+  }) => trpcMutation<CompetitorNews>('competitors.addNews', data),
+};
