@@ -218,23 +218,185 @@ export const conversationsApi = {
 };
 
 
-// Settings API (stub - will be wired to backend)
+/* ââ Settings API ââââââââââââââââââââââââââââââââââââââââââââ */
+
+export interface AIConfig {
+  confidenceThreshold: number;
+  autoApproveEnabled: boolean;
+  dailyActionLimit: number;
+  strategyPermissions: {
+    directConversion: boolean;
+    guidedAssistance: boolean;
+    trustBuilding: boolean;
+    reengagement: boolean;
+  };
+  guardrailSettings: {
+    toneValidator: boolean;
+    accuracyCheck: boolean;
+    hallucinationFilter: boolean;
+    complianceCheck: boolean;
+    injectionDefense: boolean;
+    confidenceGate: boolean;
+  };
+  aiPermissions: Record<string, unknown>;
+}
+
+export interface ChannelRecord {
+  id: string;
+  tenantId: string;
+  type: 'email' | 'sms' | 'whatsapp';
+  provider: string;
+  config: Record<string, unknown>;
+  status: 'connected' | 'disconnected' | 'error';
+  lastTestedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface IntegrationRecord {
+  id: string;
+  tenantId: string;
+  provider: string;
+  category: 'crm' | 'payments' | 'calendar' | 'commerce' | 'other';
+  status: 'connected' | 'disconnected' | 'syncing' | 'error';
+  config: Record<string, unknown>;
+  lastSyncAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TeamMemberRecord {
+  id: string;
+  tenantId: string;
+  email: string;
+  name: string | null;
+  role: 'owner' | 'admin' | 'agent' | 'viewer';
+  active: boolean;
+  createdAt: string;
+}
+
+export interface InvitationRecord {
+  id: string;
+  tenantId: string;
+  email: string;
+  role: 'owner' | 'admin' | 'agent' | 'viewer';
+  status: 'pending' | 'accepted' | 'expired' | 'cancelled';
+  expiresAt: string;
+  createdAt: string;
+}
+
+export interface NotificationPrefs {
+  escalation: boolean;
+  daily_digest: boolean;
+  weekly_report: boolean;
+  brain_update: boolean;
+}
+
+export interface SecurityConfig {
+  id: string;
+  tenantId: string;
+  twoFactorEnabled: boolean;
+  ssoEnabled: boolean;
+  ssoProvider: string | null;
+  ssoConfig: Record<string, unknown>;
+  auditRetentionDays: number;
+  gdprCompliant: boolean;
+}
+
+export interface AuditLogEntry {
+  id: string;
+  actor: string;
+  actionType: string;
+  contactId: string | null;
+  payload: Record<string, unknown>;
+  reasoning: string | null;
+  autoApproved: boolean;
+  createdAt: string;
+}
+
 export const settingsApi = {
-  get: async (): Promise<any> => {
-    try {
-      return await trpcQuery('settings.get');
-    } catch {
-      return null;
-    }
+  // AI Configuration
+  ai: {
+    get: () => trpcQuery<AIConfig>('settings.ai.get'),
+    update: (data: Partial<Omit<AIConfig, 'aiPermissions'>>) =>
+      trpcMutation<AIConfig>('settings.ai.update', data),
   },
-  update: async (data: any): Promise<any> => {
-    try {
-      return await trpcMutation('settings.update', data);
-    } catch {
-      return null;
-    }
+
+  // Communication Channels
+  channels: {
+    list: () => trpcQuery<ChannelRecord[]>('settings.channels.list'),
+    update: (data: {
+      type: string;
+      provider: string;
+      config?: Record<string, unknown>;
+      status?: string;
+    }) => trpcMutation<ChannelRecord>('settings.channels.update', data),
+    testConnection: (data: { type: string }) =>
+      trpcMutation<{ success: boolean; message: string }>(
+        'settings.channels.testConnection',
+        data
+      ),
+  },
+
+  // Integrations
+  integrations: {
+    list: () => trpcQuery<IntegrationRecord[]>('settings.integrations.list'),
+    connect: (data: {
+      provider: string;
+      category: string;
+      config?: Record<string, unknown>;
+    }) => trpcMutation<IntegrationRecord>('settings.integrations.connect', data),
+    disconnect: (data: { id: string }) =>
+      trpcMutation<IntegrationRecord>('settings.integrations.disconnect', data),
+    sync: (data: { id: string }) =>
+      trpcMutation<IntegrationRecord>('settings.integrations.sync', data),
+  },
+
+  // Team & Roles
+  team: {
+    list: () =>
+      trpcQuery<{ members: TeamMemberRecord[]; invitations: InvitationRecord[] }>(
+        'settings.team.list'
+      ),
+    invite: (data: { email: string; role: string }) =>
+      trpcMutation<InvitationRecord>('settings.team.invite', data),
+    updateRole: (data: { id: string; role: string }) =>
+      trpcMutation<TeamMemberRecord>('settings.team.updateRole', data),
+    remove: (data: { id: string }) =>
+      trpcMutation<TeamMemberRecord>('settings.team.remove', data),
+    cancelInvite: (data: { id: string }) =>
+      trpcMutation<void>('settings.team.cancelInvite', data),
+  },
+
+  // Notifications
+  notifications: {
+    get: () => trpcQuery<NotificationPrefs>('settings.notifications.get'),
+    update: (data: { type: string; enabled: boolean }) =>
+      trpcMutation<NotificationPrefs>('settings.notifications.update', data),
+  },
+
+  // Security
+  security: {
+    get: () => trpcQuery<SecurityConfig>('settings.security.get'),
+    update: (data: Partial<Omit<SecurityConfig, 'id' | 'tenantId'>>) =>
+      trpcMutation<SecurityConfig>('settings.security.update', data),
+    getAuditLog: (params?: {
+      page?: number;
+      limit?: number;
+      actionType?: string;
+    }) =>
+      trpcQuery<{
+        logs: AuditLogEntry[];
+        pagination: {
+          page: number;
+          limit: number;
+          total: number;
+          pages: number;
+        };
+      }>('settings.security.getAuditLog', params || {}),
   },
 };
+
 /* ── Competitor Intelligence API helpers ──────────────────── */
 
 // Types matching the Prisma models
