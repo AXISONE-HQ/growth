@@ -545,6 +545,225 @@ const objectivesRouter = router({
     }),
 });
 
+
+// ============================================================================
+// CONVERSATIONS ROUTER (NEW)
+// ============================================================================
+const conversationsRouter = router({
+  list: protectedProcedure
+    .input(
+      z.object({
+        contactId: z.string().cuid().optional(),
+        channel: z.string().optional(),
+        status: z.string().optional(),
+        limit: z.number().int().positive().default(50),
+        offset: z.number().int().nonnegative().default(0),
+      })
+    )
+    .query(async ({ ctx, input }) => {
+      const where = {
+        tenantId: ctx.tenantId,
+        ...(input.contactId && { contactId: input.contactId }),
+        ...(input.channel && { channel: input.channel }),
+        ...(input.status && { status: input.status }),
+      };
+
+      const [conversations, total] = await Promise.all([
+        ctx.prisma.conversation.findMany({
+          where,
+          take: input.limit,
+          skip: input.offset,
+          orderBy: { createdAt: "desc" },
+          include: { messages: { take: 5, orderBy: { createdAt: "desc" } } },
+        }),
+        ctx.prisma.conversation.count({ where }),
+      ]);
+
+      return { conversations, total };
+    }),
+
+  getById: protectedProcedure
+    .input(z.object({ id: z.string().cuid() }))
+    .query(async ({ ctx, input }) => {
+      const conversation = await ctx.prisma.conversation.findUnique({
+        where: { id: input.id },
+        include: {
+          messages: {
+            orderBy: { createdAt: "asc" },
+          },
+        },
+      });
+
+      if (!conversation || conversation.tenantId !== ctx.tenantId) {
+        throw new TRPCError({ code: "NOT_FOUND" });
+      }
+
+      return conversation;
+    }),
+
+  create: protectedProcedure
+    .input(
+      z.object({
+        contactId: z.string().cuid(),
+        channel: z.string(),
+        status: z.string().default("open"),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      const contact = await ctx.prisma.contact.findUnique({
+        where: { id: input.contactId },
+      });
+
+      if (!contact || contact.tenantId !== ctx.tenantId) {
+        throw new TRPCError({ code: "NOT_FOUND" });
+      }
+
+      return ctx.prisma.conversation.create({
+        data: {
+          tenantId: ctx.tenantId,
+          contactId: input.contactId,
+          channel: input.channel,
+          status: input.status,
+          aiHandled: false,
+        },
+      });
+    }),
+
+  addMessage: protectedProcedure
+    .input(
+      z.object({
+        conversationId: z.string().cuid(),
+        senderId: z.string(),
+        senderType: z.enum(["human", "ai", "system"]),
+        content: z.string(),
+        metadata: z.record(z.any()).optional(),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      const conversation = await ctx.prisma.conversation.findUnique({
+        where: { id: input.conversationId },
+      });
+
+      if (!conversation || conversation.tenantId !== ctx.tenantId) {
+        throw new TRPCError({ code: "NOT_FOUND" });
+      }
+
+      return ctx.prisma.message.create({
+        data: {
+          conversationId: input.conversationId,
+          senderId: input.senderId,
+          senderType: input.senderType,
+          content: input.content,
+          channel: conversation.channel,
+          metadata: input.metadata || {},
+        },
+      });
+    }),
+
+  updateStatus: protectedProcedure
+    .input(
+      z.object({
+        id: z.string().cuid(),
+        status: z.string(),
+        aiHandled: z.boolean().optional(),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      const conversation = await ctx.prisma.conversation.findUnique({
+        where: { id: input.id },
+      });
+
+      if (!conversation || conversation.tenantId !== ctx.tenantId) {
+        throw new TRPCError({ code: "NOT_FOUND" });
+      }
+
+      const updateData: any = { status: input.status };
+      if (input.aiHandled !== undefined) {
+        updateData.aiHandled = input.aiHandled;
+      }
+
+      return ctx.prisma.conversation.update({
+        where: { id: input.id },
+        data: updateData,
+      });
+    }),
+});
+
+
+// ============================================================================
+// SETTINGS ROUTER (NEW)
+// ============================================================================
+const settingsRouter = router({
+  listByCategory: protectedProcedure
+    .input(z.object({ category: z.string() }))
+    .query(async ({ ctx, input }) => {
+      return ctx.prisma.tenantSettings.findMany({
+        where: {
+          tenantId: ctx.tenantId,
+          category: input.category,
+        },
+        orderBy: { key: "asc" },
+      });
+    }),
+
+  get: protectedProcedure
+    .input(z.object({ category: z.string(), key: z.string() }))
+    .query(async ({ ctx, input }) => {
+      return ctx.prisma.tenantSettings.findUnique({
+        where: {
+          tenantId_category_key: {
+            tenantId: ctx.tenantId,
+            category: input.category,
+            key: input.key,
+          },
+        },
+      });
+    }),
+
+  upsert: protectedProcedure
+    .input(
+      z.object({
+        category: z.string(),
+        key: z.string(),
+        value: z.any(),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      return ctx.prisma.tenantSettings.upsert({
+        where: {
+          tenantId_category_key: {
+            tenantId: ctx.tenantId,
+            category: input.category,
+            key: input.key,
+          },
+        },
+        create: {
+          tenantId: ctx.tenantId,
+          category: input.category,
+          key: input.key,
+          value: input.value,
+        },
+        update: {
+          value: input.value,
+        },
+      });
+    }),
+
+  delete: protectedProcedure
+    .input(z.object({ category: z.string(), key: z.string() }))
+    .mutation(async ({ ctx, input }) => {
+      return ctx.prisma.tenantSettings.delete({
+        where: {
+          tenantId_category_key: {
+            tenantId: ctx.tenantId,
+            category: input.category,
+            key: input.key,
+          },
+        },
+      });
+    }),
+});
+
 // ============================================================================
 // DASHBOARD ROUTER
 // ============================================================================
@@ -618,6 +837,8 @@ export const appRouter = router({
   auditLog: auditLogRouter,
   brain: brainRouter,
   objectives: objectivesRouter,
+  conversations: conversationsRouter,
+  settings: settingsRouter,
   dashboard: dashboardRouter,
 });
 
