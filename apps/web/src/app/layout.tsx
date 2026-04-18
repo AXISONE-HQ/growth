@@ -30,7 +30,7 @@ const navItems = [
   { href: '/customers', label: 'Customers', icon: Users },
   { href: '/audit', label: 'Audit Log', icon: FileText },
   { href: '/knowledge', label: 'Knowledge Center', icon: BookOpen },
-  { href: '/competitors', label: 'Competitors', icon: Users, adminOnly: true as const },
+  { href: '/competitors', label: 'Competitive Set', icon: Shield },
     { href: '/settings', label: 'Settings', icon: Settings },
 ];
 
@@ -43,7 +43,7 @@ const pageTitle: Record<string, string> = {
   '/customers': 'Customers',
   '/audit': 'Audit Log',
   '/knowledge': 'Knowledge Center',
-  '/competitors': 'Competitors',
+    '/competitors': 'Competitive Set',
     '/settings': 'Settings',
 };
 
