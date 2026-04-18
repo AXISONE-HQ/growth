@@ -28,7 +28,8 @@ const navItems = [
   { href: '/customers', label: 'Customers', icon: Users },
   { href: '/audit', label: 'Audit Log', icon: FileText },
   { href: '/knowledge', label: 'Knowledge Center', icon: BookOpen },
-  { href: '/settings', label: 'Settings', icon: Settings },
+  { href: '/competitors', label: 'Competitors', icon: Users, adminOnly: true as const },
+    { href: '/settings', label: 'Settings', icon: Settings },
 ];
 
 const pageTitle: Record<string, string> = {
@@ -40,7 +41,8 @@ const pageTitle: Record<string, string> = {
   '/customers': 'Customers',
   '/audit': 'Audit Log',
   '/knowledge': 'Knowledge Center',
-  '/settings': 'Settings',
+  '/competitors': 'Competitors',
+    '/settings': 'Settings',
 };
 
 function AppShell({ children }: { children: React.ReactNode }) {
@@ -104,7 +106,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
             const isActive = pathname === item.href || pathname.startsWith(item.href + '/');
 
             // Hide admin-only items from members
-            if (item.adminOnly && user.role !== 'admin') {
+            if ('adminOnly' in item && item.adminOnly && user.role !== 'admin') {
               return null;
             }
 
