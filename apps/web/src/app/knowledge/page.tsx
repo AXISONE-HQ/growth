@@ -5,7 +5,8 @@ import {
   Save, X, Upload, FileText, Globe, Eye, ChevronDown, ChevronRight,
   AlertTriangle, CheckCircle, Loader2, RefreshCw, MessageSquareWarning,
   TrendingUp, TrendingDown, Flame, Zap, Sparkles, Target, Swords,
-  BookOpen, Search, Filter, ExternalLink, ThumbsUp, ThumbsDown, Clock
+  BookOpen, Search, Filter, ExternalLink, ThumbsUp, ThumbsDown, Clock,
+  Pencil, RotateCcw, UserCheck
 } from 'lucide-react';
 import { useState, useEffect, useCallback } from 'react';
 import {
@@ -39,6 +40,8 @@ interface ObjectionSource {
   excerpt: string;
 }
 
+type EditableField = 'recommendedResponse' | 'talkTrack' | 'differentiators';
+
 interface SalesObjection {
   id: string;
   objection: string;
@@ -53,6 +56,12 @@ interface SalesObjection {
   talkTrack: string;
   differentiators: string[];
   sources: ObjectionSource[];
+  editedFields?: {
+    [key in EditableField]?: {
+      editedBy: string;
+      editedAt: string;
+    };
+  };
 }
 
 const OBJECTION_CATEGORIES: { value: ObjectionCategory; label: string; color: string }[] = [
@@ -264,11 +273,74 @@ export default function KnowledgeCenterPage() {
   const [expandedFaq, setExpandedFaq] = useState<string | null>(null);
 
   // ── Sales Objections state ──
-  const [objections] = useState<SalesObjection[]>(MOCK_OBJECTIONS);
+  const [objections, setObjections] = useState<SalesObjection[]>(MOCK_OBJECTIONS);
   const [expandedObjection, setExpandedObjection] = useState<string | null>(null);
   const [objectionCategoryFilter, setObjectionCategoryFilter] = useState<ObjectionCategory | 'all'>('all');
   const [objectionStatusFilter, setObjectionStatusFilter] = useState<ObjectionStatus | 'all'>('all');
   const [objectionSearch, setObjectionSearch] = useState('');
+
+  // ── Objection editing state ──
+  const [editingObjField, setEditingObjField] = useState<{ objId: string; field: EditableField } | null>(null);
+  const [editDraft, setEditDraft] = useState('');
+  const [editDraftDiffs, setEditDraftDiffs] = useState<string[]>([]);
+
+  const startEditingField = (objId: string, field: EditableField, currentValue: string | string[]) => {
+    if (field === 'differentiators') {
+      setEditDraftDiffs(currentValue as string[]);
+    } else {
+      setEditDraft(currentValue as string);
+    }
+    setEditingObjField({ objId, field });
+  };
+
+  const cancelEditingField = () => {
+    setEditingObjField(null);
+    setEditDraft('');
+    setEditDraftDiffs([]);
+  };
+
+  const saveEditedField = () => {
+    if (!editingObjField) return;
+    const { objId, field } = editingObjField;
+
+    setObjections(prev => prev.map(obj => {
+      if (obj.id !== objId) return obj;
+      const updated = { ...obj };
+      if (field === 'differentiators') {
+        updated.differentiators = editDraftDiffs.filter(d => d.trim() !== '');
+      } else {
+        (updated as any)[field] = editDraft;
+      }
+      updated.editedFields = {
+        ...updated.editedFields,
+        [field]: {
+          editedBy: 'You',
+          editedAt: new Date().toISOString(),
+        },
+      };
+      return updated;
+    }));
+
+    showToast('Response updated successfully');
+    cancelEditingField();
+  };
+
+  const revertToAI = (objId: string, field: EditableField) => {
+    const original = MOCK_OBJECTIONS.find(o => o.id === objId);
+    if (!original) return;
+
+    setObjections(prev => prev.map(obj => {
+      if (obj.id !== objId) return obj;
+      const updated = { ...obj };
+      (updated as any)[field] = (original as any)[field];
+      const editedFields = { ...updated.editedFields };
+      delete editedFields[field];
+      updated.editedFields = Object.keys(editedFields).length > 0 ? editedFields : undefined;
+      return updated;
+    }));
+
+    showToast('Reverted to AI recommendation');
+  };
 
   const filteredObjections = objections.filter(o => {
     if (objectionCategoryFilter !== 'all' && o.category !== objectionCategoryFilter) return false;
@@ -1144,38 +1216,199 @@ export default function KnowledgeCenterPage() {
                   <div className="border-t border-gray-100 px-5 py-5 space-y-5 bg-gray-50/50">
 
                     {/* AI Recommended Response */}
-                    <div className="bg-white border border-indigo-200 rounded-xl p-5">
-                      <div className="flex items-center gap-2 mb-3">
-                        <Sparkles className="w-4 h-4 text-indigo-500" />
-                        <h4 className="text-sm font-semibold text-gray-900">AI Recommended Response</h4>
-                        <span className="text-xs bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full">Auto-generated</span>
+                    <div className={`bg-white border rounded-xl p-5 ${obj.editedFields?.recommendedResponse ? 'border-amber-200' : 'border-indigo-200'}`}>
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center gap-2">
+                          <Sparkles className="w-4 h-4 text-indigo-500" />
+                          <h4 className="text-sm font-semibold text-gray-900">AI Recommended Response</h4>
+                          {obj.editedFields?.recommendedResponse ? (
+                            <span className="inline-flex items-center gap-1 text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full">
+                              <UserCheck className="w-3 h-3" /> Edited by {obj.editedFields.recommendedResponse.editedBy}
+                            </span>
+                          ) : (
+                            <span className="text-xs bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full">Auto-generated</span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-1">
+                          {obj.editedFields?.recommendedResponse && (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); revertToAI(obj.id, 'recommendedResponse'); }}
+                              className="flex items-center gap-1 px-2 py-1 text-xs rounded-md text-gray-500 hover:text-indigo-600 hover:bg-indigo-50 transition-colors"
+                              title="Revert to AI recommendation"
+                            >
+                              <RotateCcw className="w-3 h-3" /> Revert
+                            </button>
+                          )}
+                          {editingObjField?.objId === obj.id && editingObjField.field === 'recommendedResponse' ? (
+                            <div className="flex items-center gap-1">
+                              <button onClick={(e) => { e.stopPropagation(); saveEditedField(); }} className="flex items-center gap-1 px-2.5 py-1 text-xs rounded-md bg-emerald-600 text-white hover:bg-emerald-700 transition-colors">
+                                <Save className="w-3 h-3" /> Save
+                              </button>
+                              <button onClick={(e) => { e.stopPropagation(); cancelEditingField(); }} className="flex items-center gap-1 px-2 py-1 text-xs rounded-md text-gray-500 hover:bg-gray-100 transition-colors">
+                                <X className="w-3 h-3" /> Cancel
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); startEditingField(obj.id, 'recommendedResponse', obj.recommendedResponse); }}
+                              className="flex items-center gap-1 px-2 py-1 text-xs rounded-md text-gray-500 hover:text-indigo-600 hover:bg-indigo-50 transition-colors"
+                            >
+                              <Pencil className="w-3 h-3" /> Edit
+                            </button>
+                          )}
+                        </div>
                       </div>
-                      <p className="text-sm text-gray-700 leading-relaxed">{obj.recommendedResponse}</p>
+                      {editingObjField?.objId === obj.id && editingObjField.field === 'recommendedResponse' ? (
+                        <textarea
+                          value={editDraft}
+                          onChange={(e) => setEditDraft(e.target.value)}
+                          onClick={(e) => e.stopPropagation()}
+                          rows={5}
+                          className="w-full text-sm text-gray-700 leading-relaxed border border-gray-300 rounded-lg p-3 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none resize-y"
+                          placeholder="Edit the recommended response..."
+                        />
+                      ) : (
+                        <p className="text-sm text-gray-700 leading-relaxed">{obj.recommendedResponse}</p>
+                      )}
                     </div>
 
                     {/* Talk Track */}
-                    <div className="bg-white border border-gray-200 rounded-xl p-5">
-                      <div className="flex items-center gap-2 mb-3">
-                        <Target className="w-4 h-4 text-amber-500" />
-                        <h4 className="text-sm font-semibold text-gray-900">Talk Track</h4>
+                    <div className={`bg-white border rounded-xl p-5 ${obj.editedFields?.talkTrack ? 'border-amber-200' : 'border-gray-200'}`}>
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center gap-2">
+                          <Target className="w-4 h-4 text-amber-500" />
+                          <h4 className="text-sm font-semibold text-gray-900">Talk Track</h4>
+                          {obj.editedFields?.talkTrack && (
+                            <span className="inline-flex items-center gap-1 text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full">
+                              <UserCheck className="w-3 h-3" /> Edited by {obj.editedFields.talkTrack.editedBy}
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-1">
+                          {obj.editedFields?.talkTrack && (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); revertToAI(obj.id, 'talkTrack'); }}
+                              className="flex items-center gap-1 px-2 py-1 text-xs rounded-md text-gray-500 hover:text-indigo-600 hover:bg-indigo-50 transition-colors"
+                              title="Revert to AI recommendation"
+                            >
+                              <RotateCcw className="w-3 h-3" /> Revert
+                            </button>
+                          )}
+                          {editingObjField?.objId === obj.id && editingObjField.field === 'talkTrack' ? (
+                            <div className="flex items-center gap-1">
+                              <button onClick={(e) => { e.stopPropagation(); saveEditedField(); }} className="flex items-center gap-1 px-2.5 py-1 text-xs rounded-md bg-emerald-600 text-white hover:bg-emerald-700 transition-colors">
+                                <Save className="w-3 h-3" /> Save
+                              </button>
+                              <button onClick={(e) => { e.stopPropagation(); cancelEditingField(); }} className="flex items-center gap-1 px-2 py-1 text-xs rounded-md text-gray-500 hover:bg-gray-100 transition-colors">
+                                <X className="w-3 h-3" /> Cancel
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); startEditingField(obj.id, 'talkTrack', obj.talkTrack); }}
+                              className="flex items-center gap-1 px-2 py-1 text-xs rounded-md text-gray-500 hover:text-indigo-600 hover:bg-indigo-50 transition-colors"
+                            >
+                              <Pencil className="w-3 h-3" /> Edit
+                            </button>
+                          )}
+                        </div>
                       </div>
-                      <p className="text-sm text-gray-600 leading-relaxed whitespace-pre-line">{obj.talkTrack}</p>
+                      {editingObjField?.objId === obj.id && editingObjField.field === 'talkTrack' ? (
+                        <textarea
+                          value={editDraft}
+                          onChange={(e) => setEditDraft(e.target.value)}
+                          onClick={(e) => e.stopPropagation()}
+                          rows={5}
+                          className="w-full text-sm text-gray-600 leading-relaxed border border-gray-300 rounded-lg p-3 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none resize-y"
+                          placeholder="Edit the talk track..."
+                        />
+                      ) : (
+                        <p className="text-sm text-gray-600 leading-relaxed whitespace-pre-line">{obj.talkTrack}</p>
+                      )}
                     </div>
 
                     {/* Competitive Differentiators */}
-                    <div className="bg-white border border-gray-200 rounded-xl p-5">
-                      <div className="flex items-center gap-2 mb-3">
-                        <Swords className="w-4 h-4 text-red-500" />
-                        <h4 className="text-sm font-semibold text-gray-900">Key Differentiators</h4>
+                    <div className={`bg-white border rounded-xl p-5 ${obj.editedFields?.differentiators ? 'border-amber-200' : 'border-gray-200'}`}>
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center gap-2">
+                          <Swords className="w-4 h-4 text-red-500" />
+                          <h4 className="text-sm font-semibold text-gray-900">Key Differentiators</h4>
+                          {obj.editedFields?.differentiators && (
+                            <span className="inline-flex items-center gap-1 text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full">
+                              <UserCheck className="w-3 h-3" /> Edited by {obj.editedFields.differentiators.editedBy}
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-1">
+                          {obj.editedFields?.differentiators && (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); revertToAI(obj.id, 'differentiators'); }}
+                              className="flex items-center gap-1 px-2 py-1 text-xs rounded-md text-gray-500 hover:text-indigo-600 hover:bg-indigo-50 transition-colors"
+                              title="Revert to AI recommendation"
+                            >
+                              <RotateCcw className="w-3 h-3" /> Revert
+                            </button>
+                          )}
+                          {editingObjField?.objId === obj.id && editingObjField.field === 'differentiators' ? (
+                            <div className="flex items-center gap-1">
+                              <button onClick={(e) => { e.stopPropagation(); saveEditedField(); }} className="flex items-center gap-1 px-2.5 py-1 text-xs rounded-md bg-emerald-600 text-white hover:bg-emerald-700 transition-colors">
+                                <Save className="w-3 h-3" /> Save
+                              </button>
+                              <button onClick={(e) => { e.stopPropagation(); cancelEditingField(); }} className="flex items-center gap-1 px-2 py-1 text-xs rounded-md text-gray-500 hover:bg-gray-100 transition-colors">
+                                <X className="w-3 h-3" /> Cancel
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); startEditingField(obj.id, 'differentiators', obj.differentiators); }}
+                              className="flex items-center gap-1 px-2 py-1 text-xs rounded-md text-gray-500 hover:text-indigo-600 hover:bg-indigo-50 transition-colors"
+                            >
+                              <Pencil className="w-3 h-3" /> Edit
+                            </button>
+                          )}
+                        </div>
                       </div>
-                      <div className="space-y-2">
-                        {obj.differentiators.map((d, i) => (
-                          <div key={i} className="flex items-start gap-2">
-                            <CheckCircle className="w-4 h-4 text-emerald-500 mt-0.5 flex-shrink-0" />
-                            <p className="text-sm text-gray-700">{d}</p>
-                          </div>
-                        ))}
-                      </div>
+                      {editingObjField?.objId === obj.id && editingObjField.field === 'differentiators' ? (
+                        <div className="space-y-2" onClick={(e) => e.stopPropagation()}>
+                          {editDraftDiffs.map((d, i) => (
+                            <div key={i} className="flex items-center gap-2">
+                              <CheckCircle className="w-4 h-4 text-emerald-500 flex-shrink-0" />
+                              <input
+                                type="text"
+                                value={d}
+                                onChange={(e) => {
+                                  const updated = [...editDraftDiffs];
+                                  updated[i] = e.target.value;
+                                  setEditDraftDiffs(updated);
+                                }}
+                                className="flex-1 text-sm text-gray-700 border border-gray-300 rounded-lg px-3 py-1.5 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                              />
+                              <button
+                                onClick={() => setEditDraftDiffs(editDraftDiffs.filter((_, idx) => idx !== i))}
+                                className="p-1 text-gray-400 hover:text-red-500 transition-colors"
+                                title="Remove differentiator"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          ))}
+                          <button
+                            onClick={() => setEditDraftDiffs([...editDraftDiffs, ''])}
+                            className="flex items-center gap-1 text-xs text-indigo-600 hover:text-indigo-700 mt-1"
+                          >
+                            <Plus className="w-3 h-3" /> Add differentiator
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="space-y-2">
+                          {obj.differentiators.map((d, i) => (
+                            <div key={i} className="flex items-start gap-2">
+                              <CheckCircle className="w-4 h-4 text-emerald-500 mt-0.5 flex-shrink-0" />
+                              <p className="text-sm text-gray-700">{d}</p>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
 
                     {/* Supporting Evidence / Sources */}
