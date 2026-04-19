@@ -88,7 +88,7 @@ export default function SettingsPage() {
         }
         case 'team': {
           const data = await settingsApi.team.list();
-          setTeamMembers(data.members ?? data);
+          setTeamMembers(data.members);
           setInvitations(data.invitations ?? []);
           break;
         }
