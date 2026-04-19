@@ -1,32 +1,208 @@
 'use client';
 
 import {
-  Settings, Brain, Shield, Zap, Mail, Phone, MessageCircle,
-  Key, Users, Bell, Palette, Globe, Database, ChevronRight,
-  CheckCircle, AlertTriangle, Sparkles, Link, ToggleLeft,
-  ToggleRight, Save, RefreshCw, Lock, Eye, Plug
+  Settings, Brain, Shield, Zap, Mail, Phone, MessageCircle, Key,
+  Users, Bell, Palette, Globe, Database, ChevronRight, CheckCircle,
+  AlertTriangle, Sparkles, Link, ToggleLeft, ToggleRight, Save,
+  RefreshCw, Lock, Eye, Plug, Loader2
 } from 'lucide-react';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { settingsApi } from '@/lib/api';
 
-/* ─── Component ─────────────────────────────────────── */
+/* âââ Types matching API client ââââââââââââââââââââââââ */
+interface AIConfig {
+  confidenceThreshold: number;
+  autoApproveAboveThreshold: boolean;
+  dailyActionLimit: number;
+  enabledStrategies: string[];
+  guardrails: string[];
+}
+interface ChannelRecord {
+  id: string;
+  type: string;
+  provider: string;
+  enabled: boolean;
+  status: string;
+  config: Record<string, unknown>;
+}
+interface IntegrationRecord {
+  id: string;
+  name: string;
+  category: string;
+  status: string;
+  lastSyncAt: string | null;
+  config: Record<string, unknown>;
+}
+interface TeamMemberRecord {
+  id: string;
+  userId: string;
+  name: string;
+  email: string;
+  role: string;
+  status: string;
+  avatarUrl: string | null;
+}
+interface InvitationRecord {
+  id: string;
+  email: string;
+  role: string;
+  status: string;
+  expiresAt: string;
+}
+interface NotificationPrefs {
+  escalationAlerts: boolean;
+  dailyDigest: boolean;
+  weeklyReport: boolean;
+  brainUpdates: boolean;
+}
+interface SecurityConfig {
+  twoFactorRequired: boolean;
+  ssoEnabled: boolean;
+  ssoProvider: string | null;
+  dataEncryption: string;
+  auditLogRetentionDays: number;
+  gdprCompliant: boolean;
+  ipWhitelist: string[];
+}
+
+/* âââ Helpers âââââââââââââââââââââââââââââââââââââââââââ */
+const STRATEGY_META: Record<string, { name: string; desc: string }> = {
+  direct_conversion: { name: 'Direct Conversion', desc: 'Push toward conversion for high-intent contacts' },
+  guided_assistance: { name: 'Guided Assistance', desc: 'Educational approach for evaluating contacts' },
+  trust_building: { name: 'Trust Building', desc: 'Relationship-building for early-stage or at-risk contacts' },
+  re_engagement: { name: 'Re-engagement', desc: 'Win-back dormant or churned contacts' },
+};
+
+const ALL_STRATEGIES = Object.keys(STRATEGY_META);
+
+const channelIcon: Record<string, typeof Mail> = { email: Mail, sms: Phone, whatsapp: MessageCircle };
+
+const roleColors: Record<string, string> = {
+  owner: 'bg-indigo-50 text-indigo-700',
+  admin: 'bg-purple-50 text-purple-700',
+  agent: 'bg-emerald-50 text-emerald-700',
+  viewer: 'bg-gray-100 text-gray-600',
+};
+
+const integrationIcons: Record<string, string> = {
+  HubSpot: 'ð¶', Salesforce: 'âï¸', Stripe: 'ð³', 'Cal.com': 'ð', Pipedrive: 'ð¢', Shopify: 'ð',
+};
+
+/* âââ Component âââââââââââââââââââââââââââââââââââââââ */
 export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState('ai');
-  const [confidenceThreshold, setConfidenceThreshold] = useState(70);
-  const [autoApprove, setAutoApprove] = useState(true);
-  const [dailyLimit, setDailyLimit] = useState(200);
-  const [channels, setChannels] = useState({
-    email: { enabled: true, provider: 'SendGrid', status: 'connected' },
-    sms: { enabled: true, provider: 'Twilio', status: 'connected' },
-    whatsapp: { enabled: false, provider: 'Twilio', status: 'not_configured' },
-  });
-  const [notifications, setNotifications] = useState({
-    escalations: true,
-    dailyDigest: true,
-    weeklyReport: true,
-    brainUpdates: false,
-  });
 
+  /* ââ Loading / saving state ââââââââââââââââ */
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveMsg, setSaveMsg] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  /* ââ AI âââââââââââââââââââââââââââââââââââââ */
+  const [aiConfig, setAiConfig] = useState<AIConfig | null>(null);
+
+  /* ââ Channels âââââââââââââââââââââââââââââââ */
+  const [channels, setChannels] = useState<ChannelRecord[]>([]);
+
+  /* ââ Integrations âââââââââââââââââââââââââââ */
+  const [integrations, setIntegrations] = useState<IntegrationRecord[]>([]);
+
+  /* ââ Team ââââââââââââââââââââââââââââââââââââ */
+  const [teamMembers, setTeamMembers] = useState<TeamMemberRecord[]>([]);
+  const [invitations, setInvitations] = useState<InvitationRecord[]>([]);
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteRole, setInviteRole] = useState('viewer');
+
+  /* ââ Notifications ââââââââââââââââââââââââââ */
+  const [notifPrefs, setNotifPrefs] = useState<NotificationPrefs | null>(null);
+
+  /* ââ Security âââââââââââââââââââââââââââââââ */
+  const [securityConfig, setSecurityConfig] = useState<SecurityConfig | null>(null);
+
+  /* ââ Data fetching per tab ââââââââââââââââââ */
+  const loadTab = useCallback(async (tab: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      switch (tab) {
+        case 'ai': {
+          const data = await settingsApi.ai.get();
+          setAiConfig(data);
+          break;
+        }
+        case 'channels': {
+          const data = await settingsApi.channels.list();
+          setChannels(data);
+          break;
+        }
+        case 'integrations': {
+          const data = await settingsApi.integrations.list();
+          setIntegrations(data);
+          break;
+        }
+        case 'team': {
+          const data = await settingsApi.team.list();
+          setTeamMembers(data.members ?? data);
+          setInvitations(data.invitations ?? []);
+          break;
+        }
+        case 'notifications': {
+          const data = await settingsApi.notifications.get();
+          setNotifPrefs(data);
+          break;
+        }
+        case 'security': {
+          const data = await settingsApi.security.get();
+          setSecurityConfig(data);
+          break;
+        }
+      }
+    } catch (e: any) {
+      console.error(`Settings load error (${tab}):`, e);
+      setError(e?.message ?? 'Failed to load settings');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { loadTab(activeTab); }, [activeTab, loadTab]);
+
+  /* ââ Save helpers âââââââââââââââââââââââââââ */
+  const flash = (msg: string) => { setSaveMsg(msg); setTimeout(() => setSaveMsg(null), 2500); };
+
+  const saveAI = async () => {
+    if (!aiConfig) return;
+    setSaving(true);
+    try {
+      await settingsApi.ai.update(aiConfig);
+      flash('AI settings saved');
+    } catch (e: any) { setError(e?.message ?? 'Save failed'); }
+    finally { setSaving(false); }
+  };
+
+  const saveNotifications = async () => {
+    if (!notifPrefs) return;
+    setSaving(true);
+    try {
+      await settingsApi.notifications.update(notifPrefs);
+      flash('Notification preferences saved');
+    } catch (e: any) { setError(e?.message ?? 'Save failed'); }
+    finally { setSaving(false); }
+  };
+
+  const handleInvite = async () => {
+    if (!inviteEmail) return;
+    setSaving(true);
+    try {
+      await settingsApi.team.invite({ email: inviteEmail, role: inviteRole });
+      flash(`Invitation sent to ${inviteEmail}`);
+      setInviteEmail('');
+      loadTab('team');
+    } catch (e: any) { setError(e?.message ?? 'Invite failed'); }
+    finally { setSaving(false); }
+  };
+
+  /* ââ Tab config âââââââââââââââââââââââââââââ */
   const tabs = [
     { id: 'ai', label: 'AI Configuration', icon: Brain },
     { id: 'channels', label: 'Channels', icon: Mail },
@@ -36,27 +212,13 @@ export default function SettingsPage() {
     { id: 'security', label: 'Security', icon: Shield },
   ];
 
-  const integrations = [
-    { name: 'HubSpot', category: 'CRM', status: 'connected', icon: '🔶', lastSync: '5 min ago' },
-    { name: 'Salesforce', category: 'CRM', status: 'available', icon: '☁️', lastSync: null },
-    { name: 'Stripe', category: 'Payments', status: 'connected', icon: '💳', lastSync: '1 hr ago' },
-    { name: 'Cal.com', category: 'Calendar', status: 'connected', icon: '📅', lastSync: '12 min ago' },
-    { name: 'Pipedrive', category: 'CRM', status: 'available', icon: '🟢', lastSync: null },
-    { name: 'Shopify', category: 'Commerce', status: 'available', icon: '🛒', lastSync: null },
-  ];
-
-  const teamMembers = [
-    { name: 'You', email: 'admin@company.com', role: 'Owner', avatar: 'YO', status: 'active' },
-    { name: 'Jordan Mitchell', email: 'jordan@company.com', role: 'Admin', avatar: 'JM', status: 'active' },
-    { name: 'Casey Brooks', email: 'casey@company.com', role: 'Agent', avatar: 'CB', status: 'active' },
-    { name: 'Alex Rivera', email: 'alex@company.com', role: 'Viewer', avatar: 'AR', status: 'invited' },
-  ];
-
-  const roleColors: Record<string, string> = {
-    Owner: 'bg-indigo-50 text-indigo-700',
-    Admin: 'bg-purple-50 text-purple-700',
-    Agent: 'bg-emerald-50 text-emerald-700',
-    Viewer: 'bg-gray-100 text-gray-600',
+  /* ââ Toggle helper for strategies âââââââââââ */
+  const toggleStrategy = (key: string) => {
+    if (!aiConfig) return;
+    const enabled = aiConfig.enabledStrategies.includes(key)
+      ? aiConfig.enabledStrategies.filter((s) => s !== key)
+      : [...aiConfig.enabledStrategies, key];
+    setAiConfig({ ...aiConfig, enabledStrategies: enabled });
   };
 
   return (
@@ -71,9 +233,7 @@ export default function SettingsPage() {
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
               className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors text-left ${
-                activeTab === tab.id
-                  ? 'bg-indigo-50 text-indigo-700'
-                  : 'text-gray-600 hover:bg-gray-50'
+                activeTab === tab.id ? 'bg-indigo-50 text-indigo-700' : 'text-gray-600 hover:bg-gray-50'
               }`}
             >
               <tab.icon className="w-4 h-4" />
@@ -85,27 +245,52 @@ export default function SettingsPage() {
 
       {/* Content */}
       <div className="flex-1 max-w-3xl">
+        {/* Status bar */}
+        {(saveMsg || error) && (
+          <div className={`mb-4 px-4 py-2 rounded-lg text-sm font-medium ${
+            error ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'
+          }`}>
+            {error ?? saveMsg}
+            {error && (
+              <button onClick={() => setError(null)} className="ml-3 underline text-xs">Dismiss</button>
+            )}
+          </div>
+        )}
+
+        {/* Loading */}
+        {loading && (
+          <div className="flex items-center justify-center py-20">
+            <Loader2 className="w-6 h-6 animate-spin text-indigo-500" />
+            <span className="ml-2 text-sm text-gray-500">Loadingâ¦</span>
+          </div>
+        )}
+
         {/* AI Configuration */}
-        {activeTab === 'ai' && (
+        {activeTab === 'ai' && !loading && aiConfig && (
           <div className="flex flex-col gap-6">
             <div className="bg-white border border-gray-200 rounded-xl p-6">
-              <h2 className="text-base font-semibold text-gray-900 mb-1">AI Decision Controls</h2>
+              <div className="flex items-center justify-between mb-1">
+                <h2 className="text-base font-semibold text-gray-900">AI Decision Controls</h2>
+                <button
+                  onClick={saveAI}
+                  disabled={saving}
+                  className="flex items-center gap-1.5 text-xs bg-indigo-500 text-white px-3 py-1.5 rounded-lg font-medium hover:bg-indigo-600 transition-colors disabled:opacity-50"
+                >
+                  {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}
+                  Save
+                </button>
+              </div>
               <p className="text-sm text-gray-500 mb-6">Control how autonomously the AI operates across all pipelines</p>
-
               {/* Confidence Threshold */}
               <div className="mb-6">
                 <label className="text-sm font-medium text-gray-700 mb-2 block">
-                  Global Confidence Threshold: <strong className="text-indigo-500">{confidenceThreshold}%</strong>
+                  Global Confidence Threshold: <strong className="text-indigo-500">{aiConfig.confidenceThreshold}%</strong>
                 </label>
-                <p className="text-xs text-gray-500 mb-3">
-                  Actions below this confidence level will be escalated for human review
-                </p>
+                <p className="text-xs text-gray-500 mb-3">Actions below this confidence level will be escalated for human review</p>
                 <input
-                  type="range"
-                  min="20"
-                  max="95"
-                  value={confidenceThreshold}
-                  onChange={(e) => setConfidenceThreshold(Number(e.target.value))}
+                  type="range" min="20" max="95"
+                  value={aiConfig.confidenceThreshold}
+                  onChange={(e) => setAiConfig({ ...aiConfig, confidenceThreshold: Number(e.target.value) })}
                   className="w-full h-2 bg-gray-200 rounded-full appearance-none cursor-pointer accent-indigo-500"
                 />
                 <div className="flex justify-between mt-1 text-[10px] text-gray-400">
@@ -118,12 +303,12 @@ export default function SettingsPage() {
               <div className="flex items-center justify-between p-4 bg-gray-50 rounded-xl mb-4">
                 <div>
                   <div className="text-sm font-medium text-gray-900">Auto-approve high-confidence actions</div>
-                  <div className="text-xs text-gray-500">Actions above {confidenceThreshold}% confidence execute without human review</div>
+                  <div className="text-xs text-gray-500">Actions above {aiConfig.confidenceThreshold}% confidence execute without human review</div>
                 </div>
                 <button
-                  onClick={() => setAutoApprove(!autoApprove)}
+                  onClick={() => setAiConfig({ ...aiConfig, autoApproveAboveThreshold: !aiConfig.autoApproveAboveThreshold })}
                   className={`w-11 h-6 rounded-full transition-colors flex items-center ${
-                    autoApprove ? 'bg-indigo-500 justify-end' : 'bg-gray-300 justify-start'
+                    aiConfig.autoApproveAboveThreshold ? 'bg-indigo-500 justify-end' : 'bg-gray-300 justify-start'
                   }`}
                 >
                   <div className="w-5 h-5 bg-white rounded-full shadow mx-0.5" />
@@ -138,8 +323,8 @@ export default function SettingsPage() {
                 </div>
                 <input
                   type="number"
-                  value={dailyLimit}
-                  onChange={(e) => setDailyLimit(Number(e.target.value))}
+                  value={aiConfig.dailyActionLimit}
+                  onChange={(e) => setAiConfig({ ...aiConfig, dailyActionLimit: Number(e.target.value) })}
                   className="w-24 px-3 py-1.5 text-sm text-right border border-gray-200 rounded-lg focus:border-indigo-500 outline-none"
                 />
               </div>
@@ -150,24 +335,26 @@ export default function SettingsPage() {
               <h2 className="text-base font-semibold text-gray-900 mb-1">Strategy Permissions</h2>
               <p className="text-sm text-gray-500 mb-4">Enable or disable AI strategies globally</p>
               <div className="flex flex-col gap-3">
-                {[
-                  { name: 'Direct Conversion', desc: 'Push toward conversion for high-intent contacts', enabled: true },
-                  { name: 'Guided Assistance', desc: 'Educational approach for evaluating contacts', enabled: true },
-                  { name: 'Trust Building', desc: 'Relationship-building for early-stage or at-risk contacts', enabled: true },
-                  { name: 'Re-engagement', desc: 'Win-back dormant or churned contacts', enabled: true },
-                ].map((s) => (
-                  <div key={s.name} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-                    <div>
-                      <div className="text-sm font-medium text-gray-900">{s.name}</div>
-                      <div className="text-xs text-gray-500">{s.desc}</div>
+                {ALL_STRATEGIES.map((key) => {
+                  const meta = STRATEGY_META[key];
+                  const enabled = aiConfig.enabledStrategies.includes(key);
+                  return (
+                    <div key={key} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                      <div>
+                        <div className="text-sm font-medium text-gray-900">{meta.name}</div>
+                        <div className="text-xs text-gray-500">{meta.desc}</div>
+                      </div>
+                      <button
+                        onClick={() => toggleStrategy(key)}
+                        className={`w-11 h-6 rounded-full transition-colors flex items-center ${
+                          enabled ? 'bg-indigo-500 justify-end' : 'bg-gray-300 justify-start'
+                        }`}
+                      >
+                        <div className="w-5 h-5 bg-white rounded-full shadow mx-0.5" />
+                      </button>
                     </div>
-                    <div className={`w-11 h-6 rounded-full transition-colors flex items-center ${
-                      s.enabled ? 'bg-indigo-500 justify-end' : 'bg-gray-300 justify-start'
-                    }`}>
-                      <div className="w-5 h-5 bg-white rounded-full shadow mx-0.5" />
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
 
@@ -177,12 +364,12 @@ export default function SettingsPage() {
               <p className="text-sm text-gray-500 mb-4">Safety checks applied before every AI action</p>
               <div className="grid grid-cols-2 gap-3">
                 {[
-                  { name: 'Tone Validator', status: 'Active', desc: 'Checks brand voice compliance' },
-                  { name: 'Accuracy Check', status: 'Active', desc: 'Validates against Company Truth' },
-                  { name: 'Hallucination Filter', status: 'Active', desc: 'Ensures claims grounded in context' },
-                  { name: 'Compliance (CAN-SPAM/CASL)', status: 'Active', desc: 'Legal compliance enforcement' },
-                  { name: 'Injection Defense', status: 'Active', desc: 'Blocks prompt injection attempts' },
-                  { name: 'Confidence Gate', status: 'Active', desc: 'Threshold-based auto-escalation' },
+                  { name: 'Tone Validator', desc: 'Checks brand voice compliance' },
+                  { name: 'Accuracy Check', desc: 'Validates against Company Truth' },
+                  { name: 'Hallucination Filter', desc: 'Ensures claims grounded in context' },
+                  { name: 'Compliance (CAN-SPAM/CASL)', desc: 'Legal compliance enforcement' },
+                  { name: 'Injection Defense', desc: 'Blocks prompt injection attempts' },
+                  { name: 'Confidence Gate', desc: 'Threshold-based auto-escalation' },
                 ].map((g) => (
                   <div key={g.name} className="flex items-start gap-3 p-3 bg-gray-50 rounded-lg">
                     <CheckCircle className="w-4 h-4 text-emerald-500 mt-0.5 flex-shrink-0" />
@@ -198,92 +385,62 @@ export default function SettingsPage() {
         )}
 
         {/* Channels */}
-        {activeTab === 'channels' && (
+        {activeTab === 'channels' && !loading && (
           <div className="flex flex-col gap-6">
             <div className="bg-white border border-gray-200 rounded-xl p-6">
               <h2 className="text-base font-semibold text-gray-900 mb-1">Communication Channels</h2>
               <p className="text-sm text-gray-500 mb-6">Configure channels the AI can use to reach contacts</p>
-
               <div className="flex flex-col gap-4">
-                {/* Email */}
-                <div className="p-4 border border-gray-200 rounded-xl">
-                  <div className="flex items-center justify-between mb-3">
-                    <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 bg-indigo-50 rounded-lg flex items-center justify-center">
-                        <Mail className="w-5 h-5 text-indigo-600" />
-                      </div>
-                      <div>
-                        <div className="text-sm font-semibold text-gray-900">Email</div>
-                        <div className="text-xs text-gray-500">SendGrid · SPF/DKIM configured</div>
-                      </div>
-                    </div>
-                    <span className="text-xs bg-emerald-50 text-emerald-700 px-2.5 py-1 rounded-full font-medium flex items-center gap-1">
-                      <CheckCircle className="w-3 h-3" /> Connected
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-3 gap-3 text-xs">
-                    <div className="p-2 bg-gray-50 rounded-lg"><span className="text-gray-500">Sent today:</span> <strong className="text-gray-900">47</strong></div>
-                    <div className="p-2 bg-gray-50 rounded-lg"><span className="text-gray-500">Open rate:</span> <strong className="text-gray-900">34%</strong></div>
-                    <div className="p-2 bg-gray-50 rounded-lg"><span className="text-gray-500">Bounce rate:</span> <strong className="text-gray-900">1.2%</strong></div>
-                  </div>
-                </div>
-
-                {/* SMS */}
-                <div className="p-4 border border-gray-200 rounded-xl">
-                  <div className="flex items-center justify-between mb-3">
-                    <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 bg-emerald-50 rounded-lg flex items-center justify-center">
-                        <Phone className="w-5 h-5 text-emerald-600" />
-                      </div>
-                      <div>
-                        <div className="text-sm font-semibold text-gray-900">SMS</div>
-                        <div className="text-xs text-gray-500">Twilio · 10DLC registered</div>
+                {channels.length === 0 && !loading && (
+                  <p className="text-sm text-gray-400 py-8 text-center">No channels configured yet.</p>
+                )}
+                {channels.map((ch) => {
+                  const Icon = channelIcon[ch.type] ?? Mail;
+                  const connected = ch.status === 'connected';
+                  return (
+                    <div key={ch.id} className={`p-4 border rounded-xl ${connected ? 'border-gray-200' : 'border-gray-200 border-dashed'}`}>
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center gap-3">
+                          <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${connected ? 'bg-indigo-50' : 'bg-gray-50'}`}>
+                            <Icon className={`w-5 h-5 ${connected ? 'text-indigo-600' : 'text-gray-400'}`} />
+                          </div>
+                          <div>
+                            <div className="text-sm font-semibold text-gray-900 capitalize">{ch.type}</div>
+                            <div className="text-xs text-gray-500">{ch.provider}</div>
+                          </div>
+                        </div>
+                        {connected ? (
+                          <span className="text-xs bg-emerald-50 text-emerald-700 px-2.5 py-1 rounded-full font-medium flex items-center gap-1">
+                            <CheckCircle className="w-3 h-3" /> Connected
+                          </span>
+                        ) : (
+                          <button className="text-xs bg-indigo-500 text-white px-3 py-1.5 rounded-lg font-medium hover:bg-indigo-600 transition-colors">
+                            Configure
+                          </button>
+                        )}
                       </div>
                     </div>
-                    <span className="text-xs bg-emerald-50 text-emerald-700 px-2.5 py-1 rounded-full font-medium flex items-center gap-1">
-                      <CheckCircle className="w-3 h-3" /> Connected
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-3 gap-3 text-xs">
-                    <div className="p-2 bg-gray-50 rounded-lg"><span className="text-gray-500">Sent today:</span> <strong className="text-gray-900">23</strong></div>
-                    <div className="p-2 bg-gray-50 rounded-lg"><span className="text-gray-500">Response rate:</span> <strong className="text-gray-900">28%</strong></div>
-                    <div className="p-2 bg-gray-50 rounded-lg"><span className="text-gray-500">Opt-out rate:</span> <strong className="text-gray-900">0.3%</strong></div>
-                  </div>
-                </div>
-
-                {/* WhatsApp */}
-                <div className="p-4 border border-gray-200 rounded-xl border-dashed">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 bg-gray-50 rounded-lg flex items-center justify-center">
-                        <MessageCircle className="w-5 h-5 text-gray-400" />
-                      </div>
-                      <div>
-                        <div className="text-sm font-semibold text-gray-900">WhatsApp</div>
-                        <div className="text-xs text-gray-500">Twilio WhatsApp Business API</div>
-                      </div>
-                    </div>
-                    <button className="text-xs bg-indigo-500 text-white px-3 py-1.5 rounded-lg font-medium hover:bg-indigo-600 transition-colors">
-                      Configure
-                    </button>
-                  </div>
-                </div>
+                  );
+                })}
               </div>
             </div>
           </div>
         )}
 
         {/* Integrations */}
-        {activeTab === 'integrations' && (
+        {activeTab === 'integrations' && !loading && (
           <div className="bg-white border border-gray-200 rounded-xl p-6">
             <h2 className="text-base font-semibold text-gray-900 mb-1">Integrations</h2>
             <p className="text-sm text-gray-500 mb-6">Connect your tools to power the AI loop</p>
             <div className="flex flex-col gap-3">
+              {integrations.length === 0 && (
+                <p className="text-sm text-gray-400 py-8 text-center">No integrations available.</p>
+              )}
               {integrations.map((int) => (
-                <div key={int.name} className="flex items-center justify-between p-4 border border-gray-200 rounded-xl">
+                <div key={int.id} className="flex items-center justify-between p-4 border border-gray-200 rounded-xl">
                   <div className="flex items-center gap-3">
                     <div className="w-10 h-10 bg-gray-50 rounded-lg flex items-center justify-center text-xl">
-                      {int.icon}
+                      {integrationIcons[int.name] ?? 'ð'}
                     </div>
                     <div>
                       <div className="text-sm font-semibold text-gray-900">{int.name}</div>
@@ -291,13 +448,26 @@ export default function SettingsPage() {
                     </div>
                   </div>
                   <div className="flex items-center gap-3">
-                    {int.lastSync && <span className="text-[11px] text-gray-400">Synced {int.lastSync}</span>}
+                    {int.lastSyncAt && (
+                      <span className="text-[11px] text-gray-400">
+                        Synced {new Date(int.lastSyncAt).toLocaleString()}
+                      </span>
+                    )}
                     {int.status === 'connected' ? (
                       <span className="text-xs bg-emerald-50 text-emerald-700 px-2.5 py-1 rounded-full font-medium flex items-center gap-1">
                         <CheckCircle className="w-3 h-3" /> Connected
                       </span>
                     ) : (
-                      <button className="text-xs bg-white border border-gray-200 text-gray-600 px-3 py-1.5 rounded-lg font-medium hover:bg-gray-50 transition-colors">
+                      <button
+                        onClick={async () => {
+                          try {
+                            await settingsApi.integrations.connect(int.id);
+                            flash('Integration connected');
+                            loadTab('integrations');
+                          } catch (e: any) { setError(e?.message ?? 'Connect failed'); }
+                        }}
+                        className="text-xs bg-white border border-gray-200 text-gray-600 px-3 py-1.5 rounded-lg font-medium hover:bg-gray-50 transition-colors"
+                      >
                         Connect
                       </button>
                     )}
@@ -309,23 +479,48 @@ export default function SettingsPage() {
         )}
 
         {/* Team & Roles */}
-        {activeTab === 'team' && (
+        {activeTab === 'team' && !loading && (
           <div className="bg-white border border-gray-200 rounded-xl p-6">
             <div className="flex items-center justify-between mb-6">
               <div>
                 <h2 className="text-base font-semibold text-gray-900">Team & Roles</h2>
                 <p className="text-sm text-gray-500 mt-0.5">Manage who has access and what they can do</p>
               </div>
-              <button className="text-xs bg-indigo-500 text-white px-3 py-1.5 rounded-lg font-medium hover:bg-indigo-600 transition-colors">
-                Invite Member
+            </div>
+
+            {/* Invite form */}
+            <div className="flex gap-2 mb-6">
+              <input
+                type="email"
+                value={inviteEmail}
+                onChange={(e) => setInviteEmail(e.target.value)}
+                placeholder="Email address"
+                className="flex-1 px-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:border-indigo-500 outline-none"
+              />
+              <select
+                value={inviteRole}
+                onChange={(e) => setInviteRole(e.target.value)}
+                className="px-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:border-indigo-500 outline-none"
+              >
+                <option value="viewer">Viewer</option>
+                <option value="agent">Agent</option>
+                <option value="admin">Admin</option>
+              </select>
+              <button
+                onClick={handleInvite}
+                disabled={saving || !inviteEmail}
+                className="text-xs bg-indigo-500 text-white px-3 py-1.5 rounded-lg font-medium hover:bg-indigo-600 transition-colors disabled:opacity-50"
+              >
+                {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Invite'}
               </button>
             </div>
+
             <div className="flex flex-col gap-3">
               {teamMembers.map((m) => (
-                <div key={m.email} className="flex items-center justify-between p-4 border border-gray-200 rounded-xl">
+                <div key={m.id} className="flex items-center justify-between p-4 border border-gray-200 rounded-xl">
                   <div className="flex items-center gap-3">
                     <div className="w-9 h-9 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center text-xs font-semibold">
-                      {m.avatar}
+                      {m.name.split(' ').map((n) => n[0]).join('').slice(0, 2).toUpperCase()}
                     </div>
                     <div>
                       <div className="text-sm font-medium text-gray-900">{m.name}</div>
@@ -333,10 +528,44 @@ export default function SettingsPage() {
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
-                    <span className={`text-[11px] px-2.5 py-1 rounded-full font-medium ${roleColors[m.role]}`}>{m.role}</span>
+                    <span className={`text-[11px] px-2.5 py-1 rounded-full font-medium ${roleColors[m.role.toLowerCase()] ?? 'bg-gray-100 text-gray-600'}`}>
+                      {m.role}
+                    </span>
                     {m.status === 'invited' && (
                       <span className="text-[11px] text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full">Pending</span>
                     )}
+                  </div>
+                </div>
+              ))}
+
+              {/* Pending invitations */}
+              {invitations.filter((i) => i.status === 'pending').map((inv) => (
+                <div key={inv.id} className="flex items-center justify-between p-4 border border-dashed border-gray-200 rounded-xl">
+                  <div className="flex items-center gap-3">
+                    <div className="w-9 h-9 rounded-full bg-gray-100 text-gray-400 flex items-center justify-center text-xs font-semibold">
+                      ?
+                    </div>
+                    <div>
+                      <div className="text-sm font-medium text-gray-500">{inv.email}</div>
+                      <div className="text-xs text-gray-400">Invitation pending</div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className={`text-[11px] px-2.5 py-1 rounded-full font-medium ${roleColors[inv.role.toLowerCase()] ?? 'bg-gray-100 text-gray-600'}`}>
+                      {inv.role}
+                    </span>
+                    <button
+                      onClick={async () => {
+                        try {
+                          await settingsApi.team.cancelInvite(inv.id);
+                          flash('Invitation cancelled');
+                          loadTab('team');
+                        } catch (e: any) { setError(e?.message ?? 'Cancel failed'); }
+                      }}
+                      className="text-[11px] text-red-600 hover:underline"
+                    >
+                      Cancel
+                    </button>
                   </div>
                 </div>
               ))}
@@ -345,26 +574,36 @@ export default function SettingsPage() {
         )}
 
         {/* Notifications */}
-        {activeTab === 'notifications' && (
+        {activeTab === 'notifications' && !loading && notifPrefs && (
           <div className="bg-white border border-gray-200 rounded-xl p-6">
-            <h2 className="text-base font-semibold text-gray-900 mb-1">Notification Preferences</h2>
+            <div className="flex items-center justify-between mb-1">
+              <h2 className="text-base font-semibold text-gray-900">Notification Preferences</h2>
+              <button
+                onClick={saveNotifications}
+                disabled={saving}
+                className="flex items-center gap-1.5 text-xs bg-indigo-500 text-white px-3 py-1.5 rounded-lg font-medium hover:bg-indigo-600 transition-colors disabled:opacity-50"
+              >
+                {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}
+                Save
+              </button>
+            </div>
             <p className="text-sm text-gray-500 mb-6">Choose what alerts and reports you receive</p>
             <div className="flex flex-col gap-4">
-              {[
-                { key: 'escalations', label: 'Escalation alerts', desc: 'Get notified when the AI escalates a contact for human review', enabled: notifications.escalations },
-                { key: 'dailyDigest', label: 'Daily digest', desc: 'Summary of all AI actions, decisions, and outcomes from the day', enabled: notifications.dailyDigest },
-                { key: 'weeklyReport', label: 'Weekly performance report', desc: 'Strategy performance, conversion rates, and pipeline health', enabled: notifications.weeklyReport },
-                { key: 'brainUpdates', label: 'Brain update notifications', desc: 'Get notified when the Business Brain completes a learning cycle', enabled: notifications.brainUpdates },
-              ].map((n) => (
+              {([
+                { key: 'escalationAlerts' as const, label: 'Escalation alerts', desc: 'Get notified when the AI escalates a contact for human review' },
+                { key: 'dailyDigest' as const, label: 'Daily digest', desc: 'Summary of all AI actions, decisions, and outcomes from the day' },
+                { key: 'weeklyReport' as const, label: 'Weekly performance report', desc: 'Strategy performance, conversion rates, and pipeline health' },
+                { key: 'brainUpdates' as const, label: 'Brain update notifications', desc: 'Get notified when the Business Brain completes a learning cycle' },
+              ]).map((n) => (
                 <div key={n.key} className="flex items-center justify-between p-4 bg-gray-50 rounded-xl">
                   <div>
                     <div className="text-sm font-medium text-gray-900">{n.label}</div>
                     <div className="text-xs text-gray-500">{n.desc}</div>
                   </div>
                   <button
-                    onClick={() => setNotifications({ ...notifications, [n.key]: !n.enabled })}
+                    onClick={() => setNotifPrefs({ ...notifPrefs, [n.key]: !notifPrefs[n.key] })}
                     className={`w-11 h-6 rounded-full transition-colors flex items-center ${
-                      n.enabled ? 'bg-indigo-500 justify-end' : 'bg-gray-300 justify-start'
+                      notifPrefs[n.key] ? 'bg-indigo-500 justify-end' : 'bg-gray-300 justify-start'
                     }`}
                   >
                     <div className="w-5 h-5 bg-white rounded-full shadow mx-0.5" />
@@ -376,18 +615,18 @@ export default function SettingsPage() {
         )}
 
         {/* Security */}
-        {activeTab === 'security' && (
+        {activeTab === 'security' && !loading && securityConfig && (
           <div className="flex flex-col gap-6">
             <div className="bg-white border border-gray-200 rounded-xl p-6">
               <h2 className="text-base font-semibold text-gray-900 mb-1">Security & Compliance</h2>
               <p className="text-sm text-gray-500 mb-6">Data protection and access controls</p>
               <div className="flex flex-col gap-3">
                 {[
-                  { name: 'Two-factor authentication', desc: 'Require 2FA for all team members', status: 'Enabled', icon: Shield },
-                  { name: 'SSO (SAML)', desc: 'Single sign-on via your identity provider', status: 'Available', icon: Key },
-                  { name: 'Data encryption', desc: 'AES-256 at rest, TLS 1.3 in transit', status: 'Active', icon: Lock },
-                  { name: 'Audit log retention', desc: 'Immutable logs retained for 2 years', status: '2 years', icon: Database },
-                  { name: 'GDPR compliance', desc: 'Data processing agreement on file', status: 'Compliant', icon: Globe },
+                  { name: 'Two-factor authentication', desc: 'Require 2FA for all team members', status: securityConfig.twoFactorRequired ? 'Enabled' : 'Disabled', icon: Shield },
+                  { name: 'SSO (SAML)', desc: `Single sign-on${securityConfig.ssoProvider ? ` via ${securityConfig.ssoProvider}` : ''}`, status: securityConfig.ssoEnabled ? 'Active' : 'Available', icon: Key },
+                  { name: 'Data encryption', desc: securityConfig.dataEncryption || 'AES-256 at rest, TLS 1.3 in transit', status: 'Active', icon: Lock },
+                  { name: 'Audit log retention', desc: 'Immutable logs retained', status: `${Math.round(securityConfig.auditLogRetentionDays / 365)} years`, icon: Database },
+                  { name: 'GDPR compliance', desc: 'Data processing agreement on file', status: securityConfig.gdprCompliant ? 'Compliant' : 'Not configured', icon: Globe },
                 ].map((s) => (
                   <div key={s.name} className="flex items-center justify-between p-4 border border-gray-200 rounded-xl">
                     <div className="flex items-center gap-3">
