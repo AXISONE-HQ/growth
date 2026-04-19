@@ -1,14 +1,15 @@
-import express from "express";
-import cors from "cors";
-import { createExpressMiddleware } from "@trpc/server/adapters/express";
+import { Hono } from "hono";
+import { cors } from "hono/cors";
+import { serve } from "@hono/node-server";
+import { trpcServer } from "@hono/trpc-server";
 import { appRouter } from "./router.js";
 import { createContext } from "./trpc.js";
 
-const app = express();
-const PORT = process.env.PORT || 8080;
+const app = new Hono();
+const PORT = Number(process.env.PORT) || 8080;
 
 // CORS middleware
-app.use(cors({
+app.use("/*", cors({
   origin: process.env.CORS_ORIGIN
     ? process.env.CORS_ORIGIN.split(",")
     : [
@@ -16,29 +17,27 @@ app.use(cors({
         "http://localhost:3001",
         "https://growth-web-1086551891973.us-central1.run.app",
       ],
-  allowedHeaders: ["Content-Type", "x-tenant-id", "Authorization"],
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowHeaders: ["Content-Type", "x-tenant-id", "Authorization"],
+  allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   credentials: true,
 }));
 
-app.use(express.json());
-
 // Health check
-app.get("/health", (_req, res) => {
-  res.json({ status: "ok", service: "growth-api", timestamp: new Date().toISOString() });
+app.get("/health", (c) => {
+  return c.json({ status: "ok", service: "growth-api", timestamp: new Date().toISOString() });
 });
 
 // Root
-app.get("/", (_req, res) => {
-  res.json({ message: "growth API  AI Revenue System by AxisOne" });
+app.get("/", (c) => {
+  return c.json({ message: "growth API - AI Revenue System by AxisOne" });
 });
 
 // tRPC
-app.use("/trpc", createExpressMiddleware({
+app.use("/trpc/*", trpcServer({
   router: appRouter,
   createContext,
 }));
 
-app.listen(PORT, () => {
+serve({ fetch: app.fetch, port: PORT }, () => {
   console.log(`growth-api listening on port ${PORT}`);
 });
