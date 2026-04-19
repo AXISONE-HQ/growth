@@ -1,5 +1,5 @@
 import { initTRPC, TRPCError } from "@trpc/server";
-import { CreateHTTPContextOptions } from "@trpc/server/adapters/standalone";
+import { FetchCreateContextFnOptions } from "@trpc/server/adapters/fetch";
 import { prisma } from "./prisma.js";
 
 // Firebase Admin — lazy init to avoid failures if env not set
@@ -35,12 +35,12 @@ async function verifyFirebaseToken(
   }
 }
 
-export const createContext = async (opts: CreateHTTPContextOptions) => {
-  const tenantId = opts.req.headers["x-tenant-id"] as string | undefined;
+export const createContext = async (opts: FetchCreateContextFnOptions) => {
+  const tenantId = opts.req.headers.get("x-tenant-id") ?? undefined;
 
   // Extract Firebase JWT from Authorization header
   let firebaseUser: { uid: string; email?: string } | null = null;
-  const authHeader = opts.req.headers["authorization"] as string | undefined;
+  const authHeader = opts.req.headers.get("authorization") ?? undefined;
   if (authHeader?.startsWith("Bearer ")) {
     const token = authHeader.slice(7);
     firebaseUser = await verifyFirebaseToken(token);
