@@ -3,9 +3,11 @@
 import {
   Building2, Package, Shield, HelpCircle, Plus, Edit3, Trash2,
   Save, X, Upload, FileText, Globe, Eye, ChevronDown, ChevronRight,
-  AlertTriangle, CheckCircle, Loader2, RefreshCw
+  AlertTriangle, CheckCircle, Loader2, RefreshCw, MessageSquareWarning,
+  TrendingUp, TrendingDown, Flame, Zap, Sparkles, Target, Swords,
+  BookOpen, Search, Filter, ExternalLink, ThumbsUp, ThumbsDown, Clock
 } from 'lucide-react';
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
   knowledgeApi,
   type CompanyInfo,
@@ -15,16 +17,196 @@ import {
   type KnowledgeDocument,
 } from '@/lib/api';
 
-/* ââ Tabs Config ââââââââââââââââââââââââââââââââââââââââ */
+/* ── Tabs Config ──────────────────────────────────────── */
 
 const tabs = [
   { id: 'company-truth', label: 'Company Truth', icon: Building2 },
   { id: 'products', label: 'Products', icon: Package },
   { id: 'warranties', label: 'Warranties & Financing', icon: Shield },
   { id: 'faq', label: 'FAQ', icon: HelpCircle },
+  { id: 'objections', label: 'Sales Objections', icon: MessageSquareWarning },
 ];
 
-/* ââ Toast Component ââââââââââââââââââââââââââââââââââââ */
+/* ── Sales Objections Types & Mock Data ─────────────── */
+
+type ObjectionCategory = 'pricing' | 'product' | 'trust' | 'timing' | 'competition';
+type ObjectionStatus = 'active' | 'resolved' | 'new';
+type ObjectionTrend = 'hot' | 'rising' | 'stable' | 'declining' | 'new';
+
+interface ObjectionSource {
+  type: 'knowledge' | 'competitive';
+  title: string;
+  excerpt: string;
+}
+
+interface SalesObjection {
+  id: string;
+  objection: string;
+  category: ObjectionCategory;
+  status: ObjectionStatus;
+  trend: ObjectionTrend;
+  occurrences: number;
+  firstSeen: string;
+  lastSeen: string;
+  winRate: number;
+  recommendedResponse: string;
+  talkTrack: string;
+  differentiators: string[];
+  sources: ObjectionSource[];
+}
+
+const OBJECTION_CATEGORIES: { value: ObjectionCategory; label: string; color: string }[] = [
+  { value: 'pricing', label: 'Pricing', color: 'bg-emerald-100 text-emerald-700' },
+  { value: 'product', label: 'Product', color: 'bg-blue-100 text-blue-700' },
+  { value: 'trust', label: 'Trust', color: 'bg-purple-100 text-purple-700' },
+  { value: 'timing', label: 'Timing', color: 'bg-amber-100 text-amber-700' },
+  { value: 'competition', label: 'Competition', color: 'bg-red-100 text-red-700' },
+];
+
+const MOCK_OBJECTIONS: SalesObjection[] = [
+  {
+    id: 'obj-1',
+    objection: "Your pricing is too high compared to competitors",
+    category: 'pricing',
+    status: 'active',
+    trend: 'hot',
+    occurrences: 47,
+    firstSeen: '2026-01-15',
+    lastSeen: '2026-04-18',
+    winRate: 62,
+    recommendedResponse: "I understand budget is important. What many clients discover is that our total cost of ownership is actually 30-40% lower when you factor in the automation savings. Our AI handles tasks that would require 2-3 additional headcount with manual tools. Let me show you the ROI calculator — most teams see payback within 60 days.",
+    talkTrack: "1) Acknowledge the concern genuinely. 2) Shift from price to value — frame as investment, not cost. 3) Reference the ROI calculator with their specific metrics. 4) Share the case study from [similar industry] showing 3.2x ROI. 5) Offer the pilot program: 30-day trial at reduced rate to prove value before full commitment.",
+    differentiators: [
+      "AI automation replaces 2-3 FTEs worth of manual outreach",
+      "Average customer sees 3.2x ROI within first quarter",
+      "No-code setup means zero implementation costs vs. competitors requiring consultants",
+      "30-day pilot program available to prove value risk-free",
+    ],
+    sources: [
+      { type: 'competitive', title: 'vs. HubSpot Sales Hub', excerpt: 'HubSpot Professional starts at $450/mo but requires $3,000+ onboarding. growth includes onboarding and AI automation at $299/mo.' },
+      { type: 'competitive', title: 'vs. Salesforce Sales Cloud', excerpt: 'Salesforce requires admin staff ($80K+/yr). growth is self-serve with AI-guided setup.' },
+      { type: 'knowledge', title: 'ROI Calculator — Customer Results', excerpt: 'Average growth customer saves 22 hours/week on manual outreach tasks, equivalent to $2,800/mo in labor costs.' },
+    ],
+  },
+  {
+    id: 'obj-2',
+    objection: "We're already using HubSpot and don't want to switch",
+    category: 'competition',
+    status: 'active',
+    trend: 'rising',
+    occurrences: 31,
+    firstSeen: '2026-02-03',
+    lastSeen: '2026-04-17',
+    winRate: 45,
+    recommendedResponse: "That's great — HubSpot is solid for marketing automation. growth isn't a replacement for HubSpot; it actually integrates with it. We sit on top of your CRM and add the AI decision layer that HubSpot doesn't have. Think of it as giving your HubSpot data a brain that acts on it autonomously. Many of our best customers run both.",
+    talkTrack: "1) Validate their current investment — never bash HubSpot. 2) Position growth as complementary, not competitive. 3) Explain the AI decision loop concept — what growth does that HubSpot can't. 4) Mention the native HubSpot integration via Nango. 5) Offer a side-by-side demo showing both tools working together.",
+    differentiators: [
+      "Native HubSpot integration — syncs contacts, deals, and activities bidirectionally",
+      "AI Decision Engine that autonomously determines next-best-action (HubSpot requires manual workflows)",
+      "Learning loop that continuously optimizes — HubSpot workflows are static",
+      "Complementary tool, not a replacement — enhances existing CRM investment",
+    ],
+    sources: [
+      { type: 'competitive', title: 'vs. HubSpot Sales Hub', excerpt: 'HubSpot workflows require manual configuration for every scenario. growth AI adapts automatically based on contact behavior and outcomes.' },
+      { type: 'knowledge', title: 'Integration Guide — HubSpot', excerpt: 'Full bidirectional sync via Nango SDK. Contacts, deals, activities, and custom properties all supported.' },
+      { type: 'competitive', title: 'Battle Card — HubSpot', excerpt: 'Key gap: HubSpot has no autonomous AI agent capability. Their "AI" is limited to content generation, not decision-making.' },
+    ],
+  },
+  {
+    id: 'obj-3',
+    objection: "How do I know the AI won't send embarrassing messages to my customers?",
+    category: 'trust',
+    status: 'active',
+    trend: 'stable',
+    occurrences: 23,
+    firstSeen: '2026-01-22',
+    lastSeen: '2026-04-16',
+    winRate: 78,
+    recommendedResponse: "That's a really important question — and honestly, it should be a dealbreaker if a vendor can't answer it well. We built growth with a 6-layer guardrail system. Every AI-generated message passes through tone validation, accuracy checks, hallucination filtering, compliance checks, confidence scoring, and injection defense before anything is sent. Plus, you set the confidence threshold — anything below it goes to your human review queue instead of sending automatically.",
+    talkTrack: "1) Validate the concern — this shows they're thinking seriously about adoption. 2) Walk through the 6 guardrail layers specifically. 3) Show the confidence threshold slider in Settings. 4) Demonstrate the human review queue. 5) Share that 99.7% of messages pass all guardrails without issue.",
+    differentiators: [
+      "6-layer guardrail system: tone, accuracy, hallucination, compliance, confidence, injection defense",
+      "Adjustable confidence threshold — you control how autonomous the AI is",
+      "Human review queue for any message below your confidence threshold",
+      "Full audit log of every AI decision with reasoning explanation",
+    ],
+    sources: [
+      { type: 'knowledge', title: 'AI Guardrail Architecture', excerpt: 'Every agent action passes through 6 sequential validation checks. Failure at any layer triggers regeneration or human escalation.' },
+      { type: 'knowledge', title: 'Settings — AI Configuration', excerpt: 'Global confidence threshold (20-95%) controls autonomous vs. human-reviewed actions. Default is 70%.' },
+    ],
+  },
+  {
+    id: 'obj-4',
+    objection: "We need to see results before committing to an annual plan",
+    category: 'timing',
+    status: 'active',
+    trend: 'rising',
+    occurrences: 19,
+    firstSeen: '2026-03-01',
+    lastSeen: '2026-04-18',
+    winRate: 71,
+    recommendedResponse: "Completely fair. That's exactly why we offer a 30-day pilot program. You get full access to the platform with your real data, and we set up your Business Brain together. Most teams see measurable results within the first two weeks — typically a 25-40% increase in response rates and 15% more qualified pipeline. At the end of 30 days, the data speaks for itself.",
+    talkTrack: "1) Agree with their caution — don't push back. 2) Present the 30-day pilot as designed for exactly this concern. 3) Set clear success metrics upfront (response rate, pipeline, time saved). 4) Offer weekly check-ins during the pilot. 5) Emphasize there's no commitment until they see results.",
+    differentiators: [
+      "30-day pilot program with full platform access",
+      "Business Brain setup included — personalized to their industry and data",
+      "Weekly performance check-ins during pilot",
+      "Clear success metrics agreed upfront — data-driven decision to continue",
+    ],
+    sources: [
+      { type: 'knowledge', title: 'Pilot Program Details', excerpt: '30-day full-access pilot. Includes onboarding, Brain setup, and weekly optimization calls. No commitment until results are proven.' },
+      { type: 'knowledge', title: 'Customer Success Metrics', excerpt: 'Average pilot conversion rate: 73%. Median time to first measurable result: 11 days.' },
+    ],
+  },
+  {
+    id: 'obj-5',
+    objection: "Our team doesn't have time to learn another tool",
+    category: 'product',
+    status: 'active',
+    trend: 'declining',
+    occurrences: 14,
+    firstSeen: '2026-02-10',
+    lastSeen: '2026-04-10',
+    winRate: 82,
+    recommendedResponse: "I hear you — tool fatigue is real. The good news is growth was built to require almost zero learning curve. The AI does the heavy lifting. Your team's main interaction is reviewing the AI's work in the dashboard and adjusting the confidence threshold. Most teams are fully onboarded in under 2 hours, and after that, the AI actually gives time back because it handles outreach that your team currently does manually.",
+    talkTrack: "1) Acknowledge tool fatigue as a real pain point. 2) Differentiate: growth is not a tool your team 'uses' — it works FOR them. 3) Mention the 2-hour onboarding. 4) Quantify time savings (22 hrs/week average). 5) Offer a personalized demo showing their specific workflow automated.",
+    differentiators: [
+      "2-hour average onboarding time — the fastest in the category",
+      "AI-first design means the tool works autonomously, not another inbox to check",
+      "Saves average team 22 hours/week by automating manual outreach",
+      "No-code setup — zero technical skills required",
+    ],
+    sources: [
+      { type: 'knowledge', title: 'Onboarding Guide', excerpt: 'Step 1: Connect CRM (5 min). Step 2: AI builds Business Brain (30 min, automated). Step 3: Set objectives and thresholds (15 min). Step 4: Review first AI actions (30 min).' },
+      { type: 'competitive', title: 'Implementation Comparison', excerpt: 'Salesforce: 3-6 months. HubSpot: 2-4 weeks. growth: 2 hours to first AI action.' },
+    ],
+  },
+  {
+    id: 'obj-6',
+    objection: "What happens to our data? Is it used to train AI models?",
+    category: 'trust',
+    status: 'new',
+    trend: 'new',
+    occurrences: 3,
+    firstSeen: '2026-04-12',
+    lastSeen: '2026-04-18',
+    winRate: 100,
+    recommendedResponse: "Great question. Your data is completely isolated — every tenant has their own Business Brain, and there is zero cross-tenant data sharing. We never use customer data to train our AI models. We use Anthropic's Claude API which has the same guarantee. Your data stays yours, encrypted at rest with AES-256 and in transit with TLS 1.3, and we're fully GDPR compliant. You can see all of this in our security settings.",
+    talkTrack: "1) Take the question seriously — this matters. 2) Explain tenant isolation architecture. 3) Confirm no model training on customer data. 4) Reference encryption standards (AES-256, TLS 1.3). 5) Point to GDPR compliance and audit log retention. 6) Offer to share the security whitepaper.",
+    differentiators: [
+      "Complete tenant data isolation — no cross-tenant data access",
+      "Zero model training on customer data — guaranteed in ToS",
+      "AES-256 encryption at rest, TLS 1.3 in transit",
+      "GDPR compliant with 2-year immutable audit log retention",
+    ],
+    sources: [
+      { type: 'knowledge', title: 'Security & Compliance', excerpt: 'Multi-tenant architecture with strict tenant_id isolation. pgvector embeddings namespaced per tenant. No cross-tenant retrieval possible.' },
+      { type: 'knowledge', title: 'Data Processing Agreement', excerpt: 'Customer data is never used for model training. Anthropic API usage follows their enterprise data policy — no training on API inputs.' },
+    ],
+  },
+];
+
+/* ── Toast Component ──────────────────────────────────── */
 
 function Toast({ message, type, onClose }: { message: string; type: 'success' | 'error'; onClose: () => void }) {
   useEffect(() => {
@@ -42,101 +224,30 @@ function Toast({ message, type, onClose }: { message: string; type: 'success' | 
   );
 }
 
-/* ââ Main Component ââââââââââââââââââââââââââââââââââââ */
+/* ── Main Component ──────────────────────────────────── */
 
 export default function KnowledgeCenterPage() {
   const [activeTab, setActiveTab] = useState('company-truth');
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
   const showToast = (message: string, type: 'success' | 'error' = 'success') => setToast({ message, type });
 
-  // ââ Loading states ââ
+  // ── Loading states ──
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
-  // ââ Company Truth state ââ
+  // ── Company Truth state ──
   const [companyInfo, setCompanyInfo] = useState<CompanyInfo | null>(null);
   const [editingCompany, setEditingCompany] = useState(false);
   const [companyDraft, setCompanyDraft] = useState({ vision: '', mission: '', websiteUrl: '' });
   const [documents, setDocuments] = useState<KnowledgeDocument[]>([]);
-  const [isDragging, setIsDragging] = useState(false);
-  const [isUploading, setIsUploading] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // File upload constants
-  const ALLOWED_TYPES = ['application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'text/plain', 'text/csv'];
-  const ALLOWED_EXTENSIONS = ['.pdf', '.docx', '.xlsx', '.txt', '.csv'];
-  const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
-
-  const handleFiles = async (files: FileList | File[]) => {
-    const fileArray = Array.from(files);
-    setIsUploading(true);
-    let successCount = 0;
-    let errorMessages: string[] = [];
-
-    for (const file of fileArray) {
-      // Validate file type
-      const ext = '.' + file.name.split('.').pop()?.toLowerCase();
-      if (!ALLOWED_TYPES.includes(file.type) && !ALLOWED_EXTENSIONS.includes(ext)) {
-        errorMessages.push(`${file.name}: unsupported file type`);
-        continue;
-      }
-      // Validate file size
-      if (file.size > MAX_FILE_SIZE) {
-        errorMessages.push(`${file.name}: exceeds 10MB limit`);
-        continue;
-      }
-      try {
-        const doc = await knowledgeApi.createDocument({
-          name: file.name,
-          type: file.type || ext,
-          sizeBytes: file.size,
-        });
-        setDocuments(prev => [...prev, doc]);
-        successCount++;
-      } catch (err) {
-        errorMessages.push(`${file.name}: upload failed`);
-      }
-    }
-
-    setIsUploading(false);
-    if (successCount > 0) {
-      showToast(`${successCount} document${successCount > 1 ? 's' : ''} uploaded`, 'success');
-    }
-    if (errorMessages.length > 0) {
-      showToast(errorMessages.join(', '), 'error');
-    }
-    // Reset file input
-    if (fileInputRef.current) fileInputRef.current.value = '';
-  };
-
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragging(false);
-    if (e.dataTransfer.files.length > 0) {
-      handleFiles(e.dataTransfer.files);
-    }
-  };
-
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragging(true);
-  };
-
-  const handleDragLeave = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragging(false);
-  };
-
-  // ââ Products state ââ
+  // ── Products state ──
   const [products, setProducts] = useState<Product[]>([]);
   const [editingProduct, setEditingProduct] = useState<string | null>(null);
   const [showAddProduct, setShowAddProduct] = useState(false);
   const [productDraft, setProductDraft] = useState({ name: '', category: '', price: '', description: '', sku: '' });
 
-  // ââ Policies state (Warranties & Financing) ââ
+  // ── Policies state (Warranties & Financing) ──
   const [warranties, setWarranties] = useState<PolicyRule[]>([]);
   const [financing, setFinancing] = useState<PolicyRule[]>([]);
   const [rules, setRules] = useState<PolicyRule[]>([]);
@@ -145,14 +256,46 @@ export default function KnowledgeCenterPage() {
   const [financingDraft, setFinancingDraft] = useState({ title: '', content: '' });
   const [newRule, setNewRule] = useState('');
 
-  // ââ FAQ state ââ
+  // ── FAQ state ──
   const [faqs, setFaqs] = useState<FAQ[]>([]);
   const [editingFaq, setEditingFaq] = useState<string | null>(null);
   const [showAddFaq, setShowAddFaq] = useState(false);
   const [faqDraft, setFaqDraft] = useState({ question: '', answer: '' });
   const [expandedFaq, setExpandedFaq] = useState<string | null>(null);
 
-  /* ââ Data Loading ââââââââââââââââââââââââââââââââââââââ */
+  // ── Sales Objections state ──
+  const [objections] = useState<SalesObjection[]>(MOCK_OBJECTIONS);
+  const [expandedObjection, setExpandedObjection] = useState<string | null>(null);
+  const [objectionCategoryFilter, setObjectionCategoryFilter] = useState<ObjectionCategory | 'all'>('all');
+  const [objectionStatusFilter, setObjectionStatusFilter] = useState<ObjectionStatus | 'all'>('all');
+  const [objectionSearch, setObjectionSearch] = useState('');
+
+  const filteredObjections = objections.filter(o => {
+    if (objectionCategoryFilter !== 'all' && o.category !== objectionCategoryFilter) return false;
+    if (objectionStatusFilter !== 'all' && o.status !== objectionStatusFilter) return false;
+    if (objectionSearch.trim() && !o.objection.toLowerCase().includes(objectionSearch.toLowerCase()) && !o.recommendedResponse.toLowerCase().includes(objectionSearch.toLowerCase())) return false;
+    return true;
+  });
+
+  const getTrendIcon = (trend: ObjectionTrend) => {
+    switch (trend) {
+      case 'hot': return <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-red-100 text-red-700"><Flame className="w-3 h-3" /> Hot</span>;
+      case 'rising': return <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-orange-100 text-orange-700"><TrendingUp className="w-3 h-3" /> Rising</span>;
+      case 'stable': return <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-gray-100 text-gray-600"><TrendingDown className="w-3 h-3" /> Stable</span>;
+      case 'declining': return <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-700"><TrendingDown className="w-3 h-3" /> Declining</span>;
+      case 'new': return <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-indigo-100 text-indigo-700"><Sparkles className="w-3 h-3" /> New</span>;
+    }
+  };
+
+  const getCategoryStyle = (category: ObjectionCategory) => {
+    return OBJECTION_CATEGORIES.find(c => c.value === category)?.color || 'bg-gray-100 text-gray-600';
+  };
+
+  const getCategoryLabel = (category: ObjectionCategory) => {
+    return OBJECTION_CATEGORIES.find(c => c.value === category)?.label || category;
+  };
+
+  /* ── Data Loading ────────────────────────────────────── */
 
   const loadCompanyData = useCallback(async () => {
     try {
@@ -214,7 +357,7 @@ export default function KnowledgeCenterPage() {
     loadAll();
   }, [loadCompanyData, loadProducts, loadPolicies, loadFAQs]);
 
-  /* ââ Company Truth Handlers ââââââââââââââââââââââââââââ */
+  /* ── Company Truth Handlers ──────────────────────────── */
 
   const saveCompanyInfo = async () => {
     setSaving(true);
@@ -263,7 +406,7 @@ export default function KnowledgeCenterPage() {
     setSaving(false);
   };
 
-  /* ââ Product Handlers ââââââââââââââââââââââââââââââââââ */
+  /* ── Product Handlers ────────────────────────────────── */
 
   const saveProduct = async () => {
     if (!productDraft.name.trim()) return;
@@ -334,7 +477,7 @@ export default function KnowledgeCenterPage() {
     setProductDraft({ name: '', category: '', price: '', description: '', sku: '' });
   };
 
-  /* ââ Warranties & Financing Handlers âââââââââââââââââââ */
+  /* ── Warranties & Financing Handlers ─────────────────── */
 
   const startWarrantiesEdit = () => {
     setWarrantyDraft({
@@ -413,7 +556,7 @@ export default function KnowledgeCenterPage() {
     setSaving(false);
   };
 
-  /* ââ FAQ Handlers ââââââââââââââââââââââââââââââââââââââ */
+  /* ── FAQ Handlers ────────────────────────────────────── */
 
   const saveFaq = async () => {
     if (!faqDraft.question.trim() || !faqDraft.answer.trim()) return;
@@ -473,7 +616,7 @@ export default function KnowledgeCenterPage() {
     setFaqDraft({ question: '', answer: '' });
   };
 
-  /* ââ Loading Screen ââââââââââââââââââââââââââââââââââââ */
+  /* ── Loading Screen ──────────────────────────────────── */
 
   if (loading) {
     return (
@@ -486,7 +629,7 @@ export default function KnowledgeCenterPage() {
     );
   }
 
-  /* ââ Render ââââââââââââââââââââââââââââââââââââââââââââ */
+  /* ── Render ──────────────────────────────────────────── */
   return (
     <div className="p-6 space-y-6">
       {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
@@ -499,7 +642,7 @@ export default function KnowledgeCenterPage() {
         </div>
       )}
 
-      {/* ââ Tab Bar ââ */}
+      {/* ── Tab Bar ── */}
       <div className="flex gap-1 bg-gray-100 p-1 rounded-lg w-fit">
         {tabs.map(t => {
           const Icon = t.icon;
@@ -518,9 +661,9 @@ export default function KnowledgeCenterPage() {
         })}
       </div>
 
-      {/* ââââââââââââââââââââââââââââââââââââââââââââââââââ */}
-      {/* TAB 1 â Company Truth                            */}
-      {/* ââââââââââââââââââââââââââââââââââââââââââââââââââ */}
+      {/* ══════════════════════════════════════════════════ */}
+      {/* TAB 1 — Company Truth                            */}
+      {/* ══════════════════════════════════════════════════ */}
       {activeTab === 'company-truth' && (
         <div className="space-y-6">
           {/* Company Info Card */}
@@ -591,31 +734,15 @@ export default function KnowledgeCenterPage() {
                 <h2 className="text-lg font-semibold text-gray-900">Reference Documents</h2>
                 <p className="text-sm text-gray-500 mt-1">Upload documents the AI will use as additional context (brand guides, playbooks, pricing sheets)</p>
               </div>
-              <button onClick={() => fileInputRef.current?.click()} disabled={isUploading} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-50">
-                <Upload className="w-4 h-4" /> {isUploading ? 'Uploading...' : 'Upload Document'}
+              <button className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 transition-colors">
+                <Upload className="w-4 h-4" /> Upload Document
               </button>
             </div>
 
-            <input
-              type="file"
-              ref={fileInputRef}
-              onChange={(e) => e.target.files && handleFiles(e.target.files)}
-              multiple
-              accept=".pdf,.docx,.xlsx,.txt,.csv"
-              className="hidden"
-            />
-            <div
-              onDrop={handleDrop}
-              onDragOver={handleDragOver}
-              onDragEnter={handleDragOver}
-              onDragLeave={handleDragLeave}
-              onClick={() => fileInputRef.current?.click()}
-              className={`border-2 border-dashed rounded-lg p-8 text-center mb-6 transition-colors cursor-pointer ${
-                isDragging ? 'border-indigo-500 bg-indigo-50' : 'border-gray-300 hover:border-indigo-400'
-              }`}>
+            <div className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center mb-6 hover:border-indigo-400 transition-colors cursor-pointer">
               <Upload className="w-8 h-8 text-gray-400 mx-auto mb-2" />
               <p className="text-sm text-gray-600 font-medium">Drag and drop files here, or click to browse</p>
-              <p className="text-xs text-gray-400 mt-1">PDF, DOCX, XLSX, TXT â Max 10MB per file</p>
+              <p className="text-xs text-gray-400 mt-1">PDF, DOCX, XLSX, TXT — Max 10MB per file</p>
             </div>
 
             {documents.length > 0 && (
@@ -626,7 +753,7 @@ export default function KnowledgeCenterPage() {
                       <FileText className="w-5 h-5 text-indigo-500" />
                       <div>
                         <p className="text-sm font-medium text-gray-900">{doc.name}</p>
-                        <p className="text-xs text-gray-400">{doc.type} Â· {(doc.sizeBytes / 1024).toFixed(0)} KB Â· Uploaded {new Date(doc.uploadedAt).toLocaleDateString()}</p>
+                        <p className="text-xs text-gray-400">{doc.type} · {(doc.sizeBytes / 1024).toFixed(0)} KB · Uploaded {new Date(doc.uploadedAt).toLocaleDateString()}</p>
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
@@ -649,16 +776,16 @@ export default function KnowledgeCenterPage() {
         </div>
       )}
 
-      {/* ââââââââââââââââââââââââââââââââââââââââââââââââââ */}
-      {/* TAB 2 â Products                                 */}
-      {/* ââââââââââââââââââââââââââââââââââââââââââââââââââ */}
+      {/* ══════════════════════════════════════════════════ */}
+      {/* TAB 2 — Products                                 */}
+      {/* ══════════════════════════════════════════════════ */}
       {activeTab === 'products' && (
         <div className="space-y-6">
           <div className="bg-white border border-gray-200 rounded-xl p-6">
             <div className="flex items-center justify-between mb-6">
               <div>
                 <h2 className="text-lg font-semibold text-gray-900">Products</h2>
-                <p className="text-sm text-gray-500 mt-1">Manage your product catalog â the AI references these for pricing, descriptions, and recommendations</p>
+                <p className="text-sm text-gray-500 mt-1">Manage your product catalog — the AI references these for pricing, descriptions, and recommendations</p>
               </div>
               {!showAddProduct && editingProduct === null && (
                 <button onClick={() => { setShowAddProduct(true); setProductDraft({ name: '', category: '', price: '', description: '', sku: '' }); }} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 transition-colors">
@@ -736,9 +863,9 @@ export default function KnowledgeCenterPage() {
         </div>
       )}
 
-      {/* ââââââââââââââââââââââââââââââââââââââââââââââââââ */}
-      {/* TAB 3 â Warranties & Financing                   */}
-      {/* ââââââââââââââââââââââââââââââââââââââââââââââââââ */}
+      {/* ══════════════════════════════════════════════════ */}
+      {/* TAB 3 — Warranties & Financing                   */}
+      {/* ══════════════════════════════════════════════════ */}
       {activeTab === 'warranties' && (
         <div className="space-y-6">
           <div className="bg-white border border-gray-200 rounded-xl p-6">
@@ -769,7 +896,7 @@ export default function KnowledgeCenterPage() {
                 {editingWarranties ? (
                   <textarea value={warrantyDraft.content} onChange={e => setWarrantyDraft({ ...warrantyDraft, content: e.target.value })} rows={4} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none" />
                 ) : (
-                  <p className="text-sm text-gray-600 bg-gray-50 rounded-lg px-4 py-3">{warranties[0]?.content || 'Not set â click Edit to define your warranty policy'}</p>
+                  <p className="text-sm text-gray-600 bg-gray-50 rounded-lg px-4 py-3">{warranties[0]?.content || 'Not set — click Edit to define your warranty policy'}</p>
                 )}
               </div>
 
@@ -778,7 +905,7 @@ export default function KnowledgeCenterPage() {
                 {editingWarranties ? (
                   <textarea value={financingDraft.content} onChange={e => setFinancingDraft({ ...financingDraft, content: e.target.value })} rows={4} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none" />
                 ) : (
-                  <p className="text-sm text-gray-600 bg-gray-50 rounded-lg px-4 py-3">{financing[0]?.content || 'Not set â click Edit to define your financing terms'}</p>
+                  <p className="text-sm text-gray-600 bg-gray-50 rounded-lg px-4 py-3">{financing[0]?.content || 'Not set — click Edit to define your financing terms'}</p>
                 )}
               </div>
 
@@ -820,9 +947,9 @@ export default function KnowledgeCenterPage() {
         </div>
       )}
 
-      {/* ââââââââââââââââââââââââââââââââââââââââââââââââââ */}
-      {/* TAB 4 â FAQ                                      */}
-      {/* ââââââââââââââââââââââââââââââââââââââââââââââââââ */}
+      {/* ══════════════════════════════════════════════════ */}
+      {/* TAB 4 — FAQ                                      */}
+      {/* ══════════════════════════════════════════════════ */}
       {activeTab === 'faq' && (
         <div className="space-y-6">
           <div className="bg-white border border-gray-200 rounded-xl p-6">
@@ -890,6 +1017,233 @@ export default function KnowledgeCenterPage() {
                   <p className="text-xs mt-1">Click &quot;Add FAQ&quot; to create your first question and answer</p>
                 </div>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ══════════════════════════════════════════════════ */}
+      {/* TAB 5 — Sales Objections                         */}
+      {/* ══════════════════════════════════════════════════ */}
+      {activeTab === 'objections' && (
+        <div className="space-y-6">
+
+          {/* Summary Stats */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div className="bg-white border border-gray-200 rounded-xl p-4">
+              <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Total Objections</p>
+              <p className="text-2xl font-bold text-gray-900 mt-1">{objections.length}</p>
+              <p className="text-xs text-gray-400 mt-1">{objections.filter(o => o.status === 'new').length} new this month</p>
+            </div>
+            <div className="bg-white border border-gray-200 rounded-xl p-4">
+              <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Avg Win Rate</p>
+              <p className="text-2xl font-bold text-emerald-600 mt-1">{Math.round(objections.reduce((sum, o) => sum + o.winRate, 0) / objections.length)}%</p>
+              <p className="text-xs text-gray-400 mt-1">when objection is addressed</p>
+            </div>
+            <div className="bg-white border border-gray-200 rounded-xl p-4">
+              <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Most Common</p>
+              <p className="text-2xl font-bold text-red-600 mt-1"><Flame className="w-5 h-5 inline" /> Pricing</p>
+              <p className="text-xs text-gray-400 mt-1">{objections.filter(o => o.category === 'pricing').reduce((s, o) => s + o.occurrences, 0)} occurrences</p>
+            </div>
+            <div className="bg-white border border-gray-200 rounded-xl p-4">
+              <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Total Mentions</p>
+              <p className="text-2xl font-bold text-gray-900 mt-1">{objections.reduce((sum, o) => sum + o.occurrences, 0)}</p>
+              <p className="text-xs text-gray-400 mt-1">across all conversations</p>
+            </div>
+          </div>
+
+          {/* Filters & Search */}
+          <div className="bg-white border border-gray-200 rounded-xl p-4">
+            <div className="flex flex-col md:flex-row gap-3">
+              <div className="relative flex-1">
+                <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                <input
+                  value={objectionSearch}
+                  onChange={e => setObjectionSearch(e.target.value)}
+                  placeholder="Search objections and responses..."
+                  className="w-full pl-10 pr-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                />
+              </div>
+              <div className="flex gap-2">
+                <div className="flex items-center gap-2">
+                  <Filter className="w-4 h-4 text-gray-400" />
+                  <select
+                    value={objectionCategoryFilter}
+                    onChange={e => setObjectionCategoryFilter(e.target.value as ObjectionCategory | 'all')}
+                    className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none bg-white"
+                  >
+                    <option value="all">All Categories</option>
+                    {OBJECTION_CATEGORIES.map(c => (
+                      <option key={c.value} value={c.value}>{c.label}</option>
+                    ))}
+                  </select>
+                </div>
+                <select
+                  value={objectionStatusFilter}
+                  onChange={e => setObjectionStatusFilter(e.target.value as ObjectionStatus | 'all')}
+                  className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none bg-white"
+                >
+                  <option value="all">All Statuses</option>
+                  <option value="active">Active</option>
+                  <option value="new">New</option>
+                  <option value="resolved">Resolved</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          {/* Objections List */}
+          <div className="space-y-3">
+            {filteredObjections.sort((a, b) => b.occurrences - a.occurrences).map(obj => (
+              <div key={obj.id} className={`bg-white border rounded-xl overflow-hidden transition-all ${expandedObjection === obj.id ? 'border-indigo-300 shadow-md' : 'border-gray-200 hover:border-gray-300'}`}>
+                {/* Collapsed Header */}
+                <div
+                  className="flex items-center gap-4 px-5 py-4 cursor-pointer"
+                  onClick={() => setExpandedObjection(expandedObjection === obj.id ? null : obj.id)}
+                >
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    {expandedObjection === obj.id ? <ChevronDown className="w-4 h-4 text-gray-400" /> : <ChevronRight className="w-4 h-4 text-gray-400" />}
+                  </div>
+
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-semibold text-gray-900 truncate">&quot;{obj.objection}&quot;</p>
+                    <div className="flex items-center gap-3 mt-1.5 flex-wrap">
+                      <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${getCategoryStyle(obj.category)}`}>
+                        {getCategoryLabel(obj.category)}
+                      </span>
+                      {getTrendIcon(obj.trend)}
+                      <span className="text-xs text-gray-400 flex items-center gap-1">
+                        <MessageSquareWarning className="w-3 h-3" /> {obj.occurrences} mentions
+                      </span>
+                      <span className="text-xs text-gray-400 flex items-center gap-1">
+                        <Clock className="w-3 h-3" /> Last: {new Date(obj.lastSeen).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-4 flex-shrink-0">
+                    <div className="text-right">
+                      <p className="text-xs text-gray-500">Win Rate</p>
+                      <div className="flex items-center gap-1.5 mt-0.5">
+                        <div className="w-16 h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                          <div
+                            className={`h-full rounded-full ${obj.winRate >= 70 ? 'bg-emerald-500' : obj.winRate >= 50 ? 'bg-amber-500' : 'bg-red-500'}`}
+                            style={{ width: `${obj.winRate}%` }}
+                          />
+                        </div>
+                        <span className={`text-xs font-semibold ${obj.winRate >= 70 ? 'text-emerald-600' : obj.winRate >= 50 ? 'text-amber-600' : 'text-red-600'}`}>
+                          {obj.winRate}%
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Expanded Battle Card */}
+                {expandedObjection === obj.id && (
+                  <div className="border-t border-gray-100 px-5 py-5 space-y-5 bg-gray-50/50">
+
+                    {/* AI Recommended Response */}
+                    <div className="bg-white border border-indigo-200 rounded-xl p-5">
+                      <div className="flex items-center gap-2 mb-3">
+                        <Sparkles className="w-4 h-4 text-indigo-500" />
+                        <h4 className="text-sm font-semibold text-gray-900">AI Recommended Response</h4>
+                        <span className="text-xs bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full">Auto-generated</span>
+                      </div>
+                      <p className="text-sm text-gray-700 leading-relaxed">{obj.recommendedResponse}</p>
+                    </div>
+
+                    {/* Talk Track */}
+                    <div className="bg-white border border-gray-200 rounded-xl p-5">
+                      <div className="flex items-center gap-2 mb-3">
+                        <Target className="w-4 h-4 text-amber-500" />
+                        <h4 className="text-sm font-semibold text-gray-900">Talk Track</h4>
+                      </div>
+                      <p className="text-sm text-gray-600 leading-relaxed whitespace-pre-line">{obj.talkTrack}</p>
+                    </div>
+
+                    {/* Competitive Differentiators */}
+                    <div className="bg-white border border-gray-200 rounded-xl p-5">
+                      <div className="flex items-center gap-2 mb-3">
+                        <Swords className="w-4 h-4 text-red-500" />
+                        <h4 className="text-sm font-semibold text-gray-900">Key Differentiators</h4>
+                      </div>
+                      <div className="space-y-2">
+                        {obj.differentiators.map((d, i) => (
+                          <div key={i} className="flex items-start gap-2">
+                            <CheckCircle className="w-4 h-4 text-emerald-500 mt-0.5 flex-shrink-0" />
+                            <p className="text-sm text-gray-700">{d}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Supporting Evidence / Sources */}
+                    <div className="bg-white border border-gray-200 rounded-xl p-5">
+                      <div className="flex items-center gap-2 mb-3">
+                        <BookOpen className="w-4 h-4 text-purple-500" />
+                        <h4 className="text-sm font-semibold text-gray-900">Supporting Evidence</h4>
+                        <span className="text-xs text-gray-400">{obj.sources.length} sources</span>
+                      </div>
+                      <div className="space-y-3">
+                        {obj.sources.map((src, i) => (
+                          <div key={i} className={`border rounded-lg p-3 ${src.type === 'competitive' ? 'border-red-100 bg-red-50/30' : 'border-indigo-100 bg-indigo-50/30'}`}>
+                            <div className="flex items-center gap-2 mb-1">
+                              {src.type === 'competitive' ? (
+                                <Swords className="w-3.5 h-3.5 text-red-500" />
+                              ) : (
+                                <BookOpen className="w-3.5 h-3.5 text-indigo-500" />
+                              )}
+                              <span className="text-xs font-semibold text-gray-700">{src.title}</span>
+                              <span className={`text-xs px-1.5 py-0.5 rounded ${src.type === 'competitive' ? 'bg-red-100 text-red-600' : 'bg-indigo-100 text-indigo-600'}`}>
+                                {src.type === 'competitive' ? 'Competitive Set' : 'Knowledge Center'}
+                              </span>
+                            </div>
+                            <p className="text-xs text-gray-600 leading-relaxed">{src.excerpt}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Meta Info */}
+                    <div className="flex items-center justify-between text-xs text-gray-400 pt-2">
+                      <div className="flex items-center gap-4">
+                        <span>First seen: {new Date(obj.firstSeen).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}</span>
+                        <span>Last seen: {new Date(obj.lastSeen).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}</span>
+                        <span>{obj.occurrences} total occurrences</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button className="flex items-center gap-1 px-2 py-1 rounded hover:bg-gray-100 transition-colors text-gray-500 hover:text-emerald-600">
+                          <ThumbsUp className="w-3.5 h-3.5" /> Helpful
+                        </button>
+                        <button className="flex items-center gap-1 px-2 py-1 rounded hover:bg-gray-100 transition-colors text-gray-500 hover:text-red-600">
+                          <ThumbsDown className="w-3.5 h-3.5" /> Improve
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+
+            {filteredObjections.length === 0 && (
+              <div className="bg-white border border-gray-200 rounded-xl p-12 text-center text-gray-400">
+                <MessageSquareWarning className="w-10 h-10 mx-auto mb-3 opacity-50" />
+                <p className="text-sm font-medium">No objections match your filters</p>
+                <p className="text-xs mt-1">Try adjusting your search or filter criteria</p>
+              </div>
+            )}
+          </div>
+
+          {/* AI Learning Note */}
+          <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4 flex items-start gap-3">
+            <Sparkles className="w-5 h-5 text-indigo-500 mt-0.5 flex-shrink-0" />
+            <div>
+              <p className="text-sm font-medium text-indigo-900">AI-Powered Objection Intelligence</p>
+              <p className="text-xs text-indigo-700 mt-1">
+                Objections are automatically captured from lead conversations and enriched with responses from your Knowledge Center and Competitive Set.
+                The AI continuously learns which responses win deals and adjusts recommendations accordingly. Occurrence weights and trends update in real-time.
+              </p>
             </div>
           </div>
         </div>
