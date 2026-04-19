@@ -1,7 +1,6 @@
-import { healthCheck, generateMessage, classifyIntent, scoreConfidence, selectStrategy, MODELS } from "./services/ai.js";
 import { z } from "zod";
 import { router, publicProcedure, protectedProcedure } from "./trpc.js";
-import { TRPCError } from "@trpc/server";
+import { generateObjectionResponses, regenerateSingleField } from "./llm.js";
 
 // ============================================================================
 // CONTACTS ROUTER
@@ -547,565 +546,6 @@ const objectivesRouter = router({
     }),
 });
 
-
-// ============================================================================
-// CONVERSATIONS ROUTER (NEW)
-// ============================================================================
-const conversationsRouter = router({
-  list: protectedProcedure
-    .input(
-      z.object({
-        contactId: z.string().cuid().optional(),
-        channel: z.string().optional(),
-        status: z.string().optional(),
-        limit: z.number().int().positive().default(50),
-        offset: z.number().int().nonnegative().default(0),
-      })
-    )
-    .query(async ({ ctx, input }) => {
-      const where = {
-        tenantId: ctx.tenantId,
-        ...(input.contactId && { contactId: input.contactId }),
-        ...(input.channel && { channel: input.channel }),
-        ...(input.status && { status: input.status }),
-      };
-
-      const [conversations, total] = await Promise.all([
-        ctx.prisma.conversation.findMany({
-          where,
-          take: input.limit,
-          skip: input.offset,
-          orderBy: { createdAt: "desc" },
-          include: { messages: { take: 5, orderBy: { createdAt: "desc" } } },
-        }),
-        ctx.prisma.conversation.count({ where }),
-      ]);
-
-      return { conversations, total };
-    }),
-
-  getById: protectedProcedure
-    .input(z.object({ id: z.string().cuid() }))
-    .query(async ({ ctx, input }) => {
-      const conversation = await ctx.prisma.conversation.findUnique({
-        where: { id: input.id },
-        include: {
-          messages: {
-            orderBy: { createdAt: "asc" },
-          },
-        },
-      });
-
-      if (!conversation || conversation.tenantId !== ctx.tenantId) {
-        throw new TRPCError({ code: "NOT_FOUND" });
-      }
-
-      return conversation;
-    }),
-
-  create: protectedProcedure
-    .input(
-      z.object({
-        contactId: z.string().cuid(),
-        channel: z.string(),
-        status: z.string().default("open"),
-      })
-    )
-    .mutation(async ({ ctx, input }) => {
-      const contact = await ctx.prisma.contact.findUnique({
-        where: { id: input.contactId },
-      });
-
-      if (!contact || contact.tenantId !== ctx.tenantId) {
-        throw new TRPCError({ code: "NOT_FOUND" });
-      }
-
-      return ctx.prisma.conversation.create({
-        data: {
-          tenantId: ctx.tenantId,
-          contactId: input.contactId,
-          channel: input.channel,
-          status: input.status,
-          aiHandled: false,
-        },
-      });
-    }),
-
-  addMessage: protectedProcedure
-    .input(
-      z.object({
-        conversationId: z.string().cuid(),
-        senderId: z.string(),
-        senderType: z.enum(["human", "ai", "system"]),
-        content: z.string(),
-        metadata: z.record(z.any()).optional(),
-      })
-    )
-    .mutation(async ({ ctx, input }) => {
-      const conversation = await ctx.prisma.conversation.findUnique({
-        where: { id: input.conversationId },
-      });
-
-      if (!conversation || conversation.tenantId !== ctx.tenantId) {
-        throw new TRPCError({ code: "NOT_FOUND" });
-      }
-
-      return ctx.prisma.message.create({
-        data: {
-          conversationId: input.conversationId,
-          senderId: input.senderId,
-          senderType: input.senderType,
-          content: input.content,
-          channel: conversation.channel,
-          metadata: input.metadata || {},
-        },
-      });
-    }),
-
-  updateStatus: protectedProcedure
-    .input(
-      z.object({
-        id: z.string().cuid(),
-        status: z.string(),
-        aiHandled: z.boolean().optional(),
-      })
-    )
-    .mutation(async ({ ctx, input }) => {
-      const conversation = await ctx.prisma.conversation.findUnique({
-        where: { id: input.id },
-      });
-
-      if (!conversation || conversation.tenantId !== ctx.tenantId) {
-        throw new TRPCError({ code: "NOT_FOUND" });
-      }
-
-      const updateData: any = { status: input.status };
-      if (input.aiHandled !== undefined) {
-        updateData.aiHandled = input.aiHandled;
-      }
-
-      return ctx.prisma.conversation.update({
-        where: { id: input.id },
-        data: updateData,
-      });
-    }),
-});
-
-
-// ============================================================================
-// SETTINGS ROUTER (NEW)
-// ============================================================================
-const settingsRouter = router({
-  // ── AI Configuration ──
-  ai: router({
-    get: protectedProcedure.query(async ({ ctx }) => {
-      const tenant = await ctx.prisma.tenant.findUnique({
-        where: { id: ctx.tenantId },
-        select: {
-          confidenceThreshold: true,
-          autoApproveEnabled: true,
-          dailyActionLimit: true,
-          strategyPermissions: true,
-          guardrailSettings: true,
-          aiPermissions: true,
-        },
-      });
-      if (!tenant) {
-        throw new TRPCError({ code: "NOT_FOUND", message: "Tenant not found" });
-      }
-      return tenant;
-    }),
-
-    update: protectedProcedure
-      .input(
-        z.object({
-          confidenceThreshold: z.number().min(20).max(95).optional(),
-          autoApproveEnabled: z.boolean().optional(),
-          dailyActionLimit: z.number().min(1).optional(),
-          strategyPermissions: z.object({
-            directConversion: z.boolean(),
-            guidedAssistance: z.boolean(),
-            trustBuilding: z.boolean(),
-            reengagement: z.boolean(),
-          }).optional(),
-          guardrailSettings: z.object({
-            toneValidator: z.boolean(),
-            accuracyCheck: z.boolean(),
-            hallucinationFilter: z.boolean(),
-            complianceCheck: z.boolean(),
-            injectionDefense: z.boolean(),
-            confidenceGate: z.boolean(),
-          }).optional(),
-        })
-      )
-      .mutation(async ({ ctx, input }) => {
-        return ctx.prisma.tenant.update({
-          where: { id: ctx.tenantId },
-          data: {
-            ...(input.confidenceThreshold !== undefined && { confidenceThreshold: input.confidenceThreshold }),
-            ...(input.autoApproveEnabled !== undefined && { autoApproveEnabled: input.autoApproveEnabled }),
-            ...(input.dailyActionLimit !== undefined && { dailyActionLimit: input.dailyActionLimit }),
-            ...(input.strategyPermissions && { strategyPermissions: input.strategyPermissions }),
-            ...(input.guardrailSettings && { guardrailSettings: input.guardrailSettings }),
-          },
-          select: {
-            confidenceThreshold: true,
-            autoApproveEnabled: true,
-            dailyActionLimit: true,
-            strategyPermissions: true,
-            guardrailSettings: true,
-            aiPermissions: true,
-          },
-        });
-      }),
-  }),
-
-  // ── Channels ──
-  channels: router({
-    list: protectedProcedure.query(async ({ ctx }) => {
-      return ctx.prisma.communicationChannel.findMany({
-        where: { tenantId: ctx.tenantId },
-        orderBy: { type: "asc" },
-      });
-    }),
-
-    update: protectedProcedure
-      .input(
-        z.object({
-          type: z.enum(["email", "sms", "whatsapp"]),
-          provider: z.string().min(1),
-          config: z.record(z.unknown()).optional(),
-          status: z.enum(["connected", "disconnected", "error"]).optional(),
-        })
-      )
-      .mutation(async ({ ctx, input }) => {
-        return ctx.prisma.communicationChannel.upsert({
-          where: {
-            tenantId_type: {
-              tenantId: ctx.tenantId,
-              type: input.type,
-            },
-          },
-          create: {
-            tenantId: ctx.tenantId,
-            type: input.type,
-            provider: input.provider,
-            config: input.config || {},
-            status: input.status || "disconnected",
-          },
-          update: {
-            provider: input.provider,
-            ...(input.config && { config: input.config }),
-            ...(input.status && { status: input.status }),
-          },
-        });
-      }),
-
-    testConnection: protectedProcedure
-      .input(z.object({ type: z.enum(["email", "sms", "whatsapp"]) }))
-      .mutation(async ({ ctx, input }) => {
-        await ctx.prisma.communicationChannel.updateMany({
-          where: { tenantId: ctx.tenantId, type: input.type },
-          data: { lastTestedAt: new Date() },
-        });
-        return { success: true, message: `Connection test successful for ${input.type}` };
-      }),
-  }),
-
-  // ── Integrations ──
-  integrations: router({
-    list: protectedProcedure.query(async ({ ctx }) => {
-      return ctx.prisma.integration.findMany({
-        where: { tenantId: ctx.tenantId },
-        orderBy: { provider: "asc" },
-      });
-    }),
-
-    connect: protectedProcedure
-      .input(
-        z.object({
-          provider: z.string().min(1),
-          category: z.enum(["crm", "payments", "calendar", "commerce", "other"]),
-          config: z.record(z.unknown()).optional(),
-        })
-      )
-      .mutation(async ({ ctx, input }) => {
-        return ctx.prisma.integration.upsert({
-          where: {
-            tenantId_provider: {
-              tenantId: ctx.tenantId,
-              provider: input.provider,
-            },
-          },
-          create: {
-            tenantId: ctx.tenantId,
-            provider: input.provider,
-            category: input.category,
-            config: input.config || {},
-            status: "connected",
-            lastSyncAt: new Date(),
-          },
-          update: {
-            config: input.config || {},
-            status: "connected",
-            lastSyncAt: new Date(),
-          },
-        });
-      }),
-
-    disconnect: protectedProcedure
-      .input(z.object({ id: z.string().uuid() }))
-      .mutation(async ({ ctx, input }) => {
-        const existing = await ctx.prisma.integration.findFirst({
-          where: { id: input.id, tenantId: ctx.tenantId },
-        });
-        if (!existing) throw new TRPCError({ code: "NOT_FOUND" });
-        return ctx.prisma.integration.update({
-          where: { id: input.id },
-          data: { status: "disconnected" },
-        });
-      }),
-
-    sync: protectedProcedure
-      .input(z.object({ id: z.string().uuid() }))
-      .mutation(async ({ ctx, input }) => {
-        const existing = await ctx.prisma.integration.findFirst({
-          where: { id: input.id, tenantId: ctx.tenantId },
-        });
-        if (!existing) throw new TRPCError({ code: "NOT_FOUND" });
-        return ctx.prisma.integration.update({
-          where: { id: input.id },
-          data: { lastSyncAt: new Date(), status: "connected" },
-        });
-      }),
-  }),
-
-  // ── Team & Roles ──
-  team: router({
-    list: protectedProcedure.query(async ({ ctx }) => {
-      const [members, invitations] = await Promise.all([
-        ctx.prisma.teamMember.findMany({
-          where: { tenantId: ctx.tenantId, active: true },
-          orderBy: { createdAt: "asc" },
-        }),
-        ctx.prisma.invitation.findMany({
-          where: { tenantId: ctx.tenantId, status: "pending" },
-          orderBy: { createdAt: "desc" },
-        }),
-      ]);
-      return { members, invitations };
-    }),
-
-    invite: protectedProcedure
-      .input(
-        z.object({
-          email: z.string().email(),
-          role: z.enum(["owner", "admin", "agent", "viewer"]).default("viewer"),
-        })
-      )
-      .mutation(async ({ ctx, input }) => {
-        const expiresAt = new Date();
-        expiresAt.setDate(expiresAt.getDate() + 7);
-        return ctx.prisma.invitation.upsert({
-          where: {
-            tenantId_email: {
-              tenantId: ctx.tenantId,
-              email: input.email,
-            },
-          },
-          create: {
-            tenantId: ctx.tenantId,
-            email: input.email,
-            role: input.role,
-            invitedBy: ctx.tenantId,
-            expiresAt,
-          },
-          update: {
-            role: input.role,
-            status: "pending",
-            expiresAt,
-          },
-        });
-      }),
-
-    updateRole: protectedProcedure
-      .input(
-        z.object({
-          id: z.string().uuid(),
-          role: z.enum(["owner", "admin", "agent", "viewer"]),
-        })
-      )
-      .mutation(async ({ ctx, input }) => {
-        const member = await ctx.prisma.teamMember.findFirst({
-          where: { id: input.id, tenantId: ctx.tenantId },
-        });
-        if (!member) throw new TRPCError({ code: "NOT_FOUND" });
-        return ctx.prisma.teamMember.update({
-          where: { id: input.id },
-          data: { role: input.role },
-        });
-      }),
-
-    remove: protectedProcedure
-      .input(z.object({ id: z.string().uuid() }))
-      .mutation(async ({ ctx, input }) => {
-        const member = await ctx.prisma.teamMember.findFirst({
-          where: { id: input.id, tenantId: ctx.tenantId },
-        });
-        if (!member) throw new TRPCError({ code: "NOT_FOUND" });
-        return ctx.prisma.teamMember.update({
-          where: { id: input.id },
-          data: { active: false },
-        });
-      }),
-
-    cancelInvite: protectedProcedure
-      .input(z.object({ id: z.string().uuid() }))
-      .mutation(async ({ ctx, input }) => {
-        const inv = await ctx.prisma.invitation.findFirst({
-          where: { id: input.id, tenantId: ctx.tenantId },
-        });
-        if (!inv) throw new TRPCError({ code: "NOT_FOUND" });
-        return ctx.prisma.invitation.update({
-          where: { id: input.id },
-          data: { status: "cancelled" },
-        });
-      }),
-  }),
-
-  // ── Notifications ──
-  notifications: router({
-    get: protectedProcedure.query(async ({ ctx }) => {
-      const prefs = await ctx.prisma.notificationPreference.findMany({
-        where: { tenantId: ctx.tenantId },
-      });
-      const result: Record<string, boolean> = {
-        escalation: true,
-        daily_digest: true,
-        weekly_report: true,
-        brain_update: false,
-      };
-      for (const p of prefs) {
-        result[p.type] = p.enabled;
-      }
-      return result;
-    }),
-
-    update: protectedProcedure
-      .input(
-        z.object({
-          type: z.enum(["escalation", "daily_digest", "weekly_report", "brain_update"]),
-          enabled: z.boolean(),
-        })
-      )
-      .mutation(async ({ ctx, input }) => {
-        const userId = ctx.tenantId;
-        await ctx.prisma.notificationPreference.upsert({
-          where: {
-            tenantId_userId_type: {
-              tenantId: ctx.tenantId,
-              userId: userId,
-              type: input.type,
-            },
-          },
-          create: {
-            tenantId: ctx.tenantId,
-            userId: userId,
-            type: input.type,
-            enabled: input.enabled,
-          },
-          update: {
-            enabled: input.enabled,
-          },
-        });
-        const prefs = await ctx.prisma.notificationPreference.findMany({
-          where: { tenantId: ctx.tenantId },
-        });
-        const result: Record<string, boolean> = {
-          escalation: true,
-          daily_digest: true,
-          weekly_report: true,
-          brain_update: false,
-        };
-        for (const p of prefs) {
-          result[p.type] = p.enabled;
-        }
-        return result;
-      }),
-  }),
-
-  // ── Security ──
-  security: router({
-    get: protectedProcedure.query(async ({ ctx }) => {
-      let setting = await ctx.prisma.securitySetting.findUnique({
-        where: { tenantId: ctx.tenantId },
-      });
-      if (!setting) {
-        setting = await ctx.prisma.securitySetting.create({
-          data: { tenantId: ctx.tenantId },
-        });
-      }
-      return setting;
-    }),
-
-    update: protectedProcedure
-      .input(
-        z.object({
-          twoFactorEnabled: z.boolean().optional(),
-          ssoEnabled: z.boolean().optional(),
-          ssoProvider: z.string().nullable().optional(),
-          ssoConfig: z.record(z.unknown()).optional(),
-          auditRetentionDays: z.number().min(30).max(3650).optional(),
-          gdprCompliant: z.boolean().optional(),
-        })
-      )
-      .mutation(async ({ ctx, input }) => {
-        return ctx.prisma.securitySetting.upsert({
-          where: { tenantId: ctx.tenantId },
-          create: {
-            tenantId: ctx.tenantId,
-            ...input,
-          },
-          update: input,
-        });
-      }),
-
-    getAuditLog: protectedProcedure
-      .input(
-        z.object({
-          page: z.number().min(1).default(1),
-          limit: z.number().min(1).max(100).default(20),
-          actionType: z.string().optional(),
-        })
-      )
-      .query(async ({ ctx, input }) => {
-        const skip = (input.page - 1) * input.limit;
-        const where = {
-          tenantId: ctx.tenantId,
-          ...(input.actionType && { actionType: input.actionType }),
-        };
-        const [logs, total] = await Promise.all([
-          ctx.prisma.auditLog.findMany({
-            where,
-            orderBy: { createdAt: "desc" },
-            skip,
-            take: input.limit,
-          }),
-          ctx.prisma.auditLog.count({ where }),
-        ]);
-        return {
-          logs,
-          pagination: {
-            page: input.page,
-            limit: input.limit,
-            total,
-            pages: Math.ceil(total / input.limit),
-          },
-        };
-      }),
-  }),
-});
-
 // ============================================================================
 // DASHBOARD ROUTER
 // ============================================================================
@@ -1150,7 +590,7 @@ const dashboardRouter = router({
     // Calculate escalation rate
     const totalEscalations = escalations.length;
     const resolvedEscalations = escalations.filter(
-      (e: any) => e.status === "resolved"
+      (e) => e.status === "resolved"
     ).length;
     const escalationRate =
       totalEscalations > 0 ? (resolvedEscalations / totalEscalations) * 100 : 0;
@@ -1171,127 +611,429 @@ const dashboardRouter = router({
 // ============================================================================
 
 const knowledgeRouter = router({
+  // ---- Company Info (one per tenant) ----
   getCompanyInfo: protectedProcedure.query(async ({ ctx }) => {
-    let info = await ctx.prisma.companyInfo.findUnique({ where: { tenantId: ctx.tenantId } });
-    if (!info) { info = await ctx.prisma.companyInfo.create({ data: { tenantId: ctx.tenantId } }); }
+    let info = await ctx.prisma.companyInfo.findUnique({
+      where: { tenantId: ctx.tenantId },
+    });
+
+    // Auto-create if missing
+    if (!info) {
+      info = await ctx.prisma.companyInfo.create({
+        data: { tenantId: ctx.tenantId },
+      });
+    }
+
     return info;
   }),
 
   updateCompanyInfo: protectedProcedure
-    .input(z.object({ vision: z.string().optional(), mission: z.string().optional(), websiteUrl: z.string().url().optional().nullable() }))
+    .input(
+      z.object({
+        vision: z.string().optional(),
+        mission: z.string().optional(),
+        websiteUrl: z.string().url().optional().nullable(),
+      })
+    )
     .mutation(async ({ ctx, input }) => {
-      return ctx.prisma.companyInfo.upsert({ where: { tenantId: ctx.tenantId }, update: input, create: { tenantId: ctx.tenantId, ...input } });
+      return ctx.prisma.companyInfo.upsert({
+        where: { tenantId: ctx.tenantId },
+        update: input,
+        create: {
+          tenantId: ctx.tenantId,
+          ...input,
+        },
+      });
     }),
 
+  // ---- Products ----
   listProducts: protectedProcedure
-    .input(z.object({ page: z.number().min(1).default(1), limit: z.number().min(1).max(100).default(20), category: z.string().optional(), search: z.string().optional() }))
+    .input(
+      z.object({
+        page: z.number().min(1).default(1),
+        limit: z.number().min(1).max(100).default(20),
+        category: z.string().optional(),
+        search: z.string().optional(),
+      })
+    )
     .query(async ({ ctx, input }) => {
       const skip = (input.page - 1) * input.limit;
-      const where = { tenantId: ctx.tenantId, active: true, ...(input.category && { category: input.category }), ...(input.search && { OR: [{ name: { contains: input.search, mode: "insensitive" as const } }, { sku: { contains: input.search, mode: "insensitive" as const } }] }) };
-      const [products, total] = await Promise.all([ctx.prisma.product.findMany({ where, skip, take: input.limit, orderBy: { createdAt: "desc" } }), ctx.prisma.product.count({ where })]);
-      return { products, pagination: { page: input.page, limit: input.limit, total, pages: Math.ceil(total / input.limit) } };
+
+      const where = {
+        tenantId: ctx.tenantId,
+        active: true,
+        ...(input.category && { category: input.category }),
+        ...(input.search && {
+          OR: [
+            { name: { contains: input.search, mode: "insensitive" as const } },
+            { sku: { contains: input.search, mode: "insensitive" as const } },
+          ],
+        }),
+      };
+
+      const [products, total] = await Promise.all([
+        ctx.prisma.product.findMany({
+          where,
+          skip,
+          take: input.limit,
+          orderBy: { createdAt: "desc" },
+        }),
+        ctx.prisma.product.count({ where }),
+      ]);
+
+      return {
+        products,
+        pagination: {
+          page: input.page,
+          limit: input.limit,
+          total,
+          pages: Math.ceil(total / input.limit),
+        },
+      };
     }),
 
   createProduct: protectedProcedure
-    .input(z.object({ name: z.string().min(1), category: z.string().optional(), price: z.string().optional(), description: z.string().optional(), sku: z.string().optional() }))
-    .mutation(async ({ ctx, input }) => { return ctx.prisma.product.create({ data: { ...input, tenantId: ctx.tenantId } }); }),
+    .input(
+      z.object({
+        name: z.string().min(1),
+        category: z.string().optional(),
+        price: z.string().optional(),
+        description: z.string().optional(),
+        sku: z.string().optional(),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      return ctx.prisma.product.create({
+        data: {
+          ...input,
+          tenantId: ctx.tenantId,
+        },
+      });
+    }),
 
   updateProduct: protectedProcedure
-    .input(z.object({ id: z.string().uuid(), name: z.string().optional(), category: z.string().optional(), price: z.string().optional(), description: z.string().optional(), sku: z.string().optional(), active: z.boolean().optional() }))
+    .input(
+      z.object({
+        id: z.string().uuid(),
+        name: z.string().optional(),
+        category: z.string().optional(),
+        price: z.string().optional(),
+        description: z.string().optional(),
+        sku: z.string().optional(),
+        active: z.boolean().optional(),
+      })
+    )
     .mutation(async ({ ctx, input }) => {
       const { id, ...data } = input;
-      const existing = await ctx.prisma.product.findFirst({ where: { id, tenantId: ctx.tenantId } });
-      if (!existing) throw new Error("Product not found");
-      return ctx.prisma.product.update({ where: { id }, data });
+
+      const existing = await ctx.prisma.product.findFirst({
+        where: { id, tenantId: ctx.tenantId },
+      });
+
+      if (!existing) {
+        throw new Error("Product not found");
+      }
+
+      return ctx.prisma.product.update({
+        where: { id },
+        data,
+      });
     }),
 
   deleteProduct: protectedProcedure
     .input(z.object({ id: z.string().uuid() }))
     .mutation(async ({ ctx, input }) => {
-      const existing = await ctx.prisma.product.findFirst({ where: { id: input.id, tenantId: ctx.tenantId } });
-      if (!existing) throw new Error("Product not found");
-      return ctx.prisma.product.update({ where: { id: input.id }, data: { active: false } });
+      const existing = await ctx.prisma.product.findFirst({
+        where: { id: input.id, tenantId: ctx.tenantId },
+      });
+
+      if (!existing) {
+        throw new Error("Product not found");
+      }
+
+      return ctx.prisma.product.update({
+        where: { id: input.id },
+        data: { active: false },
+      });
     }),
 
+  // ---- Policy Rules (warranties, financing, rules) ----
   listPolicies: protectedProcedure
-    .input(z.object({ category: z.enum(["warranty", "financing", "rule"]).optional(), page: z.number().min(1).default(1), limit: z.number().min(1).max(100).default(50) }))
+    .input(
+      z.object({
+        category: z.enum(["warranty", "financing", "rule"]).optional(),
+        page: z.number().min(1).default(1),
+        limit: z.number().min(1).max(100).default(50),
+      })
+    )
     .query(async ({ ctx, input }) => {
       const skip = (input.page - 1) * input.limit;
-      const where = { tenantId: ctx.tenantId, active: true, ...(input.category && { category: input.category }) };
-      const [policies, total] = await Promise.all([ctx.prisma.policyRule.findMany({ where, skip, take: input.limit, orderBy: { sortOrder: "asc" } }), ctx.prisma.policyRule.count({ where })]);
-      return { policies, pagination: { page: input.page, limit: input.limit, total, pages: Math.ceil(total / input.limit) } };
+
+      const where = {
+        tenantId: ctx.tenantId,
+        active: true,
+        ...(input.category && { category: input.category }),
+      };
+
+      const [policies, total] = await Promise.all([
+        ctx.prisma.policyRule.findMany({
+          where,
+          skip,
+          take: input.limit,
+          orderBy: { sortOrder: "asc" },
+        }),
+        ctx.prisma.policyRule.count({ where }),
+      ]);
+
+      return {
+        policies,
+        pagination: {
+          page: input.page,
+          limit: input.limit,
+          total,
+          pages: Math.ceil(total / input.limit),
+        },
+      };
     }),
 
   createPolicy: protectedProcedure
-    .input(z.object({ category: z.enum(["warranty", "financing", "rule"]), title: z.string().min(1), content: z.string().min(1), sortOrder: z.number().default(0) }))
-    .mutation(async ({ ctx, input }) => { return ctx.prisma.policyRule.create({ data: { ...input, tenantId: ctx.tenantId } }); }),
+    .input(
+      z.object({
+        category: z.enum(["warranty", "financing", "rule"]),
+        title: z.string().min(1),
+        content: z.string().min(1),
+        sortOrder: z.number().default(0),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      return ctx.prisma.policyRule.create({
+        data: {
+          ...input,
+          tenantId: ctx.tenantId,
+        },
+      });
+    }),
 
   updatePolicy: protectedProcedure
-    .input(z.object({ id: z.string().uuid(), category: z.enum(["warranty", "financing", "rule"]).optional(), title: z.string().optional(), content: z.string().optional(), sortOrder: z.number().optional(), active: z.boolean().optional() }))
+    .input(
+      z.object({
+        id: z.string().uuid(),
+        category: z.enum(["warranty", "financing", "rule"]).optional(),
+        title: z.string().optional(),
+        content: z.string().optional(),
+        sortOrder: z.number().optional(),
+        active: z.boolean().optional(),
+      })
+    )
     .mutation(async ({ ctx, input }) => {
       const { id, ...data } = input;
-      const existing = await ctx.prisma.policyRule.findFirst({ where: { id, tenantId: ctx.tenantId } });
-      if (!existing) throw new Error("Policy not found");
-      return ctx.prisma.policyRule.update({ where: { id }, data });
+
+      const existing = await ctx.prisma.policyRule.findFirst({
+        where: { id, tenantId: ctx.tenantId },
+      });
+
+      if (!existing) {
+        throw new Error("Policy not found");
+      }
+
+      return ctx.prisma.policyRule.update({
+        where: { id },
+        data,
+      });
     }),
 
   deletePolicy: protectedProcedure
     .input(z.object({ id: z.string().uuid() }))
     .mutation(async ({ ctx, input }) => {
-      const existing = await ctx.prisma.policyRule.findFirst({ where: { id: input.id, tenantId: ctx.tenantId } });
-      if (!existing) throw new Error("Policy not found");
-      return ctx.prisma.policyRule.update({ where: { id: input.id }, data: { active: false } });
+      const existing = await ctx.prisma.policyRule.findFirst({
+        where: { id: input.id, tenantId: ctx.tenantId },
+      });
+
+      if (!existing) {
+        throw new Error("Policy not found");
+      }
+
+      return ctx.prisma.policyRule.update({
+        where: { id: input.id },
+        data: { active: false },
+      });
     }),
 
+  // ---- FAQs ----
   listFAQs: protectedProcedure
-    .input(z.object({ page: z.number().min(1).default(1), limit: z.number().min(1).max(100).default(50), search: z.string().optional() }))
+    .input(
+      z.object({
+        page: z.number().min(1).default(1),
+        limit: z.number().min(1).max(100).default(50),
+        search: z.string().optional(),
+      })
+    )
     .query(async ({ ctx, input }) => {
       const skip = (input.page - 1) * input.limit;
-      const where = { tenantId: ctx.tenantId, active: true, ...(input.search && { OR: [{ question: { contains: input.search, mode: "insensitive" as const } }, { answer: { contains: input.search, mode: "insensitive" as const } }] }) };
-      const [faqs, total] = await Promise.all([ctx.prisma.fAQ.findMany({ where, skip, take: input.limit, orderBy: { sortOrder: "asc" } }), ctx.prisma.fAQ.count({ where })]);
-      return { faqs, pagination: { page: input.page, limit: input.limit, total, pages: Math.ceil(total / input.limit) } };
+
+      const where = {
+        tenantId: ctx.tenantId,
+        active: true,
+        ...(input.search && {
+          OR: [
+            { question: { contains: input.search, mode: "insensitive" as const } },
+            { answer: { contains: input.search, mode: "insensitive" as const } },
+          ],
+        }),
+      };
+
+      const [faqs, total] = await Promise.all([
+        ctx.prisma.fAQ.findMany({
+          where,
+          skip,
+          take: input.limit,
+          orderBy: { sortOrder: "asc" },
+        }),
+        ctx.prisma.fAQ.count({ where }),
+      ]);
+
+      return {
+        faqs,
+        pagination: {
+          page: input.page,
+          limit: input.limit,
+          total,
+          pages: Math.ceil(total / input.limit),
+        },
+      };
     }),
 
   createFAQ: protectedProcedure
-    .input(z.object({ question: z.string().min(1), answer: z.string().min(1), sortOrder: z.number().default(0) }))
-    .mutation(async ({ ctx, input }) => { return ctx.prisma.fAQ.create({ data: { ...input, tenantId: ctx.tenantId } }); }),
+    .input(
+      z.object({
+        question: z.string().min(1),
+        answer: z.string().min(1),
+        sortOrder: z.number().default(0),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      return ctx.prisma.fAQ.create({
+        data: {
+          ...input,
+          tenantId: ctx.tenantId,
+        },
+      });
+    }),
 
   updateFAQ: protectedProcedure
-    .input(z.object({ id: z.string().uuid(), question: z.string().optional(), answer: z.string().optional(), sortOrder: z.number().optional(), active: z.boolean().optional() }))
+    .input(
+      z.object({
+        id: z.string().uuid(),
+        question: z.string().optional(),
+        answer: z.string().optional(),
+        sortOrder: z.number().optional(),
+        active: z.boolean().optional(),
+      })
+    )
     .mutation(async ({ ctx, input }) => {
       const { id, ...data } = input;
-      const existing = await ctx.prisma.fAQ.findFirst({ where: { id, tenantId: ctx.tenantId } });
-      if (!existing) throw new Error("FAQ not found");
-      return ctx.prisma.fAQ.update({ where: { id }, data });
+
+      const existing = await ctx.prisma.fAQ.findFirst({
+        where: { id, tenantId: ctx.tenantId },
+      });
+
+      if (!existing) {
+        throw new Error("FAQ not found");
+      }
+
+      return ctx.prisma.fAQ.update({
+        where: { id },
+        data,
+      });
     }),
 
   deleteFAQ: protectedProcedure
     .input(z.object({ id: z.string().uuid() }))
     .mutation(async ({ ctx, input }) => {
-      const existing = await ctx.prisma.fAQ.findFirst({ where: { id: input.id, tenantId: ctx.tenantId } });
-      if (!existing) throw new Error("FAQ not found");
-      return ctx.prisma.fAQ.update({ where: { id: input.id }, data: { active: false } });
+      const existing = await ctx.prisma.fAQ.findFirst({
+        where: { id: input.id, tenantId: ctx.tenantId },
+      });
+
+      if (!existing) {
+        throw new Error("FAQ not found");
+      }
+
+      return ctx.prisma.fAQ.update({
+        where: { id: input.id },
+        data: { active: false },
+      });
     }),
 
+  // ---- Knowledge Documents ----
   listDocuments: protectedProcedure
-    .input(z.object({ page: z.number().min(1).default(1), limit: z.number().min(1).max(100).default(20), type: z.string().optional() }))
+    .input(
+      z.object({
+        page: z.number().min(1).default(1),
+        limit: z.number().min(1).max(100).default(20),
+        type: z.string().optional(),
+      })
+    )
     .query(async ({ ctx, input }) => {
       const skip = (input.page - 1) * input.limit;
-      const where = { tenantId: ctx.tenantId, ...(input.type && { type: input.type }) };
-      const [documents, total] = await Promise.all([ctx.prisma.knowledgeDocument.findMany({ where, skip, take: input.limit, orderBy: { uploadedAt: "desc" } }), ctx.prisma.knowledgeDocument.count({ where })]);
-      return { documents, pagination: { page: input.page, limit: input.limit, total, pages: Math.ceil(total / input.limit) } };
+
+      const where = {
+        tenantId: ctx.tenantId,
+        ...(input.type && { type: input.type }),
+      };
+
+      const [documents, total] = await Promise.all([
+        ctx.prisma.knowledgeDocument.findMany({
+          where,
+          skip,
+          take: input.limit,
+          orderBy: { uploadedAt: "desc" },
+        }),
+        ctx.prisma.knowledgeDocument.count({ where }),
+      ]);
+
+      return {
+        documents,
+        pagination: {
+          page: input.page,
+          limit: input.limit,
+          total,
+          pages: Math.ceil(total / input.limit),
+        },
+      };
     }),
 
   createDocument: protectedProcedure
-    .input(z.object({ name: z.string().min(1), type: z.string().min(1), sizeBytes: z.number().default(0), gcsPath: z.string().optional() }))
-    .mutation(async ({ ctx, input }) => { return ctx.prisma.knowledgeDocument.create({ data: { ...input, tenantId: ctx.tenantId } }); }),
+    .input(
+      z.object({
+        name: z.string().min(1),
+        type: z.string().min(1),
+        sizeBytes: z.number().default(0),
+        gcsPath: z.string().optional(),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      return ctx.prisma.knowledgeDocument.create({
+        data: {
+          ...input,
+          tenantId: ctx.tenantId,
+        },
+      });
+    }),
 
   deleteDocument: protectedProcedure
     .input(z.object({ id: z.string().uuid() }))
     .mutation(async ({ ctx, input }) => {
-      const existing = await ctx.prisma.knowledgeDocument.findFirst({ where: { id: input.id, tenantId: ctx.tenantId } });
-      if (!existing) throw new Error("Document not found");
-      return ctx.prisma.knowledgeDocument.delete({ where: { id: input.id } });
+      const existing = await ctx.prisma.knowledgeDocument.findFirst({
+        where: { id: input.id, tenantId: ctx.tenantId },
+      });
+
+      if (!existing) {
+        throw new Error("Document not found");
+      }
+
+      return ctx.prisma.knowledgeDocument.delete({
+        where: { id: input.id },
+      });
     }),
 });
 
@@ -1623,73 +1365,479 @@ const competitorsRouter = router({
     };
   }),
 });
-// ============================================================================
 
 // ============================================================================
-// AI ROUTER — LLM service layer (Anthropic Claude)
+// SALES OBJECTIONS ROUTER
 // ============================================================================
-const aiRouter = router({
-  // Health check — verify Anthropic API connectivity (public, no auth needed)
-  health: publicProcedure.query(async () => {
-    return healthCheck();
-  }),
 
-  // Generate a customer-facing message (Communication Agent)
-  generateMessage: protectedProcedure
+const salesObjectionsRouter = router({
+  // ---- List all objections for the tenant ----
+  list: protectedProcedure
     .input(
       z.object({
-        contactName: z.string().min(1),
-        objective: z.string().min(1),
-        context: z.string().min(1),
-        channel: z.enum(["email", "sms", "whatsapp"]),
-        tone: z.string().optional(),
+        page: z.number().min(1).default(1),
+        limit: z.number().min(1).max(100).default(20),
+        search: z.string().optional(),
+        category: z
+          .enum([
+            "pricing",
+            "competition",
+            "trust",
+            "timing",
+            "product",
+            "authority",
+            "need",
+            "other",
+          ])
+          .optional(),
+        status: z
+          .enum(["auto_generated", "edited", "approved", "archived"])
+          .optional(),
       })
     )
-    .mutation(async ({ input }) => {
-      return generateMessage(input);
+    .query(async ({ ctx, input }) => {
+      const skip = (input.page - 1) * input.limit;
+
+      const where = {
+        tenantId: ctx.tenantId,
+        active: true,
+        ...(input.category && { category: input.category }),
+        ...(input.search && {
+          objectionText: {
+            contains: input.search,
+            mode: "insensitive" as const,
+          },
+        }),
+      };
+
+      const [objections, total] = await Promise.all([
+        ctx.prisma.salesObjection.findMany({
+          where,
+          skip,
+          take: input.limit,
+          orderBy: { mentionCount: "desc" },
+          include: {
+            responses: {
+              where: {
+                version: {
+                  // Get latest version of each field via raw ordering
+                  gte: 1,
+                },
+              },
+              orderBy: { version: "desc" },
+            },
+          },
+        }),
+        ctx.prisma.salesObjection.count({ where }),
+      ]);
+
+      // Deduplicate responses to keep only latest version per field
+      const objectionsWithLatest = objections.map((obj) => {
+        const latestByField = new Map<string, (typeof obj.responses)[0]>();
+        for (const resp of obj.responses) {
+          if (!latestByField.has(resp.fieldName)) {
+            latestByField.set(resp.fieldName, resp);
+          }
+        }
+        return {
+          ...obj,
+          responses: Array.from(latestByField.values()),
+        };
+      });
+
+      return {
+        objections: objectionsWithLatest,
+        pagination: {
+          page: input.page,
+          limit: input.limit,
+          total,
+          pages: Math.ceil(total / input.limit),
+        },
+      };
     }),
 
-  // Classify inbound message intent (Ingestion Service)
-  classifyIntent: protectedProcedure
-    .input(z.object({ text: z.string().min(1) }))
-    .mutation(async ({ input }) => {
-      return classifyIntent(input.text);
+  // ---- Get single objection with full responses and edit history ----
+  getById: protectedProcedure
+    .input(z.object({ id: z.string().uuid() }))
+    .query(async ({ ctx, input }) => {
+      const objection = await ctx.prisma.salesObjection.findFirst({
+        where: {
+          id: input.id,
+          tenantId: ctx.tenantId,
+        },
+        include: {
+          responses: {
+            orderBy: { version: "desc" },
+            include: {
+              editHistory: {
+                orderBy: { editedAt: "desc" },
+                take: 10,
+              },
+            },
+          },
+        },
+      });
+
+      if (!objection) {
+        throw new Error("Sales objection not found");
+      }
+
+      return objection;
     }),
 
-  // Score confidence for a proposed action (Decision Engine)
-  scoreConfidence: protectedProcedure
-    .input(
-      z.object({
-        contactData: z.string().min(1),
-        objective: z.string().min(1),
-        proposedAction: z.string().min(1),
-      })
-    )
-    .mutation(async ({ input }) => {
-      return scoreConfidence(input);
-    }),
+  // ---- Dashboard stats ----
+  getStats: protectedProcedure.query(async ({ ctx }) => {
+    const where = { tenantId: ctx.tenantId, active: true };
 
-  // Select best strategy for a contact (Decision Engine)
-  selectStrategy: protectedProcedure
-    .input(
-      z.object({
-        contactContext: z.string().min(1),
-        objectiveGap: z.string().min(1),
-        availableStrategies: z.array(z.string()).min(1),
-      })
-    )
-    .mutation(async ({ input }) => {
-      return selectStrategy(input);
-    }),
+    const [total, objections] = await Promise.all([
+      ctx.prisma.salesObjection.count({ where }),
+      ctx.prisma.salesObjection.findMany({
+        where,
+        select: {
+          category: true,
+          winRate: true,
+          mentionCount: true,
+          lastMentionedAt: true,
+        },
+      }),
+    ]);
 
-  // Get available model info (public)
-  models: publicProcedure.query(() => {
+    // Calculate aggregate stats
+    const totalMentions = objections.reduce(
+      (sum, o) => sum + o.mentionCount,
+      0
+    );
+    const avgWinRate =
+      objections.length > 0
+        ? Math.round(
+            objections.reduce((sum, o) => sum + o.winRate, 0) /
+              objections.length
+          )
+        : 0;
+
+    // Find most common category
+    const categoryCount: Record<string, number> = {};
+    for (const o of objections) {
+      categoryCount[o.category] =
+        (categoryCount[o.category] || 0) + o.mentionCount;
+    }
+    const mostCommonCategory =
+      Object.entries(categoryCount).sort((a, b) => b[1] - a[1])[0]?.[0] ||
+      "none";
+
+    // Count new this month
+    const monthStart = new Date();
+    monthStart.setDate(1);
+    monthStart.setHours(0, 0, 0, 0);
+    const newThisMonth = await ctx.prisma.salesObjection.count({
+      where: { ...where, createdAt: { gte: monthStart } },
+    });
+
     return {
-      sonnet: { id: MODELS.SONNET, use: "Strategy selection, message generation, Brain synthesis" },
-      haiku: { id: MODELS.HAIKU, use: "Intent classification, confidence scoring, field mapping" },
+      total,
+      avgWinRate,
+      mostCommonCategory,
+      totalMentions,
+      newThisMonth,
     };
   }),
+
+  // ---- Create a new objection ----
+  create: protectedProcedure
+    .input(
+      z.object({
+        objectionText: z.string().min(1),
+        category: z
+          .enum([
+            "pricing",
+            "competition",
+            "trust",
+            "timing",
+            "product",
+            "authority",
+            "need",
+            "other",
+          ])
+          .default("other"),
+        mentionCount: z.number().default(1),
+        winRate: z.number().min(0).max(100).default(0),
+        generateResponses: z.boolean().default(true),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      const { generateResponses, ...data } = input;
+
+      const objection = await ctx.prisma.salesObjection.create({
+        data: {
+          ...data,
+          tenantId: ctx.tenantId,
+          lastMentionedAt: new Date(),
+        },
+      });
+
+      // Auto-generate AI responses if requested
+      if (generateResponses) {
+        try {
+          // Get company context for better responses
+          const companyInfo = await ctx.prisma.companyInfo.findUnique({
+            where: { tenantId: ctx.tenantId },
+          });
+          const products = await ctx.prisma.product.findMany({
+            where: { tenantId: ctx.tenantId, active: true },
+            take: 10,
+          });
+
+          const aiResponses = await generateObjectionResponses({
+            objectionText: input.objectionText,
+            category: input.category,
+            companyContext: {
+              vision: companyInfo?.vision || undefined,
+              mission: companyInfo?.mission || undefined,
+              products: products.map((p) => ({
+                name: p.name,
+                description: p.description || undefined,
+                price: p.price || undefined,
+              })),
+            },
+          });
+
+          // Store each response field
+          const fields = [
+            {
+              fieldName: "recommendedResponse",
+              content: aiResponses.recommendedResponse,
+            },
+            { fieldName: "talkTrack", content: aiResponses.talkTrack },
+            {
+              fieldName: "keyDifferentiators",
+              content: aiResponses.keyDifferentiators,
+            },
+          ];
+
+          await ctx.prisma.objectionResponse.createMany({
+            data: fields.map((f) => ({
+              objectionId: objection.id,
+              fieldName: f.fieldName,
+              content: f.content,
+              originalContent: f.content,
+              status: "auto_generated" as const,
+              llmModel: "claude-sonnet-4-20250514",
+              llmPromptVersion: "v1",
+              version: 1,
+            })),
+          });
+        } catch (error) {
+          console.error("Failed to generate AI responses:", error);
+          // Objection still created — responses can be generated later
+        }
+      }
+
+      // Return with responses
+      return ctx.prisma.salesObjection.findUnique({
+        where: { id: objection.id },
+        include: { responses: true },
+      });
+    }),
+
+  // ---- Update an objection response (inline edit) ----
+  updateResponse: protectedProcedure
+    .input(
+      z.object({
+        objectionId: z.string().uuid(),
+        fieldName: z.string(),
+        content: z.string().min(1),
+        editedBy: z.string().default("user"),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      // Verify tenant owns the objection
+      const objection = await ctx.prisma.salesObjection.findFirst({
+        where: { id: input.objectionId, tenantId: ctx.tenantId },
+      });
+
+      if (!objection) {
+        throw new Error("Sales objection not found");
+      }
+
+      // Find the current response for this field
+      const currentResponse = await ctx.prisma.objectionResponse.findFirst({
+        where: {
+          objectionId: input.objectionId,
+          fieldName: input.fieldName,
+        },
+        orderBy: { version: "desc" },
+      });
+
+      if (!currentResponse) {
+        throw new Error("Response field not found");
+      }
+
+      // Create edit history entry
+      await ctx.prisma.objectionEditHistory.create({
+        data: {
+          responseId: currentResponse.id,
+          previousContent: currentResponse.content,
+          newContent: input.content,
+          editedBy: input.editedBy,
+        },
+      });
+
+      // Update the response
+      return ctx.prisma.objectionResponse.update({
+        where: { id: currentResponse.id },
+        data: {
+          content: input.content,
+          status: "edited",
+          editedBy: input.editedBy,
+          editedAt: new Date(),
+        },
+      });
+    }),
+
+  // ---- Revert a response to original AI-generated content ----
+  revertResponse: protectedProcedure
+    .input(
+      z.object({
+        objectionId: z.string().uuid(),
+        fieldName: z.string(),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      const objection = await ctx.prisma.salesObjection.findFirst({
+        where: { id: input.objectionId, tenantId: ctx.tenantId },
+      });
+
+      if (!objection) {
+        throw new Error("Sales objection not found");
+      }
+
+      const response = await ctx.prisma.objectionResponse.findFirst({
+        where: {
+          objectionId: input.objectionId,
+          fieldName: input.fieldName,
+        },
+        orderBy: { version: "desc" },
+      });
+
+      if (!response || !response.originalContent) {
+        throw new Error("No original content to revert to");
+      }
+
+      // Log the revert in edit history
+      await ctx.prisma.objectionEditHistory.create({
+        data: {
+          responseId: response.id,
+          previousContent: response.content,
+          newContent: response.originalContent,
+          editedBy: "system:revert",
+        },
+      });
+
+      return ctx.prisma.objectionResponse.update({
+        where: { id: response.id },
+        data: {
+          content: response.originalContent,
+          status: "auto_generated",
+          editedBy: null,
+          editedAt: null,
+        },
+      });
+    }),
+
+  // ---- Regenerate AI response for a specific field ----
+  regenerateResponse: protectedProcedure
+    .input(
+      z.object({
+        objectionId: z.string().uuid(),
+        fieldName: z.string(),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      const objection = await ctx.prisma.salesObjection.findFirst({
+        where: { id: input.objectionId, tenantId: ctx.tenantId },
+      });
+
+      if (!objection) {
+        throw new Error("Sales objection not found");
+      }
+
+      // Get current content for context
+      const currentResponse = await ctx.prisma.objectionResponse.findFirst({
+        where: {
+          objectionId: input.objectionId,
+          fieldName: input.fieldName,
+        },
+        orderBy: { version: "desc" },
+      });
+
+      // Generate new content via LLM
+      const newContent = await regenerateSingleField(
+        objection.objectionText,
+        objection.category,
+        input.fieldName,
+        currentResponse?.content
+      );
+
+      if (currentResponse) {
+        // Log edit history
+        await ctx.prisma.objectionEditHistory.create({
+          data: {
+            responseId: currentResponse.id,
+            previousContent: currentResponse.content,
+            newContent,
+            editedBy: "ai:regenerate",
+          },
+        });
+
+        // Update existing response
+        return ctx.prisma.objectionResponse.update({
+          where: { id: currentResponse.id },
+          data: {
+            content: newContent,
+            originalContent: newContent,
+            status: "auto_generated",
+            llmModel: "claude-haiku-4-5-20251001",
+            editedBy: null,
+            editedAt: null,
+          },
+        });
+      } else {
+        // Create new response
+        return ctx.prisma.objectionResponse.create({
+          data: {
+            objectionId: input.objectionId,
+            fieldName: input.fieldName,
+            content: newContent,
+            originalContent: newContent,
+            status: "auto_generated",
+            llmModel: "claude-haiku-4-5-20251001",
+            llmPromptVersion: "v1",
+            version: 1,
+          },
+        });
+      }
+    }),
+
+  // ---- Delete (soft) an objection ----
+  delete: protectedProcedure
+    .input(z.object({ id: z.string().uuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const existing = await ctx.prisma.salesObjection.findFirst({
+        where: { id: input.id, tenantId: ctx.tenantId },
+      });
+
+      if (!existing) {
+        throw new Error("Sales objection not found");
+      }
+
+      return ctx.prisma.salesObjection.update({
+        where: { id: input.id },
+        data: { active: false },
+      });
+    }),
 });
+
+// ============================================================================
 // ROOT ROUTER
 // ============================================================================
 
@@ -1702,12 +1850,10 @@ export const appRouter = router({
   auditLog: auditLogRouter,
   brain: brainRouter,
   objectives: objectivesRouter,
-  conversations: conversationsRouter,
-  settings: settingsRouter,
   dashboard: dashboardRouter,
   knowledge: knowledgeRouter,
   competitors: competitorsRouter,
-  ai: aiRouter,
+  salesObjections: salesObjectionsRouter,
 });
 
 export type AppRouter = typeof appRouter;
