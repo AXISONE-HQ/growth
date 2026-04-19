@@ -8,72 +8,18 @@ import {
 } from 'lucide-react';
 import { useState, useEffect, useCallback } from 'react';
 import { settingsApi } from '@/lib/api';
+import type { AIConfig, ChannelRecord, IntegrationRecord, TeamMemberRecord, InvitationRecord, NotificationPrefs, SecurityConfig } from '@/lib/api';
 
-/* âââ Types matching API client ââââââââââââââââââââââââ */
-interface AIConfig {
-  confidenceThreshold: number;
-  autoApproveAboveThreshold: boolean;
-  dailyActionLimit: number;
-  enabledStrategies: string[];
-  guardrails: string[];
-}
-interface ChannelRecord {
-  id: string;
-  type: string;
-  provider: string;
-  enabled: boolean;
-  status: string;
-  config: Record<string, unknown>;
-}
-interface IntegrationRecord {
-  id: string;
-  name: string;
-  category: string;
-  status: string;
-  lastSyncAt: string | null;
-  config: Record<string, unknown>;
-}
-interface TeamMemberRecord {
-  id: string;
-  userId: string;
-  name: string;
-  email: string;
-  role: string;
-  status: string;
-  avatarUrl: string | null;
-}
-interface InvitationRecord {
-  id: string;
-  email: string;
-  role: string;
-  status: string;
-  expiresAt: string;
-}
-interface NotificationPrefs {
-  escalationAlerts: boolean;
-  dailyDigest: boolean;
-  weeklyReport: boolean;
-  brainUpdates: boolean;
-}
-interface SecurityConfig {
-  twoFactorRequired: boolean;
-  ssoEnabled: boolean;
-  ssoProvider: string | null;
-  dataEncryption: string;
-  auditLogRetentionDays: number;
-  gdprCompliant: boolean;
-  ipWhitelist: string[];
-}
 
 /* âââ Helpers âââââââââââââââââââââââââââââââââââââââââââ */
 const STRATEGY_META: Record<string, { name: string; desc: string }> = {
-  direct_conversion: { name: 'Direct Conversion', desc: 'Push toward conversion for high-intent contacts' },
-  guided_assistance: { name: 'Guided Assistance', desc: 'Educational approach for evaluating contacts' },
-  trust_building: { name: 'Trust Building', desc: 'Relationship-building for early-stage or at-risk contacts' },
-  re_engagement: { name: 'Re-engagement', desc: 'Win-back dormant or churned contacts' },
+  directConversion: { name: 'Direct Conversion', desc: 'Push toward conversion for high-intent contacts' },
+  guidedAssistance: { name: 'Guided Assistance', desc: 'Educational approach for evaluating contacts' },
+  trustBuilding: { name: 'Trust Building', desc: 'Relationship-building for early-stage or at-risk contacts' },
+  reengagement: { name: 'Re-engagement', desc: 'Win-back dormant or churned contacts' },
 };
 
-const ALL_STRATEGIES = Object.keys(STRATEGY_META);
+const ALL_STRATEGIES = Object.keys(STRATEGY_META) as Array<keyof AIConfig['strategyPermissions']>;
 
 const channelIcon: Record<string, typeof Mail> = { email: Mail, sms: Phone, whatsapp: MessageCircle };
 
@@ -157,9 +103,9 @@ export default function SettingsPage() {
           break;
         }
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error(`Settings load error (${tab}):`, e);
-      setError(e?.message ?? 'Failed to load settings');
+      setError(e instanceof Error ? e.message : 'Failed to load settings');
     } finally {
       setLoading(false);
     }
@@ -176,7 +122,7 @@ export default function SettingsPage() {
     try {
       await settingsApi.ai.update(aiConfig);
       flash('AI settings saved');
-    } catch (e: any) { setError(e?.message ?? 'Save failed'); }
+    } catch (e: unknown) { setError(e instanceof Error ? e.message : 'Save failed'); }
     finally { setSaving(false); }
   };
 
@@ -184,10 +130,21 @@ export default function SettingsPage() {
     if (!notifPrefs) return;
     setSaving(true);
     try {
-      await settingsApi.notifications.update(notifPrefs);
+      const prefMap: Record<string, boolean> = {
+        escalation: notifPrefs.escalation,
+        daily_digest: notifPrefs.daily_digest,
+        weekly_report: notifPrefs.weekly_report,
+        brain_update: notifPrefs.brain_update,
+      };
+      for (const [type, enabled] of Object.entries(prefMap)) {
+        await settingsApi.notifications.update({ type, enabled });
+      }
       flash('Notification preferences saved');
-    } catch (e: any) { setError(e?.message ?? 'Save failed'); }
-    finally { setSaving(false); }
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Save failed');
+    } finally {
+      setSaving(false);
+    }
   };
 
   const handleInvite = async () => {
@@ -198,7 +155,7 @@ export default function SettingsPage() {
       flash(`Invitation sent to ${inviteEmail}`);
       setInviteEmail('');
       loadTab('team');
-    } catch (e: any) { setError(e?.message ?? 'Invite failed'); }
+    } catch (e: unknown) { setError(e instanceof Error ? e.message : 'Invite failed'); }
     finally { setSaving(false); }
   };
 
@@ -213,12 +170,15 @@ export default function SettingsPage() {
   ];
 
   /* ââ Toggle helper for strategies âââââââââââ */
-  const toggleStrategy = (key: string) => {
+  const toggleStrategy = (key: keyof AIConfig['strategyPermissions']) => {
     if (!aiConfig) return;
-    const enabled = aiConfig.enabledStrategies.includes(key)
-      ? aiConfig.enabledStrategies.filter((s) => s !== key)
-      : [...aiConfig.enabledStrategies, key];
-    setAiConfig({ ...aiConfig, enabledStrategies: enabled });
+    setAiConfig({
+      ...aiConfig,
+      strategyPermissions: {
+        ...aiConfig.strategyPermissions,
+        [key]: !aiConfig.strategyPermissions[key],
+      },
+    });
   };
 
   return (
@@ -306,9 +266,9 @@ export default function SettingsPage() {
                   <div className="text-xs text-gray-500">Actions above {aiConfig.confidenceThreshold}% confidence execute without human review</div>
                 </div>
                 <button
-                  onClick={() => setAiConfig({ ...aiConfig, autoApproveAboveThreshold: !aiConfig.autoApproveAboveThreshold })}
+                  onClick={() => setAiConfig({ ...aiConfig, autoApproveEnabled: !aiConfig.autoApproveEnabled })}
                   className={`w-11 h-6 rounded-full transition-colors flex items-center ${
-                    aiConfig.autoApproveAboveThreshold ? 'bg-indigo-500 justify-end' : 'bg-gray-300 justify-start'
+                    aiConfig.autoApproveEnabled ? 'bg-indigo-500 justify-end' : 'bg-gray-300 justify-start'
                   }`}
                 >
                   <div className="w-5 h-5 bg-white rounded-full shadow mx-0.5" />
@@ -337,7 +297,7 @@ export default function SettingsPage() {
               <div className="flex flex-col gap-3">
                 {ALL_STRATEGIES.map((key) => {
                   const meta = STRATEGY_META[key];
-                  const enabled = aiConfig.enabledStrategies.includes(key);
+                  const enabled = aiConfig.strategyPermissions[key];
                   return (
                     <div key={key} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
                       <div>
@@ -440,10 +400,10 @@ export default function SettingsPage() {
                 <div key={int.id} className="flex items-center justify-between p-4 border border-gray-200 rounded-xl">
                   <div className="flex items-center gap-3">
                     <div className="w-10 h-10 bg-gray-50 rounded-lg flex items-center justify-center text-xl">
-                      {integrationIcons[int.name] ?? 'ð'}
+                      {integrationIcons[int.provider] ?? 'ð'}
                     </div>
                     <div>
-                      <div className="text-sm font-semibold text-gray-900">{int.name}</div>
+                      <div className="text-sm font-semibold text-gray-900">{int.provider}</div>
                       <div className="text-xs text-gray-500">{int.category}</div>
                     </div>
                   </div>
@@ -461,10 +421,10 @@ export default function SettingsPage() {
                       <button
                         onClick={async () => {
                           try {
-                            await settingsApi.integrations.connect(int.id);
+                            await settingsApi.integrations.connect({ provider: int.provider, category: int.category });
                             flash('Integration connected');
                             loadTab('integrations');
-                          } catch (e: any) { setError(e?.message ?? 'Connect failed'); }
+                          } catch (e: unknown) { setError(e instanceof Error ? e.message : 'Connect failed'); }
                         }}
                         className="text-xs bg-white border border-gray-200 text-gray-600 px-3 py-1.5 rounded-lg font-medium hover:bg-gray-50 transition-colors"
                       >
@@ -520,10 +480,10 @@ export default function SettingsPage() {
                 <div key={m.id} className="flex items-center justify-between p-4 border border-gray-200 rounded-xl">
                   <div className="flex items-center gap-3">
                     <div className="w-9 h-9 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center text-xs font-semibold">
-                      {m.name.split(' ').map((n) => n[0]).join('').slice(0, 2).toUpperCase()}
+                      {(m.name ?? m.email).split(' ').map((n: string) => n[0]).join('').slice(0, 2).toUpperCase()}
                     </div>
                     <div>
-                      <div className="text-sm font-medium text-gray-900">{m.name}</div>
+                      <div className="text-sm font-medium text-gray-900">{m.name ?? m.email}</div>
                       <div className="text-xs text-gray-500">{m.email}</div>
                     </div>
                   </div>
@@ -531,8 +491,8 @@ export default function SettingsPage() {
                     <span className={`text-[11px] px-2.5 py-1 rounded-full font-medium ${roleColors[m.role.toLowerCase()] ?? 'bg-gray-100 text-gray-600'}`}>
                       {m.role}
                     </span>
-                    {m.status === 'invited' && (
-                      <span className="text-[11px] text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full">Pending</span>
+                    {!m.active && (
+                      <span className="text-[11px] text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full">Inactive</span>
                     )}
                   </div>
                 </div>
@@ -557,10 +517,10 @@ export default function SettingsPage() {
                     <button
                       onClick={async () => {
                         try {
-                          await settingsApi.team.cancelInvite(inv.id);
+                          await settingsApi.team.cancelInvite({ id: inv.id });
                           flash('Invitation cancelled');
                           loadTab('team');
-                        } catch (e: any) { setError(e?.message ?? 'Cancel failed'); }
+                        } catch (e: unknown) { setError(e instanceof Error ? e.message : 'Cancel failed'); }
                       }}
                       className="text-[11px] text-red-600 hover:underline"
                     >
@@ -590,10 +550,10 @@ export default function SettingsPage() {
             <p className="text-sm text-gray-500 mb-6">Choose what alerts and reports you receive</p>
             <div className="flex flex-col gap-4">
               {([
-                { key: 'escalationAlerts' as const, label: 'Escalation alerts', desc: 'Get notified when the AI escalates a contact for human review' },
-                { key: 'dailyDigest' as const, label: 'Daily digest', desc: 'Summary of all AI actions, decisions, and outcomes from the day' },
-                { key: 'weeklyReport' as const, label: 'Weekly performance report', desc: 'Strategy performance, conversion rates, and pipeline health' },
-                { key: 'brainUpdates' as const, label: 'Brain update notifications', desc: 'Get notified when the Business Brain completes a learning cycle' },
+                { key: 'escalation' as const, label: 'Escalation alerts', desc: 'Get notified when the AI escalates a contact for human review' },
+                { key: 'daily_digest' as const, label: 'Daily digest', desc: 'Summary of all AI actions, decisions, and outcomes from the day' },
+                { key: 'weekly_report' as const, label: 'Weekly performance report', desc: 'Strategy performance, conversion rates, and pipeline health' },
+                { key: 'brain_update' as const, label: 'Brain update notifications', desc: 'Get notified when the Business Brain completes a learning cycle' },
               ]).map((n) => (
                 <div key={n.key} className="flex items-center justify-between p-4 bg-gray-50 rounded-xl">
                   <div>
@@ -622,10 +582,10 @@ export default function SettingsPage() {
               <p className="text-sm text-gray-500 mb-6">Data protection and access controls</p>
               <div className="flex flex-col gap-3">
                 {[
-                  { name: 'Two-factor authentication', desc: 'Require 2FA for all team members', status: securityConfig.twoFactorRequired ? 'Enabled' : 'Disabled', icon: Shield },
+                  { name: 'Two-factor authentication', desc: 'Require 2FA for all team members', status: securityConfig.twoFactorEnabled ? 'Enabled' : 'Disabled', icon: Shield },
                   { name: 'SSO (SAML)', desc: `Single sign-on${securityConfig.ssoProvider ? ` via ${securityConfig.ssoProvider}` : ''}`, status: securityConfig.ssoEnabled ? 'Active' : 'Available', icon: Key },
-                  { name: 'Data encryption', desc: securityConfig.dataEncryption || 'AES-256 at rest, TLS 1.3 in transit', status: 'Active', icon: Lock },
-                  { name: 'Audit log retention', desc: 'Immutable logs retained', status: `${Math.round(securityConfig.auditLogRetentionDays / 365)} years`, icon: Database },
+                  { name: 'Data encryption', desc: 'AES-256 at rest, TLS 1.3 in transit', status: 'Active', icon: Lock },
+                  { name: 'Audit log retention', desc: 'Immutable logs retained', status: `${Math.round(securityConfig.auditRetentionDays / 365)} years`, icon: Database },
                   { name: 'GDPR compliance', desc: 'Data processing agreement on file', status: securityConfig.gdprCompliant ? 'Compliant' : 'Not configured', icon: Globe },
                 ].map((s) => (
                   <div key={s.name} className="flex items-center justify-between p-4 border border-gray-200 rounded-xl">
