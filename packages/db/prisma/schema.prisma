@@ -454,3 +454,65 @@ model AiAgentConfig {
   @@map("ai_agent_config")
 }
 
+// ─────────────────────────────────────────────────────────────
+// APPEND TO: packages/db/prisma/schema.prisma
+//
+// Adds the ChannelConnection model for the Connectors Service.
+// See Jira KAN-477 and ADR-007 (Extract Connectors Service).
+//
+// Migration: `npm run -w @growth/db push` (dev)
+//            or `prisma migrate dev --name add_channel_connections`
+// ─────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────
+// CONNECTORS — Channel Connections per tenant
+// ─────────────────────────────────────────────────────────────
+model ChannelConnection {
+  id                String           @id @default(uuid())
+  tenantId          String           @map("tenant_id")
+  channelType       ChannelType      @map("channel_type")
+  provider          String           // "twilio" | "sendgrid" | "meta" | ...
+  providerAccountId String           @map("provider_account_id") // subaccount SID / subuser / page ID
+  status            ConnectionStatus @default(PENDING)
+  credentialsRef    String           @map("credentials_ref") // Secret Manager path
+  metadata          Json             @default("{}")
+  complianceStatus  Json?            @map("compliance_status") // 10DLC, domain auth, app review
+  connectedAt       DateTime?        @map("connected_at")
+  lastHealthCheck   DateTime?        @map("last_health_check")
+  healthStatus      String?          @map("health_status")
+  createdAt         DateTime         @default(now()) @map("created_at")
+  updatedAt         DateTime         @updatedAt @map("updated_at")
+
+  tenant            Tenant           @relation(fields: [tenantId], references: [id])
+
+  @@unique([tenantId, channelType, providerAccountId])
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@index([tenantId, channelType])
+  @@map("channel_connections")
+}
+
+enum ChannelType {
+  SMS
+  EMAIL
+  MESSENGER
+  WHATSAPP
+
+  @@map("channel_type")
+}
+
+enum ConnectionStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
+  REVOKED
+  ERROR
+
+  @@map("connection_status")
+}
+
+// ALSO ADD to the existing `model Tenant` — the relations block:
+//
+//   channelConnections ChannelConnection[]
+//
+// (Insert alongside the other tenant relations like `users`, `contacts`, etc.)
