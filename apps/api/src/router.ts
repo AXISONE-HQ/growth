@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { TRPCError } from "@trpc/server";
 import { router, publicProcedure, protectedProcedure } from "./trpc.js";
 import { generateObjectionResponses, regenerateSingleField } from "./llm.js";
 
@@ -1838,6 +1839,45 @@ const salesObjectionsRouter = router({
 });
 
 // ============================================================================
+const settingsRouter = router({
+  ai: router({
+    get: protectedProcedure.query(async ({ ctx }) => {
+      const tenant = await ctx.prisma.tenant.findUnique({ where: { id: ctx.tenantId }, select: { confidenceThreshold: true, aiPermissions: true } });
+      if (!tenant) throw new TRPCError({ code: "NOT_FOUND" });
+      return tenant;
+    }),
+    update: protectedProcedure.input(z.object({ confidenceThreshold: z.number().min(20).max(95).optional(), aiPermissions: z.record(z.unknown()).optional() })).mutation(async ({ ctx, input }) => {
+      return ctx.prisma.tenant.update({ where: { id: ctx.tenantId }, data: { ...(input.confidenceThreshold !== undefined && { confidenceThreshold: input.confidenceThreshold }), ...(input.aiPermissions !== undefined && { aiPermissions: input.aiPermissions as any }) } });
+    }),
+  }),
+  channels: router({
+    list: protectedProcedure.query(async () => { return []; }),
+    update: protectedProcedure.input(z.object({ id: z.string().uuid(), enabled: z.boolean().optional(), config: z.record(z.unknown()).optional() })).mutation(async () => { throw new TRPCError({ code: "NOT_FOUND", message: "Channel config not found" }); }),
+  }),
+  integrations: router({
+    list: protectedProcedure.query(async () => { return []; }),
+    connect: protectedProcedure.input(z.object({ provider: z.string(), config: z.record(z.unknown()).optional() })).mutation(async () => { throw new TRPCError({ code: "NOT_FOUND", message: "Integration model not available yet" }); }),
+    disconnect: protectedProcedure.input(z.object({ id: z.string().uuid() })).mutation(async () => { throw new TRPCError({ code: "NOT_FOUND", message: "Integration model not available yet" }); }),
+    sync: protectedProcedure.input(z.object({ id: z.string().uuid() })).mutation(async () => { throw new TRPCError({ code: "NOT_FOUND", message: "Integration model not available yet" }); }),
+  }),
+  team: router({
+    list: protectedProcedure.query(async () => { return { members: [], invitations: [] }; }),
+    invite: protectedProcedure.input(z.object({ email: z.string().email(), role: z.enum(["owner","admin","agent","viewer"]).default("viewer") })).mutation(async () => { throw new TRPCError({ code: "NOT_FOUND", message: "Team model not available yet" }); }),
+    updateRole: protectedProcedure.input(z.object({ id: z.string().uuid(), role: z.enum(["owner","admin","agent","viewer"]) })).mutation(async () => { throw new TRPCError({ code: "NOT_FOUND", message: "Team model not available yet" }); }),
+    remove: protectedProcedure.input(z.object({ id: z.string().uuid() })).mutation(async () => { throw new TRPCError({ code: "NOT_FOUND", message: "Team model not available yet" }); }),
+    cancelInvite: protectedProcedure.input(z.object({ id: z.string().uuid() })).mutation(async () => { throw new TRPCError({ code: "NOT_FOUND", message: "Team model not available yet" }); }),
+  }),
+  notifications: router({
+    get: protectedProcedure.query(async () => { return { escalation: true, daily_digest: true, weekly_report: true, brain_update: false }; }),
+    update: protectedProcedure.input(z.object({ type: z.enum(["escalation","daily_digest","weekly_report","brain_update"]), enabled: z.boolean() })).mutation(async ({ input }) => { const d = { escalation: true, daily_digest: true, weekly_report: true, brain_update: false }; d[input.type] = input.enabled; return d; }),
+  }),
+  security: router({
+    get: protectedProcedure.query(async ({ ctx }) => { return { id: "00000000-0000-0000-0000-000000000000", tenantId: ctx.tenantId, twoFactorEnabled: false, ssoEnabled: false, ssoProvider: null, ssoConfig: {}, auditRetentionDays: 365, gdprCompliant: false, createdAt: new Date(), updatedAt: new Date() }; }),
+    update: protectedProcedure.input(z.object({ twoFactorEnabled: z.boolean().optional(), ssoEnabled: z.boolean().optional(), ssoProvider: z.string().nullable().optional(), ssoConfig: z.record(z.unknown()).optional(), auditRetentionDays: z.number().min(30).max(3650).optional(), gdprCompliant: z.boolean().optional() })).mutation(async ({ ctx, input }) => { return { id: "00000000-0000-0000-0000-000000000000", tenantId: ctx.tenantId, twoFactorEnabled: input.twoFactorEnabled ?? false, ssoEnabled: input.ssoEnabled ?? false, ssoProvider: input.ssoProvider ?? null, ssoConfig: input.ssoConfig ?? {}, auditRetentionDays: input.auditRetentionDays ?? 365, gdprCompliant: input.gdprCompliant ?? false, createdAt: new Date(), updatedAt: new Date() }; }),
+    getAuditLog: protectedProcedure.input(z.object({ page: z.number().min(1).default(1), limit: z.number().min(1).max(100).default(20), actionType: z.string().optional() })).query(async ({ ctx, input }) => { const skip = (input.page - 1) * input.limit; const where: any = { tenantId: ctx.tenantId, ...(input.actionType && { actionType: input.actionType }) }; const [logs, total] = await Promise.all([ctx.prisma.auditLog.findMany({ where, orderBy: { createdAt: "desc" }, skip, take: input.limit }), ctx.prisma.auditLog.count({ where })]); return { logs, pagination: { page: input.page, limit: input.limit, total, pages: Math.ceil(total / input.limit) } }; }),
+  }),
+});
+
 // ROOT ROUTER
 // ============================================================================
 
@@ -1854,6 +1894,7 @@ export const appRouter = router({
   knowledge: knowledgeRouter,
   competitors: competitorsRouter,
   salesObjections: salesObjectionsRouter,
+  settings: settingsRouter,
 });
 
 export type AppRouter = typeof appRouter;
