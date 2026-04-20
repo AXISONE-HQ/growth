@@ -1839,47 +1839,265 @@ const salesObjectionsRouter = router({
 });
 
 // ============================================================================
+// SETTINGS ROUTER — Real Prisma-backed endpoints
+// ============================================================================
+
 const settingsRouter = router({
   ai: router({
-    get: protectedProcedure.query(async ({ ctx }) => {
-      const tenant = await ctx.prisma.tenant.findUnique({ where: { id: ctx.tenantId }, select: { confidenceThreshold: true, aiPermissions: true } });
-      if (!tenant) throw new TRPCError({ code: "NOT_FOUND" });
-      return tenant;
-    }),
-    update: protectedProcedure.input(z.object({ confidenceThreshold: z.number().min(20).max(95).optional(), aiPermissions: z.record(z.unknown()).optional() })).mutation(async ({ ctx, input }) => {
-      return ctx.prisma.tenant.update({ where: { id: ctx.tenantId }, data: { ...(input.confidenceThreshold !== undefined && { confidenceThreshold: input.confidenceThreshold }), ...(input.aiPermissions !== undefined && { aiPermissions: input.aiPermissions as any }) } });
-    }),
+    get: protectedProcedure
+      .input(z.object({ tenantId: z.string().uuid() }))
+      .query(async ({ ctx, input }) => {
+        const tenant = await ctx.prisma.tenant.findUnique({
+          where: { id: input.tenantId },
+          select: {
+            aiPermissions: true,
+            confidenceThreshold: true,
+          },
+        });
+        if (!tenant) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "Tenant not found" });
+        }
+        return {
+          aiPermissions: tenant.aiPermissions,
+          confidenceThreshold: tenant.confidenceThreshold,
+        };
+      }),
+    update: protectedProcedure
+      .input(
+        z.object({
+          tenantId: z.string().uuid(),
+          aiPermissions: z.record(z.any()).optional(),
+          confidenceThreshold: z.number().min(0).max(100).optional(),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const { tenantId, ...data } = input;
+        const updated = await ctx.prisma.tenant.update({
+          where: { id: tenantId },
+          data,
+          select: {
+            aiPermissions: true,
+            confidenceThreshold: true,
+          },
+        });
+        return updated;
+      }),
   }),
+
   channels: router({
-    list: protectedProcedure.query(async () => { return []; }),
-    update: protectedProcedure.input(z.object({ id: z.string().uuid(), enabled: z.boolean().optional(), config: z.record(z.unknown()).optional() })).mutation(async () => { throw new TRPCError({ code: "NOT_FOUND", message: "Channel config not found" }); }),
+    list: protectedProcedure
+      .input(z.object({ tenantId: z.string().uuid() }))
+      .query(async ({ ctx, input }) => {
+        return ctx.prisma.communicationChannel.findMany({
+          where: { tenantId: input.tenantId },
+          orderBy: { createdAt: "desc" },
+        });
+      }),
+    update: protectedProcedure
+      .input(
+        z.object({
+          tenantId: z.string().uuid(),
+          id: z.string().uuid().optional(),
+          type: z.enum(["email", "sms", "whatsapp"]),
+          provider: z.string().min(1),
+          config: z.record(z.any()).optional(),
+          status: z.enum(["connected", "disconnected", "error"]).optional(),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const { tenantId, id, type, provider, config, status } = input;
+        if (id) {
+          return ctx.prisma.communicationChannel.update({
+            where: { id },
+            data: { provider, config: config ?? undefined, status: status ?? undefined },
+          });
+        }
+        return ctx.prisma.communicationChannel.upsert({
+          where: { tenantId_type: { tenantId, type } },
+          update: { provider, config: config ?? undefined, status: status ?? undefined },
+          create: { tenantId, type, provider, config: config ?? {}, status: status ?? "disconnected" },
+        });
+      }),
   }),
+
   integrations: router({
-    list: protectedProcedure.query(async () => { return []; }),
-    connect: protectedProcedure.input(z.object({ provider: z.string(), config: z.record(z.unknown()).optional() })).mutation(async () => { throw new TRPCError({ code: "NOT_FOUND", message: "Integration model not available yet" }); }),
-    disconnect: protectedProcedure.input(z.object({ id: z.string().uuid() })).mutation(async () => { throw new TRPCError({ code: "NOT_FOUND", message: "Integration model not available yet" }); }),
-    sync: protectedProcedure.input(z.object({ id: z.string().uuid() })).mutation(async () => { throw new TRPCError({ code: "NOT_FOUND", message: "Integration model not available yet" }); }),
+    list: protectedProcedure
+      .input(z.object({ tenantId: z.string().uuid() }))
+      .query(async ({ ctx, input }) => {
+        return ctx.prisma.integration.findMany({
+          where: { tenantId: input.tenantId },
+          orderBy: { createdAt: "desc" },
+        });
+      }),
+    connect: protectedProcedure
+      .input(
+        z.object({
+          tenantId: z.string().uuid(),
+          provider: z.string().min(1),
+          category: z.enum(["crm", "payments", "calendar", "commerce", "other"]),
+          config: z.record(z.any()).optional(),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const { tenantId, provider, category, config } = input;
+        return ctx.prisma.integration.upsert({
+          where: { tenantId_provider: { tenantId, provider } },
+          update: { status: "connected", config: config ?? undefined, lastSyncAt: new Date() },
+          create: { tenantId, provider, category, status: "connected", config: config ?? {}, lastSyncAt: new Date() },
+        });
+      }),
+    disconnect: protectedProcedure
+      .input(z.object({ tenantId: z.string().uuid(), id: z.string().uuid() }))
+      .mutation(async ({ ctx, input }) => {
+        return ctx.prisma.integration.update({
+          where: { id: input.id },
+          data: { status: "disconnected" },
+        });
+      }),
+    sync: protectedProcedure
+      .input(z.object({ tenantId: z.string().uuid(), id: z.string().uuid() }))
+      .mutation(async ({ ctx, input }) => {
+        await ctx.prisma.integration.update({ where: { id: input.id }, data: { status: "syncing" } });
+        return ctx.prisma.integration.update({
+          where: { id: input.id },
+          data: { status: "connected", lastSyncAt: new Date() },
+        });
+      }),
   }),
+
   team: router({
-    list: protectedProcedure.query(async () => { return { members: [], invitations: [] }; }),
-    invite: protectedProcedure.input(z.object({ email: z.string().email(), role: z.enum(["owner","admin","agent","viewer"]).default("viewer") })).mutation(async () => { throw new TRPCError({ code: "NOT_FOUND", message: "Team model not available yet" }); }),
-    updateRole: protectedProcedure.input(z.object({ id: z.string().uuid(), role: z.enum(["owner","admin","agent","viewer"]) })).mutation(async () => { throw new TRPCError({ code: "NOT_FOUND", message: "Team model not available yet" }); }),
-    remove: protectedProcedure.input(z.object({ id: z.string().uuid() })).mutation(async () => { throw new TRPCError({ code: "NOT_FOUND", message: "Team model not available yet" }); }),
-    cancelInvite: protectedProcedure.input(z.object({ id: z.string().uuid() })).mutation(async () => { throw new TRPCError({ code: "NOT_FOUND", message: "Team model not available yet" }); }),
+    list: protectedProcedure
+      .input(z.object({ tenantId: z.string().uuid() }))
+      .query(async ({ ctx, input }) => {
+        const [members, invitations] = await Promise.all([
+          ctx.prisma.teamMember.findMany({ where: { tenantId: input.tenantId }, orderBy: { createdAt: "asc" } }),
+          ctx.prisma.invitation.findMany({ where: { tenantId: input.tenantId, status: "pending" }, orderBy: { createdAt: "desc" } }),
+        ]);
+        return { members, invitations };
+      }),
+    invite: protectedProcedure
+      .input(
+        z.object({
+          tenantId: z.string().uuid(),
+          email: z.string().email(),
+          role: z.enum(["owner", "admin", "agent", "viewer"]).default("viewer"),
+          invitedBy: z.string(),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const { tenantId, email, role, invitedBy } = input;
+        const existing = await ctx.prisma.teamMember.findUnique({ where: { tenantId_email: { tenantId, email } } });
+        if (existing) { throw new TRPCError({ code: "CONFLICT", message: "User is already a team member" }); }
+        const existingInvite = await ctx.prisma.invitation.findFirst({ where: { tenantId, email, status: "pending" } });
+        if (existingInvite) { throw new TRPCError({ code: "CONFLICT", message: "An invitation is already pending for this email" }); }
+        return ctx.prisma.invitation.create({
+          data: { tenantId, email, role, invitedBy, expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) },
+        });
+      }),
+    updateRole: protectedProcedure
+      .input(z.object({ tenantId: z.string().uuid(), memberId: z.string().uuid(), role: z.enum(["owner", "admin", "agent", "viewer"]) }))
+      .mutation(async ({ ctx, input }) => {
+        return ctx.prisma.teamMember.update({ where: { id: input.memberId }, data: { role: input.role } });
+      }),
+    remove: protectedProcedure
+      .input(z.object({ tenantId: z.string().uuid(), memberId: z.string().uuid() }))
+      .mutation(async ({ ctx, input }) => {
+        const member = await ctx.prisma.teamMember.findUnique({ where: { id: input.memberId } });
+        if (member?.role === "owner") {
+          const ownerCount = await ctx.prisma.teamMember.count({ where: { tenantId: input.tenantId, role: "owner" } });
+          if (ownerCount <= 1) { throw new TRPCError({ code: "FORBIDDEN", message: "Cannot remove the last owner" }); }
+        }
+        return ctx.prisma.teamMember.delete({ where: { id: input.memberId } });
+      }),
+    cancelInvite: protectedProcedure
+      .input(z.object({ tenantId: z.string().uuid(), invitationId: z.string().uuid() }))
+      .mutation(async ({ ctx, input }) => {
+        return ctx.prisma.invitation.update({ where: { id: input.invitationId }, data: { status: "cancelled" } });
+      }),
   }),
+
   notifications: router({
-    get: protectedProcedure.query(async () => { return { escalation: true, daily_digest: true, weekly_report: true, brain_update: false }; }),
-    update: protectedProcedure.input(z.object({ type: z.enum(["escalation","daily_digest","weekly_report","brain_update"]), enabled: z.boolean() })).mutation(async ({ input }) => { const d = { escalation: true, daily_digest: true, weekly_report: true, brain_update: false }; d[input.type] = input.enabled; return d; }),
+    get: protectedProcedure
+      .input(z.object({ tenantId: z.string().uuid(), userId: z.string() }))
+      .query(async ({ ctx, input }) => {
+        const prefs = await ctx.prisma.notificationPreference.findMany({
+          where: { tenantId: input.tenantId, userId: input.userId },
+        });
+        if (prefs.length === 0) {
+          return ["escalation", "daily_digest", "weekly_report", "brain_update"].map((type) => ({ type, enabled: true, channel: "email" }));
+        }
+        return prefs;
+      }),
+    update: protectedProcedure
+      .input(
+        z.object({
+          tenantId: z.string().uuid(),
+          userId: z.string(),
+          type: z.enum(["escalation", "daily_digest", "weekly_report", "brain_update"]),
+          enabled: z.boolean(),
+          channel: z.string().default("email"),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const { tenantId, userId, type, enabled, channel } = input;
+        return ctx.prisma.notificationPreference.upsert({
+          where: { tenantId_userId_type: { tenantId, userId, type } },
+          update: { enabled, channel },
+          create: { tenantId, userId, type, enabled, channel },
+        });
+      }),
   }),
+
   security: router({
-    get: protectedProcedure.query(async ({ ctx }) => { return { id: "00000000-0000-0000-0000-000000000000", tenantId: ctx.tenantId, twoFactorEnabled: false, ssoEnabled: false, ssoProvider: null, ssoConfig: {}, auditRetentionDays: 365, gdprCompliant: false, createdAt: new Date(), updatedAt: new Date() }; }),
-    update: protectedProcedure.input(z.object({ twoFactorEnabled: z.boolean().optional(), ssoEnabled: z.boolean().optional(), ssoProvider: z.string().nullable().optional(), ssoConfig: z.record(z.unknown()).optional(), auditRetentionDays: z.number().min(30).max(3650).optional(), gdprCompliant: z.boolean().optional() })).mutation(async ({ ctx, input }) => { return { id: "00000000-0000-0000-0000-000000000000", tenantId: ctx.tenantId, twoFactorEnabled: input.twoFactorEnabled ?? false, ssoEnabled: input.ssoEnabled ?? false, ssoProvider: input.ssoProvider ?? null, ssoConfig: input.ssoConfig ?? {}, auditRetentionDays: input.auditRetentionDays ?? 365, gdprCompliant: input.gdprCompliant ?? false, createdAt: new Date(), updatedAt: new Date() }; }),
-    getAuditLog: protectedProcedure.input(z.object({ page: z.number().min(1).default(1), limit: z.number().min(1).max(100).default(20), actionType: z.string().optional() })).query(async ({ ctx, input }) => { const skip = (input.page - 1) * input.limit; const where: any = { tenantId: ctx.tenantId, ...(input.actionType && { actionType: input.actionType }) }; const [logs, total] = await Promise.all([ctx.prisma.auditLog.findMany({ where, orderBy: { createdAt: "desc" }, skip, take: input.limit }), ctx.prisma.auditLog.count({ where })]); return { logs, pagination: { page: input.page, limit: input.limit, total, pages: Math.ceil(total / input.limit) } }; }),
+    get: protectedProcedure
+      .input(z.object({ tenantId: z.string().uuid() }))
+      .query(async ({ ctx, input }) => {
+        return ctx.prisma.securitySetting.upsert({
+          where: { tenantId: input.tenantId },
+          update: {},
+          create: { tenantId: input.tenantId },
+        });
+      }),
+    update: protectedProcedure
+      .input(
+        z.object({
+          tenantId: z.string().uuid(),
+          twoFactorEnabled: z.boolean().optional(),
+          ssoEnabled: z.boolean().optional(),
+          ssoProvider: z.string().nullable().optional(),
+          ssoConfig: z.record(z.any()).optional(),
+          auditRetentionDays: z.number().min(30).max(2555).optional(),
+          gdprCompliant: z.boolean().optional(),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const { tenantId, ...data } = input;
+        return ctx.prisma.securitySetting.upsert({
+          where: { tenantId },
+          update: data,
+          create: { tenantId, ...data },
+        });
+      }),
+    getAuditLog: protectedProcedure
+      .input(
+        z.object({
+          tenantId: z.string().uuid(),
+          limit: z.number().min(1).max(100).default(50),
+          offset: z.number().min(0).default(0),
+          actionType: z.string().optional(),
+        })
+      )
+      .query(async ({ ctx, input }) => {
+        const { tenantId, limit, offset, actionType } = input;
+        const where = { tenantId, ...(actionType ? { actionType } : {}) };
+        const [items, total] = await Promise.all([
+          ctx.prisma.auditLog.findMany({ where, orderBy: { createdAt: "desc" }, take: limit, skip: offset }),
+          ctx.prisma.auditLog.count({ where }),
+        ]);
+        return { items, total, limit, offset };
+      }),
   }),
 });
-
-// ROOT ROUTER
-// ============================================================================
 
 export const appRouter = router({
   contacts: contactsRouter,
