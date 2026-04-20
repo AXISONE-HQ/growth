@@ -111,6 +111,13 @@ model Tenant {
   knowledgeDocuments   KnowledgeDocument[]
   competitors          Competitor[]
   salesObjections      SalesObjection[]
+  // Settings module relations
+  channels             CommunicationChannel[]
+  integrations         Integration[]
+  teamMembers          TeamMember[]
+  invitations          Invitation[]
+  notificationPrefs    NotificationPreference[]
+  securitySetting      SecuritySetting?
 
   @@index([blueprintId])
   @@index([createdAt])
@@ -695,4 +702,165 @@ model ObjectionEditHistory {
 
   @@index([responseId])
   @@index([editedAt])
+}
+
+
+// ============================================================================
+// SETTINGS MODULE — Enums
+// ============================================================================
+
+enum ChannelType {
+  email
+  sms
+  whatsapp
+}
+
+enum ChannelStatus {
+  connected
+  disconnected
+  error
+}
+
+enum IntegrationCategory {
+  crm
+  payments
+  calendar
+  commerce
+  other
+}
+
+enum IntegrationStatus {
+  connected
+  disconnected
+  syncing
+  error
+}
+
+enum TeamRole {
+  owner
+  admin
+  agent
+  viewer
+}
+
+enum InvitationStatus {
+  pending
+  accepted
+  expired
+  cancelled
+}
+
+enum NotificationType {
+  escalation
+  daily_digest
+  weekly_report
+  brain_update
+}
+
+// ============================================================================
+// SETTINGS MODULE — Models
+// ============================================================================
+
+model CommunicationChannel {
+  id         String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId   String        @db.Uuid
+  type       ChannelType
+  provider   String
+  config     Json          @default("{}")
+  status     ChannelStatus @default(disconnected)
+  lastTestedAt DateTime?
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+
+  tenant     Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, type])
+  @@index([tenantId])
+  @@index([status])
+}
+
+model Integration {
+  id          String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String              @db.Uuid
+  provider    String
+  category    IntegrationCategory
+  status      IntegrationStatus   @default(disconnected)
+  config      Json                @default("{}")
+  lastSyncAt  DateTime?
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+
+  tenant      Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, provider])
+  @@index([tenantId])
+  @@index([status])
+}
+
+model TeamMember {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String   @db.Uuid
+  email     String
+  name      String?
+  role      TeamRole @default(viewer)
+  firebaseUid String?
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, email])
+  @@index([tenantId])
+  @@index([email])
+}
+
+model Invitation {
+  id          String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String           @db.Uuid
+  email       String
+  role        TeamRole         @default(viewer)
+  status      InvitationStatus @default(pending)
+  invitedBy   String
+  token       String           @unique @default(dbgenerated("gen_random_uuid()"))
+  expiresAt   DateTime
+  createdAt   DateTime         @default(now())
+
+  tenant      Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, email])
+  @@index([tenantId])
+  @@index([token])
+}
+
+model NotificationPreference {
+  id        String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String           @db.Uuid
+  userId    String
+  type      NotificationType
+  enabled   Boolean          @default(true)
+  channel   String           @default("email")
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+
+  tenant    Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, userId, type])
+  @@index([tenantId])
+  @@index([userId])
+}
+
+model SecuritySetting {
+  id                  String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId            String   @unique @db.Uuid
+  twoFactorEnabled    Boolean  @default(false)
+  ssoEnabled          Boolean  @default(false)
+  ssoProvider         String?
+  ssoConfig           Json     @default("{}")
+  auditRetentionDays  Int      @default(730)
+  gdprCompliant       Boolean  @default(true)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  tenant              Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 }
