@@ -4,41 +4,26 @@
  * The backend exposes tRPC over HTTP at /trpc/*. Queries are GET requests
  * with ?input=JSON, mutations are POST requests with JSON body.
  *
- * Auth: Firebase JWT token in Authorization header + x-tenant-id header.
+ * Auth: x-tenant-id header (dev stub for now — will switch to Firebase JWT).
  */
-
-import { auth } from './firebase';
 
 const API_BASE =
   process.env.NEXT_PUBLIC_API_URL ||
   'https://growth-api-1086551891973.us-central1.run.app';
 
-// Dev tenant ID — used as fallback until tenant resolution is wired
+// Dev tenant ID — replace with Firebase Auth context in production
 const DEV_TENANT_ID = '00000000-0000-0000-0000-000000000001';
 
 function getTenantId(): string {
-  // TODO: Replace with real tenant resolution from user profile / DB
+  // TODO: Replace with Firebase Auth → tenant resolution
   return DEV_TENANT_ID;
 }
 
-async function headers(): Promise<Record<string, string>> {
-  const h: Record<string, string> = {
+function headers(): Record<string, string> {
+  return {
     'Content-Type': 'application/json',
     'x-tenant-id': getTenantId(),
   };
-
-  // Attach Firebase JWT if user is authenticated
-  const user = auth.currentUser;
-  if (user) {
-    try {
-      const token = await user.getIdToken();
-      h['Authorization'] = `Bearer ${token}`;
-    } catch {
-      // User may have been signed out — continue without token
-    }
-  }
-
-  return h;
 }
 
 /** Call a tRPC query (GET /trpc/<path>?input=<json>) */
@@ -50,7 +35,7 @@ export async function trpcQuery<T = unknown>(
   if (input) {
     url.searchParams.set('input', JSON.stringify(input));
   }
-  const res = await fetch(url.toString(), { headers: await headers() });
+  const res = await fetch(url.toString(), { headers: headers() });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err?.error?.message || `Query failed: ${path} (${res.status})`);
@@ -66,7 +51,7 @@ export async function trpcMutation<T = unknown>(
 ): Promise<T> {
   const res = await fetch(`${API_BASE}/trpc/${path}`, {
     method: 'POST',
-    headers: await headers(),
+    headers: headers(),
     body: JSON.stringify(input),
   });
   if (!res.ok) {
@@ -199,49 +184,19 @@ export const knowledgeApi = {
     trpcMutation<KnowledgeDocument>('knowledge.deleteDocument', { id }),
 };
 
-// Conversations API (stub - will be wired to backend)
-export const conversationsApi = {
-  list: async (params?: { limit?: number }): Promise<any> => {
-    try {
-      return await trpcQuery('conversations.list', params);
-    } catch {
-      return [];
-    }
-  },
-  getById: async (id: string): Promise<any> => {
-    try {
-      return await trpcQuery('conversations.getById', { id });
-    } catch {
-      return null;
-    }
-  },
-};
+/* ── Settings API helpers ─────────────────────────────────── */
 
-
-/* ââ Settings API ââââââââââââââââââââââââââââââââââââââââââââ */
-
+// Types matching backend Prisma models + router return shapes
 export interface AIConfig {
   confidenceThreshold: number;
   autoApproveEnabled: boolean;
   dailyActionLimit: number;
-  strategyPermissions: {
-    directConversion: boolean;
-    guidedAssistance: boolean;
-    trustBuilding: boolean;
-    reengagement: boolean;
-  };
-  guardrailSettings: {
-    toneValidator: boolean;
-    accuracyCheck: boolean;
-    hallucinationFilter: boolean;
-    complianceCheck: boolean;
-    injectionDefense: boolean;
-    confidenceGate: boolean;
-  };
-  aiPermissions: Record<string, unknown>;
+  strategyPermissions: Record<string, boolean> | null;
+  guardrailSettings: Record<string, boolean> | null;
+  aiPermissions: Record<string, unknown> | null;
 }
 
-export interface ChannelRecord {
+export interface CommunicationChannel {
   id: string;
   tenantId: string;
   type: 'email' | 'sms' | 'whatsapp';
@@ -253,7 +208,7 @@ export interface ChannelRecord {
   updatedAt: string;
 }
 
-export interface IntegrationRecord {
+export interface Integration {
   id: string;
   tenantId: string;
   provider: string;
@@ -265,34 +220,33 @@ export interface IntegrationRecord {
   updatedAt: string;
 }
 
-export interface TeamMemberRecord {
+export interface TeamMember {
   id: string;
   tenantId: string;
   email: string;
   name: string | null;
   role: 'owner' | 'admin' | 'agent' | 'viewer';
+  firebaseUid: string | null;
   active: boolean;
   createdAt: string;
+  updatedAt: string;
 }
 
-export interface InvitationRecord {
+export interface Invitation {
   id: string;
   tenantId: string;
   email: string;
   role: 'owner' | 'admin' | 'agent' | 'viewer';
   status: 'pending' | 'accepted' | 'expired' | 'cancelled';
+  invitedBy: string;
+  token: string;
   expiresAt: string;
   createdAt: string;
 }
 
-export interface NotificationPrefs {
-  escalation: boolean;
-  daily_digest: boolean;
-  weekly_report: boolean;
-  brain_update: boolean;
-}
+export type NotificationPrefs = Record<string, boolean>;
 
-export interface SecurityConfig {
+export interface SecuritySetting {
   id: string;
   tenantId: string;
   twoFactorEnabled: boolean;
@@ -301,205 +255,103 @@ export interface SecurityConfig {
   ssoConfig: Record<string, unknown>;
   auditRetentionDays: number;
   gdprCompliant: boolean;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface AuditLogEntry {
   id: string;
-  actor: string;
+  tenantId: string;
   actionType: string;
-  contactId: string | null;
-  payload: Record<string, unknown>;
+  actor: string | null;
+  payload: Record<string, unknown> | null;
   reasoning: string | null;
-  autoApproved: boolean;
   createdAt: string;
 }
 
 export const settingsApi = {
-  // AI Configuration
-  ai: {
-    get: () => trpcQuery<AIConfig>('settings.ai.get'),
-    update: (data: Partial<Omit<AIConfig, 'aiPermissions'>>) =>
-      trpcMutation<AIConfig>('settings.ai.update', data),
-  },
+  // ── AI Configuration ──
+  getAIConfig: () =>
+    trpcQuery<AIConfig>('settings.ai.get'),
 
-  // Communication Channels
-  channels: {
-    list: () => trpcQuery<ChannelRecord[]>('settings.channels.list'),
-    update: (data: {
-      type: string;
-      provider: string;
-      config?: Record<string, unknown>;
-      status?: string;
-    }) => trpcMutation<ChannelRecord>('settings.channels.update', data),
-    testConnection: (data: { type: string }) =>
-      trpcMutation<{ success: boolean; message: string }>(
-        'settings.channels.testConnection',
-        data
-      ),
-  },
+  updateAIConfig: (data: {
+    confidenceThreshold?: number;
+    autoApproveEnabled?: boolean;
+    dailyActionLimit?: number;
+    strategyPermissions?: Record<string, boolean>;
+    guardrailSettings?: Record<string, boolean>;
+  }) => trpcMutation<AIConfig>('settings.ai.update', data),
 
-  // Integrations
-  integrations: {
-    list: () => trpcQuery<IntegrationRecord[]>('settings.integrations.list'),
-    connect: (data: {
-      provider: string;
-      category: string;
-      config?: Record<string, unknown>;
-    }) => trpcMutation<IntegrationRecord>('settings.integrations.connect', data),
-    disconnect: (data: { id: string }) =>
-      trpcMutation<IntegrationRecord>('settings.integrations.disconnect', data),
-    sync: (data: { id: string }) =>
-      trpcMutation<IntegrationRecord>('settings.integrations.sync', data),
-  },
+  // ── Channels ──
+  listChannels: () =>
+    trpcQuery<CommunicationChannel[]>('settings.channels.list'),
 
-  // Team & Roles
-  team: {
-    list: () =>
-      trpcQuery<{ members: TeamMemberRecord[]; invitations: InvitationRecord[] }>(
-        'settings.team.list'
-      ),
-    invite: (data: { email: string; role: string }) =>
-      trpcMutation<InvitationRecord>('settings.team.invite', data),
-    updateRole: (data: { id: string; role: string }) =>
-      trpcMutation<TeamMemberRecord>('settings.team.updateRole', data),
-    remove: (data: { id: string }) =>
-      trpcMutation<TeamMemberRecord>('settings.team.remove', data),
-    cancelInvite: (data: { id: string }) =>
-      trpcMutation<void>('settings.team.cancelInvite', data),
-  },
+  updateChannel: (data: {
+    type: 'email' | 'sms' | 'whatsapp';
+    provider: string;
+    config?: Record<string, unknown>;
+    status?: 'connected' | 'disconnected' | 'error';
+  }) => trpcMutation<CommunicationChannel>('settings.channels.update', data),
 
-  // Notifications
-  notifications: {
-    get: () => trpcQuery<NotificationPrefs>('settings.notifications.get'),
-    update: (data: { type: string; enabled: boolean }) =>
-      trpcMutation<NotificationPrefs>('settings.notifications.update', data),
-  },
+  testChannel: (type: 'email' | 'sms' | 'whatsapp') =>
+    trpcMutation<{ success: boolean; message: string }>('settings.channels.testConnection', { type }),
 
-  // Security
-  security: {
-    get: () => trpcQuery<SecurityConfig>('settings.security.get'),
-    update: (data: Partial<Omit<SecurityConfig, 'id' | 'tenantId'>>) =>
-      trpcMutation<SecurityConfig>('settings.security.update', data),
-    getAuditLog: (params?: {
-      page?: number;
-      limit?: number;
-      actionType?: string;
-    }) =>
-      trpcQuery<{
-        logs: AuditLogEntry[];
-        pagination: {
-          page: number;
-          limit: number;
-          total: number;
-          pages: number;
-        };
-      }>('settings.security.getAuditLog', params || {}),
-  },
-};
+  // ── Integrations ──
+  listIntegrations: () =>
+    trpcQuery<Integration[]>('settings.integrations.list'),
 
-/* ── Competitor Intelligence API helpers ──────────────────── */
+  connectIntegration: (data: {
+    provider: string;
+    category: 'crm' | 'payments' | 'calendar' | 'commerce' | 'other';
+    config?: Record<string, unknown>;
+  }) => trpcMutation<Integration>('settings.integrations.connect', data),
 
-// Types matching the Prisma models
-export interface Competitor {
-  id: string;
-  tenantId: string;
-  name: string;
-  website: string;
-  description: string | null;
-  logoUrl: string | null;
-  employeeCount: number | null;
-  customerCount: number | null;
-  annualRevenue: string | null;
-  segment: string | null;
-  status: 'active' | 'inactive' | 'archived';
-  metadata: Record<string, unknown>;
-  lastAnalyzedAt: string | null;
-  createdAt: string;
-  updatedAt: string;
-  battleCards?: CompetitorBattleCard[];
-  news?: CompetitorNews[];
-  _count?: { news: number };
-}
+  disconnectIntegration: (id: string) =>
+    trpcMutation<Integration>('settings.integrations.disconnect', { id }),
 
-export interface CompetitorBattleCard {
-  id: string;
-  competitorId: string;
-  overview: string;
-  strengths: string[];
-  weaknesses: string[];
-  differentiators: string[];
-  objections: string[];
-  talkingPoints: string[];
-  version: number;
-  generatedAt: string;
-  createdAt: string;
-}
+  syncIntegration: (id: string) =>
+    trpcMutation<Integration>('settings.integrations.sync', { id }),
 
-export interface CompetitorNews {
-  id: string;
-  competitorId: string;
-  title: string;
-  summary: string;
-  sourceUrl: string | null;
-  publishedAt: string | null;
-  sentiment: 'positive' | 'negative' | 'neutral';
-  relevanceScore: number;
-  createdAt: string;
-}
+  // ── Team & Roles ──
+  listTeam: () =>
+    trpcQuery<{ members: TeamMember[]; invitations: Invitation[] }>('settings.team.list'),
 
-export interface CompetitorStats {
-  totalCompetitors: number;
-  activeCompetitors: number;
-  totalNews: number;
-  recentNews: CompetitorNews[];
-}
+  inviteMember: (data: { email: string; role?: 'owner' | 'admin' | 'agent' | 'viewer' }) =>
+    trpcMutation<Invitation>('settings.team.invite', data),
 
-export const competitorsApi = {
-  // List competitors with search, filter, pagination
-  list: (params?: { page?: number; limit?: number; search?: string; status?: string }) =>
-    trpcQuery<{ competitors: Competitor[]; pagination: { page: number; limit: number; total: number; pages: number } }>(
-      'competitors.list', params || {}
+  updateMemberRole: (data: { id: string; role: 'owner' | 'admin' | 'agent' | 'viewer' }) =>
+    trpcMutation<TeamMember>('settings.team.updateRole', data),
+
+  removeMember: (id: string) =>
+    trpcMutation<TeamMember>('settings.team.remove', { id }),
+
+  cancelInvite: (id: string) =>
+    trpcMutation<Invitation>('settings.team.cancelInvite', { id }),
+
+  // ── Notifications ──
+  getNotifications: () =>
+    trpcQuery<NotificationPrefs>('settings.notifications.get'),
+
+  updateNotification: (data: {
+    type: 'escalation' | 'daily_digest' | 'weekly_report' | 'brain_update';
+    enabled: boolean;
+  }) => trpcMutation<NotificationPrefs>('settings.notifications.update', data),
+
+  // ── Security ──
+  getSecurity: () =>
+    trpcQuery<SecuritySetting>('settings.security.get'),
+
+  updateSecurity: (data: {
+    twoFactorEnabled?: boolean;
+    ssoEnabled?: boolean;
+    ssoProvider?: string | null;
+    ssoConfig?: Record<string, unknown>;
+    auditRetentionDays?: number;
+    gdprCompliant?: boolean;
+  }) => trpcMutation<SecuritySetting>('settings.security.update', data),
+
+  getAuditLog: (params?: { page?: number; limit?: number; actionType?: string }) =>
+    trpcQuery<{ logs: AuditLogEntry[]; pagination: { page: number; limit: number; total: number; pages: number } }>(
+      'settings.security.getAuditLog', params || {}
     ),
-
-  // Get single competitor with full battle cards and news
-  getById: (id: string) =>
-    trpcQuery<Competitor>('competitors.getById', { id }),
-
-  // Get battle card for a competitor
-  getBattleCard: (competitorId: string) =>
-    trpcQuery<CompetitorBattleCard | null>('competitors.getBattleCard', { competitorId }),
-
-  // List news for a competitor
-  listNews: (params: { competitorId: string; page?: number; limit?: number }) =>
-    trpcQuery<{ news: CompetitorNews[]; pagination: { page: number; limit: number; total: number; pages: number } }>(
-      'competitors.listNews', params
-    ),
-
-  // Get dashboard stats
-  getStats: () =>
-    trpcQuery<CompetitorStats>('competitors.getStats'),
-
-  // Create a new competitor
-  create: (data: { name: string; website: string; description?: string; segment?: string }) =>
-    trpcMutation<Competitor>('competitors.create', data),
-
-  // Update a competitor
-  update: (data: { id: string; name?: string; website?: string; description?: string; status?: string; segment?: string }) =>
-    trpcMutation<Competitor>('competitors.update', data),
-
-  // Delete (archive) a competitor
-  delete: (id: string) =>
-    trpcMutation<Competitor>('competitors.delete', { id }),
-
-  // Create or update battle card
-  upsertBattleCard: (data: {
-    competitorId: string; overview: string; strengths: string[];
-    weaknesses: string[]; differentiators: string[]; objections: string[]; talkingPoints: string[];
-  }) => trpcMutation<CompetitorBattleCard>('competitors.upsertBattleCard', data),
-
-  // Add news item
-  addNews: (data: {
-    competitorId: string; title: string; summary: string;
-    sourceUrl?: string; publishedAt?: string; sentiment?: string;
-  }) => trpcMutation<CompetitorNews>('competitors.addNews', data),
 };
