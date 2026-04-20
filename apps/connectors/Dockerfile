@@ -1,0 +1,47 @@
+# syntax=docker/dockerfile:1.7
+# Multi-stage build for @growth-ai/connectors — matches apps/api conventions.
+# Cloud Run target: Node 20 on linux/amd64.
+
+FROM node:20-slim AS base
+WORKDIR /app
+ENV NODE_ENV=production
+
+# ─────────────────────────────────────────────
+# deps: install workspace deps (cached layer)
+# ─────────────────────────────────────────────
+FROM base AS deps
+COPY package.json package-lock.json turbo.json ./
+COPY packages/connector-contracts/package.json ./packages/connector-contracts/
+COPY packages/db/package.json ./packages/db/
+COPY packages/shared/package.json ./packages/shared/
+COPY apps/connectors/package.json ./apps/connectors/
+RUN npm ci --include=dev
+
+# ─────────────────────────────────────────────
+# build: TypeScript compilation
+# ─────────────────────────────────────────────
+FROM deps AS build
+COPY packages/connector-contracts ./packages/connector-contracts
+COPY packages/db ./packages/db
+COPY packages/shared ./packages/shared
+COPY apps/connectors ./apps/connectors
+RUN npx prisma generate --schema=./packages/db/prisma/schema.prisma
+RUN npx turbo run build --filter=@growth-ai/connectors
+
+# ─────────────────────────────────────────────
+# runtime: minimal production image
+# ─────────────────────────────────────────────
+FROM node:20-slim AS runtime
+WORKDIR /app
+ENV NODE_ENV=production
+# Non-root user for security
+RUN groupadd -r app && useradd -r -g app app
+
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/packages ./packages
+COPY --from=build /app/apps/connectors/dist ./apps/connectors/dist
+COPY --from=build /app/apps/connectors/package.json ./apps/connectors/package.json
+
+USER app
+EXPOSE 8081
+CMD ["node", "apps/connectors/dist/index.js"]
