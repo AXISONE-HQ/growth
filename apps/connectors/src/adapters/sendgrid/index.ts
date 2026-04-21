@@ -19,6 +19,7 @@
  *   KAN-604  Aggressive rate caps on shared
  */
 
+// @ts-expect-error - html-to-text ships no types
 import { convert as htmlToText } from 'html-to-text';
 import type {
   ChannelAdapter,

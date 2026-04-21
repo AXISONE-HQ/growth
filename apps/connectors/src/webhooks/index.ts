@@ -16,7 +16,7 @@
  * KAN-578: Inbound SMS webhook routing
  */
 
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { InboundRawEventSchema } from '@growth/connector-contracts';
 import { logger } from '../logger.js';
 import { publishEvent } from '../pubsub/index.js';
@@ -134,7 +134,7 @@ webhooksApp.post('/:provider', async (c) => {
 });
 
 // ── helpers ─────────────────────────────────────────────
-function toHeadersRecord(c: Parameters<Parameters<typeof webhooksApp.post>[1]>[0]): Record<string, string> {
+function toHeadersRecord(c: Context): Record<string, string> {
   const headers: Record<string, string> = {};
   c.req.raw.headers.forEach((value, key) => {
     headers[key.toLowerCase()] = value;

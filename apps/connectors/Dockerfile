@@ -15,12 +15,13 @@ COPY packages/connector-contracts/package.json ./packages/connector-contracts/
 COPY packages/db/package.json ./packages/db/
 COPY packages/shared/package.json ./packages/shared/
 COPY apps/connectors/package.json ./apps/connectors/
-RUN npm ci --include=dev
+RUN npm install --include=dev --no-audit --no-fund
 
 # ─────────────────────────────────────────────
 # build: TypeScript compilation
 # ─────────────────────────────────────────────
 FROM deps AS build
+COPY tsconfig.json ./
 COPY packages/connector-contracts ./packages/connector-contracts
 COPY packages/db ./packages/db
 COPY packages/shared ./packages/shared

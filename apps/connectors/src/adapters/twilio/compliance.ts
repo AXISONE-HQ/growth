@@ -99,11 +99,11 @@ export async function submitBrandAndCampaign(
   log.info({ brandSid: brand.sid, status: brand.status }, 'brand registration submitted');
 
   // Step 6: A2P Messaging Campaign (usAppToPerson) attached to the Messaging Service
-  const campaign = await client.messaging.v1.services(messagingServiceSid).usAppToPerson.create({
+  const campaign = await (client.messaging.v1.services(messagingServiceSid).usAppToPerson.create as any)({
     brandRegistrationSid: brand.sid,
     description: `Automated messages from ${params.businessName} per their customer communications`,
     messageSamples: params.sampleMessages,
-    usAppToPersonUsecase: params.useCase,
+    usAppToPersonUsecase: params.useCase as any,
     hasEmbeddedLinks: true,
     hasEmbeddedPhone: false,
   });

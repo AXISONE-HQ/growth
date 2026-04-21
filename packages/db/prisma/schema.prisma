@@ -46,7 +46,8 @@ model Tenant {
   aiAgentConfigs  AiAgentConfig[]
   contactStates   ContactState[]
 
-  tenantSettings  TenantSettings[]
+  //   tenantSettings  TenantSettings[]  // commented out for smoke build (model missing on main)
+  channelConnections ChannelConnection[]
   @@map("tenants")
 }
 
