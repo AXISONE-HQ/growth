@@ -8,6 +8,7 @@ COPY tailwind.config.ts ./
 COPY postcss.config.mjs ./
 COPY src ./src
 RUN mkdir -p public
+ENV NEXT_PUBLIC_API_URL=https://growth-api-1086551891973.us-central1.run.app
 RUN npx next build
 EXPOSE 3000
 ENV PORT=3000
