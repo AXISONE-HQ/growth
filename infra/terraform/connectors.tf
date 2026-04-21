@@ -272,15 +272,15 @@ resource "google_cloud_run_v2_service" "connectors" {
       # Feature flags — default off; flip once secrets are in place
       env {
         name  = "ENABLE_TWILIO"
-        value = "false"
+        value = "true"
       }
       env {
         name  = "ENABLE_SENDGRID"
-        value = "false"
+        value = "true"
       }
       env {
         name  = "ENABLE_META"
-        value = "false"
+        value = "true"
       }
 
       startup_probe {
