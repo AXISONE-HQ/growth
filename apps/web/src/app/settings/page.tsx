@@ -115,6 +115,7 @@ export default function SettingsPage() {
     { provider: 'Cal.com', category: 'calendar' as const, icon: '📅' },
     { provider: 'Pipedrive', category: 'crm' as const, icon: '🟢' },
     { provider: 'Shopify', category: 'commerce' as const, icon: '🛒' },
+    { provider: 'Meta Lead Ads', category: 'advertising' as const, icon: '📣' },
   ];
 
   // ── Team state ──
@@ -219,6 +220,30 @@ export default function SettingsPage() {
     load();
   }, [activeTab, loadAI, loadChannels, loadIntegrations, loadTeam, loadNotifications, loadSecurity]);
 
+
+  /*  Meta OAuth redirect handling  */
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('meta_success') === 'connected') {
+      setSuccess('Meta Lead Ads connected successfully');
+      setActiveTab('integrations');
+      window.history.replaceState({}, '', '/settings');
+    }
+    const metaError = params.get('meta_error');
+    if (metaError) {
+      const messages: Record<string, string> = {
+        denied: 'Facebook permissions were denied',
+        missing_params: 'OAuth callback missing parameters',
+        invalid_state: 'Invalid OAuth state  please try again',
+        no_pages: 'No Facebook Pages found on your account',
+        exchange_failed: 'Failed to connect  please try again',
+      };
+      setError(messages[metaError] || `Meta connection failed: ${metaError}`);
+      setActiveTab('integrations');
+      window.history.replaceState({}, '', '/settings');
+    }
+  }, []);
+
   /* ── Mutations ──────────────────────────────────────────── */
   const saveAI = async () => {
     setSaving(true);
@@ -243,7 +268,13 @@ export default function SettingsPage() {
     setSaving(false);
   };
 
-  const connectIntegration = async (provider: string, category: 'crm' | 'payments' | 'calendar' | 'commerce' | 'other') => {
+  const connectIntegration = async (provider: string, category: 'crm' | 'payments' | 'calendar' | 'commerce' | 'advertising' | 'other') => {
+    // Meta Lead Ads uses OAuth  redirect to the authorize endpoint
+    if (provider === 'Meta Lead Ads') {
+      const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
+      window.location.href = `${apiBase}/api/integrations/meta/authorize`;
+      return;
+    }
     setSaving(true);
     try {
       await settingsApi.connectIntegration({ provider, category });
