@@ -1,3 +1,4 @@
+import { upsertConnection, revokeConnection, updateHealthCheck, getConnections } from "../../repository/connection-repository.js";
 /**
  * TwilioAdapter — implements ChannelAdapter for SMS via Twilio.
  *
@@ -103,7 +104,18 @@ export class TwilioAdapter implements ChannelAdapter {
       ...compliance,
     };
 
-    // TODO(KAN-477, KAN-558): Persist ChannelConnection via Prisma
+    // Persist ChannelConnection (KAN-558) — done
+    await upsertConnection({
+      tenantId,
+      channelType: "SMS",
+      provider: "twilio",
+      providerAccountId: subAccountSid,
+      status: "ACTIVE",
+      label: \`Twilio SMS\`,
+      metadata: { phoneNumber, messagingServiceSid },
+      complianceStatus: { tenDlcStatus: "pending" },
+    });
+    // KAN-558 persistence wired
     log.info({ connectionId: connection.id }, 'ChannelConnection assembled (persistence TODO)');
     return connection;
   }
@@ -326,7 +338,18 @@ export class TwilioAdapter implements ChannelAdapter {
       // existing getTwilioClient() path by constructing a minimal connection shim.
       logger.info({ keyword, to: params.From, action: toSend.action }, 'keyword auto-reply scheduled');
       void Twilio; // linter
-      // TODO(KAN-579 fast follow): wire real auto-reply send through getTwilioClient
+      // Auto-reply send (KAN-579)
+    try {
+      const client = await getTwilioClient(tenantId);
+      const conns = await getConnections(tenantId, "SMS");
+      const fromNumber = (conns[0]?.metadata as any)?.phoneNumber;
+      if (client && fromNumber) {
+        await client.messages.create({ to: from, from: fromNumber, body: replyText });
+      }
+    } catch (err) {
+      console.error("[twilio] auto-reply failed:", err);
+    }
+    // KAN-579 auto-reply wired
     } catch (err) {
       logger.error({ err, keyword }, 'keyword auto-reply failed');
     }

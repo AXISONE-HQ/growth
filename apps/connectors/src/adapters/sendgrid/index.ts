@@ -1,3 +1,4 @@
+import { upsertConnection, revokeConnection, updateHealthCheck } from "../../repository/connection-repository.js";
 /**
  * SendGridAdapter — implements ChannelAdapter for email via SendGrid.
  *
@@ -84,7 +85,17 @@ export class SendGridAdapter implements ChannelAdapter {
       params,
       domainAuthStatus,
     );
-    // TODO(KAN-477, KAN-558): persist ChannelConnection
+    // Persist ChannelConnection (KAN-558) — done
+    await upsertConnection({
+      tenantId,
+      channelType: "EMAIL",
+      provider: "sendgrid",
+      providerAccountId: subuserUsername,
+      status: "ACTIVE",
+      label: \`SendGrid Email\`,
+      metadata: { subuserUsername },
+    });
+    // KAN-558 persistence wired
     log.info({ connectionId: connection.id, status: connection.status }, 'ChannelConnection assembled');
     return connection;
   }

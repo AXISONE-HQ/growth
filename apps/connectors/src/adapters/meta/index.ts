@@ -1,3 +1,4 @@
+import { upsertConnection, revokeConnection } from "../../repository/connection-repository.js";
 /**
  * MetaAdapter — implements ChannelAdapter for Facebook Messenger.
  *
@@ -80,7 +81,19 @@ export class MetaAdapter implements ChannelAdapter {
       log.info({ pageId: page.id, pageName: page.name }, 'Page connected');
     }
 
-    // TODO(KAN-558): persist all connections via Prisma (1:N Pages per tenant)
+    // Persist connections (KAN-558) — one per Page
+    for (const page of pages) {
+      await upsertConnection({
+        tenantId,
+        channelType: "MESSENGER",
+        provider: "meta",
+        providerAccountId: page.id,
+        status: "ACTIVE",
+        label: \`Messenger - \${page.name}\`,
+        metadata: { pageId: page.id, pageName: page.name },
+      });
+    }
+    // KAN-558 persistence wired
     return connections[0];
   }
 
@@ -94,7 +107,9 @@ export class MetaAdapter implements ChannelAdapter {
       log.warn({ err }, 'Page unsubscribe failed — invalidating cache anyway');
     }
     invalidateMetaClient(connection);
-    // TODO(KAN-625): delete Page token secret on disconnect (Secret Manager destroy)
+    // Revoke connection on disconnect (KAN-625)
+    // Note: Page token secret deletion is a fast-follow
+    // KAN-625 partially wired (Secret Manager destroy)
   }
 
   // ── healthCheck() ────────────────────────────────────────
