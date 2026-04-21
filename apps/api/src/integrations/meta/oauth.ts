@@ -79,9 +79,9 @@ function verifyState(state: string, secret: string): string | null {
  * Requires x-tenant-id header.
  */
 metaOAuthApp.get("/authorize", (c) => {
-  const tenantId = c.req.header("x-tenant-id");
+  const tenantId = c.req.query("tenant_id") || c.req.header("x-tenant-id");
   if (!tenantId) {
-    return c.json({ error: "Missing x-tenant-id header" }, 401);
+    return c.json({ error: "Missing tenant_id query parameter" }, 401);
   }
 
   try {
@@ -108,11 +108,11 @@ metaOAuthApp.get("/callback", async (c) => {
   if (errorParam) {
     console.warn("Meta OAuth denied:", errorParam);
     // Redirect back to settings with error
-    return c.redirect("/settings?tab=integrations&meta_error=denied");
+    return c.redirect("https://growth-web-1086551891973.us-central1.run.app/settings?tab=integrations&meta_error=denied");
   }
 
   if (!code || !state) {
-    return c.redirect("/settings?tab=integrations&meta_error=missing_params");
+    return c.redirect("https://growth-web-1086551891973.us-central1.run.app/settings?tab=integrations&meta_error=missing_params");
   }
 
   try {
@@ -121,7 +121,7 @@ metaOAuthApp.get("/callback", async (c) => {
     // Verify CSRF state
     const tenantId = verifyState(state, appSecret);
     if (!tenantId) {
-      return c.redirect("/settings?tab=integrations&meta_error=invalid_state");
+      return c.redirect("https://growth-web-1086551891973.us-central1.run.app/settings?tab=integrations&meta_error=invalid_state");
     }
 
     // 1. Exchange code for short-lived token
@@ -133,14 +133,20 @@ metaOAuthApp.get("/callback", async (c) => {
     // 3. Get user's pages
     const pages = await getUserPages(longLivedToken);
     if (pages.length === 0) {
-      return c.redirect("/settings?tab=integrations&meta_error=no_pages");
+      return c.redirect("https://growth-web-1086551891973.us-central1.run.app/settings?tab=integrations&meta_error=no_pages");
     }
 
     // Use the first page (MVP — page selector comes later)
     const page = pages[0];
 
-    // 4. Subscribe page to leadgen webhooks
+    // 4. Subscribe page to leadgen webhooks (non-blocking -- may fail in dev mode
+    //    without leads_retrieval permission; subscription can be retried later)
+    try {
     await subscribePageToLeadgen(page.id, page.access_token);
+      console.log(`Leadgen webhook subscribed for page ${page.id}`);
+    } catch (subErr: any) {
+      console.warn(`Leadgen subscription skipped for page ${page.id}: ${subErr.message}`);
+    }
 
     // 5. Store integration record
     // NOTE: In production, store page.access_token in Secret Manager.
@@ -178,10 +184,10 @@ metaOAuthApp.get("/callback", async (c) => {
     });
 
     console.log(`Meta Lead Ads connected for tenant ${tenantId}, page "${page.name}" (${page.id})`);
-    return c.redirect("/settings?tab=integrations&meta_success=connected");
+    return c.redirect("https://growth-web-1086551891973.us-central1.run.app/settings?tab=integrations&meta_success=connected");
   } catch (err: any) {
     console.error("Meta OAuth callback error:", err);
-    return c.redirect(`/settings?tab=integrations&meta_error=exchange_failed`);
+    return c.redirect(`https://growth-web-1086551891973.us-central1.run.app/settings?tab=integrations&meta_error=exchange_failed`);
   }
 });
 
@@ -190,9 +196,9 @@ metaOAuthApp.get("/callback", async (c) => {
  * Disconnects the Meta integration for a tenant.
  */
 metaOAuthApp.post("/disconnect", async (c) => {
-  const tenantId = c.req.header("x-tenant-id");
+  const tenantId = c.req.query("tenant_id") || c.req.header("x-tenant-id");
   if (!tenantId) {
-    return c.json({ error: "Missing x-tenant-id header" }, 401);
+    return c.json({ error: "Missing tenant_id query parameter" }, 401);
   }
 
   try {
