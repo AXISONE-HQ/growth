@@ -1934,7 +1934,7 @@ const settingsRouter = router({
         z.object({
           tenantId: z.string().uuid(),
           provider: z.string().min(1),
-          category: z.enum(["crm", "payments", "calendar", "commerce", "other"]),
+          category: z.enum(["crm", "payments", "calendar", "commerce", "advertising", "other"]),
           config: z.record(z.any()).optional(),
         })
       )

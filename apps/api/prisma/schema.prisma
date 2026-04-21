@@ -726,6 +726,7 @@ enum IntegrationCategory {
   payments
   calendar
   commerce
+  advertising
   other
 }
 
