@@ -112,20 +112,13 @@ export default function SettingsPage() {
   const [integrationSubTab, setIntegrationSubTab] = useState<'crm_erp' | 'leads' | 'productivity'>('crm_erp');
 
   const integrationCatalog = [
-    { provider: 'HubSpot', category: 'crm' as const, subTab: 'crm_erp' as const, icon: 'ð¶' },
-    { provider: 'Salesforce', category: 'crm' as const, subTab: 'crm_erp' as const, icon: 'âï¸' },
-    { provider: 'Stripe', category: 'payments' as const, subTab: 'crm_erp' as const, icon: 'ð³' },
-    { provider: 'Cal.com', category: 'calendar' as const, subTab: 'productivity' as const, icon: 'ð' },
-    { provider: 'Pipedrive', category: 'crm' as const, subTab: 'crm_erp' as const, icon: 'ð¢' },
-    { provider: 'Shopify', category: 'commerce' as const, subTab: 'crm_erp' as const, icon: 'ð' },
-    { provider: 'Meta Lead Ads', category: 'advertising' as const, subTab: 'leads' as const, icon: 'ð£' },
-    { provider: 'Facebook Messenger', category: 'messaging' as const, subTab: 'leads' as const, icon: '💬' },
+    { provider: 'HubSpot', category: 'crm' as const, subTab: 'crm_erp' as const, icon: Link2 },
+    { provider: 'Meta Lead Ads', category: 'advertising' as const, subTab: 'leads' as const, icon: Megaphone },
   ];
 
   const integrationSubTabs = [
     { id: 'crm_erp' as const, label: 'CRM / ERP' },
     { id: 'leads' as const, label: 'Leads' },
-    { id: 'productivity' as const, label: 'Productivity' },
   ];
 
   // ââ Team state ââ
@@ -305,12 +298,6 @@ export default function SettingsPage() {
       return;
     }
 
-    // Facebook Messenger uses OAuth redirect
-    if (provider === 'Facebook Messenger') {
-      const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://loca' + 'lhost:8080';
-      window.location.href = `${apiBase}/api/integrations/messenger/authorize`;
-      return;
-    }
     setSaving(true);
     try {
       await settingsApi.connectIntegration({ provider, category });
@@ -646,7 +633,7 @@ export default function SettingsPage() {
                 return (
                   <div key={cat.provider} className="flex items-center justify-between p-4 border border-gray-200 rounded-xl">
                     <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 bg-gray-50 rounded-lg flex items-center justify-center text-xl">{cat.icon}</div>
+                      <div className="w-10 h-10 bg-gray-50 rounded-lg flex items-center justify-center "><cat.icon className="w-5 h-5 text-gray-600" /></div>
                       <div>
                         <div className="text-sm font-semibold text-gray-900">{cat.provider}</div>
                         <div className="text-xs text-gray-500 capitalize">{cat.category}</div>
