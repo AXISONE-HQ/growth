@@ -727,6 +727,7 @@ enum IntegrationCategory {
   calendar
   commerce
   advertising
+  messaging
   other
 }
 
