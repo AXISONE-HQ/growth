@@ -2,7 +2,7 @@ import "dotenv/config";
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { trpcServer } from "@hono/trpc-server";
-import cors from "cors";
+import { cors } from "hono/cors";
 import { appRouter } from "./router.js";
 import { createContext } from "./trpc.js";
 import { metaOAuthApp } from "./integrations/meta/oauth.js";
@@ -24,7 +24,7 @@ app.use(
     origin:
       process.env.CORS_ORIGIN ||
       (process.env.NODE_ENV === "production"
-        ? undefined
+        ? "*"
         : ["http://localhost:3000", "http://localhost:3001"]),
     credentials: true,
   })

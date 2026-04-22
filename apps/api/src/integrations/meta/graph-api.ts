@@ -158,7 +158,7 @@ export function buildAuthorizationUrl(
   url.searchParams.set("client_id", appId);
   url.searchParams.set("redirect_uri", redirectUri);
   url.searchParams.set("state", state);
-  url.searchParams.set("scope", "pages_show_list,pages_manage_metadata,leads_retrieval");
+  url.searchParams.set("scope", "pages_show_list,pages_read_engagement");
   url.searchParams.set("response_type", "code");
   return url.toString();
 }
