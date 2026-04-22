@@ -85,7 +85,7 @@ const WEB_BASE = "https://growth-web-1086551891973.us-central1.run.app";
  * Requires x-tenant-id header.
  */
 messengerOAuthApp.get("/authorize", (c) => {
-  const tenantId = c.req.header("x-tenant-id");
+  const tenantId = c.req.query("tenant_id") || c.req.header("x-tenant-id");
   if (!tenantId) {
     return c.json({ error: "Missing x-tenant-id header" }, 401);
   }
@@ -222,7 +222,7 @@ messengerOAuthApp.get("/callback", async (c) => {
  * Disconnects the Messenger integration for a tenant.
  */
 messengerOAuthApp.post("/disconnect", async (c) => {
-  const tenantId = c.req.header("x-tenant-id");
+  const tenantId = c.req.query("tenant_id") || c.req.header("x-tenant-id");
   if (!tenantId) {
     return c.json({ error: "Missing x-tenant-id header" }, 401);
   }
