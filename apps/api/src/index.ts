@@ -2,12 +2,14 @@ import "dotenv/config";
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { trpcServer } from "@hono/trpc-server";
-import { cors } from "hono/cors";
+import cors from "cors";
 import { appRouter } from "./router.js";
 import { createContext } from "./trpc.js";
 import { metaOAuthApp } from "./integrations/meta/oauth.js";
 import { metaWebhookApp } from "./integrations/meta/webhook.js";
 import { metaDataDeletionApp } from "./integrations/meta/data-deletion.js";
+import { messengerOAuthApp } from "./integrations/messenger/oauth.js";
+import { messengerWebhookApp } from "./integrations/messenger/webhook.js";
 
 const app = new Hono();
 const PORT = parseInt(process.env.PORT || "8080", 10);
@@ -22,7 +24,7 @@ app.use(
     origin:
       process.env.CORS_ORIGIN ||
       (process.env.NODE_ENV === "production"
-        ? "*"
+        ? undefined
         : ["http://localhost:3000", "http://localhost:3001"]),
     credentials: true,
   })
@@ -45,6 +47,16 @@ app.route("/webhooks/meta", metaWebhookApp);
 
 // Data Deletion Callback — GDPR compliance (public, signed-request-verified)
 app.route("/api/integrations/meta/data-deletion", metaDataDeletionApp);
+
+// ============================================================================
+// FACEBOOK MESSENGER INTEGRATION (plain HTTP — not tRPC)
+// ============================================================================
+
+// OAuth flow — authorize + callback (Messenger permissions)
+app.route("/api/integrations/messenger", messengerOAuthApp);
+
+// Webhook — incoming messages from Messenger (public, signature-verified)
+app.route("/webhooks/messenger", messengerWebhookApp);
 
 // ============================================================================
 // tRPC SERVER
