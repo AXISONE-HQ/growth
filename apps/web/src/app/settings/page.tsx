@@ -228,12 +228,12 @@ export default function SettingsPage() {
     if (params.get('meta_success') === 'connected') {
       setSuccess('Meta Lead Ads connected successfully');
       setActiveTab('integrations');
-      window.history.replaceState({}
+      window.history.replaceState({}, '', '/settings');
+    }
     if (params.get('messenger_success') === 'connected') {
       setSuccess('Facebook Messenger connected successfully');
       setActiveTab('integrations');
       window.history.replaceState({}, '', '/settings');
-    }, '', '/settings');
     }
     const messengerError = params.get('messenger_error');
     if (messengerError) {
