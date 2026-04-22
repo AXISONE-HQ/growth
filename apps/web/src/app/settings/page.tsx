@@ -108,15 +108,24 @@ export default function SettingsPage() {
   const [integrations, setIntegrations] = useState<Integration[]>([]);
 
   // Available integrations catalog (static list â actual connection status comes from API)
+  // -- Integration sub-tab state --
+  const [integrationSubTab, setIntegrationSubTab] = useState<'crm_erp' | 'leads' | 'productivity'>('crm_erp');
+
   const integrationCatalog = [
-    { provider: 'HubSpot', category: 'crm' as const, icon: 'ð¶' },
-    { provider: 'Salesforce', category: 'crm' as const, icon: 'âï¸' },
-    { provider: 'Stripe', category: 'payments' as const, icon: 'ð³' },
-    { provider: 'Cal.com', category: 'calendar' as const, icon: 'ð' },
-    { provider: 'Pipedrive', category: 'crm' as const, icon: 'ð¢' },
-    { provider: 'Shopify', category: 'commerce' as const, icon: 'ð' },
-    { provider: 'Meta Lead Ads', category: 'advertising' as const, icon: 'ð£' },
-    { provider: 'Facebook Messenger', category: 'messaging' as const, icon: '💬' },
+    { provider: 'HubSpot', category: 'crm' as const, subTab: 'crm_erp' as const, icon: 'ð¶' },
+    { provider: 'Salesforce', category: 'crm' as const, subTab: 'crm_erp' as const, icon: 'âï¸' },
+    { provider: 'Stripe', category: 'payments' as const, subTab: 'crm_erp' as const, icon: 'ð³' },
+    { provider: 'Cal.com', category: 'calendar' as const, subTab: 'productivity' as const, icon: 'ð' },
+    { provider: 'Pipedrive', category: 'crm' as const, subTab: 'crm_erp' as const, icon: 'ð¢' },
+    { provider: 'Shopify', category: 'commerce' as const, subTab: 'crm_erp' as const, icon: 'ð' },
+    { provider: 'Meta Lead Ads', category: 'advertising' as const, subTab: 'leads' as const, icon: 'ð£' },
+    { provider: 'Facebook Messenger', category: 'messaging' as const, subTab: 'leads' as const, icon: '💬' },
+  ];
+
+  const integrationSubTabs = [
+    { id: 'crm_erp' as const, label: 'CRM / ERP' },
+    { id: 'leads' as const, label: 'Leads' },
+    { id: 'productivity' as const, label: 'Productivity' },
   ];
 
   // ââ Team state ââ
@@ -388,20 +397,22 @@ export default function SettingsPage() {
   };
 
   return (
-    <div className="p-6 flex gap-6">
-      {/* Sidebar Tabs */}
-      <div className="w-[220px] flex-shrink-0">
-        <h1 className="text-xl font-bold text-gray-900 mb-1">Settings</h1>
-        <p className="text-sm text-gray-500 mb-5">Configure your growth workspace</p>
-        <div className="flex flex-col gap-1">
+    <div className="p-6">
+      {/* Header */}
+      <h1 className="text-xl font-bold text-gray-900 mb-1">Settings</h1>
+      <p className="text-sm text-gray-500 mb-5">Configure your growth workspace</p>
+
+      {/* Horizontal Tabs */}
+      <div className="border-b border-gray-200 mb-6">
+        <div className="flex gap-1">
           {tabs.map((tab) => (
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
-              className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors text-left ${
+              className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px ${
                 activeTab === tab.id
-                  ? 'bg-indigo-50 text-indigo-700'
-                  : 'text-gray-600 hover:bg-gray-50'
+                  ? 'border-indigo-500 text-indigo-700'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
               }`}
             >
               <tab.icon className="w-4 h-4" />
@@ -412,7 +423,7 @@ export default function SettingsPage() {
       </div>
 
       {/* Content */}
-      <div className="flex-1 max-w-3xl">
+      <div className="max-w-3xl">
         {/* Toast Messages */}
         {success && (
           <div className="mb-4 flex items-center gap-2 px-4 py-2.5 bg-emerald-50 border border-emerald-200 rounded-lg text-sm text-emerald-700">
@@ -608,9 +619,27 @@ export default function SettingsPage() {
         {!loading && activeTab === 'integrations' && (
           <div className="bg-white border border-gray-200 rounded-xl p-6">
             <h2 className="text-base font-semibold text-gray-900 mb-1">Integrations</h2>
-            <p className="text-sm text-gray-500 mb-6">Connect your tools to power the AI loop</p>
+            <p className="text-sm text-gray-500 mb-4">Connect your tools to power the AI loop</p>
+
+            {/* Integration Sub-tabs */}
+            <div className="flex gap-1 mb-6 border-b border-gray-100">
+              {integrationSubTabs.map((st) => (
+                <button
+                  key={st.id}
+                  onClick={() => setIntegrationSubTab(st.id)}
+                  className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px ${
+                    integrationSubTab === st.id
+                      ? 'border-indigo-500 text-indigo-700'
+                      : 'border-transparent text-gray-400 hover:text-gray-600 hover:border-gray-300'
+                  }`}
+                >
+                  {st.label}
+                </button>
+              ))}
+            </div>
+
             <div className="flex flex-col gap-3">
-              {integrationCatalog.map((cat) => {
+              {integrationCatalog.filter((cat) => cat.subTab === integrationSubTab).map((cat) => {
                 const live = getIntegrationStatus(cat.provider);
                 const isConnected = live?.status === 'connected';
 
