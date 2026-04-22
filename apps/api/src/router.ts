@@ -1898,7 +1898,7 @@ const settingsRouter = router({
         z.object({
           tenantId: z.string().uuid(),
           id: z.string().uuid().optional(),
-          type: z.enum(["email", "sms", "whatsapp"]),
+          type: z.enum(["email", "sms", "whatsapp", "messenger"]),
           provider: z.string().min(1),
           config: z.record(z.any()).optional(),
           status: z.enum(["connected", "disconnected", "error"]).optional(),

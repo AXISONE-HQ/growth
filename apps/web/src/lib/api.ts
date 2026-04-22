@@ -199,7 +199,7 @@ export interface AIConfig {
 export interface CommunicationChannel {
   id: string;
   tenantId: string;
-  type: 'email' | 'sms' | 'whatsapp';
+  type: 'email' | 'sms' | 'whatsapp' | 'messenger';
   provider: string;
   config: Record<string, unknown>;
   status: 'connected' | 'disconnected' | 'error';
@@ -287,13 +287,13 @@ export const settingsApi = {
     trpcQuery<CommunicationChannel[]>('settings.channels.list'),
 
   updateChannel: (data: {
-    type: 'email' | 'sms' | 'whatsapp';
+    type: 'email' | 'sms' | 'whatsapp' | 'messenger';
     provider: string;
     config?: Record<string, unknown>;
     status?: 'connected' | 'disconnected' | 'error';
   }) => trpcMutation<CommunicationChannel>('settings.channels.update', data),
 
-  testChannel: (type: 'email' | 'sms' | 'whatsapp') =>
+  testChannel: (type: 'email' | 'sms' | 'whatsapp' | 'messenger') =>
     trpcMutation<{ success: boolean; message: string }>('settings.channels.testConnection', { type }),
 
   // ── Integrations ──
