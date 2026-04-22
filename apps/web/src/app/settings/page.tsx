@@ -4,7 +4,7 @@ import {
   Brain, Shield, Mail, Phone, MessageCircle, MessagesSquare,
   Key, Users, Bell, Globe, Database, CheckCircle,
   Lock, Plug, Loader2, RefreshCw, X, AlertCircle,
-  UserPlus
+  UserPlus, Link2, Megaphone
 } from 'lucide-react';
 import { useState, useEffect, useCallback } from 'react';
 import {
