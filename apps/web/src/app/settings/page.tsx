@@ -1,7 +1,7 @@
 'use client';
 
 import {
-  Brain, Shield, Mail, Phone, MessageCircle,
+  Brain, Shield, Mail, Phone, MessageCircle, MessagesSquare,
   Key, Users, Bell, Globe, Database, CheckCircle,
   Lock, Plug, Loader2, RefreshCw, X, AlertCircle,
   UserPlus
@@ -18,7 +18,7 @@ import {
   type SecuritySetting,
 } from '@/lib/api';
 
-/* ─── Helpers ──────────────────────────────────────────────── */
+/* âââ Helpers ââââââââââââââââââââââââââââââââââââââââââââââââ */
 function timeAgo(dateStr: string | null): string {
   if (!dateStr) return 'Never';
   const diff = Date.now() - new Date(dateStr).getTime();
@@ -74,12 +74,12 @@ function SaveButton({ saving, dirty, onClick }: { saving: boolean; dirty: boolea
       }`}
     >
       {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : null}
-      {saving ? 'Saving…' : 'Save Changes'}
+      {saving ? 'Savingâ¦' : 'Save Changes'}
     </button>
   );
 }
 
-/* ─── Main Component ───────────────────────────────────────── */
+/* âââ Main Component âââââââââââââââââââââââââââââââââââââââââ */
 export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState('ai');
   const [loading, setLoading] = useState(true);
@@ -87,7 +87,7 @@ export default function SettingsPage() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
-  // ── AI Config state ──
+  // ââ AI Config state ââ
   const [aiConfig, setAiConfig] = useState<AIConfig | null>(null);
   const [aiDirty, setAiDirty] = useState(false);
   const [confidenceThreshold, setConfidenceThreshold] = useState(70);
@@ -101,36 +101,37 @@ export default function SettingsPage() {
     complianceCheck: true, injectionDefense: true, confidenceGate: true,
   });
 
-  // ── Channels state ──
+  // ââ Channels state ââ
   const [channels, setChannels] = useState<CommunicationChannel[]>([]);
 
-  // ── Integrations state ──
+  // ââ Integrations state ââ
   const [integrations, setIntegrations] = useState<Integration[]>([]);
 
-  // Available integrations catalog (static list — actual connection status comes from API)
+  // Available integrations catalog (static list â actual connection status comes from API)
   const integrationCatalog = [
-    { provider: 'HubSpot', category: 'crm' as const, icon: '🔶' },
-    { provider: 'Salesforce', category: 'crm' as const, icon: '☁️' },
-    { provider: 'Stripe', category: 'payments' as const, icon: '💳' },
-    { provider: 'Cal.com', category: 'calendar' as const, icon: '📅' },
-    { provider: 'Pipedrive', category: 'crm' as const, icon: '🟢' },
-    { provider: 'Shopify', category: 'commerce' as const, icon: '🛒' },
-    { provider: 'Meta Lead Ads', category: 'advertising' as const, icon: '📣' },
+    { provider: 'HubSpot', category: 'crm' as const, icon: 'ð¶' },
+    { provider: 'Salesforce', category: 'crm' as const, icon: 'âï¸' },
+    { provider: 'Stripe', category: 'payments' as const, icon: 'ð³' },
+    { provider: 'Cal.com', category: 'calendar' as const, icon: 'ð' },
+    { provider: 'Pipedrive', category: 'crm' as const, icon: 'ð¢' },
+    { provider: 'Shopify', category: 'commerce' as const, icon: 'ð' },
+    { provider: 'Meta Lead Ads', category: 'advertising' as const, icon: 'ð£' },
+    { provider: 'Facebook Messenger', category: 'messaging' as const, icon: '💬' },
   ];
 
-  // ── Team state ──
+  // ââ Team state ââ
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [invitations, setInvitations] = useState<Invitation[]>([]);
   const [showInvite, setShowInvite] = useState(false);
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole, setInviteRole] = useState<'owner' | 'admin' | 'agent' | 'viewer'>('viewer');
 
-  // ── Notifications state ──
+  // ââ Notifications state ââ
   const [notifPrefs, setNotifPrefs] = useState<NotificationPrefs>({
     escalation: true, daily_digest: true, weekly_report: true, brain_update: false,
   });
 
-  // ── Security state ──
+  // ââ Security state ââ
   const [security, setSecurity] = useState<SecuritySetting | null>(null);
 
   const roleColors: Record<string, string> = {
@@ -149,7 +150,7 @@ export default function SettingsPage() {
     { id: 'security', label: 'Security', icon: Shield },
   ];
 
-  /* ── Flash messages ─────────────────────────────────────── */
+  /* ââ Flash messages âââââââââââââââââââââââââââââââââââââââ */
   const flash = useCallback((msg: string) => {
     setSuccess(msg);
     setTimeout(() => setSuccess(null), 3000);
@@ -160,7 +161,7 @@ export default function SettingsPage() {
     setTimeout(() => setError(null), 5000);
   }, []);
 
-  /* ── Data loaders ───────────────────────────────────────── */
+  /* ââ Data loaders âââââââââââââââââââââââââââââââââââââââââ */
   const loadAI = useCallback(async () => {
     try {
       const data = await settingsApi.getAIConfig();
@@ -227,8 +228,27 @@ export default function SettingsPage() {
     if (params.get('meta_success') === 'connected') {
       setSuccess('Meta Lead Ads connected successfully');
       setActiveTab('integrations');
+      window.history.replaceState({}
+    if (params.get('messenger_success') === 'connected') {
+      setSuccess('Facebook Messenger connected successfully');
+      setActiveTab('integrations');
+      window.history.replaceState({}, '', '/settings');
+    }, '', '/settings');
+    }
+    const messengerError = params.get('messenger_error');
+    if (messengerError) {
+      const msgs: Record<string, string> = {
+        denied: 'Facebook Messenger permissions were denied',
+        missing_params: 'OAuth callback missing parameters',
+        invalid_state: 'Invalid OAuth state — please try again',
+        no_pages: 'No Facebook Pages found on your account',
+        exchange_failed: 'Failed to connect — please try again',
+      };
+      setError(msgs[messengerError] || 'Messenger connection failed: ' + messengerError);
+      setActiveTab('integrations');
       window.history.replaceState({}, '', '/settings');
     }
+
     const metaError = params.get('meta_error');
     if (metaError) {
       const messages: Record<string, string> = {
@@ -244,7 +264,7 @@ export default function SettingsPage() {
     }
   }, []);
 
-  /* ── Mutations ──────────────────────────────────────────── */
+  /* ââ Mutations ââââââââââââââââââââââââââââââââââââââââââââ */
   const saveAI = async () => {
     setSaving(true);
     try {
@@ -268,11 +288,18 @@ export default function SettingsPage() {
     setSaving(false);
   };
 
-  const connectIntegration = async (provider: string, category: 'crm' | 'payments' | 'calendar' | 'commerce' | 'advertising' | 'other') => {
+  const connectIntegration = async (provider: string, category: 'crm' | 'payments' | 'calendar' | 'commerce' | 'advertising' | 'messaging' | 'other') => {
     // Meta Lead Ads uses OAuth  redirect to the authorize endpoint
     if (provider === 'Meta Lead Ads') {
       const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
       window.location.href = `${apiBase}/api/integrations/meta/authorize`;
+      return;
+    }
+
+    // Facebook Messenger uses OAuth redirect
+    if (provider === 'Facebook Messenger') {
+      const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://loca' + 'lhost:8080';
+      window.location.href = `${apiBase}/api/integrations/messenger/authorize`;
       return;
     }
     setSaving(true);
@@ -348,7 +375,7 @@ export default function SettingsPage() {
     setSaving(false);
   };
 
-  /* ── Helper: get integration status from API data ───────── */
+  /* ââ Helper: get integration status from API data âââââââââ */
   const getIntegrationStatus = (provider: string) => {
     return integrations.find((i) => i.provider === provider);
   };
@@ -357,6 +384,7 @@ export default function SettingsPage() {
     email: { icon: Mail, color: 'bg-indigo-50 text-indigo-600' },
     sms: { icon: Phone, color: 'bg-emerald-50 text-emerald-600' },
     whatsapp: { icon: MessageCircle, color: 'bg-green-50 text-green-600' },
+    messenger: { icon: MessagesSquare, color: 'bg-blue-50 text-blue-600' },
   };
 
   return (
@@ -401,11 +429,11 @@ export default function SettingsPage() {
         {loading && (
           <div className="flex items-center justify-center py-20">
             <Loader2 className="w-6 h-6 text-indigo-500 animate-spin" />
-            <span className="ml-2 text-sm text-gray-500">Loading settings…</span>
+            <span className="ml-2 text-sm text-gray-500">Loading settingsâ¦</span>
           </div>
         )}
 
-        {/* ═══ AI Configuration ═══ */}
+        {/* âââ AI Configuration âââ */}
         {!loading && activeTab === 'ai' && (
           <div className="flex flex-col gap-6">
             <div className="bg-white border border-gray-200 rounded-xl p-6">
@@ -508,7 +536,7 @@ export default function SettingsPage() {
           </div>
         )}
 
-        {/* ═══ Channels ═══ */}
+        {/* âââ Channels âââ */}
         {!loading && activeTab === 'channels' && (
           <div className="flex flex-col gap-6">
             <div className="bg-white border border-gray-200 rounded-xl p-6">
@@ -516,7 +544,7 @@ export default function SettingsPage() {
               <p className="text-sm text-gray-500 mb-6">Configure channels the AI can use to reach contacts</p>
 
               <div className="flex flex-col gap-4">
-                {(['email', 'sms', 'whatsapp'] as const).map((type) => {
+                {(['email', 'sms', 'whatsapp', 'messenger'] as const).map((type) => {
                   const ch = channels.find((c) => c.type === type);
                   const iconInfo = channelIcons[type];
                   const Icon = iconInfo.icon;
@@ -532,7 +560,7 @@ export default function SettingsPage() {
                           <div>
                             <div className="text-sm font-semibold text-gray-900 capitalize">{type}</div>
                             <div className="text-xs text-gray-500">
-                              {ch ? `${ch.provider} · ${isConnected ? 'Active' : ch.status}` : 'Not configured'}
+                              {ch ? `${ch.provider} Â· ${isConnected ? 'Active' : ch.status}` : 'Not configured'}
                             </div>
                           </div>
                         </div>
@@ -569,7 +597,7 @@ export default function SettingsPage() {
           </div>
         )}
 
-        {/* ═══ Integrations ═══ */}
+        {/* âââ Integrations âââ */}
         {!loading && activeTab === 'integrations' && (
           <div className="bg-white border border-gray-200 rounded-xl p-6">
             <h2 className="text-base font-semibold text-gray-900 mb-1">Integrations</h2>
@@ -633,7 +661,7 @@ export default function SettingsPage() {
           </div>
         )}
 
-        {/* ═══ Team & Roles ═══ */}
+        {/* âââ Team & Roles âââ */}
         {!loading && activeTab === 'team' && (
           <div className="bg-white border border-gray-200 rounded-xl p-6">
             <div className="flex items-center justify-between mb-6">
@@ -714,7 +742,7 @@ export default function SettingsPage() {
                     </div>
                     <div>
                       <div className="text-sm font-medium text-gray-900">{inv.email}</div>
-                      <div className="text-xs text-gray-500">Invited · Expires {timeAgo(inv.expiresAt)}</div>
+                      <div className="text-xs text-gray-500">Invited Â· Expires {timeAgo(inv.expiresAt)}</div>
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
@@ -734,7 +762,7 @@ export default function SettingsPage() {
           </div>
         )}
 
-        {/* ═══ Notifications ═══ */}
+        {/* âââ Notifications âââ */}
         {!loading && activeTab === 'notifications' && (
           <div className="bg-white border border-gray-200 rounded-xl p-6">
             <h2 className="text-base font-semibold text-gray-900 mb-1">Notification Preferences</h2>
@@ -758,7 +786,7 @@ export default function SettingsPage() {
           </div>
         )}
 
-        {/* ═══ Security ═══ */}
+        {/* âââ Security âââ */}
         {!loading && activeTab === 'security' && security && (
           <div className="flex flex-col gap-6">
             <div className="bg-white border border-gray-200 rounded-xl p-6">
@@ -789,7 +817,7 @@ export default function SettingsPage() {
                   <Toggle enabled={security.ssoEnabled} onChange={() => updateSecurity('ssoEnabled', !security.ssoEnabled)} disabled={saving} />
                 </div>
 
-                {/* Encryption — always on */}
+                {/* Encryption â always on */}
                 <div className="flex items-center justify-between p-4 border border-gray-200 rounded-xl">
                   <div className="flex items-center gap-3">
                     <div className="w-9 h-9 bg-gray-50 rounded-lg flex items-center justify-center"><Lock className="w-4 h-4 text-gray-600" /></div>
@@ -807,7 +835,7 @@ export default function SettingsPage() {
                     <div className="w-9 h-9 bg-gray-50 rounded-lg flex items-center justify-center"><Database className="w-4 h-4 text-gray-600" /></div>
                     <div>
                       <div className="text-sm font-medium text-gray-900">Audit log retention</div>
-                      <div className="text-xs text-gray-500">Immutable logs — {Math.round(security.auditRetentionDays / 365)} year{security.auditRetentionDays > 365 ? 's' : ''}</div>
+                      <div className="text-xs text-gray-500">Immutable logs â {Math.round(security.auditRetentionDays / 365)} year{security.auditRetentionDays > 365 ? 's' : ''}</div>
                     </div>
                   </div>
                   <span className="text-xs bg-emerald-50 text-emerald-700 px-2.5 py-1 rounded-full font-medium">
