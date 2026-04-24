@@ -19,6 +19,7 @@
     "@trpc/server": "^10.45.2",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
+    "google-auth-library": "^9.15.1",
     "hono": "^4.1.13",
     "prisma": "^5.8.0",
     "zod": "^3.22.4"

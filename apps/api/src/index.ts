@@ -10,6 +10,7 @@ import { metaWebhookApp } from "./integrations/meta/webhook.js";
 import { metaDataDeletionApp } from "./integrations/meta/data-deletion.js";
 import { messengerOAuthApp } from "./integrations/messenger/oauth.js";
 import { messengerWebhookApp } from "./integrations/messenger/webhook.js";
+import { actionDecidedPushApp } from "./subscribers/action-decided-push.js";
 
 const app = new Hono();
 const PORT = parseInt(process.env.PORT || "8080", 10);
@@ -57,6 +58,12 @@ app.route("/api/integrations/messenger", messengerOAuthApp);
 
 // Webhook — incoming messages from Messenger (public, signature-verified)
 app.route("/webhooks/messenger", messengerWebhookApp);
+
+// ============================================================================
+// PUB/SUB PUSH SUBSCRIBERS (OIDC-authed)
+// ============================================================================
+
+app.route("/pubsub", actionDecidedPushApp);
 
 // ============================================================================
 // tRPC SERVER
