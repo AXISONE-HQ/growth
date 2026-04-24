@@ -12,6 +12,7 @@ export interface UpsertConnectionInput {
   provider: string;
   providerAccountId: string;
   status: ConnectionStatus;
+  credentialsRef: string;
   label?: string;
   metadata?: Prisma.InputJsonValue;
   complianceStatus?: Prisma.InputJsonValue;
@@ -33,9 +34,10 @@ export async function upsertConnection(input: UpsertConnectionInput) {
       provider: input.provider,
       providerAccountId: input.providerAccountId,
       status: input.status,
+      credentialsRef: input.credentialsRef,
       label: input.label ?? null,
       metadata: input.metadata ?? {},
-      complianceStatus: input.complianceStatus ?? null,
+      complianceStatus: input.complianceStatus ?? Prisma.JsonNull,
       connectedAt: now,
     },
     update: {

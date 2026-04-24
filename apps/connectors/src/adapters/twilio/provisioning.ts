@@ -59,8 +59,10 @@ export type TwilioConnectParams = z.infer<typeof TwilioConnectParamsSchema>;
 export async function provisionSubaccount(tenant: TenantRef): Promise<{
   accountSid: string;
   authToken: string;
+  credentialsRef: string;
 }> {
   const master = await getMasterTwilioClient();
+  const credentialsRef = `projects/${env.GCP_PROJECT_ID}/secrets/${tenant.id}-twilio`;
 
   // Idempotency: check for an existing subaccount with matching friendlyName
   const existing = await master.api.v2010.accounts.list({
@@ -72,7 +74,7 @@ export async function provisionSubaccount(tenant: TenantRef): Promise<{
     // For an existing account, we can't recover the auth token from the list API;
     // it lives in Secret Manager already. Re-fetch.
     const token = await fetchExistingAuthToken(tenant.id);
-    return { accountSid: existing[0].sid, authToken: token };
+    return { accountSid: existing[0].sid, authToken: token, credentialsRef };
   }
 
   const subaccount = await master.api.v2010.accounts.create({
@@ -88,7 +90,7 @@ export async function provisionSubaccount(tenant: TenantRef): Promise<{
   await writeReverseLookupSecret(subaccount.sid, subaccount.authToken);
 
   logger.info({ tenantId: tenant.id, accountSid: subaccount.sid }, 'Twilio subaccount created');
-  return { accountSid: subaccount.sid, authToken: subaccount.authToken };
+  return { accountSid: subaccount.sid, authToken: subaccount.authToken, credentialsRef };
 }
 
 /**

@@ -87,13 +87,14 @@ export class SendGridAdapter implements ChannelAdapter {
     );
     // Persist ChannelConnection (KAN-558) — done
     await upsertConnection({
-      tenantId,
+      tenantId: tenant.id,
       channelType: "EMAIL",
       provider: "sendgrid",
-      providerAccountId: subuserUsername,
+      providerAccountId: subuser.username,
       status: "ACTIVE",
-      label: \`SendGrid Email\`,
-      metadata: { subuserUsername },
+      credentialsRef: subuser.credentialsRef,
+      label: `SendGrid Email`,
+      metadata: { subuserUsername: subuser.username },
     });
     // KAN-558 persistence wired
     log.info({ connectionId: connection.id, status: connection.status }, 'ChannelConnection assembled');
