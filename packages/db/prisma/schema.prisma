@@ -3,7 +3,11 @@
 // Prisma ORM with PostgreSQL (Cloud SQL)
 
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  // KAN-677: native = local dev (macOS arm64). debian-openssl-3.0.x = Cloud Run
+  // (node:20-slim). Without the second target, the production container errors:
+  // "Prisma Client could not locate the Query Engine for runtime debian-openssl-3.0.x".
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
 }
 
 datasource db {
