@@ -15,7 +15,10 @@ COPY packages/connector-contracts/package.json ./packages/connector-contracts/
 COPY packages/db/package.json ./packages/db/
 COPY packages/shared/package.json ./packages/shared/
 COPY apps/connectors/package.json ./apps/connectors/
-RUN npm install --include=dev --no-audit --no-fund
+# --ignore-scripts: source isn't here yet, so postinstall hooks (tsc in
+# connector-contracts; prisma generate in packages/db) would fail. They're
+# re-run explicitly in the build stage once source is available.
+RUN npm install --include=dev --no-audit --no-fund --ignore-scripts
 
 # ─────────────────────────────────────────────
 # build: TypeScript compilation
