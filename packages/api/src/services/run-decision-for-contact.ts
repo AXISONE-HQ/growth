@@ -18,7 +18,7 @@
  * ──────────────────────────────────────────────────────────────────────────────
  */
 
-import type { PrismaClient } from '@prisma/client';
+import type { Prisma, PrismaClient } from '@prisma/client';
 import { TRPCError } from '@trpc/server';
 
 // ✅ VERIFIED exports against the real service files (2026-04-23):
@@ -182,7 +182,7 @@ function buildAuditLogStore(prisma: PrismaClient): AuditLogStore {
               confidenceScore: entry.confidenceScore,
               guardrailResult: entry.guardrailResult,
               durationMs: entry.durationMs,
-            } as unknown as Record<string, unknown>,
+            } as unknown as Prisma.InputJsonValue,
           },
         });
         return { success: true };
@@ -259,7 +259,7 @@ async function runPlaybookStep(
         allowedActions: step.allowedActions,
         instruction: step.instruction,
         ...(step.additionalContext ?? {}),
-      } as unknown as Record<string, unknown>,
+      } as unknown as Prisma.InputJsonValue,
     },
   });
 
