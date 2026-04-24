@@ -424,6 +424,37 @@ export class InMemoryPubSubClient implements PubSubClient {
 }
 
 // ─────────────────────────────────────────────
+// Cloud Pub/Sub Client (production)
+// ─────────────────────────────────────────────
+//
+// Thin wrapper around @google-cloud/pubsub. Auth is automatic in Cloud Run
+// via the service account attached to the revision; locally set
+// GOOGLE_APPLICATION_CREDENTIALS to a keyfile path. Retries are handled by
+// the SDK's built-in gRPC retry middleware (default settings are fine).
+//
+// Topic names passed to publish() are routed through topicName() upstream
+// (see publishEvent), which prefixes with the TOPIC_PREFIX convention. The
+// client itself just takes the final topic name and publishes.
+
+import { PubSub } from '@google-cloud/pubsub';
+
+export class CloudPubSubClient implements PubSubClient {
+  private pubsub: PubSub;
+
+  constructor(projectId: string) {
+    this.pubsub = new PubSub({ projectId });
+  }
+
+  async publish(
+    topic: string,
+    data: Buffer,
+    attributes?: Record<string, string>,
+  ): Promise<string> {
+    return this.pubsub.topic(topic).publishMessage({ data, attributes });
+  }
+}
+
+// ─────────────────────────────────────────────
 // API Route Handlers
 // ─────────────────────────────────────────────
 

@@ -59,9 +59,8 @@ import {
 import {
   publishActionDecided,
   publishEscalationTriggered,
-  InMemoryPubSubClient,
-  type PubSubClient,
 } from './action-decided-publisher';
+import { getPubSubClient } from '../lib/pubsub-client';
 
 export interface PlaybookStepContext {
   /** Unique step identifier, e.g. "dormant_reactivation_14d:day_0". */
@@ -109,7 +108,6 @@ export interface RunForContactResult {
 
 let contextCacheSingleton: ContextCache | null = null;
 let auditPubSubSingleton: AuditPubSubClient | null = null;
-let pubSubSingleton: PubSubClient | null = null;
 
 function getContextCache(): ContextCache {
   if (!contextCacheSingleton) contextCacheSingleton = new InMemoryContextCache();
@@ -119,15 +117,6 @@ function getContextCache(): ContextCache {
 function getAuditPubSubClient(): AuditPubSubClient {
   if (!auditPubSubSingleton) auditPubSubSingleton = new InMemoryAuditPubSubClient();
   return auditPubSubSingleton;
-}
-
-// TODO(KAN-656): replace with real @google-cloud/pubsub client. Currently in-memory,
-// so action.decided events are dropped and no downstream (connectors/SendGrid) fires.
-// The real consumer also listens on `action.send`, not `action.decided` — a topic-
-// name bridge is needed before end-to-end email delivery works.
-function getPubSubClient(): PubSubClient {
-  if (!pubSubSingleton) pubSubSingleton = new InMemoryPubSubClient();
-  return pubSubSingleton;
 }
 
 function buildContextDatabase(prisma: PrismaClient): ContextDatabase {
@@ -455,7 +444,7 @@ async function runFreeform(
     console.error('[runDecisionForContact] audit-logger failed:', err);
   });
 
-  // 9. Publish Pub/Sub event. TODO(KAN-656): real client + action.send topic bridge.
+  // 9. Publish Pub/Sub event.
   const client = getPubSubClient();
   const publishOp =
     outcome === 'EXECUTED'
