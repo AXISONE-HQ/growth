@@ -35,7 +35,7 @@ export async function upsertConnection(input: UpsertConnectionInput) {
       status: input.status,
       label: input.label ?? null,
       metadata: input.metadata ?? {},
-      complianceStatus: input.complianceStatus ?? null,
+      complianceStatus: input.complianceStatus ?? Prisma.JsonNull,
       connectedAt: now,
     },
     update: {
