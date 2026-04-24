@@ -280,6 +280,31 @@ async function runPlaybookStep(
     console.error('[runPlaybookStep] audit-logger failed:', err);
   });
 
+  // Adapter mode still publishes to action.decided so downstream Message Composer (KAN-660)
+  // can pick up. Gated on !dryRun: dry-run launches don't trigger real sends.
+  const isDryRun = step.additionalContext?.dryRun === true;
+  if (!isDryRun) {
+    const objectiveId =
+      (step.additionalContext?.objectiveId as string | undefined) ?? 'unknown';
+    publishActionDecided(getPubSubClient(), {
+      tenantId,
+      contactId,
+      objectiveId,
+      actionType,
+      channel: step.channel,
+      actionPayload: { instruction: step.instruction },
+      selectedStrategy: strategyType,
+      confidenceScore: confidence, // 1.0 = certainty the predetermined step will execute, not outcome probability
+      strategyReasoning: reasoning,
+      actionReasoning: step.instruction,
+    }).catch((err: unknown) => {
+      console.error(
+        `[runPlaybookStep] publishActionDecided failed decisionId=${decision.id} contactId=${contactId}:`,
+        err,
+      );
+    });
+  }
+
   return {
     decisionId: decision.id,
     strategy: strategyType,
