@@ -101,6 +101,38 @@ PR #3 surfaced 12 of these cascading violations because it was the first PR to i
 
 **For now:** treat `TS6059` errors on cross-package imports as expected noise. Focus on errors within `apps/api/src/` itself.
 
+## Workspace resolution — packages that ship built output
+
+Workspace packages under `packages/*` that other workspaces depend on (e.g. `@growth/connector-contracts`, `@growth/db`, `@growth/shared`) declare:
+
+```jsonc
+{
+  "main":  "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": { "build": "tsc" }
+}
+```
+
+Consumers import via the workspace name (`import { ... } from '@growth/connector-contracts'`) and npm's workspaces symlink resolves `node_modules/@growth/connector-contracts` → `packages/connector-contracts/`. tsc then follows `main`/`types` and expects to find `dist/index.js` / `dist/index.d.ts`.
+
+**If `dist/` doesn't exist, resolution fails with** `TS2307: Cannot find module '@growth/<name>'` — even though the workspace symlink is fine. `turbo.json` already chains `lint.dependsOn: ["^build"]`, but that only fires when lint is invoked *through* turbo. Direct `npm run lint -w <workspace>` and fresh clones bypass it.
+
+**Fix pattern: a `postinstall` hook in the emitting package's `package.json`** so `npm install` always produces `dist/` before anything tries to consume the package:
+
+```jsonc
+"scripts": {
+  "build": "tsc",
+  "postinstall": "tsc",   // ensures dist/ after every install
+  "lint": "tsc --noEmit"
+}
+```
+
+**Packages using this pattern today:**
+- `packages/connector-contracts` — `postinstall: "tsc"` (KAN-664, PR #8)
+- `packages/db` — `postinstall: "prisma generate"` (KAN-665, PR #7) — same shape, different tool
+
+`packages/shared` has the same `main: dist/index.js` declaration but isn't currently imported from any `apps/` code, so its missing `dist/` is latent, not broken. If/when `apps/*` imports from `@growth/shared`, add the same `postinstall: "tsc"` hook.
+
 ## Known pre-existing type errors
 
 As of 2026-04-24, `npx tsc --noEmit` from `apps/api/` reports approximately:
