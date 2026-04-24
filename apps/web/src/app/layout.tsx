@@ -18,6 +18,7 @@ import {
   LogOut,
   Shield,
   ChevronDown,
+  Target,
 } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
 import { AuthProvider, useAuth } from '@/lib/AuthContext';
@@ -25,6 +26,7 @@ import { AuthProvider, useAuth } from '@/lib/AuthContext';
 const navItems = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/pipelines', label: 'Pipelines', icon: Activity },
+  { href: '/opportunities', label: 'Opportunities', icon: Target },
   { href: '/conversations', label: 'Conversations', icon: MessageSquare },
   { href: '/escalations', label: 'Escalations', icon: AlertTriangle, badge: 3 },
   { href: '/customers', label: 'Customers', icon: Users },
@@ -38,6 +40,7 @@ const pageTitle: Record<string, string> = {
   '/dashboard': 'Dashboard',
   '/pipelines': 'Pipelines',
   '/pipelines/create': 'Create Pipeline',
+  '/opportunities': 'Opportunities',
   '/conversations': 'Conversations',
   '/escalations': 'Escalations',
   '/customers': 'Customers',
