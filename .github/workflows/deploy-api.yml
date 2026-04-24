@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'apps/api/**'
+      - 'packages/**'
       - '.github/workflows/deploy-api.yml'
   workflow_dispatch:
 
@@ -40,9 +41,10 @@ jobs:
       - name: Build Docker image
         run: |
           docker build \
+            -f apps/api/Dockerfile \
             -t ${{ env.IMAGE }}:${{ github.sha }} \
             -t ${{ env.IMAGE }}:latest \
-            ./apps/api
+            .
 
       - name: Push Docker image
         run: |
