@@ -475,6 +475,7 @@ model ChannelConnection {
   provider          String           // "twilio" | "sendgrid" | "meta" | ...
   providerAccountId String           @map("provider_account_id") // subaccount SID / subuser / page ID
   status            ConnectionStatus @default(PENDING)
+  label             String?          // human-readable display label (e.g. "Twilio SMS", "Messenger - <page>")
   credentialsRef    String           @map("credentials_ref") // Secret Manager path
   metadata          Json             @default("{}")
   complianceStatus  Json?            @map("compliance_status") // 10DLC, domain auth, app review
