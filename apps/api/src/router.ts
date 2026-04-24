@@ -2,6 +2,13 @@ import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { router, publicProcedure, protectedProcedure } from "./trpc.js";
 import { generateObjectionResponses, regenerateSingleField } from "./llm.js";
+import { detectSignals } from "../../../packages/api/src/services/wedge-signals.js";
+import { matchOpportunities } from "../../../packages/api/src/services/wedge-opportunities.js";
+import {
+  WEDGE_PLAYBOOKS,
+  buildPlaybookStepContext,
+} from "../../../packages/api/src/services/wedge-playbooks.js";
+import { runDecisionForContact } from "../../../packages/api/src/services/run-decision-for-contact.js";
 
 // ============================================================================
 // CONTACTS ROUTER
@@ -2099,6 +2106,139 @@ const settingsRouter = router({
   }),
 });
 
+// ============================================================================
+// WEDGE ROUTER — KAN-655 Day-1 Wedge (opportunities + playbook launch)
+// ============================================================================
+
+const wedgeRouter = router({
+  // Scan tenant contacts → signal detector → opportunity matcher.
+  // Attach playbook preview + sample contact list to each opportunity.
+  opportunities: protectedProcedure.query(async ({ ctx }) => {
+    const contacts = await ctx.prisma.contact.findMany({
+      where: { tenantId: ctx.tenantId },
+    });
+
+    const signals = detectSignals(contacts as any);
+    const opportunities = matchOpportunities(signals);
+
+    const enriched = opportunities.map((opp) => {
+      const playbook = WEDGE_PLAYBOOKS[opp.playbookSlug];
+      const sampleContacts = contacts
+        .filter((c: any) => opp.entityIds.includes(c.id))
+        .slice(0, 5)
+        .map((c: any) => ({
+          id: c.id,
+          name:
+            [c.firstName, c.lastName].filter(Boolean).join(" ") ||
+            c.email ||
+            c.id,
+          email: c.email ?? null,
+          lifecycleStage: c.lifecycleStage ?? null,
+        }));
+      return {
+        ...opp,
+        playbook: playbook
+          ? {
+              slug: playbook.slug,
+              name: playbook.name,
+              description: playbook.description,
+              steps: playbook.steps.map((s) => ({
+                day: s.day,
+                channel: s.channel,
+                intent: s.intent,
+              })),
+            }
+          : null,
+        sampleContacts,
+      };
+    });
+
+    return {
+      opportunities: enriched,
+      summary: {
+        totalContacts: contacts.length,
+        totalSignals: signals.length,
+        totalOpportunities: enriched.length,
+        generatedAt: new Date().toISOString(),
+      },
+    };
+  }),
+
+  // Launch step 0 of the playbook against every entity in the selected
+  // opportunity. Each contact goes through runDecisionForContact with a
+  // playbookStepContext (adapter pattern; file #3 adds that param to
+  // RunForContactInput — until then the call type-errors on the extra field).
+  launch: protectedProcedure
+    .input(
+      z.object({
+        opportunityType: z.enum([
+          "dormant_reactivation",
+          "high_intent_no_touch",
+          "data_enrichment",
+        ]),
+        playbookSlug: z.string(),
+        dryRun: z.boolean().default(true),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      // Re-derive the opportunity (fresh truth, not stale client state).
+      const contacts = await ctx.prisma.contact.findMany({
+        where: { tenantId: ctx.tenantId },
+      });
+      const signals = detectSignals(contacts as any);
+      const opportunities = matchOpportunities(signals);
+      const opp = opportunities.find((o) => o.type === input.opportunityType);
+      if (!opp) {
+        throw new TRPCError({
+          code: "NOT_FOUND",
+          message: `No current opportunity of type ${input.opportunityType}`,
+        });
+      }
+
+      const stepContext = buildPlaybookStepContext(input.playbookSlug, 0);
+      const actorId = ctx.firebaseUser?.uid ?? "wedge";
+
+      const results: Array<
+        | { entityId: string; outcome: string; decisionId: string }
+        | { entityId: string; error: string }
+      > = [];
+
+      for (const entityId of opp.entityIds) {
+        try {
+          const r = await runDecisionForContact(ctx.prisma, {
+            tenantId: ctx.tenantId,
+            contactId: entityId,
+            actor: { type: "USER", id: actorId },
+            playbookStepContext: {
+              ...stepContext,
+              additionalContext: {
+                ...stepContext.additionalContext,
+                dryRun: input.dryRun,
+                opportunityType: input.opportunityType,
+              },
+            },
+          });
+          results.push({
+            entityId,
+            outcome: r.outcome,
+            decisionId: r.decisionId,
+          });
+        } catch (err) {
+          results.push({ entityId, error: String(err) });
+        }
+      }
+
+      return {
+        launched: results.filter((r) => !("error" in r)).length,
+        errors: results.filter((r) => "error" in r).length,
+        dryRun: input.dryRun,
+        opportunityType: input.opportunityType,
+        playbookSlug: input.playbookSlug,
+        results,
+      };
+    }),
+});
+
 export const appRouter = router({
   contacts: contactsRouter,
   pipelines: pipelinesRouter,
@@ -2113,6 +2253,7 @@ export const appRouter = router({
   competitors: competitorsRouter,
   salesObjections: salesObjectionsRouter,
   settings: settingsRouter,
+  wedge: wedgeRouter,
 });
 
 export type AppRouter = typeof appRouter;

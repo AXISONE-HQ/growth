@@ -55,7 +55,7 @@ export const WEDGE_PLAYBOOKS: Record<string, WedgePlaybookTemplate> = {
         channel: 'email',
         intent: 'final_breakup',
         instruction:
-          'Send a polite breakup email: "Is this still a priority? If not, no problem — I\\'ll stop reaching out." Strict 3-sentence cap.',
+          'Send a polite breakup email: "Is this still a priority? If not, no problem — I\'ll stop reaching out." Strict 3-sentence cap.',
         allowedActions: ['send_email'],
       },
     ],
