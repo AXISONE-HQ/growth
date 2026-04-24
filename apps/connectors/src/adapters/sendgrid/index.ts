@@ -92,6 +92,7 @@ export class SendGridAdapter implements ChannelAdapter {
       provider: "sendgrid",
       providerAccountId: subuser.username,
       status: "ACTIVE",
+      credentialsRef: subuser.credentialsRef,
       label: `SendGrid Email`,
       metadata: { subuserUsername: subuser.username },
     });

@@ -36,6 +36,7 @@ interface SubuserOutput {
   username: string;
   email: string;
   apiKey: string; // scoped mail.send only
+  credentialsRef: string; // Secret Manager path
 }
 
 /**
@@ -46,6 +47,7 @@ export async function provisionSubuser(tenant: TenantRef): Promise<SubuserOutput
   const client = await getMasterSendGridClient();
   const log = logger.child({ tenantId: tenant.id, provider: 'sendgrid' });
   const username = `growth-${tenant.slug}`;
+  const credentialsRef = `projects/${env.GCP_PROJECT_ID}/secrets/${tenant.id}-sendgrid`;
 
   // Idempotency check
   const [existingRes] = await client.request({
@@ -58,7 +60,7 @@ export async function provisionSubuser(tenant: TenantRef): Promise<SubuserOutput
     log.info({ username }, 'reusing existing SendGrid subuser');
     // API key must be fetched from Secret Manager — we can't recover it from the API
     const apiKey = await fetchExistingApiKey(tenant.id);
-    return { username, email: existing[0].email, apiKey };
+    return { username, email: existing[0].email, apiKey, credentialsRef };
   }
 
   // Create the subuser
@@ -93,7 +95,7 @@ export async function provisionSubuser(tenant: TenantRef): Promise<SubuserOutput
   await writeSubuserSecret(tenant.id, { apiKey, subuserUsername: username });
   log.info({ username }, 'SendGrid subuser API key provisioned');
 
-  return { username, email: subuserEmail, apiKey };
+  return { username, email: subuserEmail, apiKey, credentialsRef };
 }
 
 /** Build a ChannelConnection record from provisioning outputs. */
