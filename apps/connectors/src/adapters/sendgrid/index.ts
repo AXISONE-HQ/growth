@@ -92,7 +92,7 @@ export class SendGridAdapter implements ChannelAdapter {
       provider: "sendgrid",
       providerAccountId: subuserUsername,
       status: "ACTIVE",
-      label: \`SendGrid Email\`,
+      label: `SendGrid Email`,
       metadata: { subuserUsername },
     });
     // KAN-558 persistence wired

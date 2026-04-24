@@ -111,7 +111,7 @@ export class TwilioAdapter implements ChannelAdapter {
       provider: "twilio",
       providerAccountId: subAccountSid,
       status: "ACTIVE",
-      label: \`Twilio SMS\`,
+      label: `Twilio SMS`,
       metadata: { phoneNumber, messagingServiceSid },
       complianceStatus: { tenDlcStatus: "pending" },
     });

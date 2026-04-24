@@ -89,7 +89,7 @@ export class MetaAdapter implements ChannelAdapter {
         provider: "meta",
         providerAccountId: page.id,
         status: "ACTIVE",
-        label: \`Messenger - \${page.name}\`,
+        label: `Messenger - ${page.name}`,
         metadata: { pageId: page.id, pageName: page.name },
       });
     }
