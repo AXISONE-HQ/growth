@@ -106,10 +106,10 @@ export class TwilioAdapter implements ChannelAdapter {
 
     // Persist ChannelConnection (KAN-558) — done
     await upsertConnection({
-      tenantId,
+      tenantId: tenant.id,
       channelType: "SMS",
       provider: "twilio",
-      providerAccountId: subAccountSid,
+      providerAccountId: accountSid,
       status: "ACTIVE",
       label: `Twilio SMS`,
       metadata: { phoneNumber, messagingServiceSid },
@@ -338,18 +338,25 @@ export class TwilioAdapter implements ChannelAdapter {
       // existing getTwilioClient() path by constructing a minimal connection shim.
       logger.info({ keyword, to: params.From, action: toSend.action }, 'keyword auto-reply scheduled');
       void Twilio; // linter
-      // Auto-reply send (KAN-579)
-    try {
-      const client = await getTwilioClient(tenantId);
-      const conns = await getConnections(tenantId, "SMS");
-      const fromNumber = (conns[0]?.metadata as any)?.phoneNumber;
-      if (client && fromNumber) {
-        await client.messages.create({ to: from, from: fromNumber, body: replyText });
-      }
-    } catch (err) {
-      console.error("[twilio] auto-reply failed:", err);
-    }
-    // KAN-579 auto-reply wired
+      // TODO(KAN-549): resolve real tenantId from params.AccountSid, then
+      // look up the SMS ChannelConnection and send the auto-reply via
+      // getTwilioClient(conn). Matches the placeholder pattern used in
+      // handleWebhook() (lines 271, 286) — the webhook router resolves the
+      // real tenantId downstream. Skeleton of the eventual send:
+      //
+      //   const tenantId = await resolveTenantFromAccountSid(params.AccountSid);
+      //   const conns = await getConnections(tenantId, "SMS");
+      //   const conn = conns[0];
+      //   if (!conn) return;
+      //   const client = await getTwilioClient(conn);
+      //   const fromNumber = (conn.metadata as { phoneNumber?: string })?.phoneNumber;
+      //   if (fromNumber) {
+      //     await client.messages.create({
+      //       to: params.From,
+      //       from: fromNumber,
+      //       body: toSend.body,
+      //     });
+      //   }
     } catch (err) {
       logger.error({ err, keyword }, 'keyword auto-reply failed');
     }

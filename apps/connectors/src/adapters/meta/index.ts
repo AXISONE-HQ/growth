@@ -84,7 +84,7 @@ export class MetaAdapter implements ChannelAdapter {
     // Persist connections (KAN-558) — one per Page
     for (const page of pages) {
       await upsertConnection({
-        tenantId,
+        tenantId: tenant.id,
         channelType: "MESSENGER",
         provider: "meta",
         providerAccountId: page.id,
