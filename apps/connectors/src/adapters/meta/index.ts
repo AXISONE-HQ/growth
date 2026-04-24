@@ -17,6 +17,7 @@ import type {
   SendResult,
   TenantRef,
 } from '@growth/connector-contracts';
+import { env } from '../../env.js';
 import { logger } from '../../logger.js';
 import {
   GRAPH_API_VERSION,
@@ -83,12 +84,14 @@ export class MetaAdapter implements ChannelAdapter {
 
     // Persist connections (KAN-558) — one per Page
     for (const page of pages) {
+      const credentialsRef = `projects/${env.GCP_PROJECT_ID}/secrets/${tenant.id}-meta-${page.id}`;
       await upsertConnection({
         tenantId: tenant.id,
         channelType: "MESSENGER",
         provider: "meta",
         providerAccountId: page.id,
         status: "ACTIVE",
+        credentialsRef,
         label: `Messenger - ${page.name}`,
         metadata: { pageId: page.id, pageName: page.name },
       });

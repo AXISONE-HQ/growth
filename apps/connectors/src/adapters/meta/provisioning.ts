@@ -103,13 +103,17 @@ export async function unsubscribePage(pageId: string, pageAccessToken: string): 
   logger.info({ pageId }, 'Page unsubscribed from webhook');
 }
 
-/** Persist the Page Access Token + metadata to Secret Manager. */
+/**
+ * Persist the Page Access Token + metadata to Secret Manager.
+ * Returns the Secret Manager path (credentialsRef) so the caller can
+ * persist it on the ChannelConnection row.
+ */
 export async function storePageToken(
   tenantId: string,
   pageId: string,
   pageName: string,
   pageAccessToken: string,
-): Promise<void> {
+): Promise<string> {
   const parent = `projects/${env.GCP_PROJECT_ID}`;
   const secretId = `${tenantId}-meta-${pageId}`;
   try {
@@ -134,6 +138,7 @@ export async function storePageToken(
       ),
     },
   });
+  return `${parent}/secrets/${secretId}`;
 }
 
 /** Build a ChannelConnection from provisioning outputs. One per Page. */

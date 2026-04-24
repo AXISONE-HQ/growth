@@ -51,7 +51,7 @@ export class TwilioAdapter implements ChannelAdapter {
     log.info('starting Twilio connect flow');
 
     // Step 1: subaccount
-    const { accountSid, authToken } = await provisionSubaccount(tenant);
+    const { accountSid, authToken, credentialsRef } = await provisionSubaccount(tenant);
     log.info({ accountSid }, 'subaccount ready');
 
     const subaccountClient = Twilio(accountSid, authToken);
@@ -111,6 +111,7 @@ export class TwilioAdapter implements ChannelAdapter {
       provider: "twilio",
       providerAccountId: accountSid,
       status: "ACTIVE",
+      credentialsRef,
       label: `Twilio SMS`,
       metadata: { phoneNumber, messagingServiceSid },
       complianceStatus: { tenDlcStatus: "pending" },
