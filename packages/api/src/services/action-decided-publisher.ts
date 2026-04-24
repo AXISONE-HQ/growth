@@ -313,6 +313,12 @@ export function buildDecisionLoggedEvent(
 // Publisher
 // ─────────────────────────────────────────────
 
+// KAN-661 narrowest-scope fix: `publishActionDecided` emits to the unprefixed
+// topic `action.decided` (which exists in GCP). The `TOPIC_PREFIX` + `topicName()`
+// pair below is retained for `publishEscalationTriggered` and `publishDecisionLogged`,
+// which emit to topics that don't exist regardless — tracked in KAN-676.
+const ACTION_DECIDED_TOPIC = 'action.decided';
+
 const TOPIC_PREFIX = 'growth';
 
 function topicName(topic: string): string {
@@ -366,7 +372,38 @@ export async function publishActionDecided(
   input: PublishActionInput,
 ): Promise<PublishResult> {
   const event = buildActionDecidedEvent(input);
-  return publishEvent(client, 'action.decided', event as unknown as Record<string, unknown>);
+  const eventId = event.eventId;
+  const publishedAt = new Date().toISOString();
+  try {
+    const data = Buffer.from(JSON.stringify(event));
+    const attributes: Record<string, string> = {
+      eventType: 'action.decided',
+      tenantId: input.tenantId,
+      version: '1.0',
+    };
+    const messageId = await client.publish(ACTION_DECIDED_TOPIC, data, attributes);
+    return {
+      eventId,
+      topic: 'action.decided',
+      messageId,
+      published: true,
+      publishedAt,
+      error: null,
+    };
+  } catch (err: any) {
+    console.error(
+      `[ActionDecidedPublisher] Failed to publish to ${ACTION_DECIDED_TOPIC}:`,
+      err,
+    );
+    return {
+      eventId,
+      topic: 'action.decided',
+      messageId: null,
+      published: false,
+      publishedAt,
+      error: err.message ?? 'Unknown publish error',
+    };
+  }
 }
 
 export async function publishEscalationTriggered(

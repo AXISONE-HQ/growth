@@ -106,8 +106,9 @@ export interface PublishActionSendInput {
   connectionId: string;
 }
 
-const TOPIC_PREFIX = 'growth';
-const ACTION_SEND_TOPIC = `${TOPIC_PREFIX}.action.send`;
+// KAN-661 fix: topic `action.send` exists in GCP; the previous `growth.` prefix
+// caused silent publish failures (no topic of that name).
+const ACTION_SEND_TOPIC = 'action.send';
 
 export async function publishActionSend(
   client: PubSubClient,

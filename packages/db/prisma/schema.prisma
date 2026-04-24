@@ -513,6 +513,22 @@ enum ConnectionStatus {
   @@map("connection_status")
 }
 
+// ─────────────────────────────────────────────────────────────
+// EMAIL SUPPRESSIONS — per-tenant (bounces, unsubscribes, spam)
+// KAN-661
+// ─────────────────────────────────────────────────────────────
+model EmailSuppression {
+  id        String   @id @default(uuid())
+  tenantId  String   @map("tenant_id")
+  email     String
+  reason    String   // 'bounce' | 'spam' | 'unsubscribed' | 'manual'
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([tenantId, email])
+  @@index([tenantId])
+  @@map("email_suppressions")
+}
+
 // ALSO ADD to the existing `model Tenant` — the relations block:
 //
 //   channelConnections ChannelConnection[]

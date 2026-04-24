@@ -22,6 +22,7 @@ import { upsertConnection, revokeConnection, updateHealthCheck } from "../../rep
 
 // @ts-expect-error - html-to-text ships no types
 import { convert as htmlToText } from 'html-to-text';
+import sgMail from '@sendgrid/mail';
 import type {
   ChannelAdapter,
   ChannelConnection,
@@ -47,7 +48,7 @@ import {
   provisionSubuser,
 } from './provisioning.js';
 import { provisionSharedSubdomain } from './subdomain.js';
-import { isSuppressed, suppress } from './suppressions.js';
+import { isSuppressed, isSuppressedDb, suppress, suppressDb } from './suppressions.js';
 import { buildUnsubscribeUrl, generateUnsubscribeToken } from './unsubscribe.js';
 
 export class SendGridAdapter implements ChannelAdapter {
@@ -173,6 +174,14 @@ export class SendGridAdapter implements ChannelAdapter {
       };
     }
 
+    // KAN-661: simple mode — single global API key + configured from-address.
+    // Bypasses subuser provisioning and domain-auth gate. Does not mix with
+    // subuser-mode sends (both paths call sgMail.setApiKey on the shared singleton);
+    // the wedge demo uses simple mode exclusively.
+    if ((connection.metadata as Record<string, unknown> | undefined)?.mode === 'simple') {
+      return this.sendSimpleMode(connection, msg);
+    }
+
     // Pre-send suppression check
     if (await isSuppressed(msg.tenantId, msg.recipient.email)) {
       log.info({ email: msg.recipient.email }, 'send suppressed');
@@ -261,6 +270,112 @@ export class SendGridAdapter implements ChannelAdapter {
         errorClass: cls.errorClass,
         errorMessage: e.message ?? cls.description,
         metadata: { sendgridStatus: status, sideEffect: cls.sideEffect },
+      };
+    }
+  }
+
+  // ── sendSimpleMode() — KAN-661: wedge-demo path ────────────
+  private async sendSimpleMode(
+    connection: ChannelConnection,
+    msg: OutboundMessage,
+  ): Promise<SendResult> {
+    const log = logger.child({
+      connectionId: connection.id,
+      actionId: msg.actionId,
+      tenantId: msg.tenantId,
+      mode: 'simple',
+    });
+    const email = msg.recipient.email!;
+
+    const check = await isSuppressedDb(msg.tenantId, email);
+    if (check.suppressed) {
+      log.info({ email, reason: check.reason }, 'simple-mode send suppressed');
+      return {
+        providerMessageId: '',
+        status: 'failed',
+        errorClass: 'permanent',
+        errorMessage: `Recipient suppressed: ${check.reason}`,
+        metadata: { suppressed: true, reason: check.reason, mode: 'simple' },
+      };
+    }
+
+    const apiKey = process.env.SENDGRID_API_KEY;
+    if (!apiKey) {
+      log.error('SENDGRID_API_KEY env var not set in simple mode');
+      return {
+        providerMessageId: '',
+        status: 'failed',
+        errorClass: 'transient',
+        errorMessage: 'SENDGRID_API_KEY not configured',
+      };
+    }
+
+    const metadata = (connection.metadata ?? {}) as Record<string, unknown>;
+    const fromEmail = (metadata.fromEmail as string | undefined) ?? 'hello@growth.axisone.com';
+    const fromName = (metadata.fromName as string | undefined) ?? 'growth';
+
+    const html = msg.content.html ?? wrapPlainTextAsHtml(msg.content.body);
+    const text = htmlToText(html, { wordwrap: 130 });
+
+    try {
+      sgMail.setApiKey(apiKey);
+      const [res] = await sgMail.send(
+        {
+          to: { email, name: msg.recipient.displayName },
+          from: { email: fromEmail, name: fromName },
+          subject: msg.content.subject ?? '(no subject)',
+          text,
+          html,
+          categories: msg.categories ?? [`tenant:${msg.tenantId}`, 'simple-mode'],
+          customArgs: {
+            actionId: msg.actionId,
+            tenantId: msg.tenantId,
+            connectionId: connection.id,
+            mode: 'simple',
+            ...(msg.traceId ? { traceId: msg.traceId } : {}),
+          },
+          headers: {
+            // Body link (inserted by KAN-660 composer) is the primary unsub path;
+            // mailto fallback satisfies CAN-SPAM / one-click.
+            'List-Unsubscribe':
+              '<mailto:unsubscribe@growth.axisone.com?subject=unsubscribe>',
+            'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+          },
+          trackingSettings: {
+            clickTracking: { enable: false, enableText: false },
+            openTracking: { enable: true },
+          },
+        },
+        false,
+      );
+      const providerMessageId =
+        (res.headers as Record<string, string> | undefined)?.['x-message-id'] ?? '';
+      log.info({ providerMessageId, statusCode: res.statusCode }, 'simple-mode send ok');
+      return {
+        providerMessageId,
+        status: 'sent',
+        metadata: { statusCode: res.statusCode, mode: 'simple' },
+      };
+    } catch (err) {
+      const e = err as {
+        code?: number;
+        response?: { statusCode?: number };
+        message?: string;
+      };
+      const statusCode = e.response?.statusCode ?? e.code;
+      const cls = classifySendGridStatus(statusCode);
+
+      if (cls.sideEffect === 'suppress_contact') {
+        await suppressDb(msg.tenantId, email, 'bounce').catch(() => undefined);
+      }
+
+      log.warn({ err, statusCode, cls }, 'simple-mode send failed');
+      return {
+        providerMessageId: '',
+        status: 'failed',
+        errorClass: cls.errorClass,
+        errorMessage: e.message ?? cls.description,
+        metadata: { sendgridStatus: statusCode, sideEffect: cls.sideEffect, mode: 'simple' },
       };
     }
   }

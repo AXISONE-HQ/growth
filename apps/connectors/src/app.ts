@@ -7,7 +7,8 @@ import { trpcServer } from '@hono/trpc-server';
 import { logger as pinoLogger } from './logger.js';
 import { registerAdapters } from './adapters/index.js';
 import { webhooksApp } from './webhooks/index.js';
-import { pubsubApp } from './pubsub/subscriber.js';
+import { actionSendPushApp } from './subscribers/action-send-push.js';
+import { unsubscribeApp } from './routes/unsubscribe.js';
 import { connectorsRouter } from './trpc/index.js';
 import { createContext } from './trpc/context.js';
 
@@ -38,8 +39,11 @@ export function buildApp(): Hono {
   // Public webhook ingress
   app.route('/webhooks', webhooksApp);
 
-  // Pub/Sub push subscriptions (IAM-authed by Cloud Run)
-  app.route('/pubsub', pubsubApp);
+  // Public unsubscribe landing (no auth — capability URL) — KAN-661
+  app.route('/unsubscribe', unsubscribeApp);
+
+  // Pub/Sub push subscriptions (OIDC-verified at handler level) — KAN-661 action.send
+  app.route('/pubsub', actionSendPushApp);
 
   // Private VPC tRPC endpoint for Connection Manager
   app.use(

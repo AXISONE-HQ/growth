@@ -19,6 +19,7 @@
 import Redis from 'ioredis';
 import { env } from '../../env.js';
 import { logger } from '../../logger.js';
+import { prisma } from '../../repository/connection-repository.js';
 
 let redis: Redis | null = null;
 function getRedis(): Redis {
@@ -69,4 +70,38 @@ export async function unsuppress(tenantId: string, email: string): Promise<void>
   await getRedis().srem(key(tenantId), normalized);
   await getRedis().hdel(`${key(tenantId)}:reason`, normalized);
   logger.info({ tenantId, email: normalized }, 'email un-suppressed');
+}
+
+// ─────────────────────────────────────────────
+// KAN-661: Prisma-backed EmailSuppression helpers
+// Used by SendGrid adapter simple-mode path and the /unsubscribe handler.
+// Redis helpers above remain for KAN-473 subuser mode (unchanged).
+// ─────────────────────────────────────────────
+
+export type DbSuppressionReason = 'bounce' | 'spam' | 'unsubscribed' | 'manual';
+
+export async function isSuppressedDb(
+  tenantId: string,
+  email: string,
+): Promise<{ suppressed: true; reason: string } | { suppressed: false }> {
+  const normalized = normalize(email);
+  const row = await prisma.emailSuppression.findUnique({
+    where: { tenantId_email: { tenantId, email: normalized } },
+  });
+  if (!row) return { suppressed: false };
+  return { suppressed: true, reason: row.reason };
+}
+
+export async function suppressDb(
+  tenantId: string,
+  email: string,
+  reason: DbSuppressionReason,
+): Promise<void> {
+  const normalized = normalize(email);
+  await prisma.emailSuppression.upsert({
+    where: { tenantId_email: { tenantId, email: normalized } },
+    create: { tenantId, email: normalized, reason },
+    update: {}, // first-write-wins; don't overwrite the original reason
+  });
+  logger.info({ tenantId, email: normalized, reason }, 'email suppressed (db)');
 }
