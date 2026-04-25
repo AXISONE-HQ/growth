@@ -1,8 +1,8 @@
 # GCP Pub/Sub — Topic & Subscription Setup
 
-**Ticket:** [KAN-658](https://axisone-team.atlassian.net/browse/KAN-658) (subtask of [KAN-656](https://axisone-team.atlassian.net/browse/KAN-656)).
+**Tickets:** [KAN-658](https://axisone-team.atlassian.net/browse/KAN-658) (initial setup) · [KAN-673](https://axisone-team.atlassian.net/browse/KAN-673) (escalation topics) · [KAN-675](https://axisone-team.atlassian.net/browse/KAN-675) (dashed-topic retirement).
 **Project:** `growth-493400` (project number `1086551891973`).
-**Provisioned:** 2026-04-24.
+**Provisioned:** 2026-04-24 (KAN-658). Updated 2026-04-25 (KAN-673 + KAN-675).
 
 This document is the authoritative, reproducible record of the Pub/Sub infrastructure that carries the decision → execution → outcome pipeline. Run the commands here to recreate the setup from scratch.
 
@@ -49,21 +49,25 @@ Any subscription that fails 5× → action.deadletter → action.deadletter.audi
 
 ### Topics
 
-| Topic                | Purpose                                                                |
-| -------------------- | ---------------------------------------------------------------------- |
-| `action.decided`     | Decision Engine emits here when a decision outcome is `EXECUTED`.      |
-| `action.send`        | Message Composer emits here with a fully-formed outbound message.      |
-| `action.executed`    | Channel adapters emit here after attempted send (success or failure).  |
-| `action.deadletter`  | DLQ for all three above — receives messages after 5 failed deliveries. |
+| Topic                    | Purpose                                                                                  |
+| ------------------------ | ---------------------------------------------------------------------------------------- |
+| `action.decided`         | Decision Engine emits here when a decision outcome is `EXECUTED`.                        |
+| `action.send`            | Message Composer emits here with a fully-formed outbound message.                        |
+| `action.executed`        | Channel adapters emit here after attempted send (success or failure).                    |
+| `action.deadletter`      | DLQ for all three above — receives messages after 5 failed deliveries.                   |
+| `escalation.triggered`   | Decision Engine emits here when a decision is `ESCALATED` (KAN-673).                     |
+| `escalation.deadletter`  | DLQ for `escalation.triggered` — same retry posture (KAN-673).                           |
 
 ### Subscriptions
 
-| Subscription                         | Topic               | Consumer                     | DLQ                 | Max retries | Ack   | Backoff       |
-| ------------------------------------ | ------------------- | ---------------------------- | ------------------- | ----------: | ----: | ------------- |
-| `action.decided.message-composer`    | `action.decided`    | Message Composer (KAN-660)   | `action.deadletter` |           5 |  30s  | 10s → 600s    |
-| `action.send.sendgrid-adapter`       | `action.send`       | SendGrid adapter             | `action.deadletter` |           5 |  30s  | 10s → 600s    |
-| `action.executed.outcome-writer`     | `action.executed`   | Outcome writer (KAN-657)     | `action.deadletter` |           5 |  30s  | 10s → 600s    |
-| `action.deadletter.audit`            | `action.deadletter` | Forensic audit (human-read)  | —                   |         n/a |  60s  | defaults      |
+| Subscription                         | Topic                   | Consumer                          | DLQ                       | Max retries | Ack   | Backoff       |
+| ------------------------------------ | ----------------------- | --------------------------------- | ------------------------- | ----------: | ----: | ------------- |
+| `action.decided.message-composer`    | `action.decided`        | Message Composer (KAN-660)        | `action.deadletter`       |           5 |  30s  | 10s → 600s    |
+| `action.send.sendgrid-adapter`       | `action.send`           | SendGrid adapter (KAN-661)        | `action.deadletter`       |           5 |  30s  | 10s → 600s    |
+| `action.executed.outcome-writer`     | `action.executed`       | Outcome writer (KAN-657)          | `action.deadletter`       |           5 |  30s  | 10s → 600s    |
+| `action.deadletter.audit`            | `action.deadletter`     | Forensic audit (human-read)       | —                         |         n/a |  60s  | defaults      |
+| `escalation.triggered.audit`         | `escalation.triggered`  | Forensic audit (human-read) — TBD | `escalation.deadletter`   |           5 |  30s  | 10s → 600s    |
+| `escalation.deadletter.audit`        | `escalation.deadletter` | Forensic audit (human-read)       | —                         |         n/a |  60s  | defaults      |
 
 ### IAM bindings
 
@@ -132,6 +136,32 @@ gcloud pubsub subscriptions create action.deadletter.audit \
     --project="$PROJECT" \
     --topic=action.deadletter \
     --ack-deadline=60
+
+# ─── Escalation pair (KAN-673) — parallel path for ESCALATED decisions ──
+gcloud pubsub topics create escalation.triggered  --project="$PROJECT"
+gcloud pubsub topics create escalation.deadletter --project="$PROJECT"
+
+# Default compute SA needs publisher (apps/api emits escalation.triggered);
+# tracked under KAN-672's temporary-over-grant pattern until dedicated SAs land.
+gcloud pubsub topics add-iam-policy-binding escalation.triggered \
+    --project="$PROJECT" \
+    --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+    --role=roles/pubsub.publisher
+
+gcloud pubsub subscriptions create escalation.triggered.audit \
+    --project="$PROJECT" \
+    --topic=escalation.triggered \
+    --ack-deadline=30 \
+    --message-retention-duration=7d \
+    --min-retry-delay=10s \
+    --max-retry-delay=600s \
+    --max-delivery-attempts=5 \
+    --dead-letter-topic=escalation.deadletter
+
+gcloud pubsub subscriptions create escalation.deadletter.audit \
+    --project="$PROJECT" \
+    --topic=escalation.deadletter \
+    --message-retention-duration=7d
 ```
 
 ## Verification
@@ -163,13 +193,31 @@ action.decided.message-composer  action.decided     action.deadletter  5        
 ## Teardown (if needed)
 
 ```sh
-for sub in action.decided.message-composer action.send.sendgrid-adapter action.executed.outcome-writer action.deadletter.audit; do
+for sub in action.decided.message-composer action.send.sendgrid-adapter action.executed.outcome-writer action.deadletter.audit escalation.triggered.audit escalation.deadletter.audit; do
   gcloud pubsub subscriptions delete "$sub" --project="$PROJECT" --quiet
 done
-for topic in action.decided action.send action.executed action.deadletter; do
+for topic in action.decided action.send action.executed action.deadletter escalation.triggered escalation.deadletter; do
   gcloud pubsub topics delete "$topic" --project="$PROJECT" --quiet
 done
 ```
+
+## Cleanup history
+
+### 2026-04-25 — dashed-topic retirement (KAN-675)
+
+Three legacy dashed-name topics + their auto-generated `*-sub` pull subscriptions were retired (zero code references, zero push endpoints, no consumers):
+
+```
+DELETED  topic action-decided     + subscription action-decided-sub
+DELETED  topic action-send        + subscription action-send-sub
+DELETED  topic action-executed    + subscription action-executed-sub
+```
+
+These coexisted with the dotted canonical names (`action.decided`, `action.send`, `action.executed`) for ~10 days during the early-Pub/Sub-setup window. The dotted names won the convention; the dashed pair was unused.
+
+Not deleted in KAN-675 (intentionally out of scope):
+- `connectors-action-send` topic + `connectors-action-send-sub` subscription — different naming pattern (prefixed); separate cleanup ticket warranted if confirmed orphan
+- `escalation-triggered` (dashed) — no `*-sub` exists; left in place as a known orphan, file follow-up if cleanup desired
 
 ## Metrics
 
