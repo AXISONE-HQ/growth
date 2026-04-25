@@ -505,7 +505,7 @@ model ChannelConnection {
   id                String           @id @default(uuid())
   tenantId          String           @map("tenant_id")
   channelType       ChannelType      @map("channel_type")
-  provider          String           // "twilio" | "sendgrid" | "meta" | ...
+  provider          String           // "twilio" | "resend" | "meta" | ...
   providerAccountId String           @map("provider_account_id") // subaccount SID / subuser / page ID
   status            ConnectionStatus @default(PENDING)
   label             String?          // human-readable display label (e.g. "Twilio SMS", "Messenger - <page>")

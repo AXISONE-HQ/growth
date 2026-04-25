@@ -30,7 +30,7 @@ const EnvSchema = z.object({
 
   // Feature flags — default all channels off so the service boots clean before adapters land
   ENABLE_TWILIO: z.coerce.boolean().default(false),
-  ENABLE_SENDGRID: z.coerce.boolean().default(false),
+  ENABLE_RESEND: z.coerce.boolean().default(false),
   ENABLE_META: z.coerce.boolean().default(false),
 });
 

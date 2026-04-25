@@ -1,7 +1,7 @@
 # Meta Messenger Adapter (KAN-474)
 
 Facebook Messenger via Meta Graph API using the **OAuth + Page Access Token**
-pattern. Unlike Twilio/SendGrid, Meta has no sub-account model — AxisOne
+pattern. Unlike Twilio/Resend, Meta has no sub-account model — AxisOne
 registers one Meta App (reviewed by Meta), tenants OAuth-authorize that App
 against their Facebook Pages, and we hold per-Page long-lived access tokens.
 

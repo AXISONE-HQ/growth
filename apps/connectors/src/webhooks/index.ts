@@ -4,7 +4,11 @@
  * Routes:
  *   GET  /webhooks/:provider            — OAuth/subscription verification (Meta)
  *   POST /webhooks/:provider            — inbound message events
- *   POST /webhooks/:provider/status     — message delivery status callbacks (Twilio/SendGrid)
+ *   POST /webhooks/:provider/status     — message delivery status callbacks (Twilio)
+ *
+ * Note: Resend status events arrive via /webhooks/:provider (POST, not /status)
+ * once the KAN-684 webhook handler ships. SendGrid was the prior email provider
+ * and used /status — Resend uses unified webhook events instead.
  *
  * Flow (POST):
  *   verify signature → dedup by provider event id → dispatch → publish → 200
@@ -108,7 +112,7 @@ webhooksApp.post('/:provider', async (c) => {
   }
 
   // Look up the adapter by channel+provider. We need to know the channel:
-  // Twilio=SMS, SendGrid=EMAIL, Meta=MESSENGER.
+  // Twilio=SMS, Resend=EMAIL, Meta=MESSENGER.
   const channel = channelForProvider(provider);
   if (!channel) return c.text('Unknown provider', 404);
 
@@ -146,7 +150,7 @@ function channelForProvider(provider: string): 'SMS' | 'EMAIL' | 'MESSENGER' | n
   switch (provider) {
     case 'twilio':
       return 'SMS';
-    case 'sendgrid':
+    case 'resend':
       return 'EMAIL';
     case 'meta':
       return 'MESSENGER';
@@ -159,8 +163,9 @@ function headerForProviderSig(provider: string): string {
   switch (provider) {
     case 'twilio':
       return 'x-twilio-signature';
-    case 'sendgrid':
-      return 'x-twilio-email-event-webhook-signature';
+    case 'resend':
+      // KAN-684 will wire Resend's `svix-signature` (Svix-backed webhook auth)
+      return 'svix-signature';
     case 'meta':
       return 'x-hub-signature-256';
     default:

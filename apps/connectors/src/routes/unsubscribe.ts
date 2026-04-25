@@ -6,12 +6,11 @@
  * returns a plain HTML confirmation page.
  *
  * Public endpoint (no auth) — the URL itself is the capability. KAN-661
- * ships an unsigned stub; KAN-674 / follow-ups will rotate to signed JWTs
- * before SendGrid handoff.
+ * ships an unsigned stub; KAN-674 / follow-ups will rotate to signed JWTs.
  */
 import { Hono } from 'hono';
 import { prisma } from '../repository/connection-repository.js';
-import { suppressDb } from '../adapters/sendgrid/suppressions.js';
+import { suppressDb } from '../adapters/resend/suppressions.js';
 import { logger } from '../logger.js';
 
 export const unsubscribeApp = new Hono();

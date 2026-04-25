@@ -5,7 +5,7 @@
  * Feature flags gate real adapters; NoOp is always registered in
  * non-production for local testing.
  *
- * When adding a new adapter (KAN-491 Twilio, KAN-499 SendGrid, KAN-510 Meta):
+ * When adding a new adapter (KAN-491 Twilio, KAN-510 Meta, etc):
  *   1. Create the adapter file under src/adapters/<provider>/
  *   2. Import and register it below
  *   3. Add its feature flag to src/env.ts
@@ -19,8 +19,7 @@ import { NoopAdapter } from './noop.js';
 import { registry } from './registry.js';
 import { TwilioAdapter } from './twilio/index.js';
 import { TwilioRealSignatureVerifier } from './twilio/signature.js';
-import { SendGridAdapter } from './sendgrid/index.js';
-import { SendGridRealSignatureVerifier } from './sendgrid/signature.js';
+import { ResendAdapter } from './resend/index.js';
 import { MetaAdapter } from './meta/index.js';
 import { MetaRealSignatureVerifier } from './meta/signature.js';
 
@@ -36,11 +35,11 @@ export function registerAdapters(): void {
     verifierRegistry.register(new TwilioRealSignatureVerifier());
   }
 
-  // KAN-473 — SendGrid Email
-  if (env.ENABLE_SENDGRID) {
-    registry.register(new SendGridAdapter());
-    // Real ECDSA verifier replaces the fail-safe stub (KAN-599)
-    verifierRegistry.register(new SendGridRealSignatureVerifier());
+  // Email — Resend (replaces SendGrid; KAN-473 epic re-scope pending).
+  // Webhook signature verifier deferred to KAN-684 alongside the Resend
+  // event-webhook handler.
+  if (env.ENABLE_RESEND) {
+    registry.register(new ResendAdapter());
   }
 
   // KAN-474 — Meta Messenger
@@ -49,9 +48,6 @@ export function registerAdapters(): void {
     // Real HMAC-SHA256 verifier replaces the fail-safe stub (KAN-626)
     verifierRegistry.register(new MetaRealSignatureVerifier());
   }
-
-  // TODO(KAN-499): SendGrid adapter
-  // if (env.ENABLE_SENDGRID) registry.register(new SendGridAdapter(...))
 
   // TODO(KAN-510): Meta Messenger adapter
   // if (env.ENABLE_META) registry.register(new MetaAdapter(...))

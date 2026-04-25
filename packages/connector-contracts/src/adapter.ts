@@ -1,7 +1,7 @@
 /**
  * The ChannelAdapter interface.
  *
- * Every provider integration (Twilio, SendGrid, Meta, WhatsApp, ...)
+ * Every provider integration (Twilio, Resend, Meta, WhatsApp, ...)
  * implements this interface. The Connectors Service routes all I/O
  * through this single shape, which means adding a new provider is a
  * new file, not a framework change.
@@ -31,7 +31,7 @@ export interface ChannelAdapter {
   /** Channel this adapter handles — used by the registry. */
   readonly channel: ChannelType;
 
-  /** Provider identifier, e.g. "twilio", "sendgrid", "meta". */
+  /** Provider identifier, e.g. "twilio", "resend", "meta". */
   readonly provider: Provider;
 
   /**
@@ -57,7 +57,7 @@ export interface ChannelAdapter {
    * Check the connection is still usable.
    * Examples:
    *   - Twilio: ping the subaccount
-   *   - SendGrid: verify domain auth still valid
+   *   - Resend: verify domain auth still valid
    *   - Meta: introspect Page Access Token
    */
   healthCheck(connection: ChannelConnection): Promise<HealthStatus>;
@@ -76,7 +76,7 @@ export interface ChannelAdapter {
   /**
    * Convert a raw provider webhook payload into normalized InboundEvents.
    * Signature verification happens BEFORE this method is called.
-   * A single payload may contain multiple events (e.g., SendGrid batches).
+   * A single payload may contain multiple events (e.g., Resend batches).
    */
   handleWebhook(payload: unknown, signature: string): Promise<InboundEvent[]>;
 }

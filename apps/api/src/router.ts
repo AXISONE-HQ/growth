@@ -1851,7 +1851,7 @@ const salesObjectionsRouter = router({
 // ============================================================================
 
 // ─── KAN-451: ChannelConnection ↔ CommunicationChannel DTO mappers ────────
-// ChannelConnection is the production model (KAN-661 SendGrid simple-mode +
+// ChannelConnection is the production model (KAN-661 Resend simple-mode +
 // action-send subscriber both depend on it). Settings UI consumes the
 // CommunicationChannel DTO shape. These mappers translate at the router boundary.
 
@@ -1983,7 +1983,7 @@ const settingsRouter = router({
   }),
 
   // KAN-451 — Communication Channels. Backed by ChannelConnection (KAN-661;
-  // production model used by the SendGrid simple-mode adapter + action-send
+  // production model used by the Resend simple-mode adapter + action-send
   // subscriber). Mapper translates between ChannelConnection's internal shape
   // and the CommunicationChannel DTO the Settings UI expects. tenant-scoped
   // via ctx.tenantId (replaces the prior input.tenantId pattern + the phantom
@@ -2054,10 +2054,10 @@ const settingsRouter = router({
       }),
 
     // testConnection — per-provider credential validation deferred to
-    // channel-specific epics (KAN-472 Twilio, KAN-473 SendGrid, KAN-474 Meta).
+    // channel-specific epics (KAN-472 Twilio, KAN-473 Resend, KAN-474 Meta).
     // Stubbed here so the Settings UI's "Test Connection" button has a wired
     // endpoint instead of 404'ing. AC's "real provider validation" lands when
-    // those epics ship the SendGrid /v3/scopes / Twilio Accounts / Meta Graph
+    // those epics ship the Resend /domains / Twilio Accounts / Meta Graph
     // health-check calls.
     testConnection: protectedProcedure
       .input(z.object({ type: z.enum(["email", "sms", "whatsapp", "messenger"]) }).strict())
@@ -2066,7 +2066,7 @@ const settingsRouter = router({
         return {
           success: false,
           message:
-            "Per-provider connection test deferred to KAN-472 (Twilio) / KAN-473 (SendGrid) / KAN-474 (Meta) epics.",
+            "Per-provider connection test deferred to KAN-472 (Twilio) / KAN-473 (Resend) / KAN-474 (Meta) epics.",
         };
       }),
   }),

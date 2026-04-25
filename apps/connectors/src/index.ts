@@ -1,7 +1,7 @@
 /**
  * @growth-ai/connectors — entry point.
  *
- * Owns channel integrations (SMS via Twilio, email via SendGrid,
+ * Owns channel integrations (SMS via Twilio, email via Resend,
  * Messenger via Meta). Decoupled from the main app; main app talks
  * to it via Pub/Sub for messages and private-VPC tRPC for connection
  * management.

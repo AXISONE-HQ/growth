@@ -63,7 +63,7 @@ Any subscription that fails 5× → action.deadletter → action.deadletter.audi
 | Subscription                         | Topic                   | Consumer                          | DLQ                       | Max retries | Ack   | Backoff       |
 | ------------------------------------ | ----------------------- | --------------------------------- | ------------------------- | ----------: | ----: | ------------- |
 | `action.decided.message-composer`    | `action.decided`        | Message Composer (KAN-660)        | `action.deadletter`       |           5 |  30s  | 10s → 600s    |
-| `action.send.sendgrid-adapter`       | `action.send`           | SendGrid adapter (KAN-661)        | `action.deadletter`       |           5 |  30s  | 10s → 600s    |
+| `action.send.sendgrid-adapter`       | `action.send`           | Resend adapter (KAN-661; sub name retained from SendGrid era) | `action.deadletter`       |           5 |  30s  | 10s → 600s    |
 | `action.executed.outcome-writer`     | `action.executed`       | Outcome writer (KAN-657)          | `action.deadletter`       |           5 |  30s  | 10s → 600s    |
 | `action.deadletter.audit`            | `action.deadletter`     | Forensic audit (human-read)       | —                         |         n/a |  60s  | defaults      |
 | `escalation.triggered.audit`         | `escalation.triggered`  | Forensic audit (human-read) — TBD | `escalation.deadletter`   |           5 |  30s  | 10s → 600s    |
@@ -234,6 +234,6 @@ Infrastructure only. The following are separate tickets:
 - **KAN-659:** wire `run-decision-for-contact.ts` to publish on real `@google-cloud/pubsub` client (replacing `InMemoryPubSubClient` in the wedge adapter).
 - **KAN-660:** Message Composer service — pulls from `action.decided.message-composer`, composes the outbound message using the playbook step's `instruction`, publishes the fully-formed message on `action.send`. This is the bridge the wedge currently lacks.
 - **KAN-657:** Outcome writer — pulls from `action.executed.outcome-writer`, upserts into the `outcomes` table.
-- **SendGrid adapter stub → real:** `apps/connectors/src/pubsub/subscriber.ts:51` currently logs `action.send received (stub)`. Needs to actually invoke `sgMail.send` with the composed message.
+- **Resend adapter stub → real:** historical reference — the email adapter has shipped (KAN-661, then provider-swapped to Resend in the post-SendGrid-rejection cutover). `apps/connectors/src/subscribers/action-send-push.ts` is now the live consumer.
 
 Until those ship, published messages to `action.decided` have no consumer — they'll accumulate in the `action.decided.message-composer` subscription backlog and eventually age out per the 7-day default retention.
