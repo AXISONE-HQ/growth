@@ -38,6 +38,13 @@ RUN npx turbo run build --filter=@growth-ai/connectors
 FROM node:20-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
+# openssl is required by Prisma's query engine and is not in node:20-slim by
+# default. Without this, Prisma logs "Prisma failed to detect the libssl/openssl
+# version to use, and may not work as expected. Defaulting to openssl-1.1.x"
+# and then crashes at runtime trying to require the 1.1.x engine.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends openssl \
+  && rm -rf /var/lib/apt/lists/*
 # Non-root user for security
 RUN groupadd -r app && useradd -r -g app app
 
