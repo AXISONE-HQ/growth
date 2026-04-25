@@ -121,6 +121,8 @@ export async function publishActionSend(
     message: {
       tenantId: input.tenantId,
       actionId: randomUUID(),
+      decisionId: input.decisionId,
+      contactId: input.contactId,
       traceId: input.decisionId,
       recipient: { email: input.toEmail },
       content: {

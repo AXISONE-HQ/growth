@@ -11,6 +11,7 @@ import { metaDataDeletionApp } from "./integrations/meta/data-deletion.js";
 import { messengerOAuthApp } from "./integrations/messenger/oauth.js";
 import { messengerWebhookApp } from "./integrations/messenger/webhook.js";
 import { actionDecidedPushApp } from "./subscribers/action-decided-push.js";
+import { actionExecutedPushApp } from "./subscribers/action-executed-push.js";
 
 const app = new Hono();
 const PORT = parseInt(process.env.PORT || "8080", 10);
@@ -64,6 +65,7 @@ app.route("/webhooks/messenger", messengerWebhookApp);
 // ============================================================================
 
 app.route("/pubsub", actionDecidedPushApp);
+app.route("/pubsub", actionExecutedPushApp);
 
 // ============================================================================
 // tRPC SERVER

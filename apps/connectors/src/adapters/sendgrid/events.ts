@@ -105,11 +105,25 @@ async function processOne(e: RawSendGridEvent): Promise<void> {
     return;
   }
 
+  // TODO(KAN-684): SendGrid event webhook is the deferred path. ActionExecutedEventSchema
+  // now requires decisionId + contactId (KAN-657). To re-enable this publisher, thread
+  // those through SendGrid's customArgs in apps/connectors/src/adapters/sendgrid/index.ts
+  // (both the subuser-mode and simple-mode `customArgs` blocks) and read them off `e.*`
+  // here. Until then, drop webhook events that lack the correlation IDs — outcome-writer
+  // wouldn't be able to construct an Outcome row anyway.
+  const decisionId = (e as { decisionId?: string }).decisionId;
+  const contactId = (e as { contactId?: string }).contactId;
+  if (!decisionId || !contactId) {
+    return;
+  }
+
   await publishEvent({
     topic: 'action.executed',
     timestamp: new Date(e.timestamp * 1000).toISOString(),
     tenantId: e.tenantId,
     actionId: e.actionId,
+    decisionId,
+    contactId,
     connectionId: e.connectionId,
     channel: 'EMAIL',
     provider: 'sendgrid',

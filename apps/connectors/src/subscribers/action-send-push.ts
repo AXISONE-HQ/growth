@@ -134,6 +134,10 @@ actionSendPushApp.post('/action-send', async (c) => {
       timestamp: new Date().toISOString(),
       tenantId,
       actionId,
+      // KAN-657: forward decisionId + contactId so outcome-writer can
+      // correlate the executed event back to a Decision row + Contact row.
+      decisionId: event.message.decisionId,
+      contactId: event.message.contactId,
       connectionId: connection.id,
       channel: 'EMAIL',
       provider: 'sendgrid',
