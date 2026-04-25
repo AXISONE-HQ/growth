@@ -1850,41 +1850,53 @@ const salesObjectionsRouter = router({
 // ============================================================================
 
 const settingsRouter = router({
+  // KAN-450 — AI Configuration. tenant-scoped via ctx.tenantId (replaces the
+  // prior input.tenantId pattern, which was both a tenant-isolation hole AND
+  // misaligned with the frontend wrapper that doesn't pass tenantId).
   ai: router({
-    get: protectedProcedure
-      .input(z.object({ tenantId: z.string().uuid() }))
-      .query(async ({ ctx, input }) => {
-        const tenant = await ctx.prisma.tenant.findUnique({
-          where: { id: input.tenantId },
-          select: {
-            aiPermissions: true,
-            confidenceThreshold: true,
-          },
-        });
-        if (!tenant) {
-          throw new TRPCError({ code: "NOT_FOUND", message: "Tenant not found" });
-        }
-        return {
-          aiPermissions: tenant.aiPermissions,
-          confidenceThreshold: tenant.confidenceThreshold,
-        };
-      }),
+    get: protectedProcedure.query(async ({ ctx }) => {
+      const tenant = await ctx.prisma.tenant.findUnique({
+        where: { id: ctx.tenantId },
+        select: {
+          confidenceThreshold: true,
+          autoApproveEnabled: true,
+          dailyActionLimit: true,
+          strategyPermissions: true,
+          guardrailSettings: true,
+          aiPermissions: true,
+        },
+      });
+      if (!tenant) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Tenant not found" });
+      }
+      return tenant;
+    }),
     update: protectedProcedure
       .input(
-        z.object({
-          tenantId: z.string().uuid(),
-          aiPermissions: z.record(z.any()).optional(),
-          confidenceThreshold: z.number().min(0).max(100).optional(),
-        })
+        z
+          .object({
+            confidenceThreshold: z.number().int().min(20).max(95).optional(),
+            autoApproveEnabled: z.boolean().optional(),
+            dailyActionLimit: z.number().int().min(1).max(10000).optional(),
+            strategyPermissions: z.record(z.boolean()).optional(),
+            guardrailSettings: z.record(z.boolean()).optional(),
+            // aiPermissions stays a free-form catch-all — Decision Engine
+            // services (data-quality.ts, company-truth.ts) read nested keys.
+            aiPermissions: z.record(z.any()).optional(),
+          })
+          .strict(),
       )
       .mutation(async ({ ctx, input }) => {
-        const { tenantId, ...data } = input;
         const updated = await ctx.prisma.tenant.update({
-          where: { id: tenantId },
-          data,
+          where: { id: ctx.tenantId },
+          data: input,
           select: {
-            aiPermissions: true,
             confidenceThreshold: true,
+            autoApproveEnabled: true,
+            dailyActionLimit: true,
+            strategyPermissions: true,
+            guardrailSettings: true,
+            aiPermissions: true,
           },
         });
         return updated;
