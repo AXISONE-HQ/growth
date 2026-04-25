@@ -101,6 +101,60 @@ PR #3 surfaced 12 of these cascading violations because it was the first PR to i
 
 **For now:** treat `TS6059` errors on cross-package imports as expected noise. Focus on errors within `apps/api/src/` itself.
 
+## Schema changes — use `prisma migrate`, never `db push`
+
+Hard rules earned from KAN-679 (production data loss event) and KAN-680 (root-cause cleanup):
+
+### Allowed
+
+- **Local development:** `npx prisma migrate dev --name <description>` against an ephemeral local DB. Generates a migration file + applies it. The migration file gets committed.
+- **Deploy / shared DBs:** `npx prisma migrate deploy` against the target. Applies any pending migration files in order. Idempotent. No interactive prompts. No destructive surprises.
+- **Status check:** `npx prisma migrate status` — read-only, safe everywhere.
+- **Adopting baseline on an existing DB:** `prisma migrate diff --from-empty --to-schema-datamodel <schema> --script > migration.sql` to capture current state, then `prisma migrate resolve --applied <migration-name>` to mark it without re-applying. Pattern used to bootstrap KAN-680.
+
+### Banned
+
+- **`prisma db push`** in any prod context. It silently DROPs tables that diverge from the schema. There is no audit trail. There is no migration file. KAN-679 lost 8 rows of production data because the schema-vs-DB diff was not what the operator expected.
+- **`--accept-data-loss`** flag, period. Anywhere. If a schema change legitimately requires a destructive operation, write the migration explicitly with named `DROP` / `ALTER ... DROP COLUMN` statements, get them reviewed in the PR, and apply via `migrate deploy`.
+- **Manual SQL `DROP TABLE` / `TRUNCATE` / `ALTER ... DROP`** against shared DBs without the `reference_destructive_db_operation_protocol.md` 5-step gate (in personal memory).
+
+### Backup posture is a prerequisite
+
+Before any session that touches DB schema or data, verify Cloud SQL backups + PITR are both enabled:
+
+```sh
+gcloud sql instances describe growth-db --project=growth-493400 \
+  --format='value(settings.backupConfiguration.enabled,settings.backupConfiguration.pointInTimeRecoveryEnabled)'
+# expected: True;True
+```
+
+Anything else (False, missing, single True) is a STOP signal — fix posture first via:
+
+```sh
+gcloud sql instances patch growth-db --project=growth-493400 \
+  --backup-start-time=03:00 --enable-point-in-time-recovery
+```
+
+### Why this exists
+
+- KAN-679 dropped `Tenant`, `Contact`, `Integration`, `CompanyInfo` tables (8 rows of demo data) when `prisma db push --accept-data-loss` interpreted legacy CamelCase tables as drift. Cloud SQL backups were disabled at the time, so there was no recovery path.
+- KAN-680 traced the root cause to a duplicate Prisma schema at `apps/api/prisma/schema.prisma` (deleted in KAN-680) — different model definitions, different table casings, no `@@map` directives. Confusion between two "authoritative" schemas was the real mistake; the data loss was the consequence.
+- Post-KAN-680: single canonical schema is `packages/db/prisma/schema.prisma`. Migrations live in `packages/db/prisma/migrations/`. Baseline = `20260425005757_baseline`.
+
+## Deploy paths — single canonical per service
+
+Post-KAN-680: each Cloud Run service has exactly one deploy mechanism. No parallel deploy systems.
+
+| Service | Deploy mechanism | Triggered by |
+|---|---|---|
+| `growth-api` | `.github/workflows/deploy-api.yml` (GitHub Actions) | push to `main` touching `apps/api/**` or `packages/**` |
+| `growth-connectors` | `.github/workflows/deploy-connectors.yml` (GitHub Actions) | push to `main` touching `apps/connectors/**` or `packages/**` |
+| `growth-web` | `cloudbuild-web.yaml` + `growth-web-deploy` Cloud Build trigger | push to `main` (no path filter — broader than ideal) |
+
+The legacy `cloudbuild.yaml` + `cloudbuild-staging.yaml` for the API + their Cloud Build trigger `growth-api-deploy` were retired in KAN-680. The trigger is **disabled** (not deleted) — its trigger ID `0a6e65ab-3765-4915-af37-e62841b76893` survives for archaeology if anyone needs to revisit history.
+
+Web's parallel deploy mechanism (cloudbuild-web.yaml) was intentionally left untouched in KAN-680 — separate cleanup ticket warranted.
+
 ## Workspace resolution — packages that ship built output
 
 Workspace packages under `packages/*` that other workspaces depend on (e.g. `@growth/connector-contracts`, `@growth/db`, `@growth/shared`) declare:
