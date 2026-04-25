@@ -573,7 +573,7 @@ export default function SettingsPage() {
                         return;
                       }
                       settingsApi.updateChannel({
-                        type: type as 'email' | 'sms' | 'whatsapp', provider: type === 'email' ? 'SendGrid' : 'Twilio', status: 'disconnected',
+                        type: type as 'email' | 'sms' | 'whatsapp', provider: type === 'email' ? 'Resend' : 'Twilio', status: 'disconnected',
                       }).then(loadChannels).then(() => flash(`${type} channel added`));
                     }}
                               className="text-xs bg-indigo-500 text-white px-3 py-1.5 rounded-lg font-medium hover:bg-indigo-600 transition-colors"

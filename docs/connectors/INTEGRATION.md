@@ -145,7 +145,7 @@ Epic KAN-470 (Foundation) and KAN-471 (Adapter Framework):
 | KAN-486 | 🟡 inbound normalizer (webhook router stub)       |
 | KAN-489 | 🟡 Connection Manager tRPC (router + NOT_IMPLEMENTED stubs) |
 
-Real implementation of each channel (Twilio KAN-472, SendGrid KAN-473,
+Real implementation of each channel (Twilio KAN-472, Resend KAN-473,
 Messenger KAN-474) plugs into this scaffolding — each adapter is ~300 LOC
 against the interface.
 

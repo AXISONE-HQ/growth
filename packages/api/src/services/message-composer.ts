@@ -3,7 +3,7 @@
  *
  * Given an action.decided event, composes a tone-aligned email (subject + body)
  * via Anthropic Haiku and publishes it to action.send for the connector layer
- * (KAN-661 SendGrid adapter).
+ * (KAN-661 Resend adapter).
  *
  * Structured output via zod — text-mode JSON pattern mirroring apps/api/src/llm.ts.
  * Brand voice: brain.tone ?? 'professional, concise' (TODO swap to Business Brain v2).

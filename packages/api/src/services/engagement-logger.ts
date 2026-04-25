@@ -7,7 +7,7 @@
  * Customer Health Scoring.
  *
  * Subscribes to: action.executed (delivery confirmations), webhook events
- *                (SendGrid, Twilio, channel-specific callbacks)
+ *                (Resend, Twilio, channel-specific callbacks)
  * Publishes to:  growth.engagement.logged (consumed by Behavioral Learner,
  *                Health Scorer, Analytics Pipeline)
  *
@@ -314,7 +314,7 @@ export async function logEngagement(
 
 /**
  * Log multiple engagement signals in a batch.
- * Used for webhook batches (e.g., SendGrid event webhooks).
+ * Used for webhook batches (e.g., Resend event webhooks).
  */
 export async function logEngagementBatch(
   inputs: EngagementInput[],
@@ -406,7 +406,7 @@ export function createEngagementLoggerRouter(
 
   /**
    * POST /api/learning/engagements/batch
-   * Log multiple engagement signals (e.g., SendGrid webhook batch).
+   * Log multiple engagement signals (e.g., Resend webhook batch).
    */
   router.post('/engagements/batch', async (req: Request, res: Response) => {
     try {

@@ -2,7 +2,7 @@
  * Communication Agent — KAN-377
  *
  * Agent Dispatcher — EXECUTE phase
- * Generates and sends messages via SMS (Twilio) and Email (SendGrid).
+ * Generates and sends messages via SMS (Twilio) and Email (Resend).
  * Includes channel adapter interfaces, message template rendering,
  * delivery status tracking, and retry logic.
  *
@@ -12,7 +12,7 @@
  *   Communication Agent
  *       │
  *   ┌───┴──────────┐
- *   SMS (Twilio)   Email (SendGrid)
+ *   SMS (Twilio)   Email (Resend)
  *       │
  *   Guardrail Layer  ← validate before send
  *       │
@@ -20,7 +20,7 @@
  *
  * Channels:
  *   - SMS: Twilio API (10DLC registered)
- *   - Email: SendGrid API (SPF/DKIM/DMARC per tenant)
+ *   - Email: Resend API (SPF/DKIM/DMARC per tenant)
  *   - WhatsApp: Phase 2 (Twilio WhatsApp Business API)
  */
 
@@ -115,7 +115,7 @@ export type Message = z.infer<typeof MessageSchema>;
 
 /**
  * Channel adapter interface — abstracts SMS/Email providers for testability.
- * In production: TwilioSmsAdapter, SendGridEmailAdapter.
+ * In production: TwilioSmsAdapter, ResendEmailAdapter.
  */
 export interface ChannelAdapter {
   channel: string;
@@ -241,7 +241,7 @@ function validateDeliveryAddress(
  * Execute a communication action — build the message and send via the channel adapter.
  *
  * @param input - Routed action from the Agent Router
- * @param adapter - Channel adapter (Twilio, SendGrid, etc.)
+ * @param adapter - Channel adapter (Twilio, Resend, etc.)
  * @returns Execution result with delivery status
  */
 export async function executeCommunication(

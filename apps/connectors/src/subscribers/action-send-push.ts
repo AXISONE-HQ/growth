@@ -1,27 +1,29 @@
 /**
- * action.send push subscriber — KAN-661.
+ * action.send push subscriber — KAN-661 (provider-swapped to Resend).
  *
  * Subscription: action.send.sendgrid-adapter (push to /pubsub/action-send)
+ *   ↑ subscription name retained for stability with the existing Pub/Sub
+ *     topology; the adapter dispatched-to is now Resend (provider swap only).
  *
  * Flow:
  *   Pub/Sub push → POST /pubsub/action-send
  *   → Verify OIDC Bearer token (401 on fail)
  *   → Decode base64 payload + zod-validate ActionSendEvent
  *   → Resolve ChannelConnection (nil-UUID fallback → any ACTIVE simple-mode EMAIL conn for tenant)
- *   → Dispatch to SendGridAdapter.send()
+ *   → Dispatch to ResendAdapter.send()
  *   → Publish action.executed with status sent/failed/suppressed
  *   → 200 on success
  *
  * Error policy (matches KAN-660):
  *   - 200 (ack + drop) on malformed envelope/payload, unknown connection, zod failures
- *   - 500 (nack → Pub/Sub retry → DLQ) on SendGrid 5xx / network / publish errors
+ *   - 500 (nack → Pub/Sub retry → DLQ) on Resend 5xx / network / publish errors
  *   - 401 on missing or invalid OIDC token
  */
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { OAuth2Client } from 'google-auth-library';
 import { ActionSendEventSchema, type ActionExecutedEvent } from '@growth/connector-contracts';
-import { SendGridAdapter } from '../adapters/sendgrid/index.js';
+import { ResendAdapter } from '../adapters/resend/index.js';
 import { prisma } from '../repository/connection-repository.js';
 import { publishEvent } from '../pubsub/index.js';
 import { logger } from '../logger.js';
@@ -51,8 +53,9 @@ async function verifyOidc(authHeader: string | undefined, audience: string): Pro
   }
 }
 
-// Singleton adapter — no per-request state; uses sgMail singleton internally.
-const sendgrid = new SendGridAdapter();
+// Singleton adapter — no per-request state; the Resend SDK client is
+// memoized lazily inside the adapter module.
+const resend = new ResendAdapter();
 
 actionSendPushApp.post('/action-send', async (c) => {
   const skipAuth = process.env.NODE_ENV === 'test' || process.env.PUBSUB_PUSH_SKIP_AUTH === 'true';
@@ -120,7 +123,7 @@ actionSendPushApp.post('/action-send', async (c) => {
   } as any; // ChannelConnection shape from @growth/connector-contracts
 
   try {
-    const result = await sendgrid.send(connection, event.message);
+    const result = await resend.send(connection, event.message);
 
     const executedStatus: ActionExecutedEvent['status'] =
       result.status === 'sent'
@@ -140,7 +143,7 @@ actionSendPushApp.post('/action-send', async (c) => {
       contactId: event.message.contactId,
       connectionId: connection.id,
       channel: 'EMAIL',
-      provider: 'sendgrid',
+      provider: 'resend',
       status: executedStatus,
       ...(result.providerMessageId ? { providerMessageId: result.providerMessageId } : {}),
       ...(result.errorClass ? { errorClass: result.errorClass } : {}),

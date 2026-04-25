@@ -1,16 +1,17 @@
 /**
- * One-shot seed: insert a ChannelConnection row per-tenant for the SendGrid
+ * One-shot seed: insert a ChannelConnection row per-tenant for the Resend
  * simple-mode adapter path (KAN-661).
  *
- * The simple-mode branch of SendGridAdapter.send() keys off
- * `metadata.mode === 'simple'` and uses a single global SENDGRID_API_KEY env var
+ * The simple-mode branch of ResendAdapter.send() keys off
+ * `metadata.mode === 'simple'` and uses a single global RESEND_API_KEY env var
  * plus `metadata.fromEmail` / `metadata.fromName` — no per-tenant Secret Manager
- * entry, no subuser, no domain-auth gate (those all belong to KAN-473).
+ * entry, no subuser, no domain-auth gate (those all belong to KAN-473 once the
+ * epic is re-scoped for Resend).
  *
  * Usage:
- *   npx tsx scripts/seed-sendgrid-simple-mode.ts                       # seeds the AxisOne Growth tenant (default slug)
- *   npx tsx scripts/seed-sendgrid-simple-mode.ts <tenantSlug>          # seeds a specific tenant by slug
- *   FROM_EMAIL=... FROM_NAME=... npx tsx scripts/seed-sendgrid-simple-mode.ts
+ *   npx tsx scripts/seed-resend-simple-mode.ts                       # seeds the AxisOne Growth tenant (default slug)
+ *   npx tsx scripts/seed-resend-simple-mode.ts <tenantSlug>          # seeds a specific tenant by slug
+ *   FROM_EMAIL=... FROM_NAME=... npx tsx scripts/seed-resend-simple-mode.ts
  *
  * Idempotent: uses upsert on the ChannelConnection unique
  * (tenantId, channelType, providerAccountId).
@@ -18,11 +19,11 @@
 import { PrismaClient, Prisma } from '@prisma/client';
 
 const DEFAULT_TENANT_SLUG = 'axisone-growth';
-const DEFAULT_FROM_EMAIL = 'hello@growth.axisone.com';
+const DEFAULT_FROM_EMAIL = 'hello@growth.axisone.ca';
 const DEFAULT_FROM_NAME = 'growth';
 const CREDENTIALS_REF =
-  'projects/growth-493400/secrets/sendgrid-api-key/versions/latest';
-const PROVIDER_ACCOUNT_ID = 'sendgrid-simple'; // unique per tenant across simple-mode
+  'projects/growth-493400/secrets/growth-resend-key/versions/latest';
+const PROVIDER_ACCOUNT_ID = 'resend-simple'; // unique per tenant across simple-mode
 
 async function main() {
   const prisma = new PrismaClient();
@@ -54,11 +55,11 @@ async function main() {
     create: {
       tenantId: tenant.id,
       channelType: 'EMAIL',
-      provider: 'sendgrid',
+      provider: 'resend',
       providerAccountId: PROVIDER_ACCOUNT_ID,
       status: 'ACTIVE',
       credentialsRef: CREDENTIALS_REF,
-      label: 'SendGrid (simple mode)',
+      label: 'Resend (simple mode)',
       metadata,
       connectedAt: new Date(),
     },
@@ -66,7 +67,7 @@ async function main() {
       status: 'ACTIVE',
       credentialsRef: CREDENTIALS_REF,
       metadata,
-      label: 'SendGrid (simple mode)',
+      label: 'Resend (simple mode)',
       updatedAt: new Date(),
     },
   });

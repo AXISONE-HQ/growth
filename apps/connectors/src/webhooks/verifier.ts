@@ -25,8 +25,8 @@ class VerifierRegistry {
 
 export const verifierRegistry = new VerifierRegistry();
 
-// All three production verifiers (Twilio/SendGrid/Meta) register themselves from
-// their adapter bootstraps. No fail-safe stubs remain.
+// Production verifiers (Twilio/Meta) register themselves from their adapter
+// bootstraps. The Resend verifier (KAN-684) lands with the Resend webhook
+// handler. No fail-safe stubs remain.
 
-// No stubs registered. Real verifiers register themselves from their adapter bootstraps
-// (see apps/connectors/src/adapters/{twilio,sendgrid,meta}/signature.ts).
+// (see apps/connectors/src/adapters/{twilio,meta}/signature.ts).
