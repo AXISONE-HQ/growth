@@ -32,6 +32,13 @@ const EnvSchema = z.object({
   ENABLE_TWILIO: z.coerce.boolean().default(false),
   ENABLE_RESEND: z.coerce.boolean().default(false),
   ENABLE_META: z.coerce.boolean().default(false),
+
+  // KAN-687 / RFC 8058. When true, the Resend adapter includes an HTTPS
+  // one-click URL in `List-Unsubscribe`. Until DNS for growth.axisone.ca
+  // → public unsubscribe endpoint is wired AND the unsubscribe-signing-key
+  // secret is bound, leave false — flipping to true with a non-resolving
+  // URL would let Microsoft penalize the One-Click claim.
+  UNSUBSCRIBE_URL_LIVE: z.coerce.boolean().default(false),
 });
 
 export const env = EnvSchema.parse(process.env);
