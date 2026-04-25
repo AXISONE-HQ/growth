@@ -96,7 +96,10 @@ const TEMPLATES: { id: string; render: Template }[] = [
       const decisions = 3 + (seed % 5);
       const actions = 2 + (seed % 4);
       const completedRate = 78 + (seed % 12);
-      const subject = `Your AxisOne Growth pipeline summary for ${dateStr}`;
+      // Subject varies by seed so two recipients getting the daily-digest in
+      // the same batch don't share an identical subject line. Microsoft's
+      // filters cluster subjects across the inbox.
+      const subject = `Your AxisOne Growth pipeline summary — ${opps} new opportunities`;
       const text = [
         `Hi ${firstName},`,
         '',
@@ -299,16 +302,33 @@ interface PlannedSend {
 
 function planBatch(day: number): { sends: PlannedSend[]; truncatedFrom?: number } {
   const requested = SCHEDULE[day];
-  const cap = RECIPIENTS.length * PER_RECIPIENT_DAILY_CAP;
+  // Per-recipient template diversity: a single recipient never receives the
+  // same template twice within one batch. With T templates, max distinct
+  // sends per recipient is T. So the effective per-recipient cap is the
+  // smaller of the operator-set cap and the template pool size.
+  const effectiveCap = Math.min(PER_RECIPIENT_DAILY_CAP, TEMPLATES.length);
+  const cap = RECIPIENTS.length * effectiveCap;
   const volume = Math.min(requested, cap);
   const truncatedFrom = volume < requested ? requested : undefined;
   const today = new Date();
   const dateStr = today.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 
   const sends: PlannedSend[] = [];
+  // Each recipient cycles through templates in their own order, with the
+  // starting template offset by recipient index. This (a) guarantees a single
+  // recipient never repeats a template within a batch and (b) keeps adjacent
+  // recipients on different templates as long as TEMPLATES.length > 1.
+  // With T < R (template pool < recipient pool) some inter-recipient template
+  // sharing is unavoidable per pigeonhole — subject-line variation in the
+  // template handles the resulting subject collision.
+  const perRecipientCount: Record<string, number> = {};
   for (let i = 0; i < volume; i++) {
     const recipient = RECIPIENTS[i % RECIPIENTS.length];
-    const tpl = TEMPLATES[i % TEMPLATES.length];
+    const recipientIndex = i % RECIPIENTS.length;
+    const recipientCount = perRecipientCount[recipient.email] ?? 0;
+    perRecipientCount[recipient.email] = recipientCount + 1;
+    const templateIndex = (recipientCount + recipientIndex) % TEMPLATES.length;
+    const tpl = TEMPLATES[templateIndex];
     const seed = day * 100 + i;
     const rendered = tpl.render(recipient.displayName, dateStr, seed);
     sends.push({ recipient, templateId: tpl.id, ...rendered, seed });
