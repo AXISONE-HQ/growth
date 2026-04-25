@@ -810,6 +810,10 @@ export function createGapAnalyzerRouter(prisma: PrismaClient): Router {
       }
 
       const { contactId } = req.params;
+      if (typeof contactId !== 'string') {
+        res.status(400).json({ success: false, error: 'Invalid contactId' });
+        return;
+      }
       const reports = await analyzeAllGapsForContact(prisma, tenantId, contactId);
 
       const summary = reports.map((r) => ({
@@ -854,12 +858,4 @@ export {
   recommendStrategy,
   generateContextSummary,
   generateSuggestedActions,
-};
-
-export type {
-  SubObjective,
-  Objective,
-  ContactState,
-  Gap,
-  GapReport,
 };
