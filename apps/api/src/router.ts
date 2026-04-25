@@ -1895,6 +1895,25 @@ interface CommunicationChannelDto {
   updatedAt: string;
 }
 
+// KAN-454: build the Record<string, boolean> shape the Settings UI expects.
+// Defaults match apps/web/src/app/settings/page.tsx initial state (line 132-133).
+function buildNotifPrefsRecord(
+  rows: Array<{ type: string; enabled: boolean }>,
+): {
+  escalation: boolean;
+  daily_digest: boolean;
+  weekly_report: boolean;
+  brain_update: boolean;
+} {
+  const map = Object.fromEntries(rows.map((r) => [r.type, r.enabled]));
+  return {
+    escalation: map.escalation ?? true,
+    daily_digest: map.daily_digest ?? true,
+    weekly_report: map.weekly_report ?? true,
+    brain_update: map.brain_update ?? false,
+  };
+}
+
 function mapChannelConnectionToDto(conn: ChannelConnection): CommunicationChannelDto {
   return {
     id: conn.id,
@@ -2148,35 +2167,61 @@ const settingsRouter = router({
       }),
   }),
 
+  // KAN-454 — Notifications. Per-user, per-tenant, per-type preference rows.
+  // Returns Record<string, boolean> shape that the frontend's NotificationPrefs
+  // type expects (apps/web/src/lib/api.ts:247). Previously returned an array
+  // and called a phantom prisma.notificationPreference model — both fixed.
+  // tenant-scoped via ctx.tenantId; user-scoped via ctx.firebaseUser?.uid.
   notifications: router({
-    get: protectedProcedure
-      .input(z.object({ tenantId: z.string().uuid(), userId: z.string() }))
-      .query(async ({ ctx, input }) => {
-        const prefs = await ctx.prisma.notificationPreference.findMany({
-          where: { tenantId: input.tenantId, userId: input.userId },
-        });
-        if (prefs.length === 0) {
-          return ["escalation", "daily_digest", "weekly_report", "brain_update"].map((type) => ({ type, enabled: true, channel: "email" }));
-        }
-        return prefs;
-      }),
+    get: protectedProcedure.query(async ({ ctx }) => {
+      // TODO(KAN-455): tighten user-auth enforcement when Security Settings ships.
+      // 'unknown' fallback matches wedgeRouter precedent; acceptable pre-launch.
+      const userId = ctx.firebaseUser?.uid ?? "unknown";
+      const rows = await ctx.prisma.notificationPreference.findMany({
+        where: { tenantId: ctx.tenantId, userId },
+      });
+      return buildNotifPrefsRecord(rows);
+    }),
+
     update: protectedProcedure
       .input(
-        z.object({
-          tenantId: z.string().uuid(),
-          userId: z.string(),
-          type: z.enum(["escalation", "daily_digest", "weekly_report", "brain_update"]),
-          enabled: z.boolean(),
-          channel: z.string().default("email"),
-        })
+        z
+          .object({
+            type: z.enum([
+              "escalation",
+              "daily_digest",
+              "weekly_report",
+              "brain_update",
+            ]),
+            enabled: z.boolean(),
+          })
+          .strict(),
       )
       .mutation(async ({ ctx, input }) => {
-        const { tenantId, userId, type, enabled, channel } = input;
-        return ctx.prisma.notificationPreference.upsert({
-          where: { tenantId_userId_type: { tenantId, userId, type } },
-          update: { enabled, channel },
-          create: { tenantId, userId, type, enabled, channel },
+        // TODO(KAN-455): tighten user-auth enforcement when Security Settings ships.
+        const userId = ctx.firebaseUser?.uid ?? "unknown";
+        await ctx.prisma.notificationPreference.upsert({
+          where: {
+            tenantId_userId_type: {
+              tenantId: ctx.tenantId,
+              userId,
+              type: input.type,
+            },
+          },
+          update: { enabled: input.enabled },
+          create: {
+            tenantId: ctx.tenantId,
+            userId,
+            type: input.type,
+            enabled: input.enabled,
+          },
         });
+        // Return the full updated record — frontend's auto-save UX
+        // (setNotifPrefs(updated)) expects the whole map, not the single row.
+        const rows = await ctx.prisma.notificationPreference.findMany({
+          where: { tenantId: ctx.tenantId, userId },
+        });
+        return buildNotifPrefsRecord(rows);
       }),
   }),
 
