@@ -27,6 +27,12 @@ model Tenant {
   blueprintId         String?  @map("blueprint_id")
   aiPermissions       Json     @default("{}") @map("ai_permissions")
   confidenceThreshold Int      @default(70) @map("confidence_threshold")
+  // KAN-450 — AI Configuration: typed columns for the Settings → AI tab.
+  // confidenceThreshold + aiPermissions stay as-is (Decision Engine consumers).
+  autoApproveEnabled  Boolean  @default(false) @map("auto_approve_enabled")
+  dailyActionLimit    Int      @default(100)   @map("daily_action_limit")
+  strategyPermissions Json     @default("{}")  @map("strategy_permissions")
+  guardrailSettings   Json     @default("{}")  @map("guardrail_settings")
   settings            Json     @default("{}")
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
