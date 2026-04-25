@@ -562,6 +562,25 @@ model EmailSuppression {
   @@map("email_suppressions")
 }
 
+// ─────────────────────────────────────────────────────────────
+// NOTIFICATION PREFERENCES — per-user per-tenant per-type toggle
+// KAN-454
+// ─────────────────────────────────────────────────────────────
+model NotificationPreference {
+  id        String   @id @default(uuid())
+  tenantId  String   @map("tenant_id")
+  userId    String   @map("user_id") // Firebase UID; 'unknown' fallback for unauthenticated dev contexts
+  type      String   // 'escalation' | 'daily_digest' | 'weekly_report' | 'brain_update'
+  enabled   Boolean
+  channel   String   @default("email")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([tenantId, userId, type])
+  @@index([tenantId, userId])
+  @@map("notification_preferences")
+}
+
 // ALSO ADD to the existing `model Tenant` — the relations block:
 //
 //   channelConnections ChannelConnection[]
