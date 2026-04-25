@@ -237,19 +237,16 @@ npx tsx scripts/sender-warmup.ts --hotmail-check
 
 ### Schedule
 
-| Day | Volume target | Notes |
-|---:|---:|---|
-| 1   |   3 | one per inbox |
-| 2   |   5 | mix of inboxes, varied subjects |
-| 3   |   8 | |
-| 4   |  13 | |
-| 5   |  21 | |
-| 6   |  34 | |
-| 7   |  50 | **CHECKPOINT** — Hotmail placement check (`--hotmail-check`). If still spam, hold the ramp; don't advance to day 8. |
-| 8–13|  50 | sustained |
-| 14  |  50 | **CHECKPOINT** — second Hotmail placement check. If still spam, escalate (see "If day 7 / day 14 still shows spam" below). |
+Flat 6/day for 14 days. With 3 inboxes × 2 templates and per-recipient template diversity enforced, 6/day is the natural cap (each recipient gets each template exactly once per batch). Set explicitly rather than letting the auto-truncation warn — also closer to Microsoft's recommended slow-ramp profile than the original Fibonacci curve.
 
-Edit the `SCHEDULE` constant at the top of the script to flatten the curve. The script enforces a per-recipient daily cap (`PER_RECIPIENT_DAILY_CAP`, default 4) — if the schedule asks for more than `recipient_pool × cap`, the batch auto-truncates and prints a warning. With the current 3-inbox pool, anything past day 3 truncates at 12.
+| Day  | Volume | Notes |
+|---:|---:|---|
+| 1–6  | 6 | flat ramp, distinct subjects per send |
+| 7    | 6 | **CHECKPOINT** — Hotmail placement check (`--hotmail-check`). If still spam, hold the ramp; don't advance to day 8. |
+| 8–13 | 6 | sustained |
+| 14   | 6 | **CHECKPOINT** — second Hotmail placement check. If still spam, escalate (see "If day 7 / day 14 still shows spam" below). |
+
+Edit the `SCHEDULE` constant at the top of the script to change the curve. Per-recipient daily cap is `PER_RECIPIENT_DAILY_CAP` (default 4); the effective cap is `min(PER_RECIPIENT_DAILY_CAP, TEMPLATES.length)`. Schedule volume above `recipient_pool × effective_cap` auto-truncates with a warning. Add inboxes to `RECIPIENTS` and/or templates to `TEMPLATES` to grow capacity.
 
 ### Idempotency
 

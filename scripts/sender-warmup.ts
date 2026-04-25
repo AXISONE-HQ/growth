@@ -46,22 +46,30 @@ const STATE_FILE = process.env.WARMUP_STATE_FILE ?? '/tmp/sender-warmup-state.js
 const RERUN_WINDOW_MS = 12 * 60 * 60 * 1000; // 12h
 
 // ── SCHEDULE ─────────────────────────────────────────────────────────────
-// Volumes per the KAN-687 brief. Tweak in one place; --day picks the row.
+// Flat 6/day for 14 days — Fred's call after the recipient-pool decision.
+// 6/day is the natural cap with 3 inboxes × 2 templates (per-recipient
+// template diversity), so the schedule is set explicitly instead of auto-
+// truncating from a higher target. Closer to Microsoft's recommended slow-
+// ramp profile anyway.
+//
+// Day-7 and day-14 are the Hotmail-check inflection points — same value,
+// different semantics: run --hotmail-check after the day's batch and
+// confirm placement before advancing.
 const SCHEDULE: Record<number, number> = {
-  1: 3,
-  2: 5,
-  3: 8,
-  4: 13,
-  5: 21,
-  6: 34,
-  7: 50, // checkpoint — Hotmail placement check after this run
-  8: 50,
-  9: 50,
-  10: 50,
-  11: 50,
-  12: 50,
-  13: 50,
-  14: 50, // checkpoint — Hotmail placement check after this run; if still spam, escalate to SNDS/JMRP
+  1: 6,
+  2: 6,
+  3: 6,
+  4: 6,
+  5: 6,
+  6: 6,
+  7: 6, // checkpoint — Hotmail placement check after this run
+  8: 6,
+  9: 6,
+  10: 6,
+  11: 6,
+  12: 6,
+  13: 6,
+  14: 6, // checkpoint — Hotmail placement check after this run; if still spam, escalate to SNDS/JMRP
 };
 
 // ── RECIPIENT POOL ───────────────────────────────────────────────────────
