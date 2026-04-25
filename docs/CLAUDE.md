@@ -155,6 +155,71 @@ The legacy `cloudbuild.yaml` + `cloudbuild-staging.yaml` for the API + their Clo
 
 Web's parallel deploy mechanism (cloudbuild-web.yaml) was intentionally left untouched in KAN-680 — separate cleanup ticket warranted.
 
+## Cloud Run deploy auto-shift expectation (KAN-685)
+
+Both `growth-api` and `growth-connectors` services should have:
+
+```
+spec.traffic = [{ type: TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST, percent: 100 }]
+```
+
+This makes every successful deploy auto-promote the new revision to 100% traffic. The `google-github-actions/deploy-cloudrun@v2` action relies on this — it doesn't pass `--no-traffic`, so promotion is determined by the existing service spec.
+
+**Don't** pin to a specific `revisionName` via REST API or `gcloud run services update-traffic --to-revisions=NAME=100`. Doing so silently breaks future auto-promotion: deploys create new revisions but traffic stays on the pinned name. Three sessions burned on this (KAN-677/657/454) before KAN-685 traced the root cause.
+
+**If you need to roll back to an older revision:** use `gcloud run services update-traffic --to-revisions=OLD_NAME=100`, verify the rollback served what you wanted, then **immediately** restore `--to-latest` after rollback. Don't leave the pin in place.
+
+**Diagnostic command** if auto-shift looks broken:
+
+```sh
+gcloud run services describe SERVICE --region=us-central1 \
+  --format='value(spec.traffic[].revisionName,spec.traffic[].percent,spec.traffic[].latestRevision)'
+```
+
+Healthy state shows `True 100` (latestRevision=true, percent=100). Broken state shows a revision name + `100` (pinned).
+
+**Repair via REST** (the gcloud equivalent sometimes hits the auth issue documented below):
+
+```sh
+TOKEN=$(gcloud auth application-default print-access-token)
+curl -s -X PATCH \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  "https://run.googleapis.com/v2/projects/growth-493400/locations/us-central1/services/SERVICE?updateMask=traffic" \
+  -d '{"traffic":[{"type":"TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST","percent":100}]}'
+```
+
+## gcloud `ACCESS_TOKEN_TYPE_UNSUPPORTED` workaround (KAN-686)
+
+Some `gcloud` commands return `ACCESS_TOKEN_TYPE_UNSUPPORTED` against the user's gcloud token, even when ADC is freshly authenticated. Confirmed affecting:
+
+- `gcloud secrets versions access`
+- `gcloud run services describe`
+- `gcloud run services update-traffic`
+
+Likely an SDK / ADC-vs-user-token / org-policy mismatch — root cause not yet investigated (out of KAN-686 scope).
+
+**Workaround:** use the ADC token directly via REST API.
+
+```sh
+# Secret Manager access
+TOKEN=$(gcloud auth application-default print-access-token)
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "https://secretmanager.googleapis.com/v1/projects/growth-493400/secrets/<name>/versions/latest:access" \
+  | python3 -c "import sys,json,base64; print(base64.b64decode(json.load(sys.stdin)['payload']['data']).decode())"
+
+# Cloud Run service describe
+TOKEN=$(gcloud auth application-default print-access-token)
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "https://run.googleapis.com/v2/projects/growth-493400/locations/us-central1/services/growth-api"
+
+# Cloud Run traffic patch (see KAN-685 section above for full example)
+```
+
+If `gcloud auth application-default print-access-token` returns empty, ADC needs refresh: `gcloud auth application-default login` (interactive — opens a browser).
+
+**When to use:** only when `gcloud` returns the specific `ACCESS_TOKEN_TYPE_UNSUPPORTED` error. The REST APIs are exact equivalents of the gcloud commands; output shapes are identical (or close enough to parse with `python3 -c "import sys,json; ..."`).
+
 ## Workspace resolution — packages that ship built output
 
 Workspace packages under `packages/*` that other workspaces depend on (e.g. `@growth/connector-contracts`, `@growth/db`, `@growth/shared`) declare:
