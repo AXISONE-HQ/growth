@@ -1,16 +1,21 @@
 /**
- * Unsubscribe GET handler — KAN-661.
+ * Unsubscribe handlers.
  *
- * Mounted at GET /unsubscribe/:contactId. Composed into the email body by
- * KAN-660's message composer. Clicking writes an EmailSuppression row and
- * returns a plain HTML confirmation page.
+ * GET /unsubscribe/:contactId — KAN-661. In-email click landing. Capability URL,
+ *   no auth, writes an EmailSuppression row, returns an HTML confirmation page.
  *
- * Public endpoint (no auth) — the URL itself is the capability. KAN-661
- * ships an unsigned stub; KAN-674 / follow-ups will rotate to signed JWTs.
+ * POST /unsubscribe?token=... — KAN-687 / RFC 8058. One-click receiver-driven
+ *   unsubscribe (Microsoft, Gmail, Yahoo). Validates the HMAC-SHA256 signed
+ *   token, suppresses, returns 200 OK with no body. Replaces nothing — sits
+ *   alongside the GET handler for the click flow.
+ *
+ * Both paths terminate at the same suppression write (`suppressDb`) so policy
+ * is consistent regardless of which path the receiver takes.
  */
 import { Hono } from 'hono';
 import { prisma } from '../repository/connection-repository.js';
 import { suppressDb } from '../adapters/resend/suppressions.js';
+import { verifyUnsubscribeToken } from '../adapters/resend/unsubscribe-token.js';
 import { logger } from '../logger.js';
 
 export const unsubscribeApp = new Hono();
@@ -73,4 +78,39 @@ unsubscribeApp.get('/:contactId', async (c) => {
     ),
     200,
   );
+});
+
+// ── POST /unsubscribe?token=... — RFC 8058 one-click ─────────────
+// Microsoft and Gmail POST to this URL when a recipient hits the inbox-level
+// "Unsubscribe" affordance. RFC 8058 requires a 200 OK response. We never
+// 4xx on a malformed token (would just trigger a retry storm and make us look
+// flaky to the receiver) — log and respond 200 either way.
+unsubscribeApp.post('/', async (c) => {
+  const token = c.req.query('token');
+  if (!token) {
+    logger.warn('[unsubscribe POST] no token in query string');
+    return c.text('OK', 200);
+  }
+
+  const payload = await verifyUnsubscribeToken(token);
+  if (!payload) {
+    logger.warn('[unsubscribe POST] token invalid or expired');
+    return c.text('OK', 200);
+  }
+
+  try {
+    await suppressDb(payload.tenantId, payload.email, 'unsubscribed');
+    logger.info(
+      { tenantId: payload.tenantId, email: payload.email, actionId: payload.actionId },
+      '[unsubscribe POST] suppressed via one-click',
+    );
+  } catch (err) {
+    logger.error(
+      { err, tenantId: payload.tenantId, email: payload.email },
+      '[unsubscribe POST] suppression write failed',
+    );
+    // Still 200 per RFC 8058; we'll catch the gap via DB monitoring, not retry.
+  }
+
+  return c.text('OK', 200);
 });

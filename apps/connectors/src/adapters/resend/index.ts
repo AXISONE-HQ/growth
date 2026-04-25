@@ -26,9 +26,15 @@ import type {
   SendResult,
   TenantRef,
 } from '@growth/connector-contracts';
+import { env } from '../../env.js';
 import { logger } from '../../logger.js';
 import { classifyResendStatus } from './errors.js';
 import { isSuppressedDb, suppressDb } from './suppressions.js';
+import {
+  buildUnsubscribeMailto,
+  buildUnsubscribeUrl,
+  generateUnsubscribeToken,
+} from './unsubscribe-token.js';
 
 // Lazy singleton — instantiating Resend at import time would force every
 // connectors process boot to require RESEND_API_KEY, which we don't want
@@ -142,6 +148,28 @@ export class ResendAdapter implements ChannelAdapter {
     const html = msg.content.html ?? wrapPlainTextAsHtml(msg.content.body);
     const text = htmlToText(html, { wordwrap: 130 });
 
+    // KAN-687 / RFC 8058. When the URL infra is live, mint a per-message
+    // signed token and put the HTTPS URL first in List-Unsubscribe (with the
+    // mailto: as fallback). Until UNSUBSCRIBE_URL_LIVE flips, keep the prior
+    // mailto-only header so Microsoft doesn't see a One-Click claim with a
+    // non-resolving URL.
+    let listUnsubscribe: string;
+    if (env.UNSUBSCRIBE_URL_LIVE) {
+      const token = await generateUnsubscribeToken({
+        tenantId: msg.tenantId,
+        email,
+        actionId: msg.actionId,
+      }).catch((err) => {
+        log.warn({ err }, 'unsubscribe token mint failed — falling back to mailto-only header');
+        return null;
+      });
+      listUnsubscribe = token
+        ? `<${buildUnsubscribeUrl(token)}>, <${buildUnsubscribeMailto(token)}>`
+        : '<mailto:unsubscribe@growth.axisone.ca?subject=unsubscribe>';
+    } else {
+      listUnsubscribe = '<mailto:unsubscribe@growth.axisone.ca?subject=unsubscribe>';
+    }
+
     try {
       const result = await resend.emails.send({
         from: fromName ? `${fromName} <${fromEmail}>` : fromEmail,
@@ -156,8 +184,7 @@ export class ResendAdapter implements ChannelAdapter {
         // window (default 24h) when this header is set. KAN-660's actionId is
         // a UUID per-action; perfect natural key.
         headers: {
-          'List-Unsubscribe':
-            '<mailto:unsubscribe@growth.axisone.ca?subject=unsubscribe>',
+          'List-Unsubscribe': listUnsubscribe,
           'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
           'Idempotency-Key': msg.actionId,
         },
