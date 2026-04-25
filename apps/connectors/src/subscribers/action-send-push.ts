@@ -7,21 +7,22 @@
  *
  * Flow:
  *   Pub/Sub push → POST /pubsub/action-send
- *   → Verify OIDC Bearer token (401 on fail)
  *   → Decode base64 payload + zod-validate ActionSendEvent
  *   → Resolve ChannelConnection (nil-UUID fallback → any ACTIVE simple-mode EMAIL conn for tenant)
  *   → Dispatch to ResendAdapter.send()
  *   → Publish action.executed with status sent/failed/suppressed
  *   → 200 on success
  *
+ * Auth: Pub/Sub OIDC is enforced by `buildOidcMiddleware` mounted on
+ * `/pubsub/*` in app.ts (KAN-688). This handler runs only for verified
+ * requests — no inline check needed.
+ *
  * Error policy (matches KAN-660):
  *   - 200 (ack + drop) on malformed envelope/payload, unknown connection, zod failures
  *   - 500 (nack → Pub/Sub retry → DLQ) on Resend 5xx / network / publish errors
- *   - 401 on missing or invalid OIDC token
  */
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { OAuth2Client } from 'google-auth-library';
 import { ActionSendEventSchema, type ActionExecutedEvent } from '@growth/connector-contracts';
 import { ResendAdapter } from '../adapters/resend/index.js';
 import { prisma } from '../repository/connection-repository.js';
@@ -30,7 +31,6 @@ import { logger } from '../logger.js';
 
 export const actionSendPushApp = new Hono();
 
-const oauth = new OAuth2Client();
 const NIL_UUID = '00000000-0000-0000-0000-000000000000';
 
 const PushEnvelopeSchema = z.object({
@@ -42,33 +42,11 @@ const PushEnvelopeSchema = z.object({
   subscription: z.string().optional(),
 });
 
-async function verifyOidc(authHeader: string | undefined, audience: string): Promise<boolean> {
-  if (!authHeader?.startsWith('Bearer ')) return false;
-  const token = authHeader.slice('Bearer '.length);
-  try {
-    const ticket = await oauth.verifyIdToken({ idToken: token, audience });
-    return !!ticket.getPayload();
-  } catch {
-    return false;
-  }
-}
-
 // Singleton adapter — no per-request state; the Resend SDK client is
 // memoized lazily inside the adapter module.
 const resend = new ResendAdapter();
 
 actionSendPushApp.post('/action-send', async (c) => {
-  const skipAuth = process.env.NODE_ENV === 'test' || process.env.PUBSUB_PUSH_SKIP_AUTH === 'true';
-  if (!skipAuth) {
-    const audience = process.env.PUBLIC_WEBHOOK_BASE_URL;
-    if (!audience) {
-      logger.error('[action-send-push] PUBLIC_WEBHOOK_BASE_URL unset — cannot verify OIDC audience');
-      return c.text('server misconfigured', 500);
-    }
-    const ok = await verifyOidc(c.req.header('authorization'), audience);
-    if (!ok) return c.text('unauthorized', 401);
-  }
-
   let envelope: z.infer<typeof PushEnvelopeSchema>;
   try {
     envelope = PushEnvelopeSchema.parse(await c.req.json());
