@@ -190,7 +190,7 @@ Tracked under KAN-687.
 - [ ] **Microsoft SNDS registration** — <https://sendersupport.olc.protection.outlook.com/snds/> for visibility into Outlook reputation. Requires Resend's sending IP block, which Resend support can provide. Optional but high-leverage for the Hotmail problem.
 - [ ] **Microsoft JMRP enrollment** — <https://sendersupport.olc.protection.outlook.com/pm/> for "marked as junk" feedback on Microsoft inboxes. Optional.
 - [ ] **Subdomain split decision** — keep `growth.axisone.ca` for transactional or split into `tx.growth.axisone.ca` (transactional) and `news.growth.axisone.ca` (marketing-grade). Strategic decision tied to KAN-473 (per-tenant identity).
-- [ ] **Sender warmup schedule** — once REC 1+2 land and rua is clean, ramp volume per Resend's published warmup curve. Out of scope for this doc; tracked separately under KAN-687.
+- [ ] **Sender warmup schedule** — `scripts/sender-warmup.ts` (see "Warmup playbook" below). Daily invocation, day 1–14 ramp. Independent of REC 1+2 — warmup is reputation work, not DNS work.
 
 ---
 
@@ -209,6 +209,75 @@ npx tsx scripts/mail-tester-send.ts test-xxxxxxxx@srv1.mail-tester.com
 ```
 
 The same env vars from KAN-662 Phase E are reused so we test through the live demo connection (`hello@growth.axisone.ca`).
+
+---
+
+## Warmup playbook
+
+`scripts/sender-warmup.ts` ramps sender volume on a schedule Microsoft tolerates while reputation builds. Manual-invoke (no cron). Runs against the production Pub/Sub → connectors-worker → Resend path — same code path as KAN-662, no shortcuts.
+
+### Invocation
+
+```sh
+# Preview the day-N batch (recipients + subjects). State file NOT updated.
+PHASE_E_TENANT_ID=9ca85088-f65b-4bac-b098-fff742281ede \
+PHASE_E_CONNECTION_ID=35ad29cd-9c96-4a05-8b90-ec3376936d1d \
+npx tsx scripts/sender-warmup.ts --day 1 --dry-run
+
+# Live send for the day.
+PHASE_E_TENANT_ID=9ca85088-f65b-4bac-b098-fff742281ede \
+PHASE_E_CONNECTION_ID=35ad29cd-9c96-4a05-8b90-ec3376936d1d \
+npx tsx scripts/sender-warmup.ts --day 1
+
+# Day-7 / day-14 placement check (one realistic message to Hotmail).
+PHASE_E_TENANT_ID=9ca85088-f65b-4bac-b098-fff742281ede \
+PHASE_E_CONNECTION_ID=35ad29cd-9c96-4a05-8b90-ec3376936d1d \
+npx tsx scripts/sender-warmup.ts --hotmail-check
+```
+
+### Schedule
+
+Flat 6/day for 14 days. With 3 inboxes × 2 templates and per-recipient template diversity enforced, 6/day is the natural cap (each recipient gets each template exactly once per batch). Set explicitly rather than letting the auto-truncation warn — also closer to Microsoft's recommended slow-ramp profile than the original Fibonacci curve.
+
+| Day  | Volume | Notes |
+|---:|---:|---|
+| 1–6  | 6 | flat ramp, distinct subjects per send |
+| 7    | 6 | **CHECKPOINT** — Hotmail placement check (`--hotmail-check`). If still spam, hold the ramp; don't advance to day 8. |
+| 8–13 | 6 | sustained |
+| 14   | 6 | **CHECKPOINT** — second Hotmail placement check. If still spam, escalate (see "If day 7 / day 14 still shows spam" below). |
+
+Edit the `SCHEDULE` constant at the top of the script to change the curve. Per-recipient daily cap is `PER_RECIPIENT_DAILY_CAP` (default 4); the effective cap is `min(PER_RECIPIENT_DAILY_CAP, TEMPLATES.length)`. Schedule volume above `recipient_pool × effective_cap` auto-truncates with a warning. Add inboxes to `RECIPIENTS` and/or templates to `TEMPLATES` to grow capacity.
+
+### Idempotency
+
+State at `/tmp/sender-warmup-state.json`. A `--day N` rerun within 12 hours is a no-op with a clear log line. Override path with `WARMUP_STATE_FILE=<path>`. Move or `rm` the state file to force a re-run within the window.
+
+`--dry-run` does NOT update state. `--hotmail-check` is independent of the schedule and ignores state.
+
+### Microsoft signals to watch
+
+After each live run check Cloud Logging for the worker's per-message dispatch — that's send-side success. The actual deliverability signal is in the inbox:
+
+| Signal | Where | Means |
+|---|---|---|
+| Hotmail inbox | `frederic.binette@hotmail.com` Inbox folder | reputation is recovering ✓ |
+| Hotmail spam | `frederic.binette@hotmail.com` Junk folder | SmartScreen still distrustful — ramp needs more days OR escalate |
+| Gmail inbox | both Gmail addresses | baseline (Gmail is more lenient) |
+| DMARC rua reports | once REC 1 mailbox exists | per-IP / per-receiver pass/fail counts |
+| Resend dashboard | <https://resend.com/emails> | bounces, complaints, delivery latency |
+
+### If day 7 / day 14 still shows spam
+
+In order of escalation:
+
+1. **Hold the ramp.** Don't advance days. Run day-N again with the same volume for 2–3 more days to give Microsoft more reputation samples.
+2. **Manually move spam → inbox** on the Hotmail account. Recipient engagement (move from spam, mark as not-spam, reply) is the strongest single positive signal Microsoft's filter consumes.
+3. **Register for Microsoft SNDS** — <https://sendersupport.olc.protection.outlook.com/snds/>. You'll need Resend's sending IP block from Resend support. SNDS gives daily per-IP reputation visibility.
+4. **Enroll in Microsoft JMRP** — <https://sendersupport.olc.protection.outlook.com/pm/>. Surfaces "marked as junk" feedback into a feedback loop.
+5. **Confirm List-Unsubscribe is RFC-8058 compliant.** As of 2026-04-25 the adapter wires `List-Unsubscribe-Post: List-Unsubscribe=One-Click` but the `List-Unsubscribe` header value is `mailto:` only — RFC 8058 requires HTTPS for the one-click claim. Microsoft weights this. Tracked as a separate finding (filed during this task; see PR description).
+6. **Wait 7 more days,** then re-test. Reputation isn't fast.
+
+If after 30 days at sustained volume Hotmail is still spam-foldering, the next lever is the subdomain split (KAN-473) — segregate transactional traffic onto its own subdomain so marketing/wedge sends don't drag transactional reputation down with them.
 
 ---
 
