@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
+import type { Prisma, ChannelConnection } from "@prisma/client";
 import { router, publicProcedure, protectedProcedure } from "./trpc.js";
 import { generateObjectionResponses, regenerateSingleField } from "./llm.js";
 import { detectSignals } from "../../../packages/api/src/services/wedge-signals.js";
@@ -1849,6 +1850,65 @@ const salesObjectionsRouter = router({
 // SETTINGS ROUTER — Real Prisma-backed endpoints
 // ============================================================================
 
+// ─── KAN-451: ChannelConnection ↔ CommunicationChannel DTO mappers ────────
+// ChannelConnection is the production model (KAN-661 SendGrid simple-mode +
+// action-send subscriber both depend on it). Settings UI consumes the
+// CommunicationChannel DTO shape. These mappers translate at the router boundary.
+
+const TYPE_TO_CHANNEL_TYPE = {
+  email: "EMAIL",
+  sms: "SMS",
+  whatsapp: "WHATSAPP",
+  messenger: "MESSENGER",
+} as const;
+
+const CHANNEL_TYPE_TO_TYPE: Record<string, "email" | "sms" | "whatsapp" | "messenger"> = {
+  EMAIL: "email",
+  SMS: "sms",
+  WHATSAPP: "whatsapp",
+  MESSENGER: "messenger",
+};
+
+const CONNECTION_STATUS_TO_DTO_STATUS: Record<string, "connected" | "disconnected" | "error"> = {
+  ACTIVE: "connected",
+  PENDING: "disconnected",
+  SUSPENDED: "disconnected",
+  REVOKED: "disconnected",
+  ERROR: "error",
+};
+
+const DTO_STATUS_TO_CONNECTION_STATUS = {
+  connected: "ACTIVE",
+  disconnected: "PENDING",
+  error: "ERROR",
+} as const;
+
+interface CommunicationChannelDto {
+  id: string;
+  tenantId: string;
+  type: "email" | "sms" | "whatsapp" | "messenger";
+  provider: string;
+  config: Record<string, unknown>;
+  status: "connected" | "disconnected" | "error";
+  lastTestedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+function mapChannelConnectionToDto(conn: ChannelConnection): CommunicationChannelDto {
+  return {
+    id: conn.id,
+    tenantId: conn.tenantId,
+    type: CHANNEL_TYPE_TO_TYPE[conn.channelType] ?? "email",
+    provider: conn.provider,
+    config: (conn.metadata as Record<string, unknown>) ?? {},
+    status: CONNECTION_STATUS_TO_DTO_STATUS[conn.status] ?? "disconnected",
+    lastTestedAt: conn.lastHealthCheck?.toISOString() ?? null,
+    createdAt: conn.createdAt.toISOString(),
+    updatedAt: conn.updatedAt.toISOString(),
+  };
+}
+
 const settingsRouter = router({
   // KAN-450 — AI Configuration. tenant-scoped via ctx.tenantId (replaces the
   // prior input.tenantId pattern, which was both a tenant-isolation hole AND
@@ -1903,39 +1963,92 @@ const settingsRouter = router({
       }),
   }),
 
+  // KAN-451 — Communication Channels. Backed by ChannelConnection (KAN-661;
+  // production model used by the SendGrid simple-mode adapter + action-send
+  // subscriber). Mapper translates between ChannelConnection's internal shape
+  // and the CommunicationChannel DTO the Settings UI expects. tenant-scoped
+  // via ctx.tenantId (replaces the prior input.tenantId pattern + the phantom
+  // prisma.communicationChannel calls that would have thrown at runtime).
   channels: router({
-    list: protectedProcedure
-      .input(z.object({ tenantId: z.string().uuid() }))
-      .query(async ({ ctx, input }) => {
-        return ctx.prisma.communicationChannel.findMany({
-          where: { tenantId: input.tenantId },
-          orderBy: { createdAt: "desc" },
-        });
-      }),
+    list: protectedProcedure.query(async ({ ctx }) => {
+      // Most-recently-connected wins per channelType. Multiple ChannelConnection
+      // rows per tenant per channelType are allowed by the schema (different
+      // providerAccountId), but the Settings UI shows one card per type.
+      const conns = await ctx.prisma.channelConnection.findMany({
+        where: { tenantId: ctx.tenantId },
+        orderBy: { connectedAt: "desc" },
+      });
+      const byType = new Map<string, (typeof conns)[number]>();
+      for (const conn of conns) {
+        if (!byType.has(conn.channelType)) byType.set(conn.channelType, conn);
+      }
+      return Array.from(byType.values()).map(mapChannelConnectionToDto);
+    }),
+
     update: protectedProcedure
       .input(
-        z.object({
-          tenantId: z.string().uuid(),
-          id: z.string().uuid().optional(),
-          type: z.enum(["email", "sms", "whatsapp", "messenger"]),
-          provider: z.string().min(1),
-          config: z.record(z.any()).optional(),
-          status: z.enum(["connected", "disconnected", "error"]).optional(),
-        })
+        z
+          .object({
+            type: z.enum(["email", "sms", "whatsapp", "messenger"]),
+            provider: z.string().min(1),
+            config: z.record(z.any()).optional(),
+            status: z.enum(["connected", "disconnected", "error"]).optional(),
+          })
+          .strict(),
       )
       .mutation(async ({ ctx, input }) => {
-        const { tenantId, id, type, provider, config, status } = input;
-        if (id) {
-          return ctx.prisma.communicationChannel.update({
-            where: { id },
-            data: { provider, config: config ?? undefined, status: status ?? undefined },
-          });
-        }
-        return ctx.prisma.communicationChannel.upsert({
-          where: { tenantId_type: { tenantId, type } },
-          update: { provider, config: config ?? undefined, status: status ?? undefined },
-          create: { tenantId, type, provider, config: config ?? {}, status: status ?? "disconnected" },
+        const channelType = TYPE_TO_CHANNEL_TYPE[input.type];
+        const connectionStatus = DTO_STATUS_TO_CONNECTION_STATUS[input.status ?? "disconnected"];
+        // Synthetic providerAccountId per (provider, channelType) for
+        // Settings-UI-managed rows. KAN-472/473/474 will create rows with
+        // real providerAccountIds (subuser SIDs, page IDs, etc.).
+        const providerAccountId = `${input.provider.toLowerCase()}-default`;
+        const updated = await ctx.prisma.channelConnection.upsert({
+          where: {
+            tenantId_channelType_providerAccountId: {
+              tenantId: ctx.tenantId,
+              channelType,
+              providerAccountId,
+            },
+          },
+          update: {
+            provider: input.provider,
+            status: connectionStatus,
+            ...(input.config ? { metadata: input.config as Prisma.InputJsonValue } : {}),
+            ...(connectionStatus === "ACTIVE" ? { connectedAt: new Date() } : {}),
+          },
+          create: {
+            tenantId: ctx.tenantId,
+            channelType,
+            provider: input.provider,
+            providerAccountId,
+            status: connectionStatus,
+            // credentialsRef placeholder — KAN-472/473/474 epics replace with
+            // real Secret Manager paths when provider keys are provisioned.
+            credentialsRef: "pending",
+            label: `${input.provider} ${input.type}`,
+            metadata: (input.config as Prisma.InputJsonValue) ?? {},
+            ...(connectionStatus === "ACTIVE" ? { connectedAt: new Date() } : {}),
+          },
         });
+        return mapChannelConnectionToDto(updated);
+      }),
+
+    // testConnection — per-provider credential validation deferred to
+    // channel-specific epics (KAN-472 Twilio, KAN-473 SendGrid, KAN-474 Meta).
+    // Stubbed here so the Settings UI's "Test Connection" button has a wired
+    // endpoint instead of 404'ing. AC's "real provider validation" lands when
+    // those epics ship the SendGrid /v3/scopes / Twilio Accounts / Meta Graph
+    // health-check calls.
+    testConnection: protectedProcedure
+      .input(z.object({ type: z.enum(["email", "sms", "whatsapp", "messenger"]) }).strict())
+      .mutation(async () => {
+        // TODO(KAN-472|KAN-473|KAN-474): per-provider validation
+        return {
+          success: false,
+          message:
+            "Per-provider connection test deferred to KAN-472 (Twilio) / KAN-473 (SendGrid) / KAN-474 (Meta) epics.",
+        };
       }),
   }),
 
