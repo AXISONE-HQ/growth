@@ -9,6 +9,7 @@ import { registerAdapters } from './adapters/index.js';
 import { webhooksApp } from './webhooks/index.js';
 import { actionSendPushApp } from './subscribers/action-send-push.js';
 import { unsubscribeApp } from './routes/unsubscribe.js';
+import { buildOidcMiddleware } from './middleware/oidc.js';
 import { connectorsRouter } from './trpc/index.js';
 import { createContext } from './trpc/context.js';
 
@@ -42,7 +43,11 @@ export function buildApp(): Hono {
   // Public unsubscribe landing (no auth — capability URL) — KAN-661
   app.route('/unsubscribe', unsubscribeApp);
 
-  // Pub/Sub push subscriptions (OIDC-verified at handler level) — KAN-661 action.send
+  // Pub/Sub push subscriptions — OIDC verified at app-layer middleware (KAN-688).
+  // Companion to PR #29's RFC 8058 work: the service is `--allow-unauthenticated`
+  // so RFC 8058 one-click POSTs from Microsoft / Gmail filters reach `/unsubscribe`,
+  // which means anything sensitive (Pub/Sub push, etc.) needs its own auth check.
+  app.use('/pubsub/*', buildOidcMiddleware());
   app.route('/pubsub', actionSendPushApp);
 
   // Private VPC tRPC endpoint for Connection Manager
