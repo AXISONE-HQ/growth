@@ -40,7 +40,12 @@ export type SendResult = z.infer<typeof SendResultSchema>;
 export const OutboundMessageSchema = z.object({
   tenantId: z.string().uuid(),
   actionId: z.string().uuid(),
-  decisionId: z.string().uuid().optional(),
+  // KAN-657: decisionId + contactId required so the action.executed consumer
+  // can correlate the executed event back to a Decision row + Contact row
+  // when writing Outcome. decisionId is a Prisma cuid (not uuid). contactId
+  // is a Prisma uuid.
+  decisionId: z.string(),
+  contactId: z.string().uuid(),
   traceId: z.string().optional(),
   recipient: z.object({
     phone: z.string().optional(),

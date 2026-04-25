@@ -59,8 +59,19 @@ interface LaunchResponse {
   dryRun: boolean;
 }
 
+// KAN-657: counts of action.executed → ActionOutcome rows for an opportunity.
+interface OutcomeSummary {
+  sent: number;
+  failed: number;
+  suppressed: number;
+  delivered: number;
+  total: number;
+  lastLaunchedAt: string | null;
+}
+
 export default function OpportunitiesPage() {
   const [data, setData] = useState<OpportunitiesResponse | null>(null);
+  const [outcomes, setOutcomes] = useState<Record<string, OutcomeSummary>>({});
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
   const [isLaunching, setIsLaunching] = useState(false);
@@ -72,6 +83,26 @@ export default function OpportunitiesPage() {
     try {
       const result = await trpcQuery<OpportunitiesResponse>('wedge.opportunities');
       setData(result);
+
+      // KAN-657: fetch per-opportunity outcome summaries in parallel.
+      // Failures here don't block the page — outcomes are a secondary surface.
+      const summaries = await Promise.all(
+        result.opportunities.map(async (opp) => {
+          try {
+            const s = await trpcQuery<OutcomeSummary>('outcomes.summaryForOpportunity', {
+              opportunityType: opp.type,
+            });
+            return [opp.type, s] as const;
+          } catch {
+            return null;
+          }
+        }),
+      );
+      const map: Record<string, OutcomeSummary> = {};
+      for (const entry of summaries) {
+        if (entry) map[entry[0]] = entry[1];
+      }
+      setOutcomes(map);
     } catch (e) {
       setError(e instanceof Error ? e : new Error(String(e)));
     } finally {
@@ -209,6 +240,7 @@ export default function OpportunitiesPage() {
           <OpportunityCard
             key={opp.type}
             opportunity={opp}
+            outcomes={outcomes[opp.type]}
             onLaunch={handleLaunch}
             isLaunching={isLaunching}
           />
@@ -222,10 +254,12 @@ export default function OpportunitiesPage() {
 
 function OpportunityCard({
   opportunity,
+  outcomes,
   onLaunch,
   isLaunching,
 }: {
   opportunity: Opportunity;
+  outcomes?: OutcomeSummary;
   onLaunch: (opp: Opportunity, dryRun: boolean) => void;
   isLaunching: boolean;
 }) {
@@ -348,6 +382,30 @@ function OpportunityCard({
               step within guardrails.
             </div>
           )}
+        </div>
+      )}
+
+      {/* Outcomes summary — KAN-657. Only rendered when at least one Outcome exists. */}
+      {outcomes && outcomes.total > 0 && (
+        <div className="px-6 py-3 border-b border-slate-700 bg-slate-900/40">
+          <p className="text-xs text-slate-400">
+            Last launched
+            {outcomes.lastLaunchedAt && (
+              <span className="text-slate-500"> · {new Date(outcomes.lastLaunchedAt).toLocaleString()}</span>
+            )}
+            : <span className="text-emerald-300">{outcomes.sent} sent</span>
+            {outcomes.delivered > 0 && (
+              <> · <span className="text-emerald-300">{outcomes.delivered} delivered</span></>
+            )}
+            {' · '}
+            <span className={outcomes.failed > 0 ? 'text-rose-300' : 'text-slate-500'}>
+              {outcomes.failed} failed
+            </span>
+            {' · '}
+            <span className={outcomes.suppressed > 0 ? 'text-amber-300' : 'text-slate-500'}>
+              {outcomes.suppressed} suppressed
+            </span>
+          </p>
         </div>
       )}
 

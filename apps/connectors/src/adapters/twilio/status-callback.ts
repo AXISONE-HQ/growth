@@ -47,6 +47,12 @@ export async function processTwilioStatusCallback(
   tenantId: string,
   actionId: string,
   connectionId: string,
+  // KAN-657: decisionId + contactId required so action.executed can correlate
+  // back to a Decision row + Contact row. SMS path is currently deferred — when
+  // the Twilio status callback handler is wired, the caller must supply both.
+  // Optional here to avoid breaking existing callers; runtime drop below if missing.
+  decisionId?: string,
+  contactId?: string,
 ): Promise<void> {
   const status = mapStatus(params.MessageStatus);
   const errorCode = params.ErrorCode ? Number.parseInt(params.ErrorCode, 10) : undefined;
@@ -59,11 +65,24 @@ export async function processTwilioStatusCallback(
     );
   }
 
+  // TODO(KAN-684): SMS path is deferred. ActionExecutedEventSchema now requires
+  // decisionId + contactId (KAN-657). Drop status callbacks that lack the
+  // correlation IDs until the Twilio status-callback wiring threads them through.
+  if (!decisionId || !contactId) {
+    logger.info(
+      { messageSid: params.MessageSid, status },
+      'twilio status callback dropped — decisionId/contactId not threaded (KAN-684)',
+    );
+    return;
+  }
+
   const event: ActionExecutedEvent = {
     topic: 'action.executed',
     timestamp: new Date().toISOString(),
     tenantId,
     actionId,
+    decisionId,
+    contactId,
     connectionId,
     channel: 'SMS',
     provider: 'twilio',

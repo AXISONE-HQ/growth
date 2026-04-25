@@ -271,6 +271,29 @@ model Outcome {
   @@map("outcomes")
 }
 
+// ─────────────────────────────────────────────
+// ACTION OUTCOMES — KAN-657
+// One row per action.executed event. Distinct from Outcome (above), which
+// tracks objective resolution per KAN-9. Sibling table; no overlap in
+// runtime usage today.
+// ─────────────────────────────────────────────
+model ActionOutcome {
+  id         String   @id @default(cuid())
+  tenantId   String   @map("tenant_id")
+  decisionId String   @map("decision_id")
+  contactId  String   @map("contact_id")
+  action     String   // 'email_send' | 'sms_send' | 'meta_send'
+  status     String   // 'sent' | 'delivered' | 'failed' | 'suppressed'
+  occurredAt DateTime @map("occurred_at")
+  metadata   Json?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([tenantId, decisionId])
+  @@index([tenantId, contactId, occurredAt])
+  @@index([tenantId, action, status, occurredAt])
+  @@map("action_outcomes")
+}
+
 model StrategyWeight {
   id           String   @id @default(uuid())
   tenantId     String   @map("tenant_id")

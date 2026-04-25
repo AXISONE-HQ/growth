@@ -2110,6 +2110,72 @@ const settingsRouter = router({
 // WEDGE ROUTER — KAN-655 Day-1 Wedge (opportunities + playbook launch)
 // ============================================================================
 
+// ─────────────────────────────────────────────────────────────────────────────
+// outcomesRouter — KAN-657 (action.executed → ActionOutcome write path)
+// ─────────────────────────────────────────────────────────────────────────────
+const outcomesRouter = router({
+  // Outcome events for one Decision, ordered by occurrence.
+  forDecision: protectedProcedure
+    .input(z.object({ decisionId: z.string() }))
+    .query(async ({ ctx, input }) => {
+      const rows = await (ctx.prisma as any).actionOutcome.findMany({
+        where: { tenantId: ctx.tenantId, decisionId: input.decisionId },
+        orderBy: { occurredAt: "asc" },
+      });
+      return rows;
+    }),
+
+  // Per-opportunity counts: sent / failed / suppressed (and any other status
+  // values that show up later — delivered/opened/clicked land via KAN-684).
+  // JOIN-shape — Decision.metadata.opportunityType is set by the wedge router
+  // on launch; we filter Decisions by that, then aggregate ActionOutcomes.
+  summaryForOpportunity: protectedProcedure
+    .input(
+      z.object({
+        opportunityType: z.string(),
+        since: z.string().datetime().optional(),
+      })
+    )
+    .query(async ({ ctx, input }) => {
+      const sinceDate = input.since ? new Date(input.since) : null;
+
+      // Pull decisionIds matching this opportunityType in tenant.
+      // Decision.metadata is JSON — Prisma's path filter for postgres.
+      const decisions = await ctx.prisma.decision.findMany({
+        where: {
+          tenantId: ctx.tenantId,
+          metadata: {
+            path: ["opportunityType"],
+            equals: input.opportunityType,
+          },
+          ...(sinceDate ? { createdAt: { gte: sinceDate } } : {}),
+        },
+        select: { id: true, createdAt: true },
+      });
+
+      const decisionIds = decisions.map((d: { id: string }) => d.id);
+      if (decisionIds.length === 0) {
+        return { sent: 0, failed: 0, suppressed: 0, delivered: 0, total: 0, lastLaunchedAt: null };
+      }
+
+      const rows: Array<{ status: string }> = await (ctx.prisma as any).actionOutcome.findMany({
+        where: { tenantId: ctx.tenantId, decisionId: { in: decisionIds } },
+        select: { status: true },
+      });
+
+      const counts = { sent: 0, failed: 0, suppressed: 0, delivered: 0 };
+      for (const r of rows) {
+        if (r.status in counts) (counts as Record<string, number>)[r.status] += 1;
+      }
+      const lastLaunchedAt = decisions.reduce<Date | null>(
+        (acc: Date | null, d: { createdAt: Date }) =>
+          !acc || d.createdAt > acc ? d.createdAt : acc,
+        null
+      );
+      return { ...counts, total: rows.length, lastLaunchedAt: lastLaunchedAt?.toISOString() ?? null };
+    }),
+});
+
 const wedgeRouter = router({
   // Scan tenant contacts → signal detector → opportunity matcher.
   // Attach playbook preview + sample contact list to each opportunity.
@@ -2254,6 +2320,7 @@ export const appRouter = router({
   salesObjections: salesObjectionsRouter,
   settings: settingsRouter,
   wedge: wedgeRouter,
+  outcomes: outcomesRouter,
 });
 
 export type AppRouter = typeof appRouter;

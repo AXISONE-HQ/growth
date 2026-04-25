@@ -38,6 +38,11 @@ export const ActionExecutedEventSchema = z.object({
   timestamp: z.string().datetime(),
   tenantId: z.string().uuid(),
   actionId: z.string().uuid(),
+  // KAN-657: decisionId + contactId required so the outcome-writer can
+  // construct Outcome rows linked to Decision + Contact. decisionId is
+  // Prisma cuid (not uuid).
+  decisionId: z.string(),
+  contactId: z.string().uuid(),
   connectionId: z.string().uuid(),
   channel: ChannelTypeSchema,
   provider: ProviderSchema,
