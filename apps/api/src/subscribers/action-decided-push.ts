@@ -26,8 +26,8 @@ import { getPubSubClient } from '../../../../packages/api/src/lib/pubsub-client.
 import { ActionDecidedEventSchema } from '../../../../packages/api/src/services/action-decided-publisher.js';
 import {
   composeMessage,
-  publishActionSend,
   resolveEmailConnectionId,
+  gateAndPublishComposed,
 } from '../../../../packages/api/src/services/message-composer.js';
 
 export const actionDecidedPushApp = new Hono();
@@ -132,16 +132,43 @@ actionDecidedPushApp.post('/action-decided', async (c) => {
       );
     }
 
-    const messageId = await publishActionSend(getPubSubClient(), {
-      tenantId: event.tenantId,
-      contactId: event.contactId,
-      decisionId: event.decisionId,
-      toEmail: contact.email,
+    // KAN-697: guardrail gate runs between compose and publishActionSend.
+    // gateAndPublishComposed runs validateMessage → decideGuardrailAction →
+    // (block) writes Escalation row + publishes escalation.triggered, OR
+    // (allow/warn) calls publishActionSend. Single source of truth for
+    // severity routing — same runGuardrailGate helper as the rules-path
+    // executeCommunication.
+    //
+    // Tenant guardrail config (Tenant.guardrailSettings JSONB, KAN-450) is
+    // loaded here when a Tenant-config loader lands. For V1 we use defaults
+    // (block/regenerate → block, warn → allow, pass → allow).
+    const fromEmail = process.env.RESEND_DEFAULT_FROM_EMAIL ?? 'hello@growth.axisone.ca';
+    const sendResult = await gateAndPublishComposed(
+      prisma,
+      getPubSubClient(),
+      {
+        tenantId: event.tenantId,
+        contactId: event.contactId,
+        decisionId: event.decisionId,
+        objectiveId: event.objectiveId,
+        toEmail: contact.email,
+        fromEmail,
+        connectionId,
+        strategy: event.decision.selectedStrategy,
+        confidenceScore: event.decision.confidenceScore,
+      },
       composed,
-      connectionId,
-    });
+    );
+
+    if (!sendResult.sent) {
+      console.warn(
+        `[action-decided-push] guardrail blocked decisionId=${event.decisionId} reason="${sendResult.blockedReason}" — escalation written, no send`,
+      );
+      return c.text('ok', 200);
+    }
+
     console.log(
-      `[action-decided-push] published action.send decisionId=${event.decisionId} messageId=${messageId}`,
+      `[action-decided-push] published action.send decisionId=${event.decisionId} messageId=${sendResult.messageId} guardrail=${sendResult.decision}`,
     );
     return c.text('ok', 200);
   } catch (err) {
