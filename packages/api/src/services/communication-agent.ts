@@ -278,28 +278,100 @@ export const TenantGuardrailConfigSchema = z.object({
 export type TenantGuardrailConfig = z.infer<typeof TenantGuardrailConfigSchema>;
 
 /**
+ * Input for the shared `runGuardrailGate` helper. Caller-shape-agnostic so
+ * both `executeCommunication` (rules path) and `action-decided-push` (active
+ * wedge path) can use the same gate without coupling to either's full input
+ * shape.
+ */
+export interface GuardrailGateInput {
+  tenantId: string;
+  contactId: string;
+  decisionId: string;
+  channel: string;
+  message: { subject: string | null; body: string; to: string; from: string };
+}
+
+/**
  * Optional callbacks for production wiring of guardrail outcomes.
  *
- * `executeCommunication` stays pure (no Prisma, no Pub/Sub). Callers wire
- * these hooks to write Escalation rows and publish `escalation.triggered`
- * Pub/Sub events. Tests can pass no-ops; production wires real handlers.
+ * The gate stays pure (no Prisma, no Pub/Sub deps). Callers wire these
+ * hooks to write Escalation rows and publish `escalation.triggered` events.
+ * Tests can pass no-ops; production wires real handlers.
  *
  * Per AC: a `block` outcome MUST never silent-drop. The `onBlock` hook is
  * how the production caller honors that contract — the call site is
  * responsible for writing the Escalation row + publishing the event.
  */
-export interface GuardrailHooks {
+export interface GuardrailGateHooks {
   /**
    * Override the validator (default: real `validateMessage` from guardrail-layer).
    * Tests inject a stub; production omits this and gets the real validator.
    */
   validate?: (input: GuardrailInput) => GuardrailResult;
   /** Called when the message is blocked. Production: write Escalation + publish escalation.triggered. */
-  onBlock?: (result: GuardrailResult, input: CommunicationAgentInput) => Promise<void>;
+  onBlock?: (result: GuardrailResult, input: GuardrailGateInput) => Promise<void>;
   /** Called when the message passed with warnings. Production: warn-log + audit-log. */
-  onWarn?: (result: GuardrailResult, input: CommunicationAgentInput) => Promise<void>;
+  onWarn?: (result: GuardrailResult, input: GuardrailGateInput) => Promise<void>;
   /** Called for every check (pass or otherwise). Production: append to audit log per KAN-660. */
-  onAudit?: (result: GuardrailResult, input: CommunicationAgentInput) => Promise<void>;
+  onAudit?: (result: GuardrailResult, input: GuardrailGateInput) => Promise<void>;
+}
+
+/** Backward-compat alias — name retained for callers that imported it from PR #36. */
+export type GuardrailHooks = GuardrailGateHooks;
+
+/** Outcome of a gate run. */
+export interface GuardrailGateResult {
+  decision: 'allow' | 'warn' | 'block';
+  result: GuardrailResult;
+  /** Human-readable reason if blocked (for logging / Escalation.triggerReason). */
+  blockedReason?: string;
+}
+
+/**
+ * Run the guardrail gate end-to-end: validate → decide → fire hooks.
+ *
+ * Both the rules-path `executeCommunication` and the active-wedge-path
+ * `action-decided-push` subscriber call this. Single source of truth for
+ * severity routing means the two call sites can't drift apart on policy.
+ *
+ * Returns the decision so the caller can branch (skip send vs proceed).
+ * Hooks fire BEFORE the return — `onBlock` finishes (including production
+ * Escalation row write + Pub/Sub publish) before the caller learns the
+ * decision. This guarantees the AC's NEVER-silent-drop contract.
+ */
+export async function runGuardrailGate(
+  input: GuardrailGateInput,
+  config: TenantGuardrailConfig = {},
+  hooks: GuardrailGateHooks = {},
+): Promise<GuardrailGateResult> {
+  const validate = hooks.validate ?? runGuardrailChecks;
+  const guardrailInput: GuardrailInput = {
+    tenantId: input.tenantId,
+    contactId: input.contactId,
+    decisionId: input.decisionId,
+    channel: input.channel,
+    message: input.message,
+    // companyTruth + complianceSettings populated by KAN-698 (RAG wiring) +
+    // a future tenant-compliance schema; intentionally omitted in V1.
+  };
+  const result = validate(guardrailInput);
+  const decision = decideGuardrailAction(result, config);
+
+  if (decision === 'block') {
+    const blockedReason = result.violations
+      .filter((v) => v.severity === 'block' || v.severity === 'regenerate')
+      .map((v) => `${v.checkType}: ${v.description}`)
+      .join('; ');
+    if (hooks.onBlock) await hooks.onBlock(result, input);
+    return { decision, result, blockedReason };
+  }
+
+  if (decision === 'warn') {
+    if (hooks.onWarn) await hooks.onWarn(result, input);
+  } else if (hooks.onAudit) {
+    await hooks.onAudit(result, input);
+  }
+  return { decision, result };
 }
 
 type GuardrailDecision = 'allow' | 'warn' | 'block';
@@ -403,38 +475,27 @@ export async function executeCommunication(
   // Step 2: Build the message
   const message = buildMessage(parsed);
 
-  // Step 2.5 (KAN-697): Guardrail validation before any send.
-  // - All 5 validators run (tone, accuracy, hallucination, compliance, injection).
-  // - Severity → action via decideGuardrailAction() with tenant config.
-  // - block: short-circuit, return rejected result, await onBlock hook
-  //   (production wires onBlock to write Escalation row + publish escalation.triggered).
-  // - warn: await onWarn hook (warn-log + audit), continue to send.
-  // - allow: await onAudit hook (audit-only), continue to send.
-  const validate = options.hooks?.validate ?? runGuardrailChecks;
-  const guardrailInput: GuardrailInput = {
-    tenantId: parsed.tenantId,
-    contactId: parsed.contactId,
-    decisionId: parsed.decisionId,
-    channel: parsed.channel,
-    message: {
-      subject: message.subject,
-      body: message.body,
-      to: message.to,
-      from: message.from,
+  // Step 2.5 (KAN-697): Guardrail gate before send. Delegates to the
+  // shared `runGuardrailGate` helper so this rules-path and the
+  // active-wedge-path (action-decided-push) can't drift on severity routing.
+  const gate = await runGuardrailGate(
+    {
+      tenantId: parsed.tenantId,
+      contactId: parsed.contactId,
+      decisionId: parsed.decisionId,
+      channel: parsed.channel,
+      message: {
+        subject: message.subject,
+        body: message.body,
+        to: message.to,
+        from: message.from,
+      },
     },
-    // companyTruth + complianceSettings intentionally omitted in V1 — KAN-698
-    // (RAG wiring) populates companyTruth from BrainContext; tenant-level
-    // complianceSettings come from a future Sprint 1+ schema extension.
-  };
-  const guardrailResult = validate(guardrailInput);
-  const decision = decideGuardrailAction(guardrailResult, options.guardrailConfig);
+    options.guardrailConfig,
+    options.hooks,
+  );
 
-  if (decision === 'block') {
-    if (options.hooks?.onBlock) {
-      // Caller is responsible for writing the Escalation row + publishing
-      // escalation.triggered. Per AC: NEVER silent drop.
-      await options.hooks.onBlock(guardrailResult, parsed);
-    }
+  if (gate.decision === 'block') {
     return CommunicationAgentResultSchema.parse({
       tenantId: parsed.tenantId,
       contactId: parsed.contactId,
@@ -444,21 +505,10 @@ export async function executeCommunication(
       status: 'blocked',
       sentAt: null,
       providerMessageId: null,
-      error: `Guardrail blocked: ${guardrailResult.violations
-        .filter((v) => v.severity === 'block' || v.severity === 'regenerate')
-        .map((v) => `${v.checkType}: ${v.description}`)
-        .join('; ')}`,
+      error: `Guardrail blocked: ${gate.blockedReason}`,
       retryCount: 0,
       message,
     });
-  }
-
-  if (decision === 'warn') {
-    if (options.hooks?.onWarn) {
-      await options.hooks.onWarn(guardrailResult, parsed);
-    }
-  } else if (options.hooks?.onAudit) {
-    await options.hooks.onAudit(guardrailResult, parsed);
   }
 
   // Step 3: Send via channel adapter with retry
