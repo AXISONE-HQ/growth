@@ -17,6 +17,68 @@ export {
 
 // ── Messenger-specific functions ────────────────────────────────────────────
 
+export type ValidatePageTokenResult =
+  | { ok: true; pageId: string; pageName: string }
+  | { ok: false; reason: "token_expired" | "page_unbound" | "unknown"; detail?: string };
+
+/**
+ * Cheap liveness check: GET /me with a Page Access Token returns the Page
+ * identity (id + name) — proves the token is alive AND still bound to its
+ * Page. Used by Settings → Channels "Test connection" (KAN-474 subtask 1).
+ *
+ * Classification mirrors apps/connectors/src/adapters/meta/errors.ts so the
+ * UI can branch on token_expired (offer Reconnect CTA) vs page_unbound
+ * (operator must re-grant from Facebook side).
+ */
+export async function validatePageToken(
+  pageAccessToken: string,
+): Promise<ValidatePageTokenResult> {
+  const url = `${GRAPH_API_BASE}/me?fields=id,name&access_token=${encodeURIComponent(
+    pageAccessToken,
+  )}`;
+  let res: Response;
+  try {
+    res = await fetch(url);
+  } catch (err) {
+    return { ok: false, reason: "unknown", detail: err instanceof Error ? err.message : String(err) };
+  }
+  if (res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { id?: string; name?: string };
+    if (typeof data.id === "string" && typeof data.name === "string") {
+      return { ok: true, pageId: data.id, pageName: data.name };
+    }
+    return { ok: false, reason: "unknown", detail: "Graph /me missing id or name" };
+  }
+  const errBody = (await res.json().catch(() => ({}))) as {
+    error?: { code?: number; subcode?: number; message?: string; type?: string };
+  };
+  const code = errBody.error?.code;
+  const subcode = errBody.error?.subcode;
+  // Meta error code 190 = OAuth invalid/expired token. Subcodes 458 (user
+  // not authorized), 460 (password change), 463 (expired) all indicate
+  // token-side failure → the user must re-OAuth.
+  if (code === 190) {
+    return {
+      ok: false,
+      reason: "token_expired",
+      detail: errBody.error?.message ?? `Meta OAuth error ${subcode ?? code}`,
+    };
+  }
+  // Code 100 / 803 commonly mean Page no longer accessible to this app.
+  if (code === 100 || code === 803) {
+    return {
+      ok: false,
+      reason: "page_unbound",
+      detail: errBody.error?.message ?? `Page lookup failed (code ${code})`,
+    };
+  }
+  return {
+    ok: false,
+    reason: "unknown",
+    detail: errBody.error?.message ?? `Graph /me ${res.status}`,
+  };
+}
+
 /**
  * Subscribe a page to the Messenger webhook (messages field).
  */

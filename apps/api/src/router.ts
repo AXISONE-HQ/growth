@@ -1,8 +1,10 @@
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import type { Prisma, ChannelConnection } from "@prisma/client";
+import { SecretManagerServiceClient } from "@google-cloud/secret-manager";
 import { router, publicProcedure, protectedProcedure } from "./trpc.js";
 import { generateObjectionResponses, regenerateSingleField } from "./llm.js";
+import { validatePageToken } from "./integrations/messenger/graph-api.js";
 import { detectSignals } from "../../../packages/api/src/services/wedge-signals.js";
 import { matchOpportunities } from "../../../packages/api/src/services/wedge-opportunities.js";
 import {
@@ -2053,20 +2055,61 @@ const settingsRouter = router({
         return mapChannelConnectionToDto(updated);
       }),
 
-    // testConnection — per-provider credential validation deferred to
-    // channel-specific epics (KAN-472 Twilio, KAN-473 Resend, KAN-474 Meta).
-    // Stubbed here so the Settings UI's "Test Connection" button has a wired
-    // endpoint instead of 404'ing. AC's "real provider validation" lands when
-    // those epics ship the Resend /domains / Twilio Accounts / Meta Graph
-    // health-check calls.
+    // testConnection — per-provider credential validation. KAN-474 lit up the
+    // messenger branch (Graph /me with the stored Page Access Token). Other
+    // channels stay stubbed pending KAN-472 (Twilio) / KAN-473 (Resend).
     testConnection: protectedProcedure
       .input(z.object({ type: z.enum(["email", "sms", "whatsapp", "messenger"]) }).strict())
-      .mutation(async () => {
-        // TODO(KAN-472|KAN-473|KAN-474): per-provider validation
+      .mutation(async ({ ctx, input }) => {
+        if (input.type === "messenger") {
+          const conn = await ctx.prisma.channelConnection.findFirst({
+            where: {
+              tenantId: ctx.tenantId,
+              channelType: "MESSENGER",
+              provider: "meta",
+              status: "ACTIVE",
+            },
+            orderBy: { connectedAt: "desc" },
+          });
+          if (!conn) {
+            return { success: false, message: "No active Messenger connection — connect first." };
+          }
+          let pageAccessToken: string | undefined;
+          try {
+            const sm = new SecretManagerServiceClient();
+            const [version] = await sm.accessSecretVersion({ name: conn.credentialsRef });
+            const raw = version.payload?.data?.toString();
+            if (raw) {
+              const payload = JSON.parse(raw) as { pageAccessToken?: string };
+              pageAccessToken = payload.pageAccessToken;
+            }
+          } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            return { success: false, message: `Could not load page token: ${msg}` };
+          }
+          if (!pageAccessToken) {
+            return { success: false, message: "Page token missing from Secret Manager payload." };
+          }
+          const result = await validatePageToken(pageAccessToken);
+          if (result.ok) {
+            return {
+              success: true,
+              message: `Connected as ${result.pageName}`,
+              pageId: result.pageId,
+              pageName: result.pageName,
+            };
+          }
+          return {
+            success: false,
+            message: result.detail ?? `Validation failed (${result.reason})`,
+            reason: result.reason,
+          };
+        }
+        // TODO(KAN-472|KAN-473): per-provider validation for email / sms / whatsapp
         return {
           success: false,
           message:
-            "Per-provider connection test deferred to KAN-472 (Twilio) / KAN-473 (Resend) / KAN-474 (Meta) epics.",
+            "Per-provider connection test deferred to KAN-472 (Twilio) / KAN-473 (Resend) epics.",
         };
       }),
   }),

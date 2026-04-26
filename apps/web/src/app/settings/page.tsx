@@ -103,6 +103,14 @@ export default function SettingsPage() {
 
   // ââ Channels state ââ
   const [channels, setChannels] = useState<CommunicationChannel[]>([]);
+  // KAN-474: messenger Test-Connection result for inline page-name display
+  // and the token_expired → Reconnect CTA branch.
+  const [messengerTestResult, setMessengerTestResult] = useState<{
+    success: boolean;
+    message: string;
+    reason?: string;
+    pageName?: string;
+  } | null>(null);
 
   // ââ Integrations state ââ
   const [integrations, setIntegrations] = useState<Integration[]>([]);
@@ -558,7 +566,11 @@ export default function SettingsPage() {
                           <div>
                             <div className="text-sm font-semibold text-gray-900 capitalize">{type}</div>
                             <div className="text-xs text-gray-500">
-                              {ch ? `${ch.provider} Â· ${isConnected ? 'Active' : ch.status}` : 'Not configured'}
+                              {ch
+                                ? type === 'messenger' && (ch.config?.pageName as string | undefined)
+                                  ? `Connected as ${ch.config.pageName as string} · ${isConnected ? 'Active' : ch.status}`
+                                  : `${ch.provider} · ${isConnected ? 'Active' : ch.status}`
+                                : 'Not configured'}
                             </div>
                           </div>
                         </div>
@@ -587,11 +599,48 @@ export default function SettingsPage() {
                         <div className="mt-3 flex items-center gap-2 text-xs text-gray-400">
                           {ch.lastTestedAt && <span>Last tested: {timeAgo(ch.lastTestedAt)}</span>}
                           <button
-                            onClick={() => settingsApi.testChannel(type).then(() => { loadChannels(); flash(`${type} test successful`); })}
+                            onClick={() =>
+                              settingsApi
+                                .testChannel(type)
+                                .then((res) => {
+                                  loadChannels();
+                                  if (type === 'messenger') {
+                                    setMessengerTestResult(
+                                      res as {
+                                        success: boolean;
+                                        message: string;
+                                        reason?: string;
+                                        pageName?: string;
+                                      },
+                                    );
+                                  }
+                                  if (res.success) flash(res.message || `${type} test successful`);
+                                  else setError(res.message || `${type} test failed`);
+                                })
+                            }
                             className="text-indigo-500 hover:text-indigo-700 font-medium flex items-center gap-1"
                           >
                             <RefreshCw className="w-3 h-3" /> Test Connection
                           </button>
+                          {/* KAN-474 Reconnect CTA — surfaces when the most recent
+                              messenger test came back token_expired. Re-runs the
+                              same OAuth popup as the initial Configure flow. */}
+                          {type === 'messenger' &&
+                            messengerTestResult?.reason === 'token_expired' && (
+                              <button
+                                onClick={() => {
+                                  const apiBase =
+                                    process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
+                                  window.open(
+                                    `${apiBase}/api/integrations/messenger/authorize`,
+                                    '_blank',
+                                  );
+                                }}
+                                className="text-amber-600 hover:text-amber-700 font-medium"
+                              >
+                                Reconnect
+                              </button>
+                            )}
                         </div>
                       )}
                     </div>
