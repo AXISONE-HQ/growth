@@ -6,15 +6,18 @@
  * Per-tenant routing:
  *   Meta sends pageId in every webhook entry â we look up the integration
  *   record by pageId to resolve the tenantId. This avoids scanning all
- *   integrations â the query is indexed via the JSONB config column.
+ *   integrations  -  the query is indexed via the JSONB config column.
  */
 
 import { Hono } from "hono";
 import crypto from "crypto";
+import { SecretManagerServiceClient } from "@google-cloud/secret-manager";
 import { getMessengerProfile } from "./graph-api.js";
 import { prisma } from "../../prisma.js";
 
 export const messengerWebhookApp = new Hono();
+
+const secretManager = new SecretManagerServiceClient();
 
 // ââ Signature Verification ââââââââââââââââââââââââââââââââââââââââââââââââââ
 
@@ -43,12 +46,45 @@ interface CachedIntegration {
   id: string;
   tenantId: string;
   pageAccessToken: string;
+  // Held so the lastInboundEventAt write below can spread + merge without a
+  // separate fetch round-trip. Reset on cache eviction.
+  metadata: Record<string, unknown>;
   cachedAt: number;
 }
 
 const integrationCache = new Map<string, CachedIntegration>();
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
+/**
+ * Inline page-token loader. Mirrors the access pattern from
+ * apps/connectors/src/adapters/meta/client.ts loadPageToken(); two callsites
+ * (here + KAN-474 oauth.ts disconnect path) doesn't justify extracting to a
+ * shared package yet.
+ */
+async function loadPageTokenFromSecretRef(
+  credentialsRef: string,
+): Promise<string | null> {
+  try {
+    const [version] = await secretManager.accessSecretVersion({ name: credentialsRef });
+    const raw = version.payload?.data?.toString();
+    if (!raw) return null;
+    const payload = JSON.parse(raw) as { pageAccessToken?: string };
+    return payload.pageAccessToken ?? null;
+  } catch (err) {
+    console.error(
+      "[messenger-webhook] failed to load page token from Secret Manager:",
+      err instanceof Error ? err.message : String(err),
+    );
+    return null;
+  }
+}
+
+/**
+ * Resolve the Messenger ChannelConnection for a given Page ID.
+ * KAN-691: replaces the prior raw-SQL query against the phantom Integration
+ * table. Page token now lives in Secret Manager (per KAN-474), loaded on
+ * cache miss via credentialsRef.
+ */
 async function getIntegrationByPageId(
   pageId: string
 ): Promise<CachedIntegration | null> {
@@ -58,41 +94,38 @@ async function getIntegrationByPageId(
     return cached;
   }
 
-  // 2. Query DB â use raw SQL for efficient JSONB lookup
+  // 2. Query DB  -  use raw SQL for efficient JSONB lookup
   //    This avoids fetching all integrations and filtering in-memory.
-  const integrations = await prisma.$queryRaw<
-    Array<{ id: string; tenant_id: string; config: any }>
-  >`
-    SELECT id, "tenantId" as tenant_id, config
-    FROM "Integration"
-    WHERE provider = 'Facebook Messenger'
-      AND status = 'connected'
-      AND config->>'pageId' = ${pageId}
-    LIMIT 1
-  `;
-
-  if (!integrations.length) {
+  // 2. Look up the active ChannelConnection. KAN-474 set:
+  //      provider='meta', channelType='MESSENGER', providerAccountId=page.id,
+  //      credentialsRef=<Secret Manager path>, metadata={pageId, pageName, ...}
+  const conn = await prisma.channelConnection.findFirst({
+    where: {
+      provider: "meta",
+      channelType: "MESSENGER",
+      providerAccountId: pageId,
+      status: "ACTIVE",
+    },
+  });
+  if (!conn) {
     return null;
   }
 
-  const integration = integrations[0];
-  const config =
-    typeof integration.config === "string"
-      ? JSON.parse(integration.config)
-      : integration.config;
-
-  if (!config?.pageAccessToken) {
+  // 3. Load the page access token from Secret Manager via credentialsRef.
+  const pageAccessToken = await loadPageTokenFromSecretRef(conn.credentialsRef);
+  if (!pageAccessToken) {
     console.error(
-      `No page access token for Messenger integration ${integration.id}`
+      `[messenger-webhook] no page access token for ChannelConnection ${conn.id}`,
     );
     return null;
   }
 
-  // 3. Populate cache
+  // 4. Populate cache
   const entry: CachedIntegration = {
-    id: integration.id,
-    tenantId: integration.tenant_id,
-    pageAccessToken: config.pageAccessToken,
+    id: conn.id,
+    tenantId: conn.tenantId,
+    pageAccessToken,
+    metadata: (conn.metadata ?? {}) as Record<string, unknown>,
     cachedAt: Date.now(),
   };
   integrationCache.set(pageId, entry);
@@ -125,7 +158,7 @@ messengerWebhookApp.get("/", (c) => {
     return c.text(challenge || "", 200);
   }
 
-  console.warn("Messenger webhook verification failed â token mismatch");
+  console.warn("Messenger webhook verification failed  -  token mismatch");
   return c.text("Forbidden", 403);
 });
 
@@ -161,7 +194,7 @@ messengerWebhookApp.post("/", async (c) => {
     return c.json({ error: "Invalid JSON" }, 400);
   }
 
-  // Must respond 200 immediately â Meta retries on timeout
+  // Must respond 200 immediately  -  Meta retries on timeout
   processMessagingEntries(payload).catch((err) => {
     console.error("Messenger processing error:", err);
   });
@@ -217,7 +250,7 @@ async function processMessagingEntries(payload: any): Promise<void> {
     const integration = await getIntegrationByPageId(pageId);
     if (!integration) {
       console.warn(
-        `No Messenger integration found for page ${pageId} â dropping ${entry.messaging?.length || 0} events`
+        `No Messenger integration found for page ${pageId}  -  dropping ${entry.messaging?.length || 0} events`
       );
       continue;
     }
@@ -226,7 +259,7 @@ async function processMessagingEntries(payload: any): Promise<void> {
 
     for (const event of events) {
       try {
-        // Skip delivery receipts and read receipts â they're not messages
+        // Skip delivery receipts and read receipts  -  they're not messages
         if (event.delivery || event.read) continue;
 
         // Skip echo messages (messages sent by the page itself)
@@ -283,38 +316,41 @@ async function processMessagingEvent(
   }
 
   // 3. Upsert contact by Messenger PSID
-  //    Messenger doesn't provide email â we use a synthetic placeholder.
+  //    Messenger doesn't provide email  -  we use a synthetic placeholder.
   //    When the contact is later enriched (via lead ad, form, CRM sync),
   //    the externalIds.messenger.psid field enables identity merge.
   const syntheticEmail = `messenger_${senderId}@messenger.placeholder`;
 
-  const contact = await prisma.contact.upsert({
-    where: {
-      tenantId_email: {
-        tenantId,
-        email: syntheticEmail,
-      },
-    },
-    create: {
-      tenantId,
-      email: syntheticEmail,
-      firstName: profile.firstName,
-      lastName: profile.lastName,
-      segment: "messenger_inbound",
-      lifecycleStage: "lead",
-      dataQualityScore: 20, // Low â no email, only PSID
-      externalIds: {
-        messenger: { psid: senderId, pageId },
-      },
-    },
-    update: {
-      ...(profile.firstName && { firstName: profile.firstName }),
-      ...(profile.lastName && { lastName: profile.lastName }),
-      externalIds: {
-        messenger: { psid: senderId, pageId },
-      },
-    },
+  // KAN-691: Contact has no @@unique([tenantId,email]) — only @@index. Email is
+  // nullable so an upsert composite key isn't possible at the schema level.
+  // Use findFirst + create-or-update. Race window is benign: a duplicate row
+  // would create a second messenger contact for the same PSID; identity-merge
+  // (separate ticket) will reconcile via externalIds.
+  const existingContact = await prisma.contact.findFirst({
+    where: { tenantId, email: syntheticEmail },
+    select: { id: true },
   });
+  const contact = existingContact
+    ? await prisma.contact.update({
+        where: { id: existingContact.id },
+        data: {
+          ...(profile.firstName && { firstName: profile.firstName }),
+          ...(profile.lastName && { lastName: profile.lastName }),
+          externalIds: { messenger: { psid: senderId, pageId } },
+        },
+      })
+    : await prisma.contact.create({
+        data: {
+          tenantId,
+          email: syntheticEmail,
+          firstName: profile.firstName,
+          lastName: profile.lastName,
+          segment: "messenger_inbound",
+          lifecycleStage: "lead",
+          dataQualityScore: 20, // Low - no email, only PSID
+          externalIds: { messenger: { psid: senderId, pageId } },
+        },
+      });
 
   // 4. Log the inbound message in the audit log
   //    This creates a full conversation history per tenant.
@@ -343,14 +379,22 @@ async function processMessagingEvent(
     },
   });
 
-  // 5. Update integration lastSyncAt
-  await prisma.integration.update({
+  // 5. Update connection metadata.lastInboundEventAt (KAN-691).
+  //    ChannelConnection has no `lastSyncAt` column; metadata JSONB carries
+  //    the same liveness signal. Spread the cached metadata so we don't clobber
+  //    pageId/pageName/subscribedAt that KAN-474 set at OAuth time.
+  await prisma.channelConnection.update({
     where: { id: integration.id },
-    data: { lastSyncAt: new Date() },
+    data: {
+      metadata: {
+        ...integration.metadata,
+        lastInboundEventAt: new Date().toISOString(),
+      },
+    },
   });
 
   console.log(
-    `[Messenger] Message ingested â tenant: ${tenantId}, PSID: ${senderId}, ` +
+    `[Messenger] Message ingested  -  tenant: ${tenantId}, PSID: ${senderId}, ` +
       `type: ${messageType}, contact: ${contact.id}`
   );
 
@@ -371,7 +415,7 @@ async function processMessagingEvent(
       timestamp: event.timestamp,
     });
   } catch (err) {
-    // Non-fatal â message is already persisted in audit log
+    // Non-fatal  -  message is already persisted in audit log
     console.error("Failed to emit Pub/Sub event:", err);
   }
 }
@@ -406,12 +450,12 @@ async function emitMessageReceivedEvent(
 
   if (!topicName) {
     console.log(
-      "[Pub/Sub] PUBSUB_TOPIC_MESSAGE_RECEIVED not configured â skipping event emission"
+      "[Pub/Sub] PUBSUB_TOPIC_MESSAGE_RECEIVED not configured  -  skipping event emission"
     );
     return;
   }
 
-  // Dynamic import â Pub/Sub client is only loaded when needed
+  // Dynamic import  -  Pub/Sub client is only loaded when needed
   try {
     const { PubSub } = await import("@google-cloud/pubsub");
     const pubsub = new PubSub();
@@ -420,7 +464,11 @@ async function emitMessageReceivedEvent(
     await topic.publishMessage({
       json: {
         eventType: "contact.message.received",
-        timestamp: new Date().toISOString(),
+        // KAN-691: separate emit-time (ISO) from Meta-side event time (unix ms,
+        // carried as `event.timestamp` from the spread). Pre-fix the explicit
+        // `timestamp:` field was silently overwritten by the spread; rename
+        // the wall-clock signal to `emittedAt` so both survive.
+        emittedAt: new Date().toISOString(),
         ...event,
       },
     });
