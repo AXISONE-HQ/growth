@@ -1,4 +1,10 @@
-import { upsertConnection, revokeConnection, updateHealthCheck, getConnections } from "../../repository/connection-repository.js";
+import {
+  upsertConnection,
+  revokeConnection,
+  updateHealthCheck,
+  getConnections,
+  findConnectionByProviderAccountId,
+} from "../../repository/connection-repository.js";
 /**
  * TwilioAdapter — implements ChannelAdapter for SMS via Twilio.
  *
@@ -18,6 +24,7 @@ import type {
   SendResult,
   TenantRef,
 } from '@growth/connector-contracts';
+import type { Prisma } from '@prisma/client';
 import { env } from '../../env.js';
 import { logger } from '../../logger.js';
 import {
@@ -104,7 +111,12 @@ export class TwilioAdapter implements ChannelAdapter {
       ...compliance,
     };
 
-    // Persist ChannelConnection (KAN-558) — done
+    // Persist ChannelConnection. KAN-549 fix: write the FULL BrandAndCampaignState
+    // (built above into connection.complianceStatus) so the poller can resume
+    // from real Brand/Campaign SIDs. Pre-fix shipped a flat
+    // { tenDlcStatus: 'pending' } that dropped brandRegistrationSid +
+    // usAppToPersonSid — poller couldn't read its own submission, sends never
+    // enabled post-approval.
     await upsertConnection({
       tenantId: tenant.id,
       channelType: "SMS",
@@ -114,10 +126,9 @@ export class TwilioAdapter implements ChannelAdapter {
       credentialsRef,
       label: `Twilio SMS`,
       metadata: { phoneNumber, messagingServiceSid },
-      complianceStatus: { tenDlcStatus: "pending" },
+      complianceStatus: connection.complianceStatus as Prisma.InputJsonValue,
     });
-    // KAN-558 persistence wired
-    log.info({ connectionId: connection.id }, 'ChannelConnection assembled (persistence TODO)');
+    log.info({ connectionId: connection.id }, 'ChannelConnection persisted');
     return connection;
   }
 
@@ -259,17 +270,38 @@ export class TwilioAdapter implements ChannelAdapter {
   // ── handleWebhook() — INBOUND only (status callbacks hit a separate route) ──
   async handleWebhook(payload: unknown, _signature: string): Promise<InboundEvent[]> {
     const p = payload as Record<string, string>;
-    if (!p.From || !p.Body || !p.MessageSid) return [];
+    if (!p.From || !p.Body || !p.MessageSid || !p.AccountSid) return [];
+
+    // KAN-549: resolve real tenantId from the inbound subaccount SID. Pre-fix
+    // we returned a placeholder `00000000-0000-0000-0000-000000000000` UUID
+    // and expected the dispatcher to overwrite it; in practice the dispatcher
+    // forwarded the placeholder, leaving downstream consumers (Decision
+    // Engine, audit log, contact upsert) to either drop the event or write
+    // it under a "shadow tenant" with cross-tenant data co-mingling risk.
+    //
+    // Each subaccount maps 1:1 to a tenant via the ChannelConnection row
+    // KAN-474 / KAN-691 / connect() write at index.ts L113. AccountSid is
+    // globally unique (Twilio SID), so a single findFirst on
+    // (provider='twilio', providerAccountId=AccountSid) is sufficient.
+    const conn = await findConnectionByProviderAccountId('twilio', p.AccountSid);
+    if (!conn) {
+      logger.warn(
+        { accountSid: p.AccountSid, messageSid: p.MessageSid },
+        '[twilio-webhook] no ChannelConnection for AccountSid — dropping inbound',
+      );
+      return [];
+    }
+    const tenantId = conn.tenantId;
 
     // KAN-579: keyword handling first — compliance-critical
     const keyword = detectKeyword(p.Body);
     if (keyword) {
-      await this.handleKeyword(keyword, p);
+      await this.handleKeyword(keyword, p, tenantId);
       // Keyword messages still flow into inbound.raw so the audit log captures them,
       // but Ingestion Service knows to short-circuit AI processing via the keyword tag.
       return [
         {
-          tenantId: '00000000-0000-0000-0000-000000000000', // resolved by webhook router
+          tenantId,
           channel: 'SMS',
           provider: 'twilio',
           fromIdentifier: p.From,
@@ -284,7 +316,7 @@ export class TwilioAdapter implements ChannelAdapter {
 
     return [
       {
-        tenantId: '00000000-0000-0000-0000-000000000000',
+        tenantId,
         channel: 'SMS',
         provider: 'twilio',
         fromIdentifier: p.From,
@@ -303,19 +335,20 @@ export class TwilioAdapter implements ChannelAdapter {
    * HELP → reply with help text
    * START → remove from opt-out + confirmation
    *
+   * `tenantId` is resolved by the caller from `params.AccountSid` (KAN-549).
+   * Pre-fix this function used `params.AccountSid` directly as the opt-out
+   * namespace — a key mismatch with the outbound pre-send check at
+   * `send():193` which reads `sms:optout:<tenantId>`, so STOPs were silently
+   * not enforced (TCPA gap, $500-$1500/violation).
+   *
    * Brand name for auto-replies is currently hard-coded to "growth". When
    * we integrate AiAgentConfig (KAN-514 territory) we'll pull per-tenant.
    */
   private async handleKeyword(
     keyword: 'STOP' | 'HELP' | 'START',
     params: Record<string, string>,
+    tenantId: string,
   ): Promise<void> {
-    // Tenant resolution from AccountSid — the webhook router resolves tenantId
-    // but we need it here for opt-out storage. Adapter stays pure by accepting
-    // it implicitly via a future signature change; for now, rely on AccountSid
-    // being unique to a tenant and use it as the opt-out namespace.
-    const tenantNamespace = params.AccountSid;
-
     const brandName = 'growth';
     const toSend: { body: string; action: string } | null =
       keyword === 'STOP'
@@ -325,9 +358,9 @@ export class TwilioAdapter implements ChannelAdapter {
           : { body: startConfirmationBody(brandName), action: 'opt-in-confirm' };
 
     if (keyword === 'STOP') {
-      await markOptedOut(tenantNamespace, params.From);
+      await markOptedOut(tenantId, params.From);
     } else if (keyword === 'START') {
-      await clearOptOut(tenantNamespace, params.From);
+      await clearOptOut(tenantId, params.From);
     }
 
     // Auto-reply via Twilio directly — doesn't go through Agent Dispatcher
