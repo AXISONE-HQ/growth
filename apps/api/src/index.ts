@@ -114,6 +114,10 @@ app.onError((err, c) => {
 // llm.call Pub/Sub event. Best-effort — publish failures are logged, never thrown.
 setLLMCostPublisher(getPubSubClient());
 
+// KAN-698: RAG knowledge fetcher auto-wires lazily inside context-assembler's
+// loadKnowledge on first call (variable-specifier dynamic import keeps
+// brain-embeddings out of the static TS6059 graph).
+
 console.log(`Starting API server on port ${PORT}...`);
 serve(
   {

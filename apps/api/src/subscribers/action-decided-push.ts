@@ -29,6 +29,7 @@ import {
   resolveEmailConnectionId,
   gateAndPublishComposed,
 } from '../../../../packages/api/src/services/message-composer.js';
+import { loadKnowledge } from '../../../../packages/api/src/services/context-assembler.js';
 
 export const actionDecidedPushApp = new Hono();
 
@@ -116,12 +117,18 @@ actionDecidedPushApp.post('/action-decided', async (c) => {
   const publicWebhookBaseUrl = process.env.PUBLIC_WEBHOOK_BASE_URL ?? 'https://example.invalid';
 
   try {
+    // KAN-698: pull top-K Knowledge Center entries for this tenant + the
+    // current instruction so the composed email grounds in tenant facts.
+    // loadKnowledge degrades gracefully (returns []) if RAG is unavailable.
+    const knowledge = await loadKnowledge(event.tenantId, instruction);
+
     const composed = await composeMessage(prisma, {
       tenantId: event.tenantId,
       contactId: event.contactId,
       decisionId: event.decisionId,
       instruction,
       publicWebhookBaseUrl,
+      knowledge,
     });
 
     const connectionId =
