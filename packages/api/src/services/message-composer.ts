@@ -9,13 +9,11 @@
  * Brand voice: brain.tone ?? 'professional, concise' (TODO swap to Business Brain v2).
  */
 
-import Anthropic from '@anthropic-ai/sdk';
 import { z } from 'zod';
 import { randomUUID } from 'crypto';
 import type { PrismaClient } from '@prisma/client';
 import type { PubSubClient } from './action-decided-publisher.js';
-
-const HAIKU_MODEL = 'claude-haiku-4-5-20251001';
+import { complete as llmComplete } from './llm-client.js';
 
 export const ComposedMessageSchema = z.object({
   subject: z.string().min(1),
@@ -31,8 +29,6 @@ export interface ComposeMessageInput {
   instruction: string;
   publicWebhookBaseUrl: string;
 }
-
-const anthropic = new Anthropic();
 
 export async function composeMessage(
   prisma: PrismaClient,
@@ -72,19 +68,16 @@ Respond with a JSON object with these fields:
 
 Return ONLY the JSON object, no markdown formatting.`;
 
-  const message = await anthropic.messages.create({
-    model: HAIKU_MODEL,
-    max_tokens: 512,
-    messages: [{ role: 'user', content: userPrompt }],
-    system: systemPrompt,
+  const llm = await llmComplete({
+    tier: 'cheap',
+    systemPrompt,
+    userPrompt,
+    maxTokens: 512,
+    jsonMode: true,
+    callerTag: 'message-composer:compose',
   });
 
-  const textContent = message.content.find((c) => c.type === 'text');
-  if (!textContent || textContent.type !== 'text') {
-    throw new Error('No text response from Haiku');
-  }
-
-  let jsonStr = textContent.text.trim();
+  let jsonStr = llm.text.trim();
   if (jsonStr.startsWith('```')) {
     jsonStr = jsonStr.replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '');
   }
