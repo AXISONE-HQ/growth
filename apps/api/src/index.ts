@@ -12,6 +12,8 @@ import { messengerOAuthApp } from "./integrations/messenger/oauth.js";
 import { messengerWebhookApp } from "./integrations/messenger/webhook.js";
 import { actionDecidedPushApp } from "./subscribers/action-decided-push.js";
 import { actionExecutedPushApp } from "./subscribers/action-executed-push.js";
+import { getPubSubClient } from "../../../packages/api/src/lib/pubsub-client.js";
+import { setLLMCostPublisher } from "../../../packages/api/src/services/llm-client.js";
 
 const app = new Hono();
 const PORT = parseInt(process.env.PORT || "8080", 10);
@@ -107,6 +109,10 @@ app.onError((err, c) => {
 // ============================================================================
 // START SERVER
 // ============================================================================
+
+// KAN-699: wire the cost-tracking publisher so every llm-client call emits an
+// llm.call Pub/Sub event. Best-effort — publish failures are logged, never thrown.
+setLLMCostPublisher(getPubSubClient());
 
 console.log(`Starting API server on port ${PORT}...`);
 serve(
