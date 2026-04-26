@@ -7,6 +7,7 @@ import { trpcServer } from '@hono/trpc-server';
 import { logger as pinoLogger } from './logger.js';
 import { registerAdapters } from './adapters/index.js';
 import { webhooksApp } from './webhooks/index.js';
+import { resendWebhookApp } from './webhooks/resend.js';
 import { actionSendPushApp } from './subscribers/action-send-push.js';
 import { unsubscribeApp } from './routes/unsubscribe.js';
 import { buildOidcMiddleware } from './middleware/oidc.js';
@@ -37,7 +38,13 @@ export function buildApp(): Hono {
   app.get('/healthz', (c) => c.json({ status: 'ok', service: '@growth-ai/connectors' }));
   app.get('/readyz', (c) => c.json({ ready: true }));
 
-  // Public webhook ingress
+  // KAN-684 — Resend-specific webhook handler. Mounted BEFORE the generic
+  // /webhooks/:provider dispatcher so the more-specific path wins routing
+  // (Hono honors registration order). Svix-signed; public; no OIDC.
+  app.route('/webhooks/resend', resendWebhookApp);
+
+  // Public webhook ingress (generic dispatcher for Twilio / Meta — Resend
+  // is handled above by its own dedicated handler).
   app.route('/webhooks', webhooksApp);
 
   // Public unsubscribe landing (no auth — capability URL) — KAN-661

@@ -39,6 +39,13 @@ const EnvSchema = z.object({
   // secret is bound, leave false — flipping to true with a non-resolving
   // URL would let Microsoft penalize the One-Click claim.
   UNSUBSCRIBE_URL_LIVE: z.coerce.boolean().default(false),
+
+  // KAN-684. Svix signing secret for Resend webhook signature verification.
+  // Optional at boot — the webhook handler returns 503 if a request lands
+  // before the secret is bound. Set on Cloud Run via:
+  //   gcloud run services update growth-connectors \
+  //     --update-secrets=RESEND_WEBHOOK_SIGNING_SECRET=growth-resend-webhook-secret:latest
+  RESEND_WEBHOOK_SIGNING_SECRET: z.string().optional(),
 });
 
 export const env = EnvSchema.parse(process.env);
