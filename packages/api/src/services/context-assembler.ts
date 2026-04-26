@@ -70,6 +70,21 @@ export const AssembledContextSchema = z.object({
     products: z.array(z.string()).optional(),
     tone: z.string().optional(),
     constraints: z.array(z.string()).optional(),
+    // KAN-698: top-K Knowledge Center entries retrieved via brain-embeddings
+    // similarity search (tenant-scoped). Available to strategy selector,
+    // action determiner, and message-composer for grounding.
+    knowledge: z
+      .array(
+        z.object({
+          id: z.string(),
+          contentType: z.string(),
+          contentId: z.string(),
+          contentText: z.string().optional(),
+          metadata: z.record(z.unknown()),
+          similarity: z.number(),
+        }),
+      )
+      .optional(),
   }),
   tenantConfig: z.object({
     planTier: z.string().optional(),
@@ -115,6 +130,113 @@ export interface ContextDatabase {
   getBrainSnapshot(tenantId: string): Promise<Record<string, unknown> | null>;
   getTenantConfig(tenantId: string): Promise<Record<string, unknown> | null>;
   getRecentActions(contactId: string, limit: number): Promise<Record<string, unknown>[]>;
+}
+
+// ─────────────────────────────────────────────
+// KAN-698: RAG knowledge retrieval (Knowledge Center via brain-embeddings)
+// ─────────────────────────────────────────────
+
+export interface KnowledgeHit {
+  id: string;
+  contentType: string;
+  contentId: string;
+  contentText?: string;
+  metadata: Record<string, unknown>;
+  similarity: number;
+}
+
+export interface KnowledgeSearchOptions {
+  limit?: number;
+  threshold?: number;
+}
+
+/**
+ * Tenant-scoped knowledge fetcher. Wired at boot (apps/api/src/index.ts) to
+ * `brain-embeddings.similaritySearch` via dynamic import so the static TS6059
+ * graph does not grow. Tests inject a mock directly.
+ */
+export type KnowledgeSearchFn = (
+  tenantId: string,
+  query: string,
+  opts?: KnowledgeSearchOptions,
+) => Promise<KnowledgeHit[]>;
+
+let _knowledgeSearch: KnowledgeSearchFn | null = null;
+let _autoWireAttempted = false;
+
+export function setKnowledgeSearch(fn: KnowledgeSearchFn | null): void {
+  _knowledgeSearch = fn;
+  // Tests use this to inject a mock — when they reset to null, allow re-auto-wire.
+  if (fn === null) _autoWireAttempted = false;
+}
+
+/**
+ * Lazy auto-wire to brain-embeddings.similaritySearch. Uses a variable
+ * specifier so tsc cannot statically resolve the import — keeps
+ * brain-embeddings.ts out of the apps/api static program (no TS6059 growth).
+ * Runs once per process lifetime; failure is silent (loadKnowledge returns []).
+ */
+async function tryAutoWireKnowledgeSearch(): Promise<void> {
+  if (_autoWireAttempted) return;
+  _autoWireAttempted = true;
+  try {
+    const spec = './brain-embeddings.js';
+    const mod = (await import(spec)) as {
+      similaritySearch?: (
+        tenantId: string,
+        query: string,
+        opts?: KnowledgeSearchOptions,
+      ) => Promise<KnowledgeHit[]>;
+    };
+    if (typeof mod.similaritySearch === 'function') {
+      const fn = mod.similaritySearch;
+      _knowledgeSearch = (tenantId, query, opts) => fn(tenantId, query, opts);
+    }
+  } catch {
+    // Silent — loadKnowledge will return [] until wired.
+  }
+}
+
+export const DEFAULT_KNOWLEDGE_K = 5;
+const DEFAULT_KNOWLEDGE_THRESHOLD = 0.5;
+
+/**
+ * Query Knowledge Center for top-K relevant entries. Tenant-scoped — the
+ * fetcher must enforce isolation (similaritySearch's WHERE tenant_id filter).
+ *
+ * Graceful degradation: returns [] if no fetcher is wired or if the search
+ * throws. Knowledge is grounding sugar; the pipeline must keep flowing.
+ */
+export async function loadKnowledge(
+  tenantId: string,
+  query: string,
+  k: number = DEFAULT_KNOWLEDGE_K,
+): Promise<KnowledgeHit[]> {
+  if (!query.trim()) return [];
+  if (!_knowledgeSearch) await tryAutoWireKnowledgeSearch();
+  if (!_knowledgeSearch) return [];
+  try {
+    return await _knowledgeSearch(tenantId, query, {
+      limit: k,
+      threshold: DEFAULT_KNOWLEDGE_THRESHOLD,
+    });
+  } catch (err) {
+    console.error('[context-assembler] knowledge search failed', err);
+    return [];
+  }
+}
+
+/** Build a compact embedding query from contact + objective context. */
+function buildKnowledgeQuery(
+  contact: Record<string, unknown> | null,
+  contactState: Record<string, unknown> | null,
+): string {
+  const parts: string[] = [];
+  if (contact?.lifecycle_stage) parts.push(`stage: ${contact.lifecycle_stage}`);
+  if (contact?.segment) parts.push(`segment: ${contact.segment}`);
+  if (contactState?.objective_type) parts.push(`objective: ${contactState.objective_type}`);
+  if (contactState?.strategy_current) parts.push(`strategy: ${contactState.strategy_current}`);
+  return parts.join(' | ');
 }
 
 // ─────────────────────────────────────────────
@@ -220,6 +342,12 @@ async function assembleFromDatabase(
       db.getRecentActions(input.contactId, 10),
     ]);
 
+  // KAN-698: Knowledge query runs after the parallel batch so we can build
+  // the embedding query from contact + objective context. Off the critical
+  // path token-budget-wise — graceful degradation returns [] on any failure.
+  const knowledgeQuery = buildKnowledgeQuery(contact, contactState);
+  const knowledge = await loadKnowledge(input.tenantId, knowledgeQuery);
+
   return {
     contactId: input.contactId,
     tenantId: input.tenantId,
@@ -258,6 +386,7 @@ async function assembleFromDatabase(
       strategyWeights: (brain?.strategy_weights as Record<string, number>) ?? undefined,
       tone: (brain?.tone as string) ?? undefined,
       constraints: (brain?.constraints as string[]) ?? undefined,
+      knowledge: knowledge.length > 0 ? knowledge : undefined,
     },
     tenantConfig: {
       planTier: (tenantConfig?.plan_tier as string) ?? undefined,

@@ -14,6 +14,7 @@ import { randomUUID } from 'crypto';
 import type { PrismaClient } from '@prisma/client';
 import type { PubSubClient } from './action-decided-publisher.js';
 import { complete as llmComplete } from './llm-client.js';
+import type { KnowledgeHit } from './context-assembler.js';
 
 export const ComposedMessageSchema = z.object({
   subject: z.string().min(1),
@@ -28,13 +29,34 @@ export interface ComposeMessageInput {
   decisionId: string;
   instruction: string;
   publicWebhookBaseUrl: string;
+  /**
+   * KAN-698: top-K Knowledge Center entries for this tenant + context.
+   * When present, injected into the user prompt so Haiku grounds the email
+   * in tenant facts instead of hallucinating. Caller fetches via
+   * `loadKnowledge` from context-assembler.
+   */
+  knowledge?: KnowledgeHit[];
+}
+
+/** KAN-698: render knowledge hits as a compact prompt block. */
+function formatKnowledgeBlock(hits: KnowledgeHit[]): string {
+  if (!hits.length) return '';
+  const lines = hits
+    .map((h, i) => {
+      const text = (h.contentText ?? '').trim();
+      if (!text) return null;
+      return `${i + 1}. [${h.contentType}] ${text}`;
+    })
+    .filter((l): l is string => l !== null);
+  if (!lines.length) return '';
+  return `\nTenant Knowledge (use these facts to ground the message; do not contradict them):\n${lines.join('\n')}\n`;
 }
 
 export async function composeMessage(
   prisma: PrismaClient,
   input: ComposeMessageInput,
 ): Promise<ComposedMessage> {
-  const { tenantId, contactId, instruction, publicWebhookBaseUrl } = input;
+  const { tenantId, contactId, instruction, publicWebhookBaseUrl, knowledge } = input;
 
   const contact = await prisma.contact.findFirst({
     where: { id: contactId, tenantId },
@@ -56,12 +78,14 @@ export async function composeMessage(
     'You are a sales communication AI composing a short, tone-aligned email. ' +
     'Respond with ONLY valid JSON in the exact format specified. No markdown, no code fences, no extra text.';
 
+  const knowledgeBlock = formatKnowledgeBlock(knowledge ?? []);
+
   const userPrompt = `Compose a short email (3-5 sentences) based on this instruction and context.
 
 Instruction: "${instruction}"
 Recipient first name: ${firstName}
 Brand voice: ${tone}
-
+${knowledgeBlock}
 Respond with a JSON object with these fields:
 1. "subject" — a natural subject line that includes the recipient's first name. Keep under 60 characters.
 2. "body" — the email body, plain text, 3-5 sentences, reflecting the instruction intent and the brand voice. Sign off with a warm closing but no name (the connector layer appends sender identity).
