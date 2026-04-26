@@ -123,9 +123,9 @@ webhooksApp.post('/:provider', async (c) => {
     return c.text('OK', 200);
   }
 
-  // TODO(KAN-549): tenantId is resolved here via providerAccountId reverse-lookup.
-  // Adapters currently return a placeholder tenantId; overwrite before publishing.
-  // For now we accept what the adapter returned.
+  // KAN-549 closed: adapters now resolve providerAccountId → tenantId
+  // themselves (Meta via pageId per KAN-691, Twilio via AccountSid per KAN-549).
+  // Inbound events arrive here already tenant-attributed; we just publish.
 
   await publishEvent({
     topic: 'inbound.raw',

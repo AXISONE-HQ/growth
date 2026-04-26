@@ -102,4 +102,23 @@ export async function getConnection(
   });
 }
 
+/**
+ * Reverse-lookup a ChannelConnection by (provider, providerAccountId) — used
+ * by inbound webhook handlers that receive a provider-side ID (Twilio
+ * AccountSid, Meta page ID, etc.) and need to resolve which tenant owns it.
+ *
+ * KAN-549: tenantId resolution from provider IDs in inbound webhooks.
+ *
+ * Returns null if no connection matches. Caller decides whether to drop the
+ * webhook (typical) or 4xx (rare).
+ */
+export async function findConnectionByProviderAccountId(
+  provider: string,
+  providerAccountId: string
+) {
+  return prisma.channelConnection.findFirst({
+    where: { provider, providerAccountId },
+  });
+}
+
 export { prisma, ChannelType, ConnectionStatus };
