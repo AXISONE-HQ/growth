@@ -85,3 +85,52 @@ export const protectedProcedure = t.procedure.use(async (opts) => {
     },
   });
 });
+
+// KAN-702: tenant-admin gate. Looks up the authenticated Firebase user's
+// TeamMember row for the active tenant and rejects unless role is owner or
+// admin. Per-tenant authority — same role source the team invite router uses
+// (apps/api/src/router.ts:2106). Interim implementation until KAN-714 promotes
+// TenantRole to a schema-level enum + canonicalizes the procedure shape.
+//
+// Failure modes:
+//   - No firebaseUser → UNAUTHORIZED (caller bypassed Firebase auth)
+//   - No TeamMember row for (tenantId, email) → FORBIDDEN (user not in tenant)
+//   - role not in {owner, admin} → FORBIDDEN
+const ADMIN_ROLES = new Set(["owner", "admin"]);
+
+export const adminProcedure = protectedProcedure.use(async (opts) => {
+  const { ctx } = opts;
+
+  if (!ctx.firebaseUser?.email) {
+    throw new TRPCError({
+      code: "UNAUTHORIZED",
+      message: "Admin procedures require a Firebase-authenticated user with email",
+    });
+  }
+
+  const member: { role: string } | null = await (ctx.prisma as any).teamMember?.findFirst({
+    where: { tenantId: ctx.tenantId, email: ctx.firebaseUser.email },
+    select: { role: true },
+  });
+
+  if (!member) {
+    throw new TRPCError({
+      code: "FORBIDDEN",
+      message: `User ${ctx.firebaseUser.email} is not a member of tenant ${ctx.tenantId}`,
+    });
+  }
+
+  if (!ADMIN_ROLES.has(member.role)) {
+    throw new TRPCError({
+      code: "FORBIDDEN",
+      message: `Role '${member.role}' cannot perform admin-gated operations (requires owner or admin)`,
+    });
+  }
+
+  return opts.next({
+    ctx: {
+      ...ctx,
+      teamMemberRole: member.role,
+    },
+  });
+});

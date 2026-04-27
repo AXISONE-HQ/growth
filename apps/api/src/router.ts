@@ -2,7 +2,126 @@ import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import type { Prisma, ChannelConnection } from "@prisma/client";
 import { SecretManagerServiceClient } from "@google-cloud/secret-manager";
-import { router, publicProcedure, protectedProcedure } from "./trpc.js";
+import { router, publicProcedure, protectedProcedure, adminProcedure } from "./trpc.js";
+
+// ============================================================================
+// KAN-702 PR A — pipeline form validation helpers (inlined here for net-zero
+// TS6059 — pulling these from packages/api/src/services adds the file to the
+// apps/api static graph and bumps the cohort by 1). Re-exported below so the
+// test file can import the same canonical implementation via the connectors
+// vitest bridge (test runs against the router file's exports rather than a
+// separate packages/api file).
+// ============================================================================
+
+export interface StageInput {
+  id?: string;
+  name: string;
+  order: number;
+  isInitial: boolean;
+  isTerminal: boolean;
+}
+
+export interface ValidationResult {
+  valid: boolean;
+  errors: string[];
+}
+
+export function validateStages(stages: StageInput[]): ValidationResult {
+  const errors: string[] = [];
+  if (stages.length === 0) {
+    errors.push("Pipeline must have at least one stage");
+    return { valid: false, errors };
+  }
+  const names = new Set<string>();
+  for (const s of stages) {
+    const trimmed = s.name.trim();
+    if (!trimmed) {
+      errors.push("Stage names cannot be empty");
+      continue;
+    }
+    if (names.has(trimmed)) errors.push(`Stage name "${trimmed}" appears more than once`);
+    names.add(trimmed);
+  }
+  const orders = new Set<number>();
+  for (const s of stages) {
+    if (orders.has(s.order)) errors.push(`Stage order ${s.order} appears more than once`);
+    orders.add(s.order);
+  }
+  const initialCount = stages.filter((s) => s.isInitial).length;
+  if (initialCount === 0) errors.push("Pipeline must have exactly one initial stage (none marked)");
+  else if (initialCount > 1) errors.push(`Pipeline must have exactly one initial stage (${initialCount} marked)`);
+  return { valid: errors.length === 0, errors };
+}
+
+export function normalizeStageOrders(stages: StageInput[]): StageInput[] {
+  return stages.map((s, i) => ({ ...s, order: i }));
+}
+
+const ALLOWED_OBJECTIVE_TYPES = new Set([
+  "warm_up_lead",
+  "book_appointment",
+  "buy_online",
+  "send_quote",
+]);
+
+export interface PipelineFormInput {
+  name: string;
+  description?: string | null;
+  objectiveType: string;
+  objectiveDescription?: string | null;
+  stages: StageInput[];
+}
+
+export function validatePipelineForm(input: PipelineFormInput): ValidationResult {
+  const errors: string[] = [];
+  if (!input.name.trim()) errors.push("Pipeline name is required");
+  if (input.name.length > 100) errors.push("Pipeline name must be 100 characters or fewer");
+  if (!ALLOWED_OBJECTIVE_TYPES.has(input.objectiveType)) {
+    errors.push(`Unknown objective type "${input.objectiveType}"`);
+  }
+  const stageResult = validateStages(input.stages);
+  errors.push(...stageResult.errors);
+  return { valid: errors.length === 0, errors };
+}
+
+export function canDeletePipeline(input: {
+  activeLeadCount: number;
+  stageHistoryCount: number;
+}): { canDelete: boolean; reason: string | null } {
+  if (input.activeLeadCount > 0) {
+    return {
+      canDelete: false,
+      reason: `Cannot delete pipeline: ${input.activeLeadCount} lead(s) currently assigned. Move leads to another pipeline first.`,
+    };
+  }
+  if (input.stageHistoryCount > 0) {
+    return {
+      canDelete: false,
+      reason: `Cannot delete pipeline: ${input.stageHistoryCount} stage transition(s) in audit history. Archive instead (toggle isActive=false).`,
+    };
+  }
+  return { canDelete: true, reason: null };
+}
+
+export function canDeleteStage(input: {
+  activeLeadCount: number;
+  isInitial: boolean;
+  isOnlyInitial: boolean;
+}): { canDelete: boolean; reason: string | null } {
+  if (input.activeLeadCount > 0) {
+    return {
+      canDelete: false,
+      reason: `Cannot delete stage: ${input.activeLeadCount} lead(s) currently in this stage. Move leads to another stage first.`,
+    };
+  }
+  if (input.isInitial && input.isOnlyInitial) {
+    return {
+      canDelete: false,
+      reason: `Cannot delete the pipeline's only initial stage. Mark another stage as initial first.`,
+    };
+  }
+  return { canDelete: true, reason: null };
+}
 import { generateObjectionResponses, regenerateSingleField } from "./llm.js";
 import { validatePageToken } from "./integrations/messenger/graph-api.js";
 import { detectSignals } from "../../../packages/api/src/services/wedge-signals.js";
@@ -2447,10 +2566,569 @@ const wedgeRouter = router({
     }),
 });
 
+// ============================================================================
+// PIPELINES — KAN-702 PR A
+//
+// Five sibling routers covering Pipeline configuration end-to-end:
+//   - pipelinesRouter:           list / getById / create / update / toggleActive
+//   - stagesRouter:              reorder / update / delete (lead-count safety)
+//   - targetsRouter:             upsert by (pipelineId, metric, period)
+//   - knowledgeFiltersRouter:    upsert per (pipelineId, knowledgeCategory)
+//   - pipelineMicroObjectivesRouter: setForPipeline (replace-all per pipeline)
+//
+// Mutations gated by adminProcedure (requires owner|admin TeamMember role for
+// the active tenant). Queries use protectedProcedure (any tenant member can
+// read their own pipelines). Cast-loose `(prisma as any)` accessors on the
+// new Prisma delegates keep the new types out of the apps/api TS6059 graph
+// (same pattern as KAN-700 / KAN-703 / KAN-704 / KAN-705).
+//
+// Pure validation helpers live in `packages/api/src/services/pipeline-validation.ts`
+// and are tested via the apps/connectors vitest bridge.
+// ============================================================================
+
+const ObjectiveTypeEnum = z.enum(["warm_up_lead", "book_appointment", "buy_online", "send_quote"]);
+const TargetMetricEnum = z.enum([
+  "appointments_booked",
+  "orders_placed",
+  "quotes_sent",
+  "replies_received",
+  "leads_qualified",
+  "revenue_dollars",
+]);
+const TargetPeriodEnum = z.enum(["weekly", "monthly", "quarterly"]);
+const KnowledgeCategoryEnum = z.enum([
+  "company_info",
+  "products",
+  "warranty",
+  "shipping",
+  "financing",
+  "faqs",
+]);
+
+const StageInputSchema = z.object({
+  id: z.string().uuid().optional(),
+  name: z.string().min(1).max(80),
+  order: z.number().int().min(0),
+  isInitial: z.boolean().default(false),
+  isTerminal: z.boolean().default(false),
+  entryActions: z.unknown().optional(),
+  transitionRules: z.unknown().optional(),
+  autoApproveMatrix: z.unknown().optional(),
+});
+
+const pipelinesRouter = router({
+  // List the tenant's pipelines with computed counts (active leads + stages)
+  // and the current period's target progress where a Target row exists.
+  list: protectedProcedure.query(async ({ ctx }) => {
+    const pipelines: any[] =
+      (await (ctx.prisma as any).pipeline?.findMany({
+        where: { tenantId: ctx.tenantId },
+        orderBy: [{ order: "asc" }, { createdAt: "asc" }],
+        include: {
+          targets: true,
+          stages: { select: { id: true } },
+          contacts: { select: { id: true } },
+        },
+      })) ?? [];
+
+    return pipelines.map((p) => ({
+      id: p.id,
+      name: p.name,
+      description: p.description,
+      isActive: p.isActive,
+      order: p.order,
+      objectiveType: p.objectiveType,
+      objectiveDescription: p.objectiveDescription,
+      stageCount: p.stages?.length ?? 0,
+      activeLeadCount: p.contacts?.length ?? 0,
+      targets: (p.targets ?? []).map((t: any) => ({
+        metric: t.metric,
+        period: t.period,
+        value: typeof t.value === "object" && "toNumber" in t.value ? t.value.toNumber() : Number(t.value),
+        currentProgress:
+          t.currentProgress == null
+            ? null
+            : typeof t.currentProgress === "object" && "toNumber" in t.currentProgress
+              ? t.currentProgress.toNumber()
+              : Number(t.currentProgress),
+      })),
+    }));
+  }),
+
+  // Full nested fetch for the wizard's edit flow.
+  getById: protectedProcedure
+    .input(z.object({ id: z.string().uuid() }))
+    .query(async ({ ctx, input }) => {
+      const p: any = await (ctx.prisma as any).pipeline?.findFirst({
+        where: { id: input.id, tenantId: ctx.tenantId },
+        include: {
+          stages: { orderBy: { order: "asc" } },
+          targets: true,
+          knowledgeFilters: true,
+          microObjectives: { include: { microObjective: true } },
+        },
+      });
+      if (!p) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Pipeline not found in this tenant" });
+      }
+      return {
+        id: p.id,
+        name: p.name,
+        description: p.description,
+        isActive: p.isActive,
+        order: p.order,
+        objectiveType: p.objectiveType,
+        objectiveDescription: p.objectiveDescription,
+        defaultAutoApproveMatrix: p.defaultAutoApproveMatrix,
+        stages: (p.stages ?? []).map((s: any) => ({
+          id: s.id,
+          name: s.name,
+          order: s.order,
+          isInitial: s.isInitial,
+          isTerminal: s.isTerminal,
+          entryActions: s.entryActions,
+          transitionRules: s.transitionRules,
+          autoApproveMatrix: s.autoApproveMatrix,
+        })),
+        targets: (p.targets ?? []).map((t: any) => ({
+          id: t.id,
+          metric: t.metric,
+          period: t.period,
+          value: typeof t.value === "object" && "toNumber" in t.value ? t.value.toNumber() : Number(t.value),
+          currentProgress:
+            t.currentProgress == null
+              ? null
+              : typeof t.currentProgress === "object" && "toNumber" in t.currentProgress
+                ? t.currentProgress.toNumber()
+                : Number(t.currentProgress),
+        })),
+        knowledgeFilters: (p.knowledgeFilters ?? []).map((f: any) => ({
+          id: f.id,
+          knowledgeCategory: f.knowledgeCategory,
+          includeRule: f.includeRule,
+          excludeRule: f.excludeRule,
+        })),
+        microObjectives: (p.microObjectives ?? []).map((pmo: any) => ({
+          microObjectiveId: pmo.microObjectiveId,
+          isActive: pmo.isActive,
+          name: pmo.microObjective?.name,
+          description: pmo.microObjective?.description,
+          isDefault: pmo.microObjective?.isDefault,
+        })),
+      };
+    }),
+
+  // Create with nested write of stages. Targets / KnowledgeFilters /
+  // MicroObjective associations land via the dedicated routers below — keeps
+  // each mutation small + lets the wizard fire them in parallel after the
+  // pipeline shell exists.
+  create: adminProcedure
+    .input(
+      z.object({
+        name: z.string().min(1).max(100),
+        description: z.string().max(1000).optional().nullable(),
+        objectiveType: ObjectiveTypeEnum,
+        objectiveDescription: z.string().max(2000).optional().nullable(),
+        order: z.number().int().min(0).default(0),
+        stages: z.array(StageInputSchema).min(1),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      // Validate the form payload against pipeline-validation rules.
+      const v = validatePipelineForm({
+        name: input.name,
+        description: input.description ?? null,
+        objectiveType: input.objectiveType,
+        objectiveDescription: input.objectiveDescription ?? null,
+        stages: input.stages.map((s) => ({
+          name: s.name,
+          order: s.order,
+          isInitial: s.isInitial,
+          isTerminal: s.isTerminal,
+        })),
+      });
+      if (!v.valid) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: v.errors.join("; ") });
+      }
+      // Tenant-unique name check.
+      const existing: any = await (ctx.prisma as any).pipeline?.findFirst({
+        where: { tenantId: ctx.tenantId, name: input.name },
+        select: { id: true },
+      });
+      if (existing) {
+        throw new TRPCError({
+          code: "CONFLICT",
+          message: `Pipeline name "${input.name}" already exists in this tenant`,
+        });
+      }
+      const created: any = await (ctx.prisma as any).pipeline?.create({
+        data: {
+          tenantId: ctx.tenantId,
+          name: input.name,
+          description: input.description ?? null,
+          objectiveType: input.objectiveType,
+          objectiveDescription: input.objectiveDescription ?? null,
+          order: input.order,
+          isActive: true,
+          stages: {
+            create: input.stages.map((s) => ({
+              name: s.name,
+              order: s.order,
+              isInitial: s.isInitial,
+              isTerminal: s.isTerminal,
+              entryActions: (s.entryActions ?? []) as any,
+              transitionRules: (s.transitionRules ?? []) as any,
+              autoApproveMatrix: (s.autoApproveMatrix ?? {}) as any,
+            })),
+          },
+        },
+        include: { stages: { orderBy: { order: "asc" } } },
+      });
+      return created;
+    }),
+
+  update: adminProcedure
+    .input(
+      z.object({
+        id: z.string().uuid(),
+        name: z.string().min(1).max(100).optional(),
+        description: z.string().max(1000).optional().nullable(),
+        objectiveType: ObjectiveTypeEnum.optional(),
+        objectiveDescription: z.string().max(2000).optional().nullable(),
+        order: z.number().int().min(0).optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const existing: any = await (ctx.prisma as any).pipeline?.findFirst({
+        where: { id: input.id, tenantId: ctx.tenantId },
+      });
+      if (!existing) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Pipeline not found in this tenant" });
+      }
+      if (input.name && input.name !== existing.name) {
+        const conflict: any = await (ctx.prisma as any).pipeline?.findFirst({
+          where: { tenantId: ctx.tenantId, name: input.name, NOT: { id: input.id } },
+          select: { id: true },
+        });
+        if (conflict) {
+          throw new TRPCError({
+            code: "CONFLICT",
+            message: `Pipeline name "${input.name}" already exists in this tenant`,
+          });
+        }
+      }
+      const { id, ...data } = input;
+      return (ctx.prisma as any).pipeline?.update({ where: { id }, data });
+    }),
+
+  toggleActive: adminProcedure
+    .input(z.object({ id: z.string().uuid(), isActive: z.boolean() }))
+    .mutation(async ({ ctx, input }) => {
+      const existing: any = await (ctx.prisma as any).pipeline?.findFirst({
+        where: { id: input.id, tenantId: ctx.tenantId },
+        select: { id: true },
+      });
+      if (!existing) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Pipeline not found in this tenant" });
+      }
+      return (ctx.prisma as any).pipeline?.update({
+        where: { id: input.id },
+        data: { isActive: input.isActive },
+      });
+    }),
+
+  delete: adminProcedure
+    .input(z.object({ id: z.string().uuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const pipeline: any = await (ctx.prisma as any).pipeline?.findFirst({
+        where: { id: input.id, tenantId: ctx.tenantId },
+        select: { id: true, contacts: { select: { id: true } } },
+      });
+      if (!pipeline) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Pipeline not found in this tenant" });
+      }
+      const stageHistoryCount: number =
+        (await (ctx.prisma as any).leadStageHistory?.count({
+          where: { toStage: { pipelineId: input.id } },
+        })) ?? 0;
+      const decision = canDeletePipeline({
+        activeLeadCount: pipeline.contacts?.length ?? 0,
+        stageHistoryCount,
+      });
+      if (!decision.canDelete) {
+        throw new TRPCError({ code: "PRECONDITION_FAILED", message: decision.reason ?? "Cannot delete pipeline" });
+      }
+      await (ctx.prisma as any).pipeline?.delete({ where: { id: input.id } });
+      return { id: input.id };
+    }),
+});
+
+const stagesRouter = router({
+  // Batch reorder. Caller passes the desired stage IDs in their new order;
+  // we normalize to 0..N-1 + write all rows in one transaction. Validates
+  // all stages belong to the same pipeline + the pipeline belongs to the
+  // tenant.
+  reorder: adminProcedure
+    .input(
+      z.object({
+        pipelineId: z.string().uuid(),
+        stageIdsInOrder: z.array(z.string().uuid()).min(1),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const pipeline: any = await (ctx.prisma as any).pipeline?.findFirst({
+        where: { id: input.pipelineId, tenantId: ctx.tenantId },
+        include: { stages: true },
+      });
+      if (!pipeline) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Pipeline not found in this tenant" });
+      }
+      const existingStageIds = new Set(pipeline.stages.map((s: any) => s.id));
+      const inputIds = new Set(input.stageIdsInOrder);
+      if (inputIds.size !== input.stageIdsInOrder.length) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Duplicate stage IDs in reorder payload" });
+      }
+      if (inputIds.size !== existingStageIds.size) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "Reorder payload must include every stage in the pipeline exactly once",
+        });
+      }
+      for (const id of input.stageIdsInOrder) {
+        if (!existingStageIds.has(id)) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: `Stage ${id} does not belong to pipeline ${input.pipelineId}`,
+          });
+        }
+      }
+      // Normalize + write in a single transaction.
+      const targetOrders = input.stageIdsInOrder.map((id, i) => ({ id, order: i }));
+      await ctx.prisma.$transaction(
+        targetOrders.map((t) =>
+          (ctx.prisma as any).stage.update({ where: { id: t.id }, data: { order: t.order } }),
+        ),
+      );
+      return { pipelineId: input.pipelineId, stages: targetOrders };
+    }),
+
+  update: adminProcedure
+    .input(
+      z.object({
+        id: z.string().uuid(),
+        name: z.string().min(1).max(80).optional(),
+        isInitial: z.boolean().optional(),
+        isTerminal: z.boolean().optional(),
+        entryActions: z.unknown().optional(),
+        transitionRules: z.unknown().optional(),
+        autoApproveMatrix: z.unknown().optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      // Tenant-scope check via the parent pipeline.
+      const stage: any = await (ctx.prisma as any).stage?.findUnique({
+        where: { id: input.id },
+        include: { pipeline: { select: { tenantId: true, id: true } } },
+      });
+      if (!stage || stage.pipeline.tenantId !== ctx.tenantId) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Stage not found in this tenant" });
+      }
+      // If isInitial is being set true, demote any other initial stage in the
+      // same pipeline first (exactly-one invariant).
+      if (input.isInitial === true) {
+        await (ctx.prisma as any).stage?.updateMany({
+          where: { pipelineId: stage.pipeline.id, isInitial: true, NOT: { id: input.id } },
+          data: { isInitial: false },
+        });
+      }
+      const { id, ...data } = input;
+      return (ctx.prisma as any).stage?.update({ where: { id }, data: data as any });
+    }),
+
+  delete: adminProcedure
+    .input(z.object({ id: z.string().uuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const stage: any = await (ctx.prisma as any).stage?.findUnique({
+        where: { id: input.id },
+        include: {
+          pipeline: { select: { tenantId: true, id: true, stages: { where: { isInitial: true }, select: { id: true } } } },
+          contacts: { select: { id: true } },
+        },
+      });
+      if (!stage || stage.pipeline.tenantId !== ctx.tenantId) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Stage not found in this tenant" });
+      }
+      const isOnlyInitial = stage.isInitial && stage.pipeline.stages.length === 1;
+      const decision = canDeleteStage({
+        activeLeadCount: stage.contacts?.length ?? 0,
+        isInitial: stage.isInitial,
+        isOnlyInitial,
+      });
+      if (!decision.canDelete) {
+        throw new TRPCError({ code: "PRECONDITION_FAILED", message: decision.reason ?? "Cannot delete stage" });
+      }
+      await (ctx.prisma as any).stage?.delete({ where: { id: input.id } });
+      return { id: input.id };
+    }),
+});
+
+const targetsRouter = router({
+  upsert: adminProcedure
+    .input(
+      z.object({
+        pipelineId: z.string().uuid(),
+        metric: TargetMetricEnum,
+        period: TargetPeriodEnum,
+        value: z.number().nonnegative(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      // Verify the pipeline belongs to the tenant.
+      const pipeline: any = await (ctx.prisma as any).pipeline?.findFirst({
+        where: { id: input.pipelineId, tenantId: ctx.tenantId },
+        select: { id: true },
+      });
+      if (!pipeline) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Pipeline not found in this tenant" });
+      }
+      return (ctx.prisma as any).target?.upsert({
+        where: {
+          pipelineId_metric_period: {
+            pipelineId: input.pipelineId,
+            metric: input.metric,
+            period: input.period,
+          },
+        },
+        create: {
+          pipelineId: input.pipelineId,
+          metric: input.metric,
+          period: input.period,
+          value: input.value,
+        },
+        update: { value: input.value },
+      });
+    }),
+});
+
+const knowledgeFiltersRouter = router({
+  upsert: adminProcedure
+    .input(
+      z.object({
+        pipelineId: z.string().uuid(),
+        knowledgeCategory: KnowledgeCategoryEnum,
+        includeRule: z.record(z.unknown()).default({}),
+        excludeRule: z.record(z.unknown()).default({}),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const pipeline: any = await (ctx.prisma as any).pipeline?.findFirst({
+        where: { id: input.pipelineId, tenantId: ctx.tenantId },
+        select: { id: true },
+      });
+      if (!pipeline) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Pipeline not found in this tenant" });
+      }
+      return (ctx.prisma as any).knowledgeFilter?.upsert({
+        where: {
+          pipelineId_knowledgeCategory: {
+            pipelineId: input.pipelineId,
+            knowledgeCategory: input.knowledgeCategory,
+          },
+        },
+        create: {
+          pipelineId: input.pipelineId,
+          knowledgeCategory: input.knowledgeCategory,
+          includeRule: input.includeRule as any,
+          excludeRule: input.excludeRule as any,
+        },
+        update: {
+          includeRule: input.includeRule as any,
+          excludeRule: input.excludeRule as any,
+        },
+      });
+    }),
+
+  delete: adminProcedure
+    .input(z.object({ pipelineId: z.string().uuid(), knowledgeCategory: KnowledgeCategoryEnum }))
+    .mutation(async ({ ctx, input }) => {
+      const pipeline: any = await (ctx.prisma as any).pipeline?.findFirst({
+        where: { id: input.pipelineId, tenantId: ctx.tenantId },
+        select: { id: true },
+      });
+      if (!pipeline) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Pipeline not found in this tenant" });
+      }
+      await (ctx.prisma as any).knowledgeFilter?.deleteMany({
+        where: { pipelineId: input.pipelineId, knowledgeCategory: input.knowledgeCategory },
+      });
+      return { pipelineId: input.pipelineId, knowledgeCategory: input.knowledgeCategory };
+    }),
+});
+
+const pipelineMicroObjectivesRouter = router({
+  // Replace-all semantics: caller passes the full set of MicroObjective IDs
+  // that should be active for the pipeline. We delete current associations,
+  // then create the new set in a single transaction. Simpler than diffing on
+  // the wire + matches the wizard's "checkbox set" UX.
+  setForPipeline: adminProcedure
+    .input(
+      z.object({
+        pipelineId: z.string().uuid(),
+        microObjectiveIds: z.array(z.string().uuid()),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const pipeline: any = await (ctx.prisma as any).pipeline?.findFirst({
+        where: { id: input.pipelineId, tenantId: ctx.tenantId },
+        select: { id: true },
+      });
+      if (!pipeline) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Pipeline not found in this tenant" });
+      }
+      // Each MicroObjective must be either platform-default (tenantId IS NULL)
+      // or owned by this tenant — guards against cross-tenant MicroObjective
+      // injection via the wizard.
+      if (input.microObjectiveIds.length > 0) {
+        const allowed: any[] = await (ctx.prisma as any).microObjective?.findMany({
+          where: {
+            id: { in: input.microObjectiveIds },
+            OR: [{ tenantId: null }, { tenantId: ctx.tenantId }],
+          },
+          select: { id: true },
+        });
+        const allowedIds = new Set(allowed.map((m: any) => m.id));
+        for (const id of input.microObjectiveIds) {
+          if (!allowedIds.has(id)) {
+            throw new TRPCError({
+              code: "FORBIDDEN",
+              message: `MicroObjective ${id} is not accessible to this tenant`,
+            });
+          }
+        }
+      }
+      await ctx.prisma.$transaction(async (tx: any) => {
+        await tx.pipelineMicroObjective.deleteMany({ where: { pipelineId: input.pipelineId } });
+        if (input.microObjectiveIds.length > 0) {
+          await tx.pipelineMicroObjective.createMany({
+            data: input.microObjectiveIds.map((moId) => ({
+              pipelineId: input.pipelineId,
+              microObjectiveId: moId,
+              isActive: true,
+            })),
+          });
+        }
+      });
+      return { pipelineId: input.pipelineId, microObjectiveIds: input.microObjectiveIds };
+    }),
+});
+
 export const appRouter = router({
   contacts: contactsRouter,
-  // KAN-700: legacy pipelinesRouter removed (was broken — used tenant_id field
-  // name + 0-row tables). KAN-702 will rebuild on the new Pipeline+Stage shape.
+  pipelines: pipelinesRouter,
+  stages: stagesRouter,
+  targets: targetsRouter,
+  knowledgeFilters: knowledgeFiltersRouter,
+  pipelineMicroObjectives: pipelineMicroObjectivesRouter,
   decisions: decisionsRouter,
   actions: actionsRouter,
   escalations: escalationsRouter,
