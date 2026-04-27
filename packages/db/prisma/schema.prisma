@@ -31,6 +31,15 @@ model Tenant {
   // confidenceThreshold + aiPermissions stay as-is (Decision Engine consumers).
   autoApproveEnabled  Boolean  @default(false) @map("auto_approve_enabled")
   dailyActionLimit    Int      @default(100)   @map("daily_action_limit")
+  // KAN-705: posture for the AI lead-assignment fallback when confidence is
+  // below threshold AND no tenant rule fires. Default conservative.
+  belowThresholdPosture       LeadAssignmentPosture @default(stay_unassigned) @map("below_threshold_posture")
+  // Nullable Pipeline ID — only consulted when belowThresholdPosture =
+  // default_pipeline. No FK constraint at the Prisma level (avoids the
+  // Tenant↔Pipeline circular ref); validated at app level.
+  defaultAssignmentPipelineId String?               @map("default_assignment_pipeline_id")
+  // KAN-705: confidence threshold (0..1) for AI assignment fallback. Default 0.5.
+  aiAssignmentConfidenceThreshold Float            @default(0.5) @map("ai_assignment_confidence_threshold")
   strategyPermissions Json     @default("{}")  @map("strategy_permissions")
   guardrailSettings   Json     @default("{}")  @map("guardrail_settings")
   settings            Json     @default("{}")
@@ -51,6 +60,7 @@ model Tenant {
   pipelines       Pipeline[]
   microObjectives MicroObjective[]
   guardrails      Guardrail[]
+  assignmentRules AssignmentRule[]
   customers       Customer[]
   conversations   Conversation[]
   escalations     Escalation[]
@@ -444,6 +454,7 @@ model Pipeline {
   targets           Target[]
   guardrails        Guardrail[]
   knowledgeFilters  KnowledgeFilter[]
+  assignmentRules   AssignmentRule[]
   contacts          Contact[]                @relation("ContactCurrentPipeline")
 
   @@index([tenantId])
@@ -561,6 +572,42 @@ model KnowledgeFilter {
   @@unique([pipelineId, knowledgeCategory])
   @@index([pipelineId])
   @@map("knowledge_filters")
+}
+
+// KAN-705: tenant-defined deterministic rules that route a new lead to a
+// specific pipeline. Evaluated tenant-wide on lead creation in priority order
+// (lower = higher precedence); first match wins. JSONB conditions keep V1
+// flexible while a future ticket can normalize the predicate language.
+//
+// Hot path query: `findMany({ where: { tenantId, isActive: true }, orderBy:
+// { priority: 'asc' } })` — covered by the (tenantId, isActive, priority)
+// composite index.
+model AssignmentRule {
+  id         String   @id @default(uuid())
+  tenantId   String   @map("tenant_id")
+  pipelineId String   @map("pipeline_id")
+  /// Lower number = higher precedence.
+  priority   Int      @default(0)
+  /// JSONB predicate matched against Lead fields: source, segment, lifecycleStage, dataQualityScore, email, externalIds.
+  conditions Json     @default("{}")
+  isActive   Boolean  @default(true) @map("is_active")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  pipeline Pipeline @relation(fields: [pipelineId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, isActive, priority])
+  @@index([pipelineId])
+  @@map("assignment_rules")
+}
+
+enum LeadAssignmentPosture {
+  stay_unassigned
+  default_pipeline
+  escalate_to_human
+
+  @@map("lead_assignment_posture")
 }
 
 model LeadStageHistory {
