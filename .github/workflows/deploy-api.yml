@@ -58,84 +58,119 @@ jobs:
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
+      # KAN-709 v4: all migrate-related setup steps gated on
+      # `github.event_name == 'push'` AND schema-changed. Manual workflow_dispatch
+      # skips the entire migrate path (no surprise migrations on ops-triggered
+      # redeploys). See `feedback_dorny_paths_filter_workflow_dispatch_footgun.md`
+      # in personal memory for the underlying dorny/paths-filter@v3 quirk.
       - name: Set up Node (for prisma migrate deploy)
-        if: steps.filter.outputs.schema == 'true'
+        if: github.event_name == 'push' && steps.filter.outputs.schema == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
 
       - name: Install dependencies (for prisma migrate deploy)
-        if: steps.filter.outputs.schema == 'true'
+        if: github.event_name == 'push' && steps.filter.outputs.schema == 'true'
         run: npm ci
 
       - name: Download Cloud SQL Auth Proxy
-        if: steps.filter.outputs.schema == 'true'
+        if: github.event_name == 'push' && steps.filter.outputs.schema == 'true'
         run: |
           curl -sLo cloud-sql-proxy https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/v2.13.0/cloud-sql-proxy.linux.amd64
           chmod +x cloud-sql-proxy
 
-      # KAN-709 v3: single-step migrate pattern. Proxy + migrate + status +
-      # cleanup all live in ONE step's bash session — eliminates the cross-step
-      # process reaping that killed v2 (GHA terminates each step's bash session
-      # on exit, taking backgrounded children with it; PROXY_PID survives via
-      # $GITHUB_ENV but the actual process does not). Phase markers
-      # `[KAN-709-v3] phase=…` make failure isolation greppable; trap ensures
-      # the proxy dies cleanly even when migrate fails.
+      # KAN-709 v3 + v4: single-step migrate pattern with proxy log-tail readiness
+      # check (E1) + retry loop around migrate (E3) + workflow_dispatch gate.
       #
-      # Port 5432 (not 5433 like local dev): the GHA runner is a fresh VM with
+      # v3 (single-step): proxy + migrate + status + cleanup all live in ONE
+      # step's bash session — eliminates the cross-step process reaping that
+      # killed v2. Phase markers `[KAN-709-v4] phase=…` make failure isolation
+      # greppable; trap ensures the proxy dies cleanly even when migrate fails.
+      #
+      # v4 (E1, this iteration): replace `nc -z` (TCP-bind only) readiness
+      # check with `grep "ready for new connections" proxy.log` — the Cloud
+      # SQL Auth Proxy's own canonical ready signal. v3 failed with P1001 on
+      # KAN-705 PR #47 because TCP listener bound BEFORE the proxy finished
+      # its async Cloud SQL Admin API auth handshake — `nc -z` passed but the
+      # proxy returned connection-refused 1-2s later when Prisma actually
+      # opened a Postgres connection.
+      #
+      # v4 (E3, this iteration): retry `prisma migrate deploy` up to 3 times
+      # with 5s backoff. Defense-in-depth against any transient post-ready
+      # blip (proxy reconnect, Cloud SQL Admin API hiccup). Phase markers
+      # capture attempt count so the GHA log makes failure mode clear.
+      #
+      # v4 (workflow_dispatch gate): `github.event_name == 'push'` added to
+      # the if-condition. dorny/paths-filter@v3 has no comparison ref on
+      # workflow_dispatch and defaults `schema=true` — without this gate,
+      # manual dispatch triggers an unwanted migrate run. Push events with
+      # real schema changes still RUN; manual dispatch becomes
+      # "deploy-only, no migrate" which is the safer ops posture.
+      #
+      # Port 5432 (not 5433 like local dev): GHA runner is a fresh VM with
       # nothing else listening, so the Postgres default port is fine + matches
       # the most natural connection-string pattern. Local dev uses 5433 to
       # dodge any local Postgres conflicts.
       - name: Run migrate end-to-end (proxy + deploy + status + cleanup)
-        if: steps.filter.outputs.schema == 'true'
+        if: github.event_name == 'push' && steps.filter.outputs.schema == 'true'
         run: |
           set -euo pipefail
           PROXY_PID=""
           trap '[ -n "$PROXY_PID" ] && kill "$PROXY_PID" 2>/dev/null || true' EXIT INT TERM
 
-          echo "[KAN-709-v3] phase=proxy_start"
+          echo "[KAN-709-v4] phase=proxy_start"
           ./cloud-sql-proxy --port 5432 ${{ env.CLOUD_SQL_INSTANCE }} > proxy.log 2>&1 &
           PROXY_PID=$!
-          echo "[KAN-709-v3] proxy started PROXY_PID=$PROXY_PID"
+          echo "[KAN-709-v4] proxy started PROXY_PID=$PROXY_PID"
 
-          echo "[KAN-709-v3] phase=proxy_wait"
-          for i in {1..30}; do
-            if nc -z 127.0.0.1 5432 2>/dev/null; then
-              echo "[KAN-709-v3] proxy ready on 5432 after ${i}s"
-              break
-            fi
-            sleep 1
-          done
-          if ! nc -z 127.0.0.1 5432 2>/dev/null; then
-            echo "[KAN-709-v3] proxy never bound 5432 — dumping log:"
-            cat proxy.log
+          echo "[KAN-709-v4] phase=proxy_wait waiting for proxy ready log line"
+          if ! timeout 60 bash -c 'until grep -q "ready for new connections" proxy.log 2>/dev/null; do sleep 1; done'; then
+            echo "[KAN-709-v4] phase=proxy_wait FAILED — proxy did not signal ready within 60s"
+            echo "--- proxy.log dump ---"
+            cat proxy.log || true
+            echo "--- end proxy.log ---"
             exit 1
           fi
+          echo "[KAN-709-v4] phase=proxy_wait proxy signaled ready"
 
-          echo "[KAN-709-v3] phase=db_url"
+          echo "[KAN-709-v4] phase=db_url"
           # RAW_URL must be exported so the node child process inherits it via
           # process.env (KAN-709 v2 lesson). Without `export`, the assignment
           # is shell-local and `node -e` sees process.env.RAW_URL as undefined.
           export RAW_URL=$(gcloud secrets versions access latest --secret=growth-db-url-production --project=${{ env.PROJECT_ID }})
           export DATABASE_URL=$(node -e "const u = new URL(process.env.RAW_URL); u.host = '127.0.0.1:5432'; u.searchParams.delete('host'); console.log(u.toString());")
-
-          echo "[KAN-709-v3] phase=migrate_deploy"
           cd packages/db
-          npx prisma migrate deploy
 
-          echo "[KAN-709-v3] phase=migrate_status"
+          echo "[KAN-709-v4] phase=migrate_deploy attempt=1"
+          for attempt in 1 2 3; do
+            if npx prisma migrate deploy 2>&1; then
+              echo "[KAN-709-v4] phase=migrate_deploy succeeded attempt=$attempt"
+              break
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "[KAN-709-v4] phase=migrate_deploy attempt=$attempt failed, sleeping 5s"
+              sleep 5
+              echo "[KAN-709-v4] phase=migrate_deploy attempt=$((attempt+1))"
+            else
+              echo "[KAN-709-v4] phase=migrate_deploy all 3 attempts failed — dumping proxy log:"
+              cat ../../proxy.log || true
+              exit 1
+            fi
+          done
+
+          echo "[KAN-709-v4] phase=migrate_status"
           npx prisma migrate status
 
-          echo "[KAN-709-v3] phase=cleanup"
+          echo "[KAN-709-v4] phase=cleanup"
           # Trap will kill the proxy on EXIT — no manual kill needed.
-          echo "[KAN-709-v3] done"
+          echo "[KAN-709-v4] phase=done"
 
       - name: Migration summary
-        if: steps.filter.outputs.schema == 'true'
+        if: github.event_name == 'push' && steps.filter.outputs.schema == 'true'
         run: |
-          echo "## KAN-709 v3 Migration Summary" >> $GITHUB_STEP_SUMMARY
-          echo "- **Schema-changing PR detected** — \`prisma migrate deploy\` ran against \`${{ env.CLOUD_SQL_INSTANCE }}\` in a single-step pattern (proxy + deploy + status + cleanup) before Cloud Run rollout." >> $GITHUB_STEP_SUMMARY
+          echo "## KAN-709 v4 Migration Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Schema-changing PR detected** — \`prisma migrate deploy\` ran against \`${{ env.CLOUD_SQL_INSTANCE }}\` in a single-step pattern (proxy log-tail readiness + retry loop + cleanup) before Cloud Run rollout." >> $GITHUB_STEP_SUMMARY
 
       # ─────────────────────────────────────────────
       # Cloud Run deploy
