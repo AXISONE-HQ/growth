@@ -13,6 +13,9 @@ export default defineConfig({
       // untracked scratch tests under packages/api/src/__tests__/integration/
       // don't get pulled in. KAN-692 will give packages/api its own runner.
       '../../packages/api/src/services/__tests__/*.test.ts',
+      // KAN-702 PR A.1: apps/api also has no test infra of its own — same
+      // piggyback pattern for the adminProcedure middleware unit tests.
+      '../../apps/api/src/__tests__/*.test.ts',
     ],
     // Fake values — only used to satisfy env.ts parse at test-module-load. Never hit.
     env: {
