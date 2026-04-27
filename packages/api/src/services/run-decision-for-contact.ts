@@ -147,6 +147,71 @@ function buildContextDatabase(prisma: PrismaClient): ContextDatabase {
       });
       return (rows ?? []) as Record<string, unknown>[];
     },
+    // KAN-703: bundle Pipeline + Stage + active MicroObjectives + KnowledgeFilters
+    // for the contact's currentPipelineId. Casts via `as any` to avoid pulling the
+    // newer Prisma types into the apps/api TS6059 graph (these types live in
+    // packages/db's generated client and are reachable at runtime; the static
+    // `as any` keeps the build-error count flat).
+    async getPipelineState(pipelineId, stageId) {
+      const p: any = await (prisma as any).pipeline?.findUnique({
+        where: { id: pipelineId },
+        include: { targets: true },
+      });
+      if (!p) return null;
+      const s: any = stageId
+        ? await (prisma as any).stage?.findUnique({ where: { id: stageId } })
+        : null;
+      const pmoRows: any[] = (await (prisma as any).pipelineMicroObjective?.findMany({
+        where: { pipelineId, isActive: true },
+        include: { microObjective: true },
+      })) ?? [];
+      const filterRows: any[] = (await (prisma as any).knowledgeFilter?.findMany({
+        where: { pipelineId },
+      })) ?? [];
+      return {
+        pipeline: {
+          id: p.id,
+          name: p.name,
+          objectiveType: p.objectiveType,
+          objectiveDescription: p.objectiveDescription ?? null,
+          targets: (p.targets ?? []).map((t: any) => ({
+            metric: t.metric,
+            value: typeof t.value === 'object' && 'toNumber' in t.value ? t.value.toNumber() : Number(t.value),
+            period: t.period,
+            currentProgress:
+              t.currentProgress == null
+                ? null
+                : typeof t.currentProgress === 'object' && 'toNumber' in t.currentProgress
+                  ? t.currentProgress.toNumber()
+                  : Number(t.currentProgress),
+          })),
+        },
+        stage: s
+          ? {
+              id: s.id,
+              name: s.name,
+              order: s.order,
+              isInitial: s.isInitial,
+              isTerminal: s.isTerminal,
+              entryActions: s.entryActions,
+              transitionRules: s.transitionRules,
+              autoApproveMatrix: s.autoApproveMatrix,
+            }
+          : null,
+        microObjectives: pmoRows.map((row: any) => ({
+          id: row.microObjective.id,
+          name: row.microObjective.name,
+          description: row.microObjective.description ?? null,
+          completionCriteria: (row.microObjective.completionCriteria ?? {}) as Record<string, unknown>,
+          order: row.microObjective.order,
+        })),
+        knowledgeFilters: filterRows.map((f: any) => ({
+          knowledgeCategory: f.knowledgeCategory,
+          includeRule: (f.includeRule ?? {}) as Record<string, unknown>,
+          excludeRule: (f.excludeRule ?? {}) as Record<string, unknown>,
+        })),
+      };
+    },
   };
 }
 

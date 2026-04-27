@@ -16,6 +16,26 @@ import type { PubSubClient } from './action-decided-publisher.js';
 import { complete as llmComplete } from './llm-client.js';
 import type { KnowledgeHit } from './context-assembler.js';
 
+/** KAN-703: subset of the BrainContext.pipeline shape we render in the prompt. */
+export interface PipelineContext {
+  name: string;
+  objectiveType: string;
+  objectiveDescription?: string | null;
+}
+
+/** KAN-703: subset of the BrainContext.stage shape we render in the prompt. */
+export interface StageContext {
+  name: string;
+  isInitial?: boolean;
+  isTerminal?: boolean;
+}
+
+/** KAN-703: subset of MicroObjective for the prompt — name + completion status if known. */
+export interface MicroObjectiveContext {
+  id: string;
+  name: string;
+}
+
 export const ComposedMessageSchema = z.object({
   subject: z.string().min(1),
   body: z.string().min(1),
@@ -36,6 +56,18 @@ export interface ComposeMessageInput {
    * `loadKnowledge` from context-assembler.
    */
   knowledge?: KnowledgeHit[];
+  /**
+   * KAN-703: pipeline-aware context. When present, the composer prepends a
+   * "Pipeline Context" block before the knowledge block so Haiku knows what
+   * funnel + stage + outstanding micro-objectives the message is operating
+   * within. Legacy contacts (pre-pipeline-assignment) get all three undefined
+   * and the prompt falls back to the KAN-660 / KAN-698 baseline.
+   */
+  pipeline?: PipelineContext;
+  stage?: StageContext;
+  microObjectives?: MicroObjectiveContext[];
+  /** Per-MicroObjective progress: `{ moId: { completed, completedAt, evidence } }`. */
+  microObjectiveProgress?: Record<string, unknown>;
 }
 
 /** KAN-698: render knowledge hits as a compact prompt block. */
@@ -52,11 +84,57 @@ function formatKnowledgeBlock(hits: KnowledgeHit[]): string {
   return `\nTenant Knowledge (use these facts to ground the message; do not contradict them):\n${lines.join('\n')}\n`;
 }
 
+/**
+ * KAN-703: render pipeline + stage + outstanding micro-objectives as a compact
+ * prompt block. Returns '' when no pipeline context is provided so the prompt
+ * stays at the KAN-660 baseline for legacy contacts.
+ */
+function formatPipelineBlock(
+  pipeline: PipelineContext | undefined,
+  stage: StageContext | undefined,
+  microObjectives: MicroObjectiveContext[] | undefined,
+  microObjectiveProgress: Record<string, unknown> | undefined,
+): string {
+  if (!pipeline && !stage && (!microObjectives || microObjectives.length === 0)) return '';
+  const parts: string[] = ['\nPipeline Context (frame the message within this funnel + stage):'];
+  if (pipeline) {
+    const desc = pipeline.objectiveDescription ? ` — ${pipeline.objectiveDescription}` : '';
+    parts.push(`- Pipeline: ${pipeline.name} (objective: ${pipeline.objectiveType}${desc})`);
+  }
+  if (stage) {
+    const flags: string[] = [];
+    if (stage.isInitial) flags.push('initial');
+    if (stage.isTerminal) flags.push('terminal');
+    const flagSuffix = flags.length > 0 ? ` (${flags.join(', ')})` : '';
+    parts.push(`- Stage: ${stage.name}${flagSuffix}`);
+  }
+  if (microObjectives && microObjectives.length > 0) {
+    const outstanding = microObjectives.filter((mo) => {
+      const progress = microObjectiveProgress?.[mo.id] as { completed?: boolean } | undefined;
+      return !progress?.completed;
+    });
+    if (outstanding.length > 0) {
+      parts.push(`- Outstanding micro-objectives: ${outstanding.map((mo) => mo.name).join('; ')}`);
+    }
+  }
+  return parts.join('\n') + '\n';
+}
+
 export async function composeMessage(
   prisma: PrismaClient,
   input: ComposeMessageInput,
 ): Promise<ComposedMessage> {
-  const { tenantId, contactId, instruction, publicWebhookBaseUrl, knowledge } = input;
+  const {
+    tenantId,
+    contactId,
+    instruction,
+    publicWebhookBaseUrl,
+    knowledge,
+    pipeline,
+    stage,
+    microObjectives,
+    microObjectiveProgress,
+  } = input;
 
   const contact = await prisma.contact.findFirst({
     where: { id: contactId, tenantId },
@@ -79,13 +157,14 @@ export async function composeMessage(
     'Respond with ONLY valid JSON in the exact format specified. No markdown, no code fences, no extra text.';
 
   const knowledgeBlock = formatKnowledgeBlock(knowledge ?? []);
+  const pipelineBlock = formatPipelineBlock(pipeline, stage, microObjectives, microObjectiveProgress);
 
   const userPrompt = `Compose a short email (3-5 sentences) based on this instruction and context.
 
 Instruction: "${instruction}"
 Recipient first name: ${firstName}
 Brand voice: ${tone}
-${knowledgeBlock}
+${pipelineBlock}${knowledgeBlock}
 Respond with a JSON object with these fields:
 1. "subject" — a natural subject line that includes the recipient's first name. Keep under 60 characters.
 2. "body" — the email body, plain text, 3-5 sentences, reflecting the instruction intent and the brand voice. Sign off with a warm closing but no name (the connector layer appends sender identity).
