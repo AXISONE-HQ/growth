@@ -77,6 +77,10 @@ jobs:
 
       - name: Start Cloud SQL Auth Proxy
         if: steps.filter.outputs.schema == 'true'
+        # Port 5432 (not 5433 like local dev): the GHA runner is a fresh VM with
+        # nothing else listening, so the Postgres default port is fine + matches
+        # the most natural connection-string pattern. Local dev uses 5433 to
+        # dodge any local Postgres conflicts.
         run: |
           ./cloud-sql-proxy --port 5432 ${{ env.CLOUD_SQL_INSTANCE }} > proxy.log 2>&1 &
           echo "PROXY_PID=$!" >> $GITHUB_ENV
@@ -95,19 +99,19 @@ jobs:
       - name: Run prisma migrate deploy
         if: steps.filter.outputs.schema == 'true'
         run: |
-          RAW_URL=$(gcloud secrets versions access latest --secret=growth-db-url-production --project=${{ env.PROJECT_ID }})
+          # RAW_URL must be exported so the node child process inherits it via
+          # process.env (KAN-709 v2 fix). Without `export`, the assignment is
+          # shell-local and `node -e` sees process.env.RAW_URL as undefined.
+          export RAW_URL=$(gcloud secrets versions access latest --secret=growth-db-url-production --project=${{ env.PROJECT_ID }})
           export DATABASE_URL=$(node -e "const u = new URL(process.env.RAW_URL); u.host = '127.0.0.1:5432'; u.searchParams.delete('host'); console.log(u.toString());")
           cd packages/db && npx prisma migrate deploy
-        env:
-          # node -e reads RAW_URL from the env, not the surrounding shell var
-          # — passing it through `env` keeps it out of step logs.
-          # (gcloud already redacts, but defense-in-depth.)
-          PROJECT_ID: ${{ env.PROJECT_ID }}
 
       - name: Verify migrate status (clean post-apply)
         if: steps.filter.outputs.schema == 'true'
         run: |
-          RAW_URL=$(gcloud secrets versions access latest --secret=growth-db-url-production --project=${{ env.PROJECT_ID }})
+          # RAW_URL must be exported so the node child process inherits it via
+          # process.env (KAN-709 v2 fix — same as the migrate-deploy step above).
+          export RAW_URL=$(gcloud secrets versions access latest --secret=growth-db-url-production --project=${{ env.PROJECT_ID }})
           export DATABASE_URL=$(node -e "const u = new URL(process.env.RAW_URL); u.host = '127.0.0.1:5432'; u.searchParams.delete('host'); console.log(u.toString());")
           cd packages/db && npx prisma migrate status
 
