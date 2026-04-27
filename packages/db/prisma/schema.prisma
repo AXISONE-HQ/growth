@@ -430,6 +430,11 @@ model Pipeline {
   order                Int           @default(0)
   objectiveType        ObjectiveType @map("objective_type")
   objectiveDescription String?       @map("objective_description")
+  // KAN-704: pipeline-tier auto-approve defaults. Resolution order is
+  // Stage.autoApproveMatrix → this column → Tenant.autoApproveEnabled
+  // (kill-switch) → platform default (auto-approve-defaults.ts). NULL means
+  // "skip this tier" (same posture as Stage.autoApproveMatrix when empty).
+  defaultAutoApproveMatrix Json?      @map("default_auto_approve_matrix")
   createdAt            DateTime      @default(now()) @map("created_at")
   updatedAt            DateTime      @updatedAt @map("updated_at")
 
