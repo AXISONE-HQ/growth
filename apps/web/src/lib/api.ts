@@ -4,26 +4,40 @@
  * The backend exposes tRPC over HTTP at /trpc/*. Queries are GET requests
  * with ?input=JSON, mutations are POST requests with JSON body.
  *
- * Auth: x-tenant-id header (dev stub for now — will switch to Firebase JWT).
+ * Auth (KAN-702 PR B): tenantId is hardcoded to AxisOne-Growth for the
+ * pre-launch single-tenant posture; Firebase ID token attached as Bearer when
+ * the user is signed in. KAN-714 (Sprint 7) replaces both the hardcoded
+ * tenantId and ADMIN_EMAILS env-var with TeamMember-based per-tenant role
+ * authority once GoRush onboarding lands.
  */
+import { auth } from './firebase';
 
 const API_BASE =
   process.env.NEXT_PUBLIC_API_URL ||
   'https://growth-api-1086551891973.us-central1.run.app';
 
-// Dev tenant ID — replace with Firebase Auth context in production
-const DEV_TENANT_ID = '00000000-0000-0000-0000-000000000001';
+// Pre-launch single-tenant. Backend resolves admin via ADM_EMAILS env-var.
+// KAN-714 will resolve tenant from authenticated user via TeamMember.
+const AXISONE_GROWTH_TENANT_ID = '9ca85088-f65b-4bac-b098-fff742281ede';
 
 function getTenantId(): string {
-  // TODO: Replace with Firebase Auth → tenant resolution
-  return DEV_TENANT_ID;
+  return AXISONE_GROWTH_TENANT_ID;
 }
 
-function headers(): Record<string, string> {
-  return {
+async function buildHeaders(): Promise<Record<string, string>> {
+  const h: Record<string, string> = {
     'Content-Type': 'application/json',
     'x-tenant-id': getTenantId(),
   };
+  // Attach Firebase ID token if the user is signed in. Anonymous calls
+  // (no current user) hit only public/protected endpoints; admin-gated
+  // mutations require a signed-in user whose email matches ADMIN_EMAILS.
+  const user = auth.currentUser;
+  if (user) {
+    const token = await user.getIdToken();
+    h.Authorization = `Bearer ${token}`;
+  }
+  return h;
 }
 
 /** Call a tRPC query (GET /trpc/<path>?input=<json>) */
@@ -35,7 +49,7 @@ export async function trpcQuery<T = unknown>(
   if (input) {
     url.searchParams.set('input', JSON.stringify(input));
   }
-  const res = await fetch(url.toString(), { headers: headers() });
+  const res = await fetch(url.toString(), { headers: await buildHeaders() });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err?.error?.message || `Query failed: ${path} (${res.status})`);
@@ -51,7 +65,7 @@ export async function trpcMutation<T = unknown>(
 ): Promise<T> {
   const res = await fetch(`${API_BASE}/trpc/${path}`, {
     method: 'POST',
-    headers: headers(),
+    headers: await buildHeaders(),
     body: JSON.stringify(input),
   });
   if (!res.ok) {
@@ -353,5 +367,167 @@ export const settingsApi = {
   getAuditLog: (params?: { page?: number; limit?: number; actionType?: string }) =>
     trpcQuery<{ logs: AuditLogEntry[]; pagination: { page: number; limit: number; total: number; pages: number } }>(
       'settings.security.getAuditLog', params || {}
+    ),
+};
+
+/* ── Pipelines API (KAN-702 PR B) ──────────────────────────────────
+ * Backend: apps/api/src/router.ts (pipelinesRouter, stagesRouter,
+ * targetsRouter, knowledgeFiltersRouter, pipelineMicroObjectivesRouter).
+ * All mutations are admin-gated via ADMIN_EMAILS env-var (PR A.1/A.2).
+ */
+
+export type PipelineObjectiveType =
+  | 'send_quote'
+  | 'send_quote_and_deal'
+  | 'book_meeting'
+  | 'sales_decision'
+  | 'reactivate_customer'
+  | 'collect_information';
+
+export type TargetMetric = 'leads_in' | 'quotes_sent' | 'deals_won' | 'meetings_booked';
+export type TargetPeriod = 'day' | 'week' | 'month' | 'quarter';
+export type KnowledgeCategory = 'product' | 'policy' | 'faq' | 'document' | 'company_info';
+
+export interface PipelineStage {
+  id?: string;
+  name: string;
+  order: number;
+  isInitial: boolean;
+  isTerminal: boolean;
+  entryActions?: unknown;
+  transitionRules?: unknown;
+  autoApproveMatrix?: Record<string, unknown>;
+}
+
+export interface PipelineTarget {
+  id?: string;
+  metric: TargetMetric;
+  period: TargetPeriod;
+  value: number;
+  currentProgress?: number | null;
+}
+
+export interface PipelineKnowledgeFilter {
+  id?: string;
+  knowledgeCategory: KnowledgeCategory;
+  includeRule?: Record<string, unknown> | null;
+  excludeRule?: Record<string, unknown> | null;
+}
+
+export interface PipelineMicroObjectiveAssoc {
+  microObjectiveId: string;
+  isActive: boolean;
+  name?: string;
+  description?: string;
+  isDefault?: boolean;
+}
+
+export interface PipelineSummary {
+  id: string;
+  name: string;
+  description: string | null;
+  isActive: boolean;
+  order: number;
+  objectiveType: PipelineObjectiveType;
+  objectiveDescription: string | null;
+  stageCount: number;
+  activeLeadCount: number;
+  targets: Array<{
+    metric: TargetMetric;
+    period: TargetPeriod;
+    value: number;
+    currentProgress: number | null;
+  }>;
+}
+
+export interface PipelineDetail extends Omit<PipelineSummary, 'stageCount' | 'activeLeadCount' | 'targets'> {
+  defaultAutoApproveMatrix: unknown;
+  stages: PipelineStage[];
+  targets: PipelineTarget[];
+  knowledgeFilters: PipelineKnowledgeFilter[];
+  microObjectives: PipelineMicroObjectiveAssoc[];
+}
+
+export interface MicroObjective {
+  id: string;
+  name: string;
+  description: string | null;
+  isDefault: boolean;
+}
+
+export const pipelinesApi = {
+  list: () => trpcQuery<PipelineSummary[]>('pipelines.list'),
+
+  getById: (id: string) => trpcQuery<PipelineDetail>('pipelines.getById', { id }),
+
+  create: (data: {
+    name: string;
+    description?: string | null;
+    objectiveType: PipelineObjectiveType;
+    objectiveDescription?: string | null;
+    order?: number;
+    stages: PipelineStage[];
+  }) => trpcMutation<PipelineDetail>('pipelines.create', data),
+
+  update: (data: {
+    id: string;
+    name?: string;
+    description?: string | null;
+    objectiveType?: PipelineObjectiveType;
+    objectiveDescription?: string | null;
+    order?: number;
+  }) => trpcMutation<PipelineDetail>('pipelines.update', data),
+
+  toggleActive: (id: string, isActive: boolean) =>
+    trpcMutation<PipelineDetail>('pipelines.toggleActive', { id, isActive }),
+
+  delete: (id: string) => trpcMutation<{ id: string }>('pipelines.delete', { id }),
+};
+
+export const stagesApi = {
+  reorder: (pipelineId: string, stageIdsInOrder: string[]) =>
+    trpcMutation<{ pipelineId: string; stages: Array<{ id: string; order: number }> }>(
+      'stages.reorder',
+      { pipelineId, stageIdsInOrder },
+    ),
+  update: (data: {
+    id: string;
+    name?: string;
+    isInitial?: boolean;
+    isTerminal?: boolean;
+    entryActions?: unknown;
+    transitionRules?: unknown;
+    autoApproveMatrix?: unknown;
+  }) => trpcMutation<PipelineStage>('stages.update', data),
+  delete: (id: string) => trpcMutation<{ id: string }>('stages.delete', { id }),
+};
+
+export const targetsApi = {
+  upsert: (data: { pipelineId: string; metric: TargetMetric; period: TargetPeriod; value: number }) =>
+    trpcMutation<PipelineTarget>('targets.upsert', data),
+};
+
+export const knowledgeFiltersApi = {
+  upsert: (data: {
+    pipelineId: string;
+    knowledgeCategory: KnowledgeCategory;
+    includeRule?: Record<string, unknown>;
+    excludeRule?: Record<string, unknown>;
+  }) => trpcMutation<PipelineKnowledgeFilter>('knowledgeFilters.upsert', data),
+  delete: (pipelineId: string, knowledgeCategory: KnowledgeCategory) =>
+    trpcMutation<{ pipelineId: string; knowledgeCategory: KnowledgeCategory }>(
+      'knowledgeFilters.delete',
+      { pipelineId, knowledgeCategory },
+    ),
+};
+
+export const pipelineMicroObjectivesApi = {
+  listAvailable: () =>
+    trpcQuery<MicroObjective[]>('pipelineMicroObjectives.listAvailable'),
+  // Replace-all semantics — caller passes the full set of active IDs.
+  setForPipeline: (pipelineId: string, microObjectiveIds: string[]) =>
+    trpcMutation<{ pipelineId: string; microObjectiveIds: string[] }>(
+      'pipelineMicroObjectives.setForPipeline',
+      { pipelineId, microObjectiveIds },
     ),
 };
