@@ -15,6 +15,7 @@
 import { Router, Request, Response } from 'express';
 import { PrismaClient, Prisma } from '@prisma/client';
 import { z } from 'zod';
+import { materializeDefaultsForTenant } from '../../../db/prisma/seeds/micro-objectives.js';
 
 // ─── Validation Schemas ───────────────────────────────────
 
@@ -94,6 +95,21 @@ export function createTenantsRouter(prisma: PrismaClient): Router {
           payload: { name: data.name, slug: data.slug, planTier: data.planTier } as Prisma.InputJsonValue,
         },
       });
+
+      // KAN-701: clone the 5 platform-default MicroObjectives to per-tenant
+      // rows. Best-effort — log on failure but never block tenant creation;
+      // the backfill script can recover any stragglers.
+      try {
+        const seedResult = await materializeDefaultsForTenant(prisma, tenant.id);
+        console.log(
+          `[tenants] seeded MicroObjectives for tenant ${tenant.slug}: created=${seedResult.created} skipped=${seedResult.skipped}`,
+        );
+      } catch (seedError) {
+        console.error(
+          `[tenants] MicroObjective seed failed for tenant ${tenant.slug} — backfill script can recover:`,
+          seedError,
+        );
+      }
 
       return res.status(201).json({ data: tenant });
     } catch (error) {
