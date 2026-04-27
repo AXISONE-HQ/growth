@@ -22,7 +22,12 @@ const TENANT_SCOPED_MODELS = [
   'StrategyWeight',
   'AuditLog',
   'Pipeline',
-  'PipelineCard',
+  // KAN-700: PipelineCard removed; per-Lead pipeline state lives on Contact now.
+  // Guardrail added (tenantId always present, pipelineId nullable for tenant-wide).
+  // MicroObjective deliberately NOT listed — its tenantId is nullable for platform
+  // defaults, so the auto-inject middleware would exclude defaults from queries.
+  // Consumers handle the tenant + platform-default merge explicitly.
+  'Guardrail',
   'Customer',
   'Conversation',
   'Escalation',

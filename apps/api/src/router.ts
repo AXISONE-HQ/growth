@@ -128,77 +128,6 @@ const contactsRouter = router({
 });
 
 // ============================================================================
-// PIPELINES ROUTER
-// ============================================================================
-
-const pipelinesRouter = router({
-  list: protectedProcedure.query(async ({ ctx }) => {
-    return ctx.prisma.pipeline.findMany({
-      where: { tenant_id: ctx.tenantId },
-      orderBy: { name: "asc" },
-    });
-  }),
-
-  getById: protectedProcedure
-    .input(z.object({ id: z.string().uuid() }))
-    .query(async ({ ctx, input }) => {
-      const pipeline = await ctx.prisma.pipeline.findFirst({
-        where: {
-          id: input.id,
-          tenant_id: ctx.tenantId,
-        },
-      });
-
-      if (!pipeline) {
-        throw new Error("Pipeline not found");
-      }
-
-      return pipeline;
-    }),
-
-  create: protectedProcedure
-    .input(
-      z.object({
-        name: z.string().min(1),
-        description: z.string().optional(),
-      })
-    )
-    .mutation(async ({ ctx, input }) => {
-      return ctx.prisma.pipeline.create({
-        data: {
-          ...input,
-          tenant_id: ctx.tenantId,
-        },
-      });
-    }),
-
-  update: protectedProcedure
-    .input(
-      z.object({
-        id: z.string().uuid(),
-        name: z.string().optional(),
-        description: z.string().optional(),
-      })
-    )
-    .mutation(async ({ ctx, input }) => {
-      const { id, ...data } = input;
-
-      const existing = await ctx.prisma.pipeline.findFirst({
-        where: { id, tenant_id: ctx.tenantId },
-      });
-
-      if (!existing) {
-        throw new Error("Pipeline not found");
-      }
-
-      return ctx.prisma.pipeline.update({
-        where: { id },
-        data,
-      });
-    }),
-});
-
-// ============================================================================
 // DECISIONS ROUTER
 // ============================================================================
 
@@ -2520,7 +2449,8 @@ const wedgeRouter = router({
 
 export const appRouter = router({
   contacts: contactsRouter,
-  pipelines: pipelinesRouter,
+  // KAN-700: legacy pipelinesRouter removed (was broken — used tenant_id field
+  // name + 0-row tables). KAN-702 will rebuild on the new Pipeline+Stage shape.
   decisions: decisionsRouter,
   actions: actionsRouter,
   escalations: escalationsRouter,

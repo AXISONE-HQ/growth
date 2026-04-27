@@ -49,6 +49,8 @@ model Tenant {
   auditLogs       AuditLog[]
   strategyWeights StrategyWeight[]
   pipelines       Pipeline[]
+  microObjectives MicroObjective[]
+  guardrails      Guardrail[]
   customers       Customer[]
   conversations   Conversation[]
   escalations     Escalation[]
@@ -122,29 +124,39 @@ model BrainSnapshot {
 // ─────────────────────────────────────────────
 
 model Contact {
-  id               String   @id @default(uuid())
-  tenantId         String   @map("tenant_id")
+  id               String    @id @default(uuid())
+  tenantId         String    @map("tenant_id")
   email            String?
   phone            String?
-  firstName        String?  @map("first_name")
-  lastName         String?  @map("last_name")
-  externalIds      Json     @default("{}") @map("external_ids")
-  dataQualityScore Float    @default(0) @map("data_quality_score")
+  firstName        String?   @map("first_name")
+  lastName         String?   @map("last_name")
+  externalIds      Json      @default("{}") @map("external_ids")
+  dataQualityScore Float     @default(0) @map("data_quality_score")
   segment          String?
-  lifecycleStage   String   @default("new") @map("lifecycle_stage")
+  lifecycleStage   String    @default("new") @map("lifecycle_stage")
   source           String?
-  createdAt        DateTime @default(now()) @map("created_at")
-  updatedAt        DateTime @updatedAt @map("updated_at")
+  // KAN-700: pipeline-aware lead state. Lead == Contact (product vocab vs
+  // schema vocab — see KAN-700 closure comment). Both pipeline + stage are
+  // nullable for V1 (existing contacts pre-assignment). microObjectiveProgress
+  // tracks per-MO completion: { microObjectiveId: { completed, completedAt, evidence } }.
+  currentPipelineId      String?   @map("current_pipeline_id")
+  currentStageId         String?   @map("current_stage_id")
+  microObjectiveProgress Json      @default("{}") @map("micro_objective_progress")
+  enteredStageAt         DateTime? @map("entered_stage_at")
+  createdAt              DateTime  @default(now()) @map("created_at")
+  updatedAt              DateTime  @updatedAt @map("updated_at")
 
-  tenant        Tenant         @relation(fields: [tenantId], references: [id])
-  contactStates ContactState[]
-  decisions     Decision[]
-  outcomes      Outcome[]
-  pipelineCards PipelineCard[]
-  customer      Customer?
-  conversations Conversation[]
-  escalations   Escalation[]
-  actions       Action[]
+  tenant            Tenant             @relation(fields: [tenantId], references: [id])
+  contactStates     ContactState[]
+  decisions         Decision[]
+  outcomes          Outcome[]
+  customer          Customer?
+  conversations     Conversation[]
+  escalations       Escalation[]
+  actions           Action[]
+  currentPipeline   Pipeline?          @relation("ContactCurrentPipeline", fields: [currentPipelineId], references: [id], onDelete: SetNull)
+  currentStage      Stage?             @relation("ContactCurrentStage", fields: [currentStageId], references: [id], onDelete: SetNull)
+  stageHistory      LeadStageHistory[]
 
   @@index([tenantId])
   @@index([tenantId, email])
@@ -152,6 +164,8 @@ model Contact {
   @@index([tenantId, segment])
   @@index([tenantId, dataQualityScore])
   @@index([tenantId, source])
+  @@index([tenantId, currentPipelineId])
+  @@index([tenantId, currentStageId])
   @@map("contacts")
 }
 
@@ -213,9 +227,10 @@ model Decision {
   metadata         Json     @default("{}")
   createdAt        DateTime @default(now()) @map("created_at")
 
-  tenant  Tenant   @relation(fields: [tenantId], references: [id])
-  contact Contact  @relation(fields: [contactId], references: [id])
-  actions Action[]
+  tenant       Tenant             @relation(fields: [tenantId], references: [id])
+  contact      Contact            @relation(fields: [contactId], references: [id])
+  actions      Action[]
+  stageHistory LeadStageHistory[]
 
   @@index([tenantId])
   @@index([tenantId, contactId])
@@ -338,47 +353,230 @@ model AuditLog {
 }
 
 // ─────────────────────────────────────────────
-// EXTENDED: Pipelines
+// KAN-700: Pipelines, Stages, MicroObjectives, Targets, Guardrails,
+// KnowledgeFilters, LeadStageHistory
+//
+// Replaces the legacy Pipeline + PipelineCard pair (dropped in this same
+// migration; both 0 rows in prod, dead-code consumer pipelinesRouter
+// removed in same PR). New design: Stage as a first-class table (was a
+// JSON blob inside the legacy Pipeline), and per-Lead pipeline state lives
+// on Contact.currentPipelineId/currentStageId (was the PipelineCard table).
 // ─────────────────────────────────────────────
 
-model Pipeline {
-  id                 String   @id @default(uuid())
-  tenantId           String   @map("tenant_id")
-  name               String
-  description        String?
-  color              String   @default("#6366F1")
-  sourceType         String?  @map("source_type")
-  audienceConditions Json     @default("[]") @map("audience_conditions")
-  stages             Json     @default("[]")
-  salesTarget        Float?   @map("sales_target")
-  isActive           Boolean  @default(true) @map("is_active")
-  createdAt          DateTime @default(now()) @map("created_at")
-  updatedAt          DateTime @updatedAt @map("updated_at")
+enum ObjectiveType {
+  warm_up_lead
+  book_appointment
+  buy_online
+  send_quote
 
-  tenant Tenant         @relation(fields: [tenantId], references: [id])
-  cards  PipelineCard[]
+  @@map("objective_type")
+}
+
+enum TargetMetric {
+  appointments_booked
+  orders_placed
+  quotes_sent
+  replies_received
+  leads_qualified
+  revenue_dollars
+
+  @@map("target_metric")
+}
+
+enum TargetPeriod {
+  weekly
+  monthly
+  quarterly
+
+  @@map("target_period")
+}
+
+enum ValidatorType {
+  tone
+  accuracy
+  hallucination
+  compliance
+  injection
+
+  @@map("validator_type")
+}
+
+enum GuardrailSeverity {
+  block
+  regenerate
+  warn
+  pass
+
+  @@map("guardrail_severity")
+}
+
+enum KnowledgeCategory {
+  company_info
+  products
+  warranty
+  shipping
+  financing
+  faqs
+
+  @@map("knowledge_category")
+}
+
+model Pipeline {
+  id                   String        @id @default(uuid())
+  tenantId             String        @map("tenant_id")
+  name                 String
+  description          String?
+  isActive             Boolean       @default(true) @map("is_active")
+  order                Int           @default(0)
+  objectiveType        ObjectiveType @map("objective_type")
+  objectiveDescription String?       @map("objective_description")
+  createdAt            DateTime      @default(now()) @map("created_at")
+  updatedAt            DateTime      @updatedAt @map("updated_at")
+
+  tenant            Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  stages            Stage[]
+  microObjectives   PipelineMicroObjective[]
+  targets           Target[]
+  guardrails        Guardrail[]
+  knowledgeFilters  KnowledgeFilter[]
+  contacts          Contact[]                @relation("ContactCurrentPipeline")
 
   @@index([tenantId])
+  @@index([tenantId, isActive])
+  @@index([tenantId, objectiveType])
   @@map("pipelines")
 }
 
-model PipelineCard {
-  id         String   @id @default(uuid())
-  pipelineId String   @map("pipeline_id")
-  contactId  String   @map("contact_id")
-  stage      String
-  dealAmount Float?   @map("deal_amount")
-  confidence Float    @default(0)
-  enteredAt  DateTime @default(now()) @map("entered_at")
-  updatedAt  DateTime @updatedAt @map("updated_at")
+model Stage {
+  id                String   @id @default(uuid())
+  pipelineId        String   @map("pipeline_id")
+  name              String
+  order             Int      @default(0)
+  isInitial         Boolean  @default(false) @map("is_initial")
+  isTerminal        Boolean  @default(false) @map("is_terminal")
+  entryActions      Json     @default("[]") @map("entry_actions")
+  transitionRules   Json     @default("[]") @map("transition_rules")
+  autoApproveMatrix Json     @default("{}") @map("auto_approve_matrix")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
 
-  pipeline Pipeline @relation(fields: [pipelineId], references: [id])
-  contact  Contact  @relation(fields: [contactId], references: [id])
+  pipeline           Pipeline           @relation(fields: [pipelineId], references: [id], onDelete: Cascade)
+  contacts           Contact[]          @relation("ContactCurrentStage")
+  fromStageHistory   LeadStageHistory[] @relation("StageFromHistory")
+  toStageHistory     LeadStageHistory[] @relation("StageToHistory")
 
   @@index([pipelineId])
-  @@index([contactId])
-  @@index([pipelineId, stage])
-  @@map("pipeline_cards")
+  @@index([pipelineId, order])
+  @@map("stages")
+}
+
+model MicroObjective {
+  id                 String   @id @default(uuid())
+  // Nullable for platform defaults (KAN-701 seeds 5 platform-default MOs).
+  tenantId           String?  @map("tenant_id")
+  name               String
+  description        String?
+  completionCriteria Json     @default("{}") @map("completion_criteria")
+  isDefault          Boolean  @default(false) @map("is_default")
+  order              Int      @default(0)
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  tenant   Tenant?                  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  pipelines PipelineMicroObjective[]
+
+  @@index([tenantId])
+  @@index([isDefault])
+  @@map("micro_objectives")
+}
+
+model PipelineMicroObjective {
+  pipelineId       String  @map("pipeline_id")
+  microObjectiveId String  @map("micro_objective_id")
+  isActive         Boolean @default(true) @map("is_active")
+
+  pipeline       Pipeline       @relation(fields: [pipelineId], references: [id], onDelete: Cascade)
+  microObjective MicroObjective @relation(fields: [microObjectiveId], references: [id], onDelete: Cascade)
+
+  @@id([pipelineId, microObjectiveId])
+  @@index([microObjectiveId])
+  @@map("pipeline_micro_objectives")
+}
+
+model Target {
+  id              String       @id @default(uuid())
+  pipelineId      String       @map("pipeline_id")
+  metric          TargetMetric
+  value           Decimal      @db.Decimal(14, 2)
+  period          TargetPeriod
+  // Computed by reporting jobs; nullable until first computation.
+  currentProgress Decimal?     @map("current_progress") @db.Decimal(14, 2)
+  projection      Decimal?     @db.Decimal(14, 2)
+  createdAt       DateTime     @default(now()) @map("created_at")
+  updatedAt       DateTime     @updatedAt @map("updated_at")
+
+  pipeline Pipeline @relation(fields: [pipelineId], references: [id], onDelete: Cascade)
+
+  @@unique([pipelineId, metric, period])
+  @@index([pipelineId])
+  @@map("targets")
+}
+
+model Guardrail {
+  id               String             @id @default(uuid())
+  tenantId         String             @map("tenant_id")
+  // Null = tenant-wide guardrail; non-null = pipeline-scoped override.
+  pipelineId       String?            @map("pipeline_id")
+  validatorType    ValidatorType      @map("validator_type")
+  severityOverride GuardrailSeverity? @map("severity_override")
+  isActive         Boolean            @default(true) @map("is_active")
+  createdAt        DateTime           @default(now()) @map("created_at")
+  updatedAt        DateTime           @updatedAt @map("updated_at")
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  pipeline Pipeline? @relation(fields: [pipelineId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, pipelineId, validatorType])
+  @@index([tenantId])
+  @@index([tenantId, pipelineId])
+  @@map("guardrails")
+}
+
+model KnowledgeFilter {
+  id                String            @id @default(uuid())
+  pipelineId        String            @map("pipeline_id")
+  knowledgeCategory KnowledgeCategory @map("knowledge_category")
+  includeRule       Json              @default("{}") @map("include_rule")
+  excludeRule       Json              @default("{}") @map("exclude_rule")
+  createdAt         DateTime          @default(now()) @map("created_at")
+  updatedAt         DateTime          @updatedAt @map("updated_at")
+
+  pipeline Pipeline @relation(fields: [pipelineId], references: [id], onDelete: Cascade)
+
+  @@unique([pipelineId, knowledgeCategory])
+  @@index([pipelineId])
+  @@map("knowledge_filters")
+}
+
+model LeadStageHistory {
+  id            String   @id @default(uuid())
+  // leadId == contactId per KAN-700 closure note (Lead == Contact in this schema).
+  leadId        String   @map("lead_id")
+  fromStageId   String?  @map("from_stage_id")
+  toStageId     String   @map("to_stage_id")
+  reason        String?
+  decisionId    String?  @map("decision_id")
+  transitionedAt DateTime @default(now()) @map("transitioned_at")
+
+  contact   Contact   @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  fromStage Stage?    @relation("StageFromHistory", fields: [fromStageId], references: [id], onDelete: SetNull)
+  toStage   Stage     @relation("StageToHistory", fields: [toStageId], references: [id], onDelete: Restrict)
+  decision  Decision? @relation(fields: [decisionId], references: [id], onDelete: SetNull)
+
+  @@index([leadId])
+  @@index([leadId, transitionedAt])
+  @@index([toStageId])
+  @@map("lead_stage_history")
 }
 
 // ─────────────────────────────────────────────
