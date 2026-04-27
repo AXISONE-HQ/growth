@@ -71,8 +71,9 @@ export const AssembledContextSchema = z.object({
     tone: z.string().optional(),
     constraints: z.array(z.string()).optional(),
     // KAN-698: top-K Knowledge Center entries retrieved via brain-embeddings
-    // similarity search (tenant-scoped). Available to strategy selector,
-    // action determiner, and message-composer for grounding.
+    // similarity search (tenant-scoped). KAN-703 adds per-pipeline filtering:
+    // when the active pipeline has KnowledgeFilter rows, hits are post-filtered
+    // by category whitelist + simple include/exclude predicate matching.
     knowledge: z
       .array(
         z.object({
@@ -85,6 +86,52 @@ export const AssembledContextSchema = z.object({
         }),
       )
       .optional(),
+    // KAN-703: pipeline-aware context. Populated when the contact has
+    // currentPipelineId set; legacy contacts (pre-assignment) get all four
+    // fields undefined and the engine falls through to tenant-scoped behavior.
+    pipeline: z
+      .object({
+        id: z.string(),
+        name: z.string(),
+        objectiveType: z.string(),
+        objectiveDescription: z.string().nullable().optional(),
+        targets: z
+          .array(
+            z.object({
+              metric: z.string(),
+              value: z.number(),
+              period: z.string(),
+              currentProgress: z.number().nullable().optional(),
+            }),
+          )
+          .optional(),
+      })
+      .optional(),
+    stage: z
+      .object({
+        id: z.string(),
+        name: z.string(),
+        order: z.number(),
+        isInitial: z.boolean(),
+        isTerminal: z.boolean(),
+        entryActions: z.unknown().optional(),
+        transitionRules: z.unknown().optional(),
+        autoApproveMatrix: z.unknown().optional(),
+      })
+      .optional(),
+    microObjectives: z
+      .array(
+        z.object({
+          id: z.string(),
+          name: z.string(),
+          description: z.string().nullable().optional(),
+          completionCriteria: z.record(z.unknown()),
+          order: z.number(),
+        }),
+      )
+      .optional(),
+    /** Per-MicroObjective progress for this contact: { microObjectiveId: { completed, completedAt, evidence } }. */
+    microObjectiveProgress: z.record(z.unknown()).optional(),
   }),
   tenantConfig: z.object({
     planTier: z.string().optional(),
@@ -130,6 +177,53 @@ export interface ContextDatabase {
   getBrainSnapshot(tenantId: string): Promise<Record<string, unknown> | null>;
   getTenantConfig(tenantId: string): Promise<Record<string, unknown> | null>;
   getRecentActions(contactId: string, limit: number): Promise<Record<string, unknown>[]>;
+  /**
+   * KAN-703: load pipeline + stage + active microObjectives + knowledge filters
+   * as one bundle. Optional — when not implemented OR when the contact has no
+   * currentPipelineId, the assembler falls back to legacy tenant-scoped behavior.
+   */
+  getPipelineState?(
+    pipelineId: string,
+    stageId: string | null,
+  ): Promise<PipelineStateBundle | null>;
+}
+
+/** KAN-703: bundle returned by ContextDatabase.getPipelineState. */
+export interface PipelineStateBundle {
+  pipeline: {
+    id: string;
+    name: string;
+    objectiveType: string;
+    objectiveDescription?: string | null;
+    targets?: Array<{
+      metric: string;
+      value: number;
+      period: string;
+      currentProgress?: number | null;
+    }>;
+  };
+  stage: {
+    id: string;
+    name: string;
+    order: number;
+    isInitial: boolean;
+    isTerminal: boolean;
+    entryActions?: unknown;
+    transitionRules?: unknown;
+    autoApproveMatrix?: unknown;
+  } | null;
+  microObjectives: Array<{
+    id: string;
+    name: string;
+    description?: string | null;
+    completionCriteria: Record<string, unknown>;
+    order: number;
+  }>;
+  knowledgeFilters: Array<{
+    knowledgeCategory: string;
+    includeRule: Record<string, unknown>;
+    excludeRule: Record<string, unknown>;
+  }>;
 }
 
 // ─────────────────────────────────────────────
@@ -226,17 +320,82 @@ export async function loadKnowledge(
   }
 }
 
-/** Build a compact embedding query from contact + objective context. */
+/** Build a compact embedding query from contact + objective + pipeline context. */
 function buildKnowledgeQuery(
   contact: Record<string, unknown> | null,
   contactState: Record<string, unknown> | null,
+  pipelineState: PipelineStateBundle | null,
 ): string {
   const parts: string[] = [];
   if (contact?.lifecycle_stage) parts.push(`stage: ${contact.lifecycle_stage}`);
   if (contact?.segment) parts.push(`segment: ${contact.segment}`);
   if (contactState?.objective_type) parts.push(`objective: ${contactState.objective_type}`);
   if (contactState?.strategy_current) parts.push(`strategy: ${contactState.strategy_current}`);
+  // KAN-703: pipeline + stage signals tighten the embedding query when present.
+  if (pipelineState?.pipeline.objectiveType) parts.push(`pipeline: ${pipelineState.pipeline.objectiveType}`);
+  if (pipelineState?.stage?.name) parts.push(`pipeline_stage: ${pipelineState.stage.name}`);
   return parts.join(' | ');
+}
+
+/**
+ * KAN-703: post-filter retrieved KnowledgeHits against the active pipeline's
+ * KnowledgeFilter rows. Semantics:
+ *   - If `filters` is empty → pass-through (no filtering applied)
+ *   - Each filter row is keyed on (pipelineId, knowledgeCategory) — its presence
+ *     whitelists that category for the pipeline
+ *   - Within a whitelisted category, `includeRule` (if non-empty) requires the
+ *     hit's metadata to match all key/value pairs in the rule; `excludeRule`
+ *     (if non-empty) requires the hit's metadata to NOT match any key/value
+ *     pair in the rule
+ *   - Hits whose metadata.category is not in the whitelist are dropped
+ *
+ * V1 predicates are simple `entryMatchesRule` AND-of-key/value. V2 will support
+ * richer expressions (operators, arrays, nesting).
+ */
+export function applyKnowledgeFilter(
+  hits: KnowledgeHit[],
+  filters: PipelineStateBundle['knowledgeFilters'],
+): KnowledgeHit[] {
+  if (!filters || filters.length === 0) return hits;
+  const whitelist = new Map<string, { include: Record<string, unknown>; exclude: Record<string, unknown> }>();
+  for (const f of filters) {
+    whitelist.set(f.knowledgeCategory, { include: f.includeRule ?? {}, exclude: f.excludeRule ?? {} });
+  }
+  return hits.filter((h) => {
+    const category = (h.metadata?.category as string | undefined) ?? null;
+    if (!category) return false; // hit has no category → not in any whitelist
+    const rule = whitelist.get(category);
+    if (!rule) return false; // category not whitelisted for this pipeline
+    if (!entryMatchesIncludeRule(h.metadata, rule.include)) return false;
+    if (entryMatchesExcludeRule(h.metadata, rule.exclude)) return false;
+    return true;
+  });
+}
+
+/** AND-of-(key=value) match. Empty rule passes everything. */
+function entryMatchesIncludeRule(
+  metadata: Record<string, unknown>,
+  rule: Record<string, unknown>,
+): boolean {
+  const entries = Object.entries(rule);
+  if (entries.length === 0) return true;
+  for (const [k, v] of entries) {
+    if (metadata[k] !== v) return false;
+  }
+  return true;
+}
+
+/** OR-of-(key=value) match. Empty rule excludes nothing (returns false = "do not exclude"). */
+function entryMatchesExcludeRule(
+  metadata: Record<string, unknown>,
+  rule: Record<string, unknown>,
+): boolean {
+  const entries = Object.entries(rule);
+  if (entries.length === 0) return false;
+  for (const [k, v] of entries) {
+    if (metadata[k] === v) return true;
+  }
+  return false;
 }
 
 // ─────────────────────────────────────────────
@@ -342,11 +501,42 @@ async function assembleFromDatabase(
       db.getRecentActions(input.contactId, 10),
     ]);
 
+  // KAN-703: load pipeline state when the contact has currentPipelineId set.
+  // Legacy contacts (no pipeline assigned yet) skip this — pipelineState=null
+  // → no pipeline/stage/microObjective context, knowledge falls through
+  // unfiltered, all back-compat. Best-effort: if the loader throws or isn't
+  // implemented, log + continue with null.
+  let pipelineState: PipelineStateBundle | null = null;
+  const currentPipelineId = (contact?.current_pipeline_id ?? contact?.currentPipelineId) as string | null | undefined;
+  const currentStageId = (contact?.current_stage_id ?? contact?.currentStageId) as string | null | undefined;
+  if (currentPipelineId && db.getPipelineState) {
+    try {
+      pipelineState = await db.getPipelineState(currentPipelineId, currentStageId ?? null);
+    } catch (err) {
+      console.error('[context-assembler] getPipelineState failed', err);
+    }
+  }
+
   // KAN-698: Knowledge query runs after the parallel batch so we can build
-  // the embedding query from contact + objective context. Off the critical
-  // path token-budget-wise — graceful degradation returns [] on any failure.
-  const knowledgeQuery = buildKnowledgeQuery(contact, contactState);
-  const knowledge = await loadKnowledge(input.tenantId, knowledgeQuery);
+  // the embedding query from contact + objective + pipeline context. Off the
+  // critical path token-budget-wise — graceful degradation returns [] on any
+  // failure.
+  const knowledgeQuery = buildKnowledgeQuery(contact, contactState, pipelineState);
+  const rawKnowledge = await loadKnowledge(input.tenantId, knowledgeQuery);
+
+  // KAN-703: apply per-pipeline KnowledgeFilter rows (post-filter the hits by
+  // category whitelist + include/exclude predicates). When the pipeline has no
+  // filters configured, this passes through unchanged.
+  const knowledge = pipelineState?.knowledgeFilters && pipelineState.knowledgeFilters.length > 0
+    ? applyKnowledgeFilter(rawKnowledge, pipelineState.knowledgeFilters)
+    : rawKnowledge;
+
+  // KAN-703: per-MicroObjective progress lives on Contact.microObjectiveProgress
+  // (JSONB). Pull it through to the BrainContext alongside the active
+  // MicroObjective definitions from pipelineState.
+  const microObjectiveProgress = (contact?.micro_objective_progress ?? contact?.microObjectiveProgress) as
+    | Record<string, unknown>
+    | undefined;
 
   return {
     contactId: input.contactId,
@@ -387,6 +577,16 @@ async function assembleFromDatabase(
       tone: (brain?.tone as string) ?? undefined,
       constraints: (brain?.constraints as string[]) ?? undefined,
       knowledge: knowledge.length > 0 ? knowledge : undefined,
+      pipeline: pipelineState?.pipeline ?? undefined,
+      stage: pipelineState?.stage ?? undefined,
+      microObjectives:
+        pipelineState?.microObjectives && pipelineState.microObjectives.length > 0
+          ? pipelineState.microObjectives
+          : undefined,
+      microObjectiveProgress:
+        microObjectiveProgress && Object.keys(microObjectiveProgress).length > 0
+          ? microObjectiveProgress
+          : undefined,
     },
     tenantConfig: {
       planTier: (tenantConfig?.plan_tier as string) ?? undefined,
