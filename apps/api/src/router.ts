@@ -3066,6 +3066,22 @@ const knowledgeFiltersRouter = router({
 });
 
 const pipelineMicroObjectivesRouter = router({
+  // KAN-702 PR B — wizard's micro-objectives step needs the available set.
+  // Returns platform defaults (tenantId IS NULL) + tenant-owned customs.
+  listAvailable: protectedProcedure.query(async ({ ctx }) => {
+    const rows: any[] =
+      (await (ctx.prisma as any).microObjective?.findMany({
+        where: { OR: [{ tenantId: null }, { tenantId: ctx.tenantId }] },
+        orderBy: [{ tenantId: "asc" }, { name: "asc" }], // platform defaults first
+      })) ?? [];
+    return rows.map((m) => ({
+      id: m.id,
+      name: m.name,
+      description: m.description,
+      isDefault: m.tenantId == null,
+    }));
+  }),
+
   // Replace-all semantics: caller passes the full set of MicroObjective IDs
   // that should be active for the pipeline. We delete current associations,
   // then create the new set in a single transaction. Simpler than diffing on
