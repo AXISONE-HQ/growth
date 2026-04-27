@@ -1,3 +1,8 @@
+// KAN-705 manual migrate provenance: 20260427155230_add_assignment_rules_and_lead_assignment_posture
+// applied via local Cloud SQL Auth Proxy on 2026-04-27 (v3 RUN-branch failed on
+// proxy-readiness signal — TCP bind ≠ proxy ready for DB traffic). This comment
+// edit retriggers deploy-api.yml via the apps/api/** path filter so Cloud Run
+// picks up the post-KAN-705 image on top of the now-migrated schema.
 import "dotenv/config";
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
