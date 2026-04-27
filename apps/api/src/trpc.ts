@@ -1,49 +1,57 @@
 import { initTRPC, TRPCError } from "@trpc/server";
 import { FetchCreateContextFnOptions } from "@trpc/server/adapters/fetch";
+import { initializeApp, getApps, applicationDefault } from "firebase-admin/app";
+import { getAuth, type Auth } from "firebase-admin/auth";
 import { prisma } from "./prisma.js";
 
-// Firebase Admin — lazy init to avoid failures if env not set
-let firebaseAdmin: typeof import("firebase-admin") | null = null;
-
-async function getFirebaseAdmin() {
-  if (firebaseAdmin) return firebaseAdmin;
-  try {
-    firebaseAdmin = await import("firebase-admin");
-    if ((firebaseAdmin as any).getApps().length === 0) {
-      (firebaseAdmin as any).initializeApp({
-        projectId: process.env.FIREBASE_PROJECT_ID || "growth-493400",
-      });
-    }
-    return firebaseAdmin;
-  } catch {
-    console.warn("firebase-admin not available — JWT verification disabled");
-    return null;
-  }
+// KAN-702 PR A.2 — fail-loud Firebase Admin init.
+//
+// Previous shape was a try/catch dynamic import that returned null on any
+// failure (missing package, init crash, anything). The package wasn't even
+// in package-lock.json, so verification was silently disabled in prod. Caught
+// by PR A.1 sniff-test when adminProcedure threw UNAUTHORIZED for a known-good
+// allowlisted email — there was no Firebase verification happening at all.
+//
+// Now: import statically (CI fails if firebase-admin isn't installed),
+// initialize once at module load (container refuses to start if config is
+// broken), and let verifyIdToken errors propagate to the caller. No silent
+// "auth disabled" mode.
+if (getApps().length === 0) {
+  initializeApp({
+    credential: applicationDefault(),
+    projectId: process.env.FIREBASE_PROJECT_ID || "growth-493400",
+  });
 }
+const firebaseAuth: Auth = getAuth();
 
 async function verifyFirebaseToken(
-  token: string
-): Promise<{ uid: string; email?: string } | null> {
-  try {
-    const admin = await getFirebaseAdmin();
-    if (!admin) return null;
-    const decoded = await admin.auth().verifyIdToken(token);
-    return { uid: decoded.uid, email: decoded.email };
-  } catch (err) {
-    console.warn("Firebase token verification failed:", err);
-    return null;
-  }
+  token: string,
+): Promise<{ uid: string; email?: string }> {
+  // Errors propagate. Caller (createContext) maps them to TRPCError UNAUTHORIZED
+  // so a bad token gets an explicit 401 instead of falling through anonymously.
+  const decoded = await firebaseAuth.verifyIdToken(token);
+  return { uid: decoded.uid, email: decoded.email };
 }
 
 export const createContext = async (opts: FetchCreateContextFnOptions) => {
   const tenantId = opts.req.headers.get("x-tenant-id") ?? undefined;
 
-  // Extract Firebase JWT from Authorization header
   let firebaseUser: { uid: string; email?: string } | null = null;
   const authHeader = opts.req.headers.get("authorization") ?? undefined;
   if (authHeader?.startsWith("Bearer ")) {
     const token = authHeader.slice(7);
-    firebaseUser = await verifyFirebaseToken(token);
+    try {
+      firebaseUser = await verifyFirebaseToken(token);
+    } catch (err) {
+      // Surface invalid/expired tokens as 401 explicitly. Silently leaving
+      // firebaseUser=null would let the request flow through protectedProcedure
+      // and only fail at adminProcedure with a misleading "missing email" error.
+      throw new TRPCError({
+        code: "UNAUTHORIZED",
+        message: "Invalid or expired Firebase ID token",
+        cause: err,
+      });
+    }
   }
 
   return {
