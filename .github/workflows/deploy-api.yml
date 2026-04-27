@@ -14,6 +14,9 @@ env:
   REGION: us-central1
   SERVICE_NAME: growth-api
   IMAGE: gcr.io/growth-493400/growth-api
+  # KAN-709: Cloud SQL instance the migrate step proxies to. Must match the
+  # instance configured for the running Cloud Run revision.
+  CLOUD_SQL_INSTANCE: growth-493400:us-central1:growth-db
 
 jobs:
   build-and-deploy:
@@ -27,6 +30,26 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # ─────────────────────────────────────────────
+      # KAN-709: prisma migrate deploy (path-gated)
+      #
+      # Runs BEFORE Docker build/deploy so the new container only ships once
+      # the DB is on the new schema. If migrate fails, no Cloud Run rollout —
+      # old container keeps serving against the old (matching) schema.
+      #
+      # Path-gated to schema/migration changes so non-schema PRs skip the
+      # ~30-60s proxy + install overhead.
+      # ─────────────────────────────────────────────
+
+      - name: Detect schema changes
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            schema:
+              - 'packages/db/prisma/schema.prisma'
+              - 'packages/db/prisma/migrations/**'
+
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
@@ -34,6 +57,73 @@ jobs:
 
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
+
+      - name: Set up Node (for prisma migrate deploy)
+        if: steps.filter.outputs.schema == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies (for prisma migrate deploy)
+        if: steps.filter.outputs.schema == 'true'
+        run: npm ci
+
+      - name: Download Cloud SQL Auth Proxy
+        if: steps.filter.outputs.schema == 'true'
+        run: |
+          curl -sLo cloud-sql-proxy https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/v2.13.0/cloud-sql-proxy.linux.amd64
+          chmod +x cloud-sql-proxy
+
+      - name: Start Cloud SQL Auth Proxy
+        if: steps.filter.outputs.schema == 'true'
+        run: |
+          ./cloud-sql-proxy --port 5432 ${{ env.CLOUD_SQL_INSTANCE }} > proxy.log 2>&1 &
+          echo "PROXY_PID=$!" >> $GITHUB_ENV
+          # Wait up to 30s for the proxy to bind 5432.
+          for i in {1..30}; do
+            if nc -z 127.0.0.1 5432 2>/dev/null; then
+              echo "[KAN-709] proxy ready on 5432"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "[KAN-709] proxy never bound 5432 — dumping log:"
+          cat proxy.log
+          exit 1
+
+      - name: Run prisma migrate deploy
+        if: steps.filter.outputs.schema == 'true'
+        run: |
+          RAW_URL=$(gcloud secrets versions access latest --secret=growth-db-url-production --project=${{ env.PROJECT_ID }})
+          export DATABASE_URL=$(node -e "const u = new URL(process.env.RAW_URL); u.host = '127.0.0.1:5432'; u.searchParams.delete('host'); console.log(u.toString());")
+          cd packages/db && npx prisma migrate deploy
+        env:
+          # node -e reads RAW_URL from the env, not the surrounding shell var
+          # — passing it through `env` keeps it out of step logs.
+          # (gcloud already redacts, but defense-in-depth.)
+          PROJECT_ID: ${{ env.PROJECT_ID }}
+
+      - name: Verify migrate status (clean post-apply)
+        if: steps.filter.outputs.schema == 'true'
+        run: |
+          RAW_URL=$(gcloud secrets versions access latest --secret=growth-db-url-production --project=${{ env.PROJECT_ID }})
+          export DATABASE_URL=$(node -e "const u = new URL(process.env.RAW_URL); u.host = '127.0.0.1:5432'; u.searchParams.delete('host'); console.log(u.toString());")
+          cd packages/db && npx prisma migrate status
+
+      - name: Stop Cloud SQL Auth Proxy
+        if: always() && steps.filter.outputs.schema == 'true' && env.PROXY_PID != ''
+        run: kill $PROXY_PID || true
+
+      - name: Migration summary
+        if: steps.filter.outputs.schema == 'true'
+        run: |
+          echo "## KAN-709 Migration Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Schema-changing PR detected** — \`prisma migrate deploy\` ran against \`${{ env.CLOUD_SQL_INSTANCE }}\` before Cloud Run rollout." >> $GITHUB_STEP_SUMMARY
+
+      # ─────────────────────────────────────────────
+      # Cloud Run deploy
+      # ─────────────────────────────────────────────
 
       - name: Configure Docker for GCR
         run: gcloud auth configure-docker gcr.io --quiet

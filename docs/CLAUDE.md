@@ -109,6 +109,7 @@ Hard rules earned from KAN-679 (production data loss event) and KAN-680 (root-ca
 
 - **Local development:** `npx prisma migrate dev --name <description>` against an ephemeral local DB. Generates a migration file + applies it. The migration file gets committed.
 - **Deploy / shared DBs:** `npx prisma migrate deploy` against the target. Applies any pending migration files in order. Idempotent. No interactive prompts. No destructive surprises.
+- **CI (post-KAN-709):** `deploy-api.yml` runs `prisma migrate deploy` automatically when `packages/db/prisma/schema.prisma` or `packages/db/prisma/migrations/**` change in the push. Spins up Cloud SQL Auth Proxy, runs migrate, then proceeds to Cloud Run deploy. If migrate fails, Cloud Run rollout never happens — the old container keeps serving the matching old schema. Operator no longer needs to run `migrate deploy` by hand for the standard schema-PR flow.
 - **Status check:** `npx prisma migrate status` — read-only, safe everywhere.
 - **Adopting baseline on an existing DB:** `prisma migrate diff --from-empty --to-schema-datamodel <schema> --script > migration.sql` to capture current state, then `prisma migrate resolve --applied <migration-name>` to mark it without re-applying. Pattern used to bootstrap KAN-680.
 
