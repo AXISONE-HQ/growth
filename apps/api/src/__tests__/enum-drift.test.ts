@@ -25,6 +25,8 @@ import {
   TargetPeriod,
   KnowledgeCategory,
   LeadAssignmentPosture,
+  KnowledgeSourceType,
+  KnowledgeSourceStatus,
 } from '@prisma/client';
 
 interface EnumPair {
@@ -61,6 +63,16 @@ const PAIRS: EnumPair[] = [
     name: 'LeadAssignmentPosture',
     prismaValues: Object.values(LeadAssignmentPosture),
     zodImport: async () => (await import('../router.js')).LeadAssignmentPostureEnum.options,
+  },
+  {
+    name: 'KnowledgeSourceType',
+    prismaValues: Object.values(KnowledgeSourceType),
+    zodImport: async () => (await import('../router.js')).KnowledgeSourceTypeEnum.options,
+  },
+  {
+    name: 'KnowledgeSourceStatus',
+    prismaValues: Object.values(KnowledgeSourceStatus),
+    zodImport: async () => (await import('../router.js')).KnowledgeSourceStatusEnum.options,
   },
 ];
 

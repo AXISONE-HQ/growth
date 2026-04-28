@@ -2616,6 +2616,22 @@ export const LeadAssignmentPostureEnum = z.enum([
   "default_pipeline",
   "escalate_to_human",
 ]);
+// KAN-706 — KnowledgeSource lifecycle enums. Mirrored here for the drift test
+// PAIRS list. KAN-707 ingestion service will use these as input zod for the
+// ingest endpoints; KAN-719 will eventually consolidate into shared types.
+export const KnowledgeSourceTypeEnum = z.enum([
+  "url",
+  "document",
+  "qa_pair",
+  "structured_field",
+]);
+export const KnowledgeSourceStatusEnum = z.enum([
+  "pending",
+  "processing",
+  "indexed",
+  "failed",
+  "stale",
+]);
 
 const StageInputSchema = z.object({
   id: z.string().uuid().optional(),
