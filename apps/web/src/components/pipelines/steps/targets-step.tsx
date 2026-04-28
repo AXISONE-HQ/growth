@@ -31,7 +31,7 @@ export function TargetsStep({
   const [rows, setRows] = useState<TargetInput[]>(defaultTargets);
 
   function add() {
-    setRows((cur) => [...cur, { metric: "leads_in", period: "month", value: 0 }]);
+    setRows((cur) => [...cur, { metric: "appointments_booked", period: "monthly", value: 0 }]);
   }
   function remove(idx: number) {
     setRows((cur) => cur.filter((_, i) => i !== idx));
