@@ -64,9 +64,10 @@ model Tenant {
   customers       Customer[]
   conversations   Conversation[]
   escalations     Escalation[]
-  knowledgeBase   KnowledgeBase[]
-  aiAgentConfigs  AiAgentConfig[]
-  contactStates   ContactState[]
+  knowledgeBase    KnowledgeBase[]
+  knowledgeSources KnowledgeSource[]
+  aiAgentConfigs   AiAgentConfig[]
+  contactStates    ContactState[]
 
   //   tenantSettings  TenantSettings[]  // commented out for smoke build (model missing on main)
   channelConnections ChannelConnection[]
@@ -836,3 +837,116 @@ model NotificationPreference {
 //   channelConnections ChannelConnection[]
 //
 // (Insert alongside the other tenant relations like `users`, `contacts`, etc.)
+
+// ─────────────────────────────────────────────
+// KAN-706 — Knowledge ingestion schemas (Sprint 2.1)
+// ─────────────────────────────────────────────
+//
+// Three new models:
+//   - KnowledgeSource: provenance + lifecycle for each ingest unit
+//     (URL crawl, document upload, Q&A pair, structured field)
+//   - KnowledgeChunk:  chunked content + pgvector embedding (1536 dim,
+//     OpenAI text-embedding-3-small). HNSW index added via raw SQL in
+//     the migration since Prisma doesn't emit vector indexes.
+//   - KnowledgeIngestion: per-job status log (status transitions,
+//     URLs discovered/indexed for crawls, error capture)
+//
+// Cross-tenant idempotency: KnowledgeSource has @@unique([tenantId,
+// contentHash]) — same URL/file content from two tenants stays distinct.
+//
+// KnowledgeFilter sourceType extensions deferred to KAN-723; KnowledgeBase
+// row migration to KnowledgeChunk is a separate question (KAN-724 if needed).
+
+enum KnowledgeSourceType {
+  url
+  document
+  qa_pair
+  structured_field
+
+  @@map("knowledge_source_type")
+}
+
+enum KnowledgeSourceStatus {
+  pending
+  processing
+  indexed
+  failed
+  stale
+
+  @@map("knowledge_source_status")
+}
+
+model KnowledgeSource {
+  id               String                @id @default(uuid())
+  tenantId         String                @map("tenant_id")
+  type             KnowledgeSourceType
+  /// Required for type=url. Null for document/qa_pair/structured_field.
+  sourceUrl        String?               @map("source_url")
+  /// GCS object reference for type=document. Null for others.
+  uploadedFileRef  String?               @map("uploaded_file_ref")
+  /// Original filename for type=document. Null for others.
+  originalFileName String?               @map("original_file_name")
+  status           KnowledgeSourceStatus @default(pending)
+  lastIndexedAt    DateTime?             @map("last_indexed_at")
+  /// SHA-256 of the source's canonical content. Combined with tenantId for
+  /// cross-tenant idempotency (same URL/file from two tenants stays distinct).
+  contentHash      String                @map("content_hash")
+  errorMessage     String?               @map("error_message")
+  /// Firebase UID of the user who created the source. Nullable for
+  /// system-generated rows (e.g., the synthetic-source backfill).
+  createdBy        String?               @map("created_by")
+  createdAt        DateTime              @default(now()) @map("created_at")
+  updatedAt        DateTime              @updatedAt @map("updated_at")
+
+  tenant     Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  chunks     KnowledgeChunk[]
+  ingestions KnowledgeIngestion[]
+
+  @@unique([tenantId, contentHash])
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@map("knowledge_sources")
+}
+
+model KnowledgeChunk {
+  id              String   @id @default(uuid())
+  sourceId        String   @map("source_id")
+  /// 0-based index of this chunk within the source.
+  chunkIndex      Int      @map("chunk_index")
+  /// Total chunks the source was split into. Stored on every chunk for
+  /// quick "X of N" UI rendering without a count() round-trip.
+  totalChunks     Int      @map("total_chunks")
+  /// Plain-text chunk content fed to retrieval ranking + LLM context.
+  content         String   @db.Text
+  /// pgvector(1536) — matches OpenAI text-embedding-3-small. Hardcoded
+  /// dimension forces deliberation if the model ever changes.
+  embedding       Unsupported("vector(1536)")
+  embeddingModel  String   @map("embedding_model")
+  embeddingVersion String  @map("embedding_version")
+  tokenCount      Int      @map("token_count")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  source KnowledgeSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  @@index([sourceId])
+  @@map("knowledge_chunks")
+}
+
+model KnowledgeIngestion {
+  id              String                @id @default(uuid())
+  knowledgeSourceId String              @map("knowledge_source_id")
+  status          KnowledgeSourceStatus
+  startedAt       DateTime?             @map("started_at")
+  completedAt    DateTime?              @map("completed_at")
+  /// For type=url crawls — URLs the crawler discovered. 0 for non-crawl jobs.
+  urlsDiscovered  Int                   @default(0) @map("urls_discovered")
+  urlsIndexed     Int                   @default(0) @map("urls_indexed")
+  errorCount      Int                   @default(0) @map("error_count")
+  errors          Json?
+  createdAt       DateTime              @default(now()) @map("created_at")
+
+  source KnowledgeSource @relation(fields: [knowledgeSourceId], references: [id], onDelete: Cascade)
+
+  @@index([knowledgeSourceId])
+  @@map("knowledge_ingestions")
+}
