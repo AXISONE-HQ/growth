@@ -1,0 +1,35 @@
+{
+  "name": "@growth-ai/knowledge-worker",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "lint": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@google-cloud/pubsub": "^4.5.0",
+    "@google-cloud/run": "^1.4.0",
+    "@google-cloud/storage": "^7.13.0",
+    "@growth/db": "0.1.0",
+    "@prisma/client": "^5.22.0",
+    "dotenv": "^16.3.1",
+    "html-to-text": "^9.0.5",
+    "js-tiktoken": "^1.0.20",
+    "mammoth": "^1.9.0",
+    "openai": "^4.71.0",
+    "pdf-parse": "^1.1.1",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/html-to-text": "^9.0.4",
+    "@types/node": "^20.10.6",
+    "@types/pdf-parse": "^1.1.4",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3",
+    "vitest": "^2.0.0"
+  }
+}

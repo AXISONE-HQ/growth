@@ -16,6 +16,12 @@ export default defineConfig({
       // KAN-702 PR A.1: apps/api also has no test infra of its own — same
       // piggyback pattern for the adminProcedure middleware unit tests.
       '../../apps/api/src/__tests__/*.test.ts',
+      // KAN-707 PR B: knowledge-worker is self-contained (mirrors
+      // apps/connectors pattern, no cross-rootDir cohort issues). All its
+      // tests are pulled in here so CI catches them via the connectors
+      // runner aggregate.
+      '../../apps/knowledge-worker/src/services/__tests__/*.test.ts',
+      '../../apps/knowledge-worker/src/handlers/__tests__/*.test.ts',
     ],
     // Fake values — only used to satisfy env.ts parse at test-module-load. Never hit.
     env: {
