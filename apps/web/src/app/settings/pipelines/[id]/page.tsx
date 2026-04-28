@@ -11,7 +11,8 @@ import { Separator } from "@/components/ui/separator";
 import { EditPipelineDrawer } from "@/components/pipelines/edit-drawer";
 import { PipelineKnowledgeFilter } from "@/components/knowledge/pipeline-knowledge-filter";
 import { OBJECTIVE_OPTIONS } from "@/components/pipelines/wizard-schema";
-import { pipelinesApi, type PipelineDetail, type KnowledgeCategory } from "@/lib/api";
+import { pipelinesApi, type PipelineDetail } from "@/lib/api";
+import type { KnowledgeCategory } from "@growth/shared";
 
 export default function PipelineDetailPage() {
   const params = useParams<{ id: string }>();

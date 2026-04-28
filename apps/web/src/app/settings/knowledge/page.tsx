@@ -11,7 +11,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { StatusBadge } from "@/components/knowledge/status-badge";
 import { AddSourceDialog } from "@/components/knowledge/add-source-dialog";
 import { knowledgeIngestApi, type KnowledgeSourceListItem } from "@/lib/api";
-import { isInProgress } from "@/lib/knowledge-validation";
+import { isInProgress } from "@growth/shared";
 
 type SourceTypeFilter = "all" | "url" | "document" | "qa_pair";
 type SourceStatusFilter = "all" | "pending" | "processing" | "indexed" | "failed" | "stale";

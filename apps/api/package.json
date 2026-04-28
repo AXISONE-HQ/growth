@@ -15,6 +15,7 @@
     "@google-cloud/pubsub": "^4.5.0",
     "@google-cloud/run": "^1.5.1",
     "@google-cloud/secret-manager": "^5.6.0",
+    "@growth/shared": "*",
     "@hono/node-server": "^1.11.2",
     "@hono/trpc-server": "^0.3.2",
     "@prisma/client": "^5.22.0",

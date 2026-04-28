@@ -15,6 +15,7 @@
     "@google-cloud/run": "^1.4.0",
     "@google-cloud/storage": "^7.13.0",
     "@growth/db": "0.1.0",
+    "@growth/shared": "*",
     "@prisma/client": "^5.22.0",
     "dotenv": "^16.3.1",
     "html-to-text": "^9.0.5",

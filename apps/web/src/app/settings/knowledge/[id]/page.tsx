@@ -9,7 +9,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Separator } from "@/components/ui/separator";
 import { StatusBadge } from "@/components/knowledge/status-badge";
 import { knowledgeIngestApi, type KnowledgeSourceDetail } from "@/lib/api";
-import { isInProgress } from "@/lib/knowledge-validation";
+import { isInProgress } from "@growth/shared";
 
 const TYPE_LABEL: Record<string, { label: string; icon: typeof Globe }> = {
   url: { label: "URL", icon: Globe },

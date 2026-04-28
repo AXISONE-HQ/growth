@@ -11,7 +11,7 @@
  * KAN-655 / KAN-661 unprefixed convention for new topics).
  */
 import { getPubSubClient } from "../../../../packages/api/src/lib/pubsub-client.js";
-import type { IngestRequestedEvent } from "./knowledge-ingest-types.js";
+import type { IngestRequestedEvent } from "@growth/shared";
 
 export const KNOWLEDGE_INGEST_REQUESTED_TOPIC = "knowledge.ingest.requested";
 

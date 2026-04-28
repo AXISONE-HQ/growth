@@ -14,7 +14,8 @@ import {
 } from "@/components/ui/select";
 import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { OBJECTIVE_OPTIONS } from "./wizard-schema";
-import { pipelinesApi, type PipelineDetail, type PipelineObjectiveType } from "@/lib/api";
+import { pipelinesApi, type PipelineDetail } from "@/lib/api";
+import type { ObjectiveType as PipelineObjectiveType } from "@growth/shared";
 
 export function EditPipelineDrawer({
   open,

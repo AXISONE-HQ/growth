@@ -376,42 +376,16 @@ export const settingsApi = {
  * All mutations are admin-gated via ADMIN_EMAILS env-var (PR A.1/A.2).
  */
 
-/**
- * Canonical Prisma enums consumed by the pipelines wizard.
- *
- * MUST match the zod mirrors in `apps/api/src/router.ts:2592-2625` which
- * themselves mirror `packages/db/prisma/schema.prisma:376-431`. The backend
- * generalized drift test (`apps/api/src/__tests__/enum-drift.test.ts`)
- * guards Prisma ↔ zod parity; the frontend ↔ backend bridge is KAN-719's
- * job (High, Sprint 2 — extracts shared types package).
- *
- * If you add a value here, update apps/api/src/router.ts AND
- * packages/db/prisma/schema.prisma in the same change. KAN-720 tracks the
- * product decision on additional values post-V1.
- */
-export type PipelineObjectiveType =
-  | 'warm_up_lead'
-  | 'book_appointment'
-  | 'buy_online'
-  | 'send_quote';
-
-export type TargetMetric =
-  | 'appointments_booked'
-  | 'orders_placed'
-  | 'quotes_sent'
-  | 'replies_received'
-  | 'leads_qualified'
-  | 'revenue_dollars';
-
-export type TargetPeriod = 'weekly' | 'monthly' | 'quarterly';
-
-export type KnowledgeCategory =
-  | 'company_info'
-  | 'products'
-  | 'warranty'
-  | 'shipping'
-  | 'financing'
-  | 'faqs';
+// KAN-737 — canonical pipeline/knowledge enums live in @growth/shared. The
+// frontend imports them directly at use sites (no re-exports here).
+import type {
+  ObjectiveType,
+  TargetMetric,
+  TargetPeriod,
+  KnowledgeCategory,
+  IngestRequest,
+  IngestStatus,
+} from "@growth/shared";
 
 export interface PipelineStage {
   id?: string;
@@ -453,7 +427,7 @@ export interface PipelineSummary {
   description: string | null;
   isActive: boolean;
   order: number;
-  objectiveType: PipelineObjectiveType;
+  objectiveType: ObjectiveType;
   objectiveDescription: string | null;
   stageCount: number;
   activeLeadCount: number;
@@ -488,7 +462,7 @@ export const pipelinesApi = {
   create: (data: {
     name: string;
     description?: string | null;
-    objectiveType: PipelineObjectiveType;
+    objectiveType: ObjectiveType;
     objectiveDescription?: string | null;
     order?: number;
     stages: PipelineStage[];
@@ -498,7 +472,7 @@ export const pipelinesApi = {
     id: string;
     name?: string;
     description?: string | null;
-    objectiveType?: PipelineObjectiveType;
+    objectiveType?: ObjectiveType;
     objectiveDescription?: string | null;
     order?: number;
   }) => trpcMutation<PipelineDetail>('pipelines.update', data),
@@ -558,27 +532,9 @@ export const pipelineMicroObjectivesApi = {
 };
 
 /* ── Knowledge Ingestion API (KAN-707 PR A) ────────────────────────
- * Service contract types MUST match apps/api/src/services/knowledge-ingest-types.ts.
- * KAN-719 will subsume both into a shared package once cross-rootDir lifts.
+ * Canonical contract types in @growth/shared (KAN-737). Consumer files import
+ * IngestionPath / IngestRequest / IngestStatus directly from @growth/shared.
  */
-
-export type IngestionPath = 'url' | 'document' | 'qa_pair';
-
-export type IngestRequest =
-  | { path: 'url'; sourceUrl: string; crawlScope?: 'page' | 'domain' | 'sitemap' }
-  | { path: 'document'; uploadedFileRef: string; originalFileName: string }
-  | { path: 'qa_pair'; question: string; answer: string };
-
-export interface IngestStatus {
-  ingestionId: string;
-  sourceId: string;
-  status: 'pending' | 'processing' | 'indexed' | 'failed' | 'stale';
-  startedAt: string | null;
-  completedAt: string | null;
-  errorMessage: string | null;
-  urlsDiscovered: number;
-  urlsIndexed: number;
-}
 
 export interface KnowledgeSourceListItem {
   id: string;

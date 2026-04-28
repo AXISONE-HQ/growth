@@ -3,7 +3,8 @@
 import { useEffect, useState } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
-import { knowledgeFiltersApi, type KnowledgeCategory } from "@/lib/api";
+import { knowledgeFiltersApi } from "@/lib/api";
+import type { KnowledgeCategory } from "@growth/shared";
 import { KNOWLEDGE_CATEGORY_OPTIONS } from "@/components/pipelines/wizard-schema";
 
 /**

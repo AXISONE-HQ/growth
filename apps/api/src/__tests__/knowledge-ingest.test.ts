@@ -13,7 +13,7 @@ import {
   IngestionPathEnum,
   IngestRequestSchema,
   PER_TENANT_INGEST_QUEUE_DEPTH_LIMIT,
-} from "../services/knowledge-ingest-types.js";
+} from "@growth/shared";
 
 vi.mock("firebase-admin/auth", () => ({
   getAuth: () => ({ verifyIdToken: vi.fn() }),

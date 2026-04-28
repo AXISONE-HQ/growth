@@ -14,14 +14,15 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { knowledgeIngestApi, type IngestRequest } from "@/lib/api";
+import { knowledgeIngestApi } from "@/lib/api";
 import {
   ALLOWED_DOC_EXTENSIONS,
   MAX_UPLOAD_BYTES,
   checkUrl,
   checkUploadedFile,
   checkQaPair,
-} from "@/lib/knowledge-validation";
+  type IngestRequest,
+} from "@growth/shared";
 
 export function AddSourceDialog({
   open,
