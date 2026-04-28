@@ -17,7 +17,7 @@ import {
   TARGET_PERIOD_OPTIONS,
   type TargetInput,
 } from "../wizard-schema";
-import type { TargetMetric, TargetPeriod } from "@/lib/api";
+import type { TargetMetric, TargetPeriod } from "@growth/shared";
 
 export function TargetsStep({
   defaultTargets,

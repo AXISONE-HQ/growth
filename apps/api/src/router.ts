@@ -6,10 +6,17 @@ import { SecretManagerServiceClient } from "@google-cloud/secret-manager";
 import { router, publicProcedure, protectedProcedure, adminProcedure } from "./trpc.js";
 import {
   IngestRequestSchema,
+  ObjectiveTypeEnum,
+  TargetMetricEnum,
+  TargetPeriodEnum,
+  KnowledgeCategoryEnum,
+  LeadAssignmentPostureEnum,
+  KnowledgeSourceTypeEnum,
+  KnowledgeSourceStatusEnum,
+  PER_TENANT_INGEST_QUEUE_DEPTH_LIMIT,
   type IngestRequestedEvent,
   type IngestStatus,
-  PER_TENANT_INGEST_QUEUE_DEPTH_LIMIT,
-} from "./services/knowledge-ingest-types.js";
+} from "@growth/shared";
 import { publishIngestRequested } from "./services/knowledge-ingest-publisher.js";
 
 // ============================================================================
@@ -2594,52 +2601,8 @@ const wedgeRouter = router({
 // and are tested via the apps/connectors vitest bridge.
 // ============================================================================
 
-// Exported so apps/api/src/__tests__/enum-drift.test.ts can iterate every
-// (Prisma enum, zod mirror) pair and assert parity. KAN-719 (High) will move
-// these into a shared types package and remove the manual mirrors.
-export const ObjectiveTypeEnum = z.enum(["warm_up_lead", "book_appointment", "buy_online", "send_quote"]);
-export const TargetMetricEnum = z.enum([
-  "appointments_booked",
-  "orders_placed",
-  "quotes_sent",
-  "replies_received",
-  "leads_qualified",
-  "revenue_dollars",
-]);
-export const TargetPeriodEnum = z.enum(["weekly", "monthly", "quarterly"]);
-export const KnowledgeCategoryEnum = z.enum([
-  "company_info",
-  "products",
-  "warranty",
-  "shipping",
-  "financing",
-  "faqs",
-]);
-// LeadAssignmentPosture is in the Prisma schema (KAN-705) but no router uses
-// it as input yet — UI lands in Sprint 7 with GoRush onboarding. Mirror is
-// declared here pre-emptively so the drift test pair list catches future
-// schema changes before any consumer wires in.
-export const LeadAssignmentPostureEnum = z.enum([
-  "stay_unassigned",
-  "default_pipeline",
-  "escalate_to_human",
-]);
-// KAN-706 — KnowledgeSource lifecycle enums. Mirrored here for the drift test
-// PAIRS list. KAN-707 ingestion service will use these as input zod for the
-// ingest endpoints; KAN-719 will eventually consolidate into shared types.
-export const KnowledgeSourceTypeEnum = z.enum([
-  "url",
-  "document",
-  "qa_pair",
-  "structured_field",
-]);
-export const KnowledgeSourceStatusEnum = z.enum([
-  "pending",
-  "processing",
-  "indexed",
-  "failed",
-  "stale",
-]);
+// Canonical zod enum mirrors live in @growth/shared (KAN-737). Drift test
+// asserting parity with Prisma sits in packages/shared/src/__tests__/.
 
 const StageInputSchema = z.object({
   id: z.string().uuid().optional(),

@@ -1,15 +1,3 @@
-/**
- * KAN-708 — knowledge ingestion validation helpers.
- *
- * Mirrors apps/knowledge-worker/src/services/knowledge-validation.ts. Both
- * copies stay in sync via the shared zod backend schema (IngestRequestSchema
- * in apps/api/src/services/knowledge-ingest-types.ts) — any change here MUST
- * propagate to the worker copy. KAN-719 (shared types) will consolidate.
- *
- * Tests for the canonical version live with the worker. The frontend copy
- * is identical; we don't run a separate test suite for it.
- */
-
 export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 
 export const ALLOWED_DOC_EXTENSIONS = [".pdf", ".docx", ".txt", ".md", ".markdown"] as const;
@@ -75,6 +63,16 @@ export function checkQaPair(opts: { question: string; answer: string }): QaPairC
   if (a.length > 10000) return { ok: false, reason: "Answer must be 10000 characters or fewer" };
   return { ok: true };
 }
+
+export type StatusVariant = "info" | "neutral" | "success" | "destructive" | "warning";
+
+export const STATUS_VARIANT: Record<string, StatusVariant> = {
+  pending: "info",
+  processing: "info",
+  indexed: "success",
+  failed: "destructive",
+  stale: "warning",
+};
 
 export function isInProgress(status: string): boolean {
   return status === "pending" || status === "processing";

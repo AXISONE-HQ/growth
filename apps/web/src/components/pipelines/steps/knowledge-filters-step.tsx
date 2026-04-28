@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
 import { KNOWLEDGE_CATEGORY_OPTIONS, type KnowledgeFilterInput } from "../wizard-schema";
-import type { KnowledgeCategory } from "@/lib/api";
+import type { KnowledgeCategory } from "@growth/shared";
 
 export function KnowledgeFiltersStep({
   defaultFilters,

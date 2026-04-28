@@ -1,5 +1,10 @@
 import { z } from "zod";
-import type { PipelineObjectiveType, KnowledgeCategory, TargetMetric, TargetPeriod } from "@/lib/api";
+import type {
+  ObjectiveType as PipelineObjectiveType,
+  KnowledgeCategory,
+  TargetMetric,
+  TargetPeriod,
+} from "@growth/shared";
 
 // ─── Step 1: Basics ───
 export const basicsSchema = z.object({
