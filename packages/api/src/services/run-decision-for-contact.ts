@@ -38,11 +38,38 @@ import { TRPCError } from '@trpc/server';
 // the `selectStrategy` and `scoreConfidence` signatures are similar. When
 // you see the first compile error, trace it back to the Input schema in
 // that service file — it's the source of truth.
+import { type DecisionPayload, computeDivergence, type DivergenceFlag } from '@growth/shared';
 import { analyzeGapsForContact } from './objective-gap-analyzer';
 import { selectStrategy } from './strategy-selector';
 import { determineAction } from './action-determiner';
 import { scoreConfidence } from './confidence-scorer';
 import { evaluateThreshold } from './threshold-gate';
+
+// KAN-738: variable-specifier dynamic import keeps agentic-decision-runner.ts
+// out of the apps/api static graph (TS6059 cohort). Same pattern as
+// context-assembler.ts:tryAutoWireKnowledgeSearch. Tactical until KAN-689 lands.
+type AgenticLoopFn = (input: { tenantId: string; contactId: string }) => Promise<{
+  payload: DecisionPayload;
+  iterations: number;
+  latencyMs: number;
+}>;
+
+let _agenticLoopFn: AgenticLoopFn | null = null;
+async function loadAgenticLoop(): Promise<AgenticLoopFn> {
+  if (_agenticLoopFn) return _agenticLoopFn;
+  const spec = './agentic-decision-runner.js';
+  const mod = (await import(spec)) as { runAgenticLoop?: AgenticLoopFn };
+  if (typeof mod.runAgenticLoop !== 'function') {
+    throw new Error('agentic-decision-runner did not export runAgenticLoop');
+  }
+  _agenticLoopFn = mod.runAgenticLoop;
+  return _agenticLoopFn;
+}
+
+/** Test seam — replace the agentic loop with a mock without touching SDKs. */
+export function __setAgenticLoopForTest(fn: AgenticLoopFn | null): void {
+  _agenticLoopFn = fn;
+}
 import {
   assembleContext,
   InMemoryContextCache,
@@ -271,7 +298,204 @@ export async function runDecisionForContact(
   if (input.playbookStepContext) {
     return runPlaybookStep(prisma, input, contact);
   }
-  return runFreeform(prisma, input, contact);
+
+  // KAN-738 — Sprint 3 / S3.1 agentic seam.
+  // Live mode: agentic emits action.decided, rules-based skipped.
+  // Shadow mode (default): both run in parallel, only rules-based emits,
+  // divergence logged to AgenticShadowDecision for offline analysis.
+  const agenticEnabled = (contact as { tenant?: { agenticModeEnabled?: boolean } }).tenant?.agenticModeEnabled === true;
+  if (agenticEnabled) {
+    return runAgentic(prisma, input, contact);
+  }
+  return runShadow(prisma, input, contact);
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Shadow mode — runFreeform + agentic in parallel; rules-based wins, divergence logged.
+// ──────────────────────────────────────────────────────────────────────────────
+
+async function runShadow(
+  prisma: PrismaClient,
+  input: RunForContactInput,
+  contact: { id: string; email: string | null; firstName: string | null; lastName: string | null; tenant: { confidenceThreshold: number | null } } & Record<string, unknown>,
+): Promise<RunForContactResult> {
+  // Run both in parallel. Rules-based result is what gets returned — preserves
+  // every downstream side-effect (Decision row, action.decided publish, audit
+  // log) that callers depend on. Agentic side-effects are logged-only.
+  const agenticLoop = await loadAgenticLoop().catch(() => null);
+  const [rulesSettled, agenticSettled] = await Promise.allSettled([
+    runFreeform(prisma, input, contact),
+    agenticLoop ? agenticLoop({ tenantId: input.tenantId, contactId: input.contactId }) : Promise.reject(new Error('agentic loop module unavailable')),
+  ]);
+
+  if (rulesSettled.status === 'rejected') {
+    // Rules-based path is the source of truth. If it fails, propagate — we
+    // don't fall back to agentic in shadow mode (agentic is unproven; that's
+    // why it's in shadow).
+    throw rulesSettled.reason;
+  }
+
+  const rulesResult = rulesSettled.value;
+  const rulesPayload: DecisionPayload = {
+    strategy: rulesResult.strategy,
+    action: {
+      type: rulesResult.action.type,
+      channel: (rulesResult.action.payload as { channel?: string | null } | undefined)?.channel ?? null,
+      payload: (rulesResult.action.payload ?? {}) as Record<string, unknown>,
+    },
+    confidence: rulesResult.confidence,
+    outcome: rulesResult.outcome,
+    reasoning: rulesResult.reasoning,
+  };
+
+  let agenticPayload: DecisionPayload | null = null;
+  let agenticError: string | null = null;
+  if (agenticSettled.status === 'fulfilled') {
+    agenticPayload = agenticSettled.value.payload;
+  } else {
+    agenticError = (agenticSettled.reason as Error)?.message ?? String(agenticSettled.reason);
+  }
+
+  const flags: DivergenceFlag[] = computeDivergence(rulesPayload, agenticPayload, agenticError !== null);
+
+  // Fire-and-forget shadow row write — never block the rules-based response
+  // on telemetry persistence. KAN-746 (filed at PR open) tracks moving this
+  // to an async-only path that doesn't share the request lifecycle.
+  void persistShadowRow(prisma, {
+    tenantId: input.tenantId,
+    contactId: input.contactId,
+    decisionId: rulesResult.decisionId,
+    rulesDecisionPayload: rulesPayload,
+    agenticDecisionPayload: agenticPayload ?? { error: agenticError },
+    divergenceFlags: flags,
+    agenticError,
+  });
+
+  return rulesResult;
+}
+
+async function persistShadowRow(
+  prisma: PrismaClient,
+  row: {
+    tenantId: string;
+    contactId: string;
+    decisionId: string;
+    rulesDecisionPayload: DecisionPayload;
+    agenticDecisionPayload: DecisionPayload | { error: string | null };
+    divergenceFlags: DivergenceFlag[];
+    agenticError: string | null;
+  },
+): Promise<void> {
+  try {
+    await (prisma as unknown as { agenticShadowDecision: { create: (args: unknown) => Promise<unknown> } }).agenticShadowDecision.create({
+      data: {
+        tenantId: row.tenantId,
+        contactId: row.contactId,
+        decisionId: row.decisionId,
+        rulesDecisionPayload: row.rulesDecisionPayload as unknown as Prisma.InputJsonValue,
+        agenticDecisionPayload: row.agenticDecisionPayload as unknown as Prisma.InputJsonValue,
+        divergenceFlags: row.divergenceFlags,
+        agenticError: row.agenticError,
+      },
+    });
+  } catch (err) {
+    console.error('[runShadow] persistShadowRow failed:', err);
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Live agentic mode — agentic emits action.decided, rules-based skipped.
+// ──────────────────────────────────────────────────────────────────────────────
+
+async function runAgentic(
+  prisma: PrismaClient,
+  input: RunForContactInput,
+  contact: { id: string; email: string | null; firstName: string | null; lastName: string | null; tenant: { confidenceThreshold: number | null } } & Record<string, unknown>,
+): Promise<RunForContactResult> {
+  const started = Date.now();
+  const { tenantId, contactId, actor = { type: 'SYSTEM' as const, id: 'decision-engine' } } = input;
+
+  let agenticPayload: DecisionPayload;
+  try {
+    const agenticLoop = await loadAgenticLoop();
+    const result = await agenticLoop({ tenantId, contactId });
+    agenticPayload = result.payload;
+  } catch (err) {
+    // Live mode + agentic failure = rule-based fallback. Logs the failure as
+    // an audit entry but does NOT silently degrade — surfaces via reasoning.
+    console.error('[runAgentic] agentic loop failed, falling back to rules-based:', err);
+    return runFreeform(prisma, input, contact);
+  }
+
+  const channel = agenticPayload.action.channel;
+  const actionType = agenticPayload.action.type;
+  const reasoning = agenticPayload.reasoning;
+
+  const decision = await prisma.decision.create({
+    data: {
+      tenantId,
+      contactId,
+      strategySelected: agenticPayload.strategy,
+      actionType,
+      confidence: agenticPayload.confidence,
+      reasoning,
+      metadata: {
+        outcome: agenticPayload.outcome,
+        agenticPayload: agenticPayload.action.payload ?? {},
+        mode: 'agentic_live',
+      } as unknown as Prisma.InputJsonValue,
+    },
+  });
+
+  logAndPublish(
+    {
+      tenantId,
+      contactId,
+      decisionId: decision.id,
+      agentType: agenticPayload.strategy || 'agentic_loop',
+      channel,
+      actionType,
+      status: agenticPayload.outcome === 'EXECUTED' ? 'success' : 'escalated',
+      payload: { agenticPayload: agenticPayload.action.payload ?? {}, actor: actor.id, mode: 'agentic_live' },
+      reasoning,
+      confidenceScore: agenticPayload.confidence,
+      guardrailResult: null,
+      executionResult: null,
+      errorMessage: null,
+      durationMs: Date.now() - started,
+      retryCount: 0,
+    },
+    { store: buildAuditLogStore(prisma), pubsub: getAuditPubSubClient() },
+  ).catch((err: unknown) => {
+    console.error('[runAgentic] audit-logger failed:', err);
+  });
+
+  if (agenticPayload.outcome === 'EXECUTED') {
+    publishActionDecided(getPubSubClient(), {
+      tenantId,
+      contactId,
+      objectiveId: ((agenticPayload.action.payload as { objectiveId?: string } | undefined)?.objectiveId) ?? 'unknown',
+      actionType,
+      channel,
+      actionPayload: (agenticPayload.action.payload ?? {}) as Record<string, unknown>,
+      selectedStrategy: agenticPayload.strategy,
+      confidenceScore: agenticPayload.confidence,
+      strategyReasoning: reasoning,
+      actionReasoning: reasoning,
+    }).catch((err: unknown) => {
+      console.error(`[runAgentic] publishActionDecided failed decisionId=${decision.id}:`, err);
+    });
+  }
+
+  return {
+    decisionId: decision.id,
+    strategy: agenticPayload.strategy,
+    action: { type: actionType, payload: agenticPayload.action.payload ?? {} },
+    confidence: agenticPayload.confidence,
+    outcome: agenticPayload.outcome,
+    reasoning,
+    latencyMs: Date.now() - started,
+  };
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

@@ -40,6 +40,11 @@ model Tenant {
   defaultAssignmentPipelineId String?               @map("default_assignment_pipeline_id")
   // KAN-705: confidence threshold (0..1) for AI assignment fallback. Default 0.5.
   aiAssignmentConfidenceThreshold Float            @default(0.5) @map("ai_assignment_confidence_threshold")
+  // KAN-738: agentic loop seam (Sprint 3 / S3.1). When false (default),
+  // agentic runs in shadow alongside rules-based — only rules-based emits
+  // action.decided. When true, agentic emits action.decided and rules-based
+  // is skipped. UI toggle ships in Sprint 4.
+  agenticModeEnabled  Boolean  @default(false) @map("agentic_mode_enabled")
   strategyPermissions Json     @default("{}")  @map("strategy_permissions")
   guardrailSettings   Json     @default("{}")  @map("guardrail_settings")
   settings            Json     @default("{}")
@@ -68,6 +73,7 @@ model Tenant {
   knowledgeSources KnowledgeSource[]
   aiAgentConfigs   AiAgentConfig[]
   contactStates    ContactState[]
+  agenticShadowDecisions AgenticShadowDecision[]
 
   //   tenantSettings  TenantSettings[]  // commented out for smoke build (model missing on main)
   channelConnections ChannelConnection[]
@@ -252,6 +258,35 @@ model Decision {
 // ─────────────────────────────────────────────
 // AGENT DISPATCHER (EXECUTE phase)
 // ─────────────────────────────────────────────
+
+// KAN-738 — Sprint 3 / S3.1 agentic loop seam.
+// One row per shadow-mode comparison run. Live mode (Tenant.agentic_mode_enabled
+// = true) does NOT write to this table — only the agentic Decision row is
+// persisted via the standard Decision model. Shadow mode is the default.
+model AgenticShadowDecision {
+  id                      String    @id @default(uuid())
+  tenantId                String    @map("tenant_id")
+  contactId               String    @map("contact_id")
+  // FK to Decision row from the rules-based path (always set in shadow mode
+  // because rules-based always runs first and emits action.decided).
+  decisionId              String?   @map("decision_id")
+  agenticDecisionPayload  Json      @map("agentic_decision_payload")
+  rulesDecisionPayload    Json      @map("rules_decision_payload")
+  // Bounded set — see DivergenceFlag in @growth/shared/decision-payload.ts.
+  divergenceFlags         String[]  @map("divergence_flags")
+  // Set when divergence_flags includes 'agentic_error'. Indexable for
+  // "all failed agentic runs in window X" queries (KAN-745 follow-up will
+  // build observability on top of this).
+  agenticError            String?   @map("agentic_error")
+  createdAt               DateTime  @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, contactId])
+  @@index([tenantId, agenticError])
+  @@map("agentic_shadow_decisions")
+}
 
 model Action {
   id           String    @id @default(uuid())
