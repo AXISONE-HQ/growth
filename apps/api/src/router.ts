@@ -2586,11 +2586,11 @@ const wedgeRouter = router({
 // and are tested via the apps/connectors vitest bridge.
 // ============================================================================
 
-// Exported so apps/api/src/__tests__/objective-type-drift.test.ts can assert
-// these values stay in sync with the schema.prisma ObjectiveType enum.
-// KAN-719 will move this into a shared types package.
+// Exported so apps/api/src/__tests__/enum-drift.test.ts can iterate every
+// (Prisma enum, zod mirror) pair and assert parity. KAN-719 (High) will move
+// these into a shared types package and remove the manual mirrors.
 export const ObjectiveTypeEnum = z.enum(["warm_up_lead", "book_appointment", "buy_online", "send_quote"]);
-const TargetMetricEnum = z.enum([
+export const TargetMetricEnum = z.enum([
   "appointments_booked",
   "orders_placed",
   "quotes_sent",
@@ -2598,14 +2598,23 @@ const TargetMetricEnum = z.enum([
   "leads_qualified",
   "revenue_dollars",
 ]);
-const TargetPeriodEnum = z.enum(["weekly", "monthly", "quarterly"]);
-const KnowledgeCategoryEnum = z.enum([
+export const TargetPeriodEnum = z.enum(["weekly", "monthly", "quarterly"]);
+export const KnowledgeCategoryEnum = z.enum([
   "company_info",
   "products",
   "warranty",
   "shipping",
   "financing",
   "faqs",
+]);
+// LeadAssignmentPosture is in the Prisma schema (KAN-705) but no router uses
+// it as input yet — UI lands in Sprint 7 with GoRush onboarding. Mirror is
+// declared here pre-emptively so the drift test pair list catches future
+// schema changes before any consumer wires in.
+export const LeadAssignmentPostureEnum = z.enum([
+  "stay_unassigned",
+  "default_pipeline",
+  "escalate_to_human",
 ]);
 
 const StageInputSchema = z.object({

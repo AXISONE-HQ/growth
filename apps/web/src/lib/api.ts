@@ -377,11 +377,17 @@ export const settingsApi = {
  */
 
 /**
- * Canonical V1 objective set. MUST match `ObjectiveTypeEnum` in
- * `apps/api/src/router.ts:2589` (which mirrors `schema.prisma:376-380`
- * `enum ObjectiveType`). KAN-719 will extract this to a shared package and
- * remove the manual mirror; KAN-720 tracks the product decision on
- * additional values for V1.5.
+ * Canonical Prisma enums consumed by the pipelines wizard.
+ *
+ * MUST match the zod mirrors in `apps/api/src/router.ts:2592-2625` which
+ * themselves mirror `packages/db/prisma/schema.prisma:376-431`. The backend
+ * generalized drift test (`apps/api/src/__tests__/enum-drift.test.ts`)
+ * guards Prisma ↔ zod parity; the frontend ↔ backend bridge is KAN-719's
+ * job (High, Sprint 2 — extracts shared types package).
+ *
+ * If you add a value here, update apps/api/src/router.ts AND
+ * packages/db/prisma/schema.prisma in the same change. KAN-720 tracks the
+ * product decision on additional values post-V1.
  */
 export type PipelineObjectiveType =
   | 'warm_up_lead'
@@ -389,9 +395,23 @@ export type PipelineObjectiveType =
   | 'buy_online'
   | 'send_quote';
 
-export type TargetMetric = 'leads_in' | 'quotes_sent' | 'deals_won' | 'meetings_booked';
-export type TargetPeriod = 'day' | 'week' | 'month' | 'quarter';
-export type KnowledgeCategory = 'product' | 'policy' | 'faq' | 'document' | 'company_info';
+export type TargetMetric =
+  | 'appointments_booked'
+  | 'orders_placed'
+  | 'quotes_sent'
+  | 'replies_received'
+  | 'leads_qualified'
+  | 'revenue_dollars';
+
+export type TargetPeriod = 'weekly' | 'monthly' | 'quarterly';
+
+export type KnowledgeCategory =
+  | 'company_info'
+  | 'products'
+  | 'warranty'
+  | 'shipping'
+  | 'financing'
+  | 'faqs';
 
 export interface PipelineStage {
   id?: string;

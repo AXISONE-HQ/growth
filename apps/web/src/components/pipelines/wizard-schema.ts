@@ -69,8 +69,18 @@ export const microObjectivesSchema = z.object({
 export type MicroObjectivesInput = z.infer<typeof microObjectivesSchema>;
 
 // ─── Step 4: Targets ───
-const TARGET_METRICS = ["leads_in", "quotes_sent", "deals_won", "meetings_booked"] as const;
-const TARGET_PERIODS = ["day", "week", "month", "quarter"] as const;
+// Values mirror schema.prisma:385-401 + apps/api/src/router.ts TargetMetricEnum
+// + TargetPeriodEnum. Drift-protected on backend by enum-drift.test.ts;
+// frontend ↔ backend bridge is KAN-719's job.
+const TARGET_METRICS = [
+  "appointments_booked",
+  "orders_placed",
+  "quotes_sent",
+  "replies_received",
+  "leads_qualified",
+  "revenue_dollars",
+] as const;
+const TARGET_PERIODS = ["weekly", "monthly", "quarterly"] as const;
 
 export const targetSchema = z.object({
   metric: z.enum(TARGET_METRICS) satisfies z.ZodType<TargetMetric>,
@@ -85,12 +95,15 @@ export const targetsSchema = z.object({
 export type TargetsInput = z.infer<typeof targetsSchema>;
 
 // ─── Step 5: Knowledge filters ───
+// Values mirror schema.prisma:423-432 + apps/api/src/router.ts
+// KnowledgeCategoryEnum. Drift-protected on backend by enum-drift.test.ts.
 const KNOWLEDGE_CATEGORIES = [
-  "product",
-  "policy",
-  "faq",
-  "document",
   "company_info",
+  "products",
+  "warranty",
+  "shipping",
+  "financing",
+  "faqs",
 ] as const;
 
 export const knowledgeFilterSchema = z.object({
@@ -118,17 +131,18 @@ export const OBJECTIVE_OPTIONS: ReadonlyArray<{ value: PipelineObjectiveType; la
 ];
 
 export const TARGET_METRIC_OPTIONS: ReadonlyArray<{ value: TargetMetric; label: string }> = [
-  { value: "leads_in", label: "Leads in" },
+  { value: "appointments_booked", label: "Appointments booked" },
+  { value: "orders_placed", label: "Orders placed" },
   { value: "quotes_sent", label: "Quotes sent" },
-  { value: "deals_won", label: "Deals won" },
-  { value: "meetings_booked", label: "Meetings booked" },
+  { value: "replies_received", label: "Replies received" },
+  { value: "leads_qualified", label: "Leads qualified" },
+  { value: "revenue_dollars", label: "Revenue ($)" },
 ];
 
 export const TARGET_PERIOD_OPTIONS: ReadonlyArray<{ value: TargetPeriod; label: string }> = [
-  { value: "day", label: "Daily" },
-  { value: "week", label: "Weekly" },
-  { value: "month", label: "Monthly" },
-  { value: "quarter", label: "Quarterly" },
+  { value: "weekly", label: "Weekly" },
+  { value: "monthly", label: "Monthly" },
+  { value: "quarterly", label: "Quarterly" },
 ];
 
 export const KNOWLEDGE_CATEGORY_OPTIONS: ReadonlyArray<{
@@ -136,11 +150,12 @@ export const KNOWLEDGE_CATEGORY_OPTIONS: ReadonlyArray<{
   label: string;
   hint: string;
 }> = [
-  { value: "product", label: "Product", hint: "Product specs, SKUs, descriptions" },
-  { value: "policy", label: "Policy", hint: "Pricing rules, discount limits, T&Cs" },
-  { value: "faq", label: "FAQ", hint: "Frequently-asked answers" },
-  { value: "document", label: "Document", hint: "Brochures, case studies, slides" },
   { value: "company_info", label: "Company info", hint: "Mission, vision, story" },
+  { value: "products", label: "Products", hint: "Product specs, SKUs, descriptions" },
+  { value: "warranty", label: "Warranty", hint: "Coverage, claims, exclusions" },
+  { value: "shipping", label: "Shipping", hint: "Carriers, lead times, costs" },
+  { value: "financing", label: "Financing", hint: "Payment plans, terms, interest" },
+  { value: "faqs", label: "FAQ", hint: "Frequently-asked answers" },
 ];
 
 // Stable client-side ID generator — Math.random + ts is sufficient for
