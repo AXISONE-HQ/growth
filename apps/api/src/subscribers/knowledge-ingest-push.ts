@@ -111,10 +111,18 @@ async function dispatchIngestJob(ingestionId: string): Promise<"dispatched" | "a
   }
 }
 
+// Subscriber-specific OIDC audience. APP_API_URL is action-decided's audience;
+// reusing it across subscribers caused KAN-731 (smoke-test failure: every
+// Pub/Sub push 401'd because the action-decided URL didn't match the
+// subscription-signed `aud` claim). Each new subscriber declares its own
+// audience env var until KAN-732 (canonical request-URL-derived audience)
+// lands and consolidates.
+const KNOWLEDGE_INGEST_AUDIENCE_DEFAULT = "https://growth-api-biut5gfhuq-uc.a.run.app/pubsub/knowledge-ingest";
+
 knowledgeIngestPushApp.post("/knowledge-ingest", async (c) => {
   const skipAuth = process.env.NODE_ENV === "test" || process.env.PUBSUB_PUSH_SKIP_AUTH === "true";
   if (!skipAuth) {
-    const audience = process.env.APP_API_URL ?? "https://growth-api-biut5gfhuq-uc.a.run.app";
+    const audience = process.env.KNOWLEDGE_INGEST_AUDIENCE ?? KNOWLEDGE_INGEST_AUDIENCE_DEFAULT;
     const ok = await verifyOidc(c.req.header("authorization"), audience);
     if (!ok) return c.text("unauthorized", 401);
   }
