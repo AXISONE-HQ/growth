@@ -13,7 +13,10 @@
  *     domain-auth-API equivalent; per-tenant identity will look different.
  */
 
-// @ts-expect-error - html-to-text ships no types
+// html-to-text now ships @types/html-to-text via the dep tree (added with
+// KAN-707 PR B's @types/html-to-text install on apps/knowledge-worker;
+// types resolve transitively). The @ts-expect-error directive is no longer
+// needed.
 import { convert as htmlToText } from 'html-to-text';
 import { Resend } from 'resend';
 import type {
