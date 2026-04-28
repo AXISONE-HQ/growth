@@ -3305,6 +3305,128 @@ const knowledgeIngestRouter = router({
         urlsIndexed: row.urlsIndexed ?? 0,
       };
     }),
+
+  // KAN-708 — list sources for the tenant, with each source's latest
+  // ingestion status and chunk count. Sorted by creation date desc by default.
+  // Filter by source type (optional) and status (optional) for the UI list view.
+  listSources: protectedProcedure
+    .input(
+      z
+        .object({
+          type: z.enum(["url", "document", "qa_pair", "structured_field"]).optional(),
+          status: z.enum(["pending", "processing", "indexed", "failed", "stale"]).optional(),
+        })
+        .optional(),
+    )
+    .query(async ({ ctx, input }) => {
+      const where: any = { tenantId: ctx.tenantId };
+      if (input?.type) where.type = input.type;
+      if (input?.status) where.status = input.status;
+      const sources: any[] =
+        (await (ctx.prisma as any).knowledgeSource?.findMany({
+          where,
+          orderBy: { createdAt: "desc" },
+          include: { _count: { select: { chunks: true } } },
+        })) ?? [];
+      return sources.map((s) => ({
+        id: s.id,
+        type: s.type,
+        status: s.status,
+        sourceUrl: s.sourceUrl,
+        originalFileName: s.originalFileName,
+        contentHash: s.contentHash,
+        lastIndexedAt: s.lastIndexedAt?.toISOString() ?? null,
+        errorMessage: s.errorMessage,
+        chunkCount: s._count.chunks,
+        createdAt: s.createdAt.toISOString(),
+        updatedAt: s.updatedAt.toISOString(),
+      }));
+    }),
+
+  // KAN-708 — source detail with chunks (paginated). Tenant-scoped.
+  getSourceById: protectedProcedure
+    .input(
+      z.object({
+        sourceId: z.string().uuid(),
+        chunkLimit: z.number().int().min(1).max(100).default(20),
+        chunkOffset: z.number().int().min(0).default(0),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      const source: any = await (ctx.prisma as any).knowledgeSource?.findFirst({
+        where: { id: input.sourceId, tenantId: ctx.tenantId },
+        include: {
+          ingestions: { orderBy: { createdAt: "desc" }, take: 5 },
+          _count: { select: { chunks: true } },
+        },
+      });
+      if (!source) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Source not found in this tenant" });
+      }
+      // Chunks separately so we can paginate without loading the full set.
+      const chunks: any[] =
+        (await (ctx.prisma as any).knowledgeChunk?.findMany({
+          where: { sourceId: input.sourceId },
+          orderBy: { chunkIndex: "asc" },
+          skip: input.chunkOffset,
+          take: input.chunkLimit,
+          select: {
+            id: true,
+            chunkIndex: true,
+            totalChunks: true,
+            content: true,
+            tokenCount: true,
+            embeddingModel: true,
+            createdAt: true,
+          },
+        })) ?? [];
+      return {
+        id: source.id,
+        type: source.type,
+        status: source.status,
+        sourceUrl: source.sourceUrl,
+        uploadedFileRef: source.uploadedFileRef,
+        originalFileName: source.originalFileName,
+        lastIndexedAt: source.lastIndexedAt?.toISOString() ?? null,
+        errorMessage: source.errorMessage,
+        createdAt: source.createdAt.toISOString(),
+        updatedAt: source.updatedAt.toISOString(),
+        totalChunks: source._count.chunks,
+        chunks: chunks.map((c) => ({
+          id: c.id,
+          chunkIndex: c.chunkIndex,
+          totalChunks: c.totalChunks,
+          content: c.content,
+          tokenCount: c.tokenCount,
+          embeddingModel: c.embeddingModel,
+          createdAt: c.createdAt.toISOString(),
+        })),
+        recentIngestions: source.ingestions.map((i: any) => ({
+          ingestionId: i.id,
+          status: i.status,
+          startedAt: i.startedAt?.toISOString() ?? null,
+          completedAt: i.completedAt?.toISOString() ?? null,
+          createdAt: i.createdAt.toISOString(),
+        })),
+      };
+    }),
+
+  // KAN-708 — delete a source + cascade chunks + ingestions. Tenant-scoped.
+  deleteSource: protectedProcedure
+    .input(z.object({ sourceId: z.string().uuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const source: any = await (ctx.prisma as any).knowledgeSource?.findFirst({
+        where: { id: input.sourceId, tenantId: ctx.tenantId },
+        select: { id: true },
+      });
+      if (!source) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Source not found in this tenant" });
+      }
+      // ON DELETE CASCADE on the FKs (KAN-706 schema) handles chunks +
+      // ingestions automatically.
+      await (ctx.prisma as any).knowledgeSource?.delete({ where: { id: input.sourceId } });
+      return { sourceId: input.sourceId };
+    }),
 });
 
 export const appRouter = router({

@@ -580,6 +580,43 @@ export interface IngestStatus {
   urlsIndexed: number;
 }
 
+export interface KnowledgeSourceListItem {
+  id: string;
+  type: 'url' | 'document' | 'qa_pair' | 'structured_field';
+  status: 'pending' | 'processing' | 'indexed' | 'failed' | 'stale';
+  sourceUrl: string | null;
+  originalFileName: string | null;
+  contentHash: string;
+  lastIndexedAt: string | null;
+  errorMessage: string | null;
+  chunkCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface KnowledgeChunkPreview {
+  id: string;
+  chunkIndex: number;
+  totalChunks: number;
+  content: string;
+  tokenCount: number;
+  embeddingModel: string;
+  createdAt: string;
+}
+
+export interface KnowledgeSourceDetail extends KnowledgeSourceListItem {
+  uploadedFileRef: string | null;
+  totalChunks: number;
+  chunks: KnowledgeChunkPreview[];
+  recentIngestions: Array<{
+    ingestionId: string;
+    status: string;
+    startedAt: string | null;
+    completedAt: string | null;
+    createdAt: string;
+  }>;
+}
+
 export const knowledgeIngestApi = {
   request: (input: IngestRequest) =>
     trpcMutation<{ ingestionId: string; sourceId: string; status: 'pending' }>(
@@ -588,4 +625,14 @@ export const knowledgeIngestApi = {
     ),
   status: (ingestionId: string) =>
     trpcQuery<IngestStatus>('knowledgeIngest.status', { ingestionId }),
+  listSources: (filter?: { type?: string; status?: string }) =>
+    trpcQuery<KnowledgeSourceListItem[]>('knowledgeIngest.listSources', filter ?? {}),
+  getSourceById: (sourceId: string, opts?: { chunkLimit?: number; chunkOffset?: number }) =>
+    trpcQuery<KnowledgeSourceDetail>('knowledgeIngest.getSourceById', {
+      sourceId,
+      chunkLimit: opts?.chunkLimit ?? 20,
+      chunkOffset: opts?.chunkOffset ?? 0,
+    }),
+  deleteSource: (sourceId: string) =>
+    trpcMutation<{ sourceId: string }>('knowledgeIngest.deleteSource', { sourceId }),
 };
