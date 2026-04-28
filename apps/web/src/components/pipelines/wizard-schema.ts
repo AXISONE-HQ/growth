@@ -5,13 +5,14 @@ import type { PipelineObjectiveType, KnowledgeCategory, TargetMetric, TargetPeri
 export const basicsSchema = z.object({
   name: z.string().min(1, "Pipeline name is required").max(100, "Max 100 characters"),
   description: z.string().max(1000, "Max 1000 characters").optional(),
+  // Values mirror schema.prisma:376-380 + apps/api/src/router.ts:2589.
+  // Drift-protected on the backend by objective-type-drift.test.ts; the
+  // frontend ↔ backend bridge is KAN-719's job.
   objectiveType: z.enum([
+    "warm_up_lead",
+    "book_appointment",
+    "buy_online",
     "send_quote",
-    "send_quote_and_deal",
-    "book_meeting",
-    "sales_decision",
-    "reactivate_customer",
-    "collect_information",
   ]) satisfies z.ZodType<PipelineObjectiveType>,
   objectiveDescription: z.string().max(2000, "Max 2000 characters").optional(),
 });
@@ -106,13 +107,14 @@ export type KnowledgeFiltersInput = z.infer<typeof knowledgeFiltersSchema>;
 // Wizard data carries the per-step shapes; each step validates its own slice.
 export type WizardData = BasicsInput & StagesInput & MicroObjectivesInput & TargetsInput & KnowledgeFiltersInput;
 
+// Display label is intentionally distinct from the canonical value — labels
+// can be UX-tuned without touching the schema. Values MUST stay in the
+// canonical set above.
 export const OBJECTIVE_OPTIONS: ReadonlyArray<{ value: PipelineObjectiveType; label: string; hint: string }> = [
-  { value: "send_quote", label: "Send quote", hint: "Lead intent: get a price for a known need" },
-  { value: "send_quote_and_deal", label: "Send quote + close the deal", hint: "Quote then guide to acceptance" },
-  { value: "book_meeting", label: "Book a meeting", hint: "Capture interest, schedule a call" },
-  { value: "sales_decision", label: "Sales decision", hint: "Multi-touch nurture to a buy/no-buy point" },
-  { value: "reactivate_customer", label: "Reactivate customer", hint: "Re-engage a churned or dormant lead" },
-  { value: "collect_information", label: "Collect information", hint: "Gather facts before routing" },
+  { value: "warm_up_lead", label: "Warm Up Lead", hint: "Nurture and educate before any sales conversation" },
+  { value: "book_appointment", label: "Book Meeting", hint: "Capture interest, schedule a call" },
+  { value: "buy_online", label: "Online Purchase", hint: "Guide a self-serve buyer to checkout" },
+  { value: "send_quote", label: "Send Quote", hint: "Lead intent: get a price for a known need" },
 ];
 
 export const TARGET_METRIC_OPTIONS: ReadonlyArray<{ value: TargetMetric; label: string }> = [

@@ -6,13 +6,12 @@ import { Badge } from "@/components/ui/badge";
 import { Layers, Users, Target as TargetIcon } from "lucide-react";
 import type { PipelineSummary } from "@/lib/api";
 
+// Mirrors OBJECTIVE_OPTIONS labels in wizard-schema.ts. Keep in sync.
 const OBJECTIVE_LABELS: Record<string, string> = {
-  send_quote: "Send quote",
-  send_quote_and_deal: "Quote + close deal",
-  book_meeting: "Book meeting",
-  sales_decision: "Sales decision",
-  reactivate_customer: "Reactivate customer",
-  collect_information: "Collect information",
+  warm_up_lead: "Warm Up Lead",
+  book_appointment: "Book Meeting",
+  buy_online: "Online Purchase",
+  send_quote: "Send Quote",
 };
 
 export function PipelineCard({ pipeline }: { pipeline: PipelineSummary }) {
