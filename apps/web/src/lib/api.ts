@@ -556,3 +556,36 @@ export const pipelineMicroObjectivesApi = {
       { pipelineId, microObjectiveIds },
     ),
 };
+
+/* ── Knowledge Ingestion API (KAN-707 PR A) ────────────────────────
+ * Service contract types MUST match apps/api/src/services/knowledge-ingest-types.ts.
+ * KAN-719 will subsume both into a shared package once cross-rootDir lifts.
+ */
+
+export type IngestionPath = 'url' | 'document' | 'qa_pair';
+
+export type IngestRequest =
+  | { path: 'url'; sourceUrl: string; crawlScope?: 'page' | 'domain' | 'sitemap' }
+  | { path: 'document'; uploadedFileRef: string; originalFileName: string }
+  | { path: 'qa_pair'; question: string; answer: string };
+
+export interface IngestStatus {
+  ingestionId: string;
+  sourceId: string;
+  status: 'pending' | 'processing' | 'indexed' | 'failed' | 'stale';
+  startedAt: string | null;
+  completedAt: string | null;
+  errorMessage: string | null;
+  urlsDiscovered: number;
+  urlsIndexed: number;
+}
+
+export const knowledgeIngestApi = {
+  request: (input: IngestRequest) =>
+    trpcMutation<{ ingestionId: string; sourceId: string; status: 'pending' }>(
+      'knowledgeIngest.request',
+      input as Record<string, unknown>,
+    ),
+  status: (ingestionId: string) =>
+    trpcQuery<IngestStatus>('knowledgeIngest.status', { ingestionId }),
+};

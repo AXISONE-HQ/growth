@@ -1,8 +1,16 @@
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
+import { createHash } from "node:crypto";
 import type { Prisma, ChannelConnection } from "@prisma/client";
 import { SecretManagerServiceClient } from "@google-cloud/secret-manager";
 import { router, publicProcedure, protectedProcedure, adminProcedure } from "./trpc.js";
+import {
+  IngestRequestSchema,
+  type IngestRequestedEvent,
+  type IngestStatus,
+  PER_TENANT_INGEST_QUEUE_DEPTH_LIMIT,
+} from "./services/knowledge-ingest-types.js";
+import { publishIngestRequested } from "./services/knowledge-ingest-publisher.js";
 
 // ============================================================================
 // KAN-702 PR A — pipeline form validation helpers (inlined here for net-zero
@@ -3166,12 +3174,146 @@ const pipelineMicroObjectivesRouter = router({
     }),
 });
 
+// KAN-707 PR A — Knowledge ingestion service (typed contract + queue depth +
+// publisher + tenant-scoped polling). PR B replaces the publisher's
+// fire-and-forget shape with the actual URL crawl / doc upload / Q&A logic
+// invoked from the push subscriber. PR A only stubs the worker.
+const knowledgeIngestRouter = router({
+  // Tenant submits an ingest request. Cross-tenant idempotency is enforced
+  // at the schema level via KnowledgeSource.@@unique([tenantId, contentHash])
+  // (KAN-706). Per-tenant queue depth (max 100 in-flight) is enforced here
+  // before the KnowledgeSource row is created. The request publishes to
+  // `knowledge.ingest.requested` for the worker (PR B) to pick up.
+  request: protectedProcedure
+    .input(IngestRequestSchema)
+    .mutation(async ({ ctx, input }) => {
+      // Per-tenant queue depth — count rows where source.tenantId = ctx.tenantId
+      // AND status IN ('pending', 'processing'). >= limit → 429.
+      const inFlight: number =
+        (await (ctx.prisma as any).knowledgeIngestion?.count({
+          where: {
+            source: { tenantId: ctx.tenantId },
+            status: { in: ["pending", "processing"] },
+          },
+        })) ?? 0;
+      if (inFlight >= PER_TENANT_INGEST_QUEUE_DEPTH_LIMIT) {
+        throw new TRPCError({
+          code: "TOO_MANY_REQUESTS",
+          message: `Per-tenant ingest queue depth limit (${PER_TENANT_INGEST_QUEUE_DEPTH_LIMIT} in-flight) exceeded; retry once jobs complete`,
+        });
+      }
+
+      // contentHash derivation per path. Cross-tenant uniqueness is the
+      // (tenantId, contentHash) composite — same URL/file from two tenants
+      // produces two distinct rows.
+      let contentHash: string;
+      let sourceUrl: string | null = null;
+      let uploadedFileRef: string | null = null;
+      let originalFileName: string | null = null;
+      let sourceType: "url" | "document" | "qa_pair";
+      switch (input.path) {
+        case "url":
+          contentHash = createHash("sha256").update(`url:${input.sourceUrl}:${input.crawlScope}`).digest("hex");
+          sourceUrl = input.sourceUrl;
+          sourceType = "url";
+          break;
+        case "document":
+          contentHash = createHash("sha256").update(`doc:${input.uploadedFileRef}`).digest("hex");
+          uploadedFileRef = input.uploadedFileRef;
+          originalFileName = input.originalFileName;
+          sourceType = "document";
+          break;
+        case "qa_pair":
+          contentHash = createHash("sha256").update(`qa:${input.question}:${input.answer}`).digest("hex");
+          sourceType = "qa_pair";
+          break;
+      }
+
+      // Upsert the source by (tenantId, contentHash). Re-submitting the same
+      // payload returns the existing row + creates a new ingestion job
+      // (re-crawl semantics).
+      const source: any = await (ctx.prisma as any).knowledgeSource?.upsert({
+        where: { tenantId_contentHash: { tenantId: ctx.tenantId, contentHash } },
+        create: {
+          tenantId: ctx.tenantId,
+          type: sourceType,
+          status: "pending",
+          contentHash,
+          sourceUrl,
+          uploadedFileRef,
+          originalFileName,
+          createdBy: ctx.firebaseUser?.uid ?? null,
+        },
+        update: {
+          status: "pending",
+          updatedAt: new Date(),
+        },
+      });
+
+      const ingestion: any = await (ctx.prisma as any).knowledgeIngestion?.create({
+        data: {
+          knowledgeSourceId: source.id,
+          status: "pending",
+        },
+      });
+
+      // Publish to the worker. PR A's stub subscriber currently logs + 200s.
+      const event: IngestRequestedEvent = {
+        eventId: ingestion.id,
+        eventType: "knowledge.ingest.requested",
+        version: "1.0",
+        tenantId: ctx.tenantId,
+        ingestionId: ingestion.id,
+        sourceId: source.id,
+        path: input.path,
+        payload: input,
+        enqueuedAt: new Date().toISOString(),
+      };
+      await publishIngestRequested(event);
+
+      return { ingestionId: ingestion.id, sourceId: source.id, status: "pending" as const };
+    }),
+
+  // Tenant-scoped polling. The endpoint MUST verify the polled ingestionId
+  // belongs to the requesting tenant (cross-tenant poll → NOT_FOUND, never
+  // the other tenant's status). Achieved by joining through KnowledgeSource
+  // with tenantId filter.
+  status: protectedProcedure
+    .input(z.object({ ingestionId: z.string().uuid() }))
+    .query(async ({ ctx, input }): Promise<IngestStatus> => {
+      const row: any = await (ctx.prisma as any).knowledgeIngestion?.findFirst({
+        where: {
+          id: input.ingestionId,
+          source: { tenantId: ctx.tenantId },
+        },
+        include: { source: { select: { id: true, errorMessage: true } } },
+      });
+      if (!row) {
+        throw new TRPCError({
+          code: "NOT_FOUND",
+          message: "Ingestion job not found in this tenant",
+        });
+      }
+      return {
+        ingestionId: row.id,
+        sourceId: row.knowledgeSourceId,
+        status: row.status,
+        startedAt: row.startedAt?.toISOString() ?? null,
+        completedAt: row.completedAt?.toISOString() ?? null,
+        errorMessage: row.source?.errorMessage ?? null,
+        urlsDiscovered: row.urlsDiscovered ?? 0,
+        urlsIndexed: row.urlsIndexed ?? 0,
+      };
+    }),
+});
+
 export const appRouter = router({
   contacts: contactsRouter,
   pipelines: pipelinesRouter,
   stages: stagesRouter,
   targets: targetsRouter,
   knowledgeFilters: knowledgeFiltersRouter,
+  knowledgeIngest: knowledgeIngestRouter,
   pipelineMicroObjectives: pipelineMicroObjectivesRouter,
   decisions: decisionsRouter,
   actions: actionsRouter,
