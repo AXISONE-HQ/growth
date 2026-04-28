@@ -9,8 +9,9 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { EditPipelineDrawer } from "@/components/pipelines/edit-drawer";
+import { PipelineKnowledgeFilter } from "@/components/knowledge/pipeline-knowledge-filter";
 import { OBJECTIVE_OPTIONS } from "@/components/pipelines/wizard-schema";
-import { pipelinesApi, type PipelineDetail } from "@/lib/api";
+import { pipelinesApi, type PipelineDetail, type KnowledgeCategory } from "@/lib/api";
 
 export default function PipelineDetailPage() {
   const params = useParams<{ id: string }>();
@@ -166,23 +167,12 @@ export default function PipelineDetailPage() {
         </Card>
       )}
 
-      {pipeline.knowledgeFilters.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Knowledge filters</CardTitle>
-            <CardDescription>Categories the AI consults for leads in this pipeline.</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="flex flex-wrap gap-1">
-              {pipeline.knowledgeFilters.map((f) => (
-                <Badge key={f.id} variant="outline" className="text-xs">
-                  {f.knowledgeCategory}
-                </Badge>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-      )}
+      {/* KAN-708 — interactive per-pipeline knowledge filter editor.
+          Replaces KAN-702 PR B's read-only Badge list with a toggle UI. */}
+      <PipelineKnowledgeFilter
+        pipelineId={pipeline.id}
+        initialEnabledCategories={pipeline.knowledgeFilters.map((f) => f.knowledgeCategory as KnowledgeCategory)}
+      />
 
       <Separator />
       <p className="text-xs text-muted-foreground">
