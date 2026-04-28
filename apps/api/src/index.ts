@@ -3,6 +3,16 @@
 // proxy-readiness signal — TCP bind ≠ proxy ready for DB traffic). This comment
 // edit retriggers deploy-api.yml via the apps/api/** path filter so Cloud Run
 // picks up the post-KAN-705 image on top of the now-migrated schema.
+//
+// KAN-706 redeploy provenance (2026-04-28): schema 20260428120430_add_knowledge_ingestion_schemas
+// was applied locally via the Cloud SQL Auth Proxy pre-merge (operator process gap —
+// see feedback_proxy_5433_points_at_prod.md). The PR #55 merge run hit a separate IAM
+// failure: github-actions SA was missing roles/cloudsql.client. After granting that role
+// at project level, this comment edit retriggers deploy-api.yml so Cloud Run picks up
+// the post-KAN-706 code (zod mirrors for KnowledgeSourceTypeEnum + KnowledgeSourceStatusEnum)
+// on top of the already-migrated schema. Path-filter takes the SKIP path on this push
+// (no schema files), so the deploy-api workflow exercises only the deploy phases — not
+// migrate-end-to-end.
 import "dotenv/config";
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
