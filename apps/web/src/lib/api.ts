@@ -376,13 +376,18 @@ export const settingsApi = {
  * All mutations are admin-gated via ADMIN_EMAILS env-var (PR A.1/A.2).
  */
 
+/**
+ * Canonical V1 objective set. MUST match `ObjectiveTypeEnum` in
+ * `apps/api/src/router.ts:2589` (which mirrors `schema.prisma:376-380`
+ * `enum ObjectiveType`). KAN-719 will extract this to a shared package and
+ * remove the manual mirror; KAN-720 tracks the product decision on
+ * additional values for V1.5.
+ */
 export type PipelineObjectiveType =
-  | 'send_quote'
-  | 'send_quote_and_deal'
-  | 'book_meeting'
-  | 'sales_decision'
-  | 'reactivate_customer'
-  | 'collect_information';
+  | 'warm_up_lead'
+  | 'book_appointment'
+  | 'buy_online'
+  | 'send_quote';
 
 export type TargetMetric = 'leads_in' | 'quotes_sent' | 'deals_won' | 'meetings_booked';
 export type TargetPeriod = 'day' | 'week' | 'month' | 'quarter';

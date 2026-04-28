@@ -2586,7 +2586,10 @@ const wedgeRouter = router({
 // and are tested via the apps/connectors vitest bridge.
 // ============================================================================
 
-const ObjectiveTypeEnum = z.enum(["warm_up_lead", "book_appointment", "buy_online", "send_quote"]);
+// Exported so apps/api/src/__tests__/objective-type-drift.test.ts can assert
+// these values stay in sync with the schema.prisma ObjectiveType enum.
+// KAN-719 will move this into a shared types package.
+export const ObjectiveTypeEnum = z.enum(["warm_up_lead", "book_appointment", "buy_online", "send_quote"]);
 const TargetMetricEnum = z.enum([
   "appointments_booked",
   "orders_placed",
