@@ -368,95 +368,160 @@ const actionsRouter = router({
 // ESCALATIONS ROUTER
 // ============================================================================
 
-const escalationsRouter = router({
-  list: protectedProcedure
+// KAN-754 — `recommendationsRouter` replaces the pre-KAN-689 broken
+// `escalationsRouter` (snake_case + non-existent fields like `priority`,
+// `claimed_at`, `dismissed_at`). Post-KAN-750, Escalation IS the recommendation
+// — see `packages/api/src/services/recommendations.ts` for handlers.
+//
+// URL/API name asymmetry intentional: URL stays `/escalations` (existing IA
+// + operational queue framing); tRPC namespace is `recommendations` (the
+// abstraction layer). KAN-756 reconciles if we ever rename the URL.
+//
+// All endpoints adminProcedure: only ADMIN_EMAILS allowlist members can act
+// on escalations — operator-grade authority, matches /settings/* surfaces.
+const SuggestedActionSchema = z.object({
+  actionType: z.string().min(1),
+  channel: z.string().nullable(),
+  payload: z.record(z.unknown()),
+});
+
+// Variable-specifier dynamic import keeps recommendations.ts out of the
+// apps/api static graph (TS6059 cohort) — `reference_variable_specifier_
+// dynamic_import` discipline. Manually-declared types (NOT `typeof
+// import("literal")`) because the literal path in `typeof import(...)`
+// also pulls the file into the static graph, defeating the purpose.
+// Mirrors run-decision-for-contact.ts's loadAgenticLoop pattern.
+interface RecsModule {
+  listRecommendations: (
+    prisma: unknown,
+    tenantId: string,
+    input: {
+      status?: "open" | "claimed" | "resolved" | "dismissed";
+      severity?: "low" | "medium" | "high" | "critical";
+      limit?: number;
+      offset?: number;
+    },
+  ) => Promise<unknown>;
+  getRecommendationDetail: (prisma: unknown, tenantId: string, id: string) => Promise<unknown>;
+  acceptRecommendation: (
+    ctx: {
+      prisma: unknown;
+      tenantId: string;
+      actor: string;
+      pubsubClient?: unknown | null;
+    },
+    input: {
+      id: string;
+      modifiedAction?: { actionType: string; channel: string | null; payload: Record<string, unknown> };
+    },
+  ) => Promise<unknown>;
+  modifyRecommendation: (
+    ctx: { prisma: unknown; tenantId: string; actor: string },
+    input: { id: string; suggestedAction: string },
+  ) => Promise<unknown>;
+  dismissRecommendation: (
+    ctx: { prisma: unknown; tenantId: string; actor: string },
+    input: { id: string; reason: string },
+  ) => Promise<unknown>;
+}
+let _recsModule: RecsModule | null = null;
+async function loadRecsModule(): Promise<RecsModule> {
+  if (_recsModule) return _recsModule;
+  const spec = "../../../packages/api/src/services/recommendations.js";
+  _recsModule = (await import(spec)) as RecsModule;
+  return _recsModule;
+}
+
+interface PubSubLib {
+  getPubSubClient: () => unknown;
+}
+let _pubsubLib: PubSubLib | null = null;
+async function loadPubSubLib(): Promise<PubSubLib> {
+  if (_pubsubLib) return _pubsubLib;
+  const spec = "../../../packages/api/src/lib/pubsub-client.js";
+  _pubsubLib = (await import(spec)) as PubSubLib;
+  return _pubsubLib;
+}
+
+const recommendationsRouter = router({
+  list: adminProcedure
     .input(
       z.object({
-        priority: z.enum(["low", "medium", "high", "critical"]).optional(),
         status: z.enum(["open", "claimed", "resolved", "dismissed"]).optional(),
-        page: z.number().min(1).default(1),
+        severity: z.enum(["low", "medium", "high", "critical"]).optional(),
         limit: z.number().min(1).max(100).default(20),
-      })
+        offset: z.number().min(0).default(0),
+      }),
     )
     .query(async ({ ctx, input }) => {
-      const skip = (input.page - 1) * input.limit;
+      const { listRecommendations } = await loadRecsModule();
+      return listRecommendations(ctx.prisma, ctx.tenantId, input);
+    }),
 
-      const where = {
-        tenant_id: ctx.tenantId,
-        ...(input.priority && { priority: input.priority }),
-        ...(input.status && { status: input.status }),
-      };
+  getDetail: adminProcedure
+    .input(z.object({ id: z.string().uuid() }))
+    .query(async ({ ctx, input }) => {
+      const { getRecommendationDetail } = await loadRecsModule();
+      return getRecommendationDetail(ctx.prisma, ctx.tenantId, input.id);
+    }),
 
-      const [escalations, total] = await Promise.all([
-        ctx.prisma.escalation.findMany({
-          where,
-          skip,
-          take: input.limit,
-          orderBy: { created_at: "desc" },
-        }),
-        ctx.prisma.escalation.count({ where }),
-      ]);
-
-      return {
-        escalations,
-        pagination: {
-          page: input.page,
-          limit: input.limit,
-          total,
-          pages: Math.ceil(total / input.limit),
+  accept: adminProcedure
+    .input(
+      z.object({
+        id: z.string().uuid(),
+        modifiedAction: SuggestedActionSchema.optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const { acceptRecommendation } = await loadRecsModule();
+      const { getPubSubClient } = await loadPubSubLib();
+      return acceptRecommendation(
+        {
+          prisma: ctx.prisma,
+          tenantId: ctx.tenantId,
+          actor: ctx.firebaseUser?.uid ?? "unknown",
+          pubsubClient: getPubSubClient(),
         },
-      };
+        input,
+      );
     }),
 
-  claim: protectedProcedure
-    .input(z.object({ id: z.string().uuid() }))
+  modify: adminProcedure
+    .input(
+      z.object({
+        id: z.string().uuid(),
+        suggestedAction: z.string().min(1).max(2000),
+      }),
+    )
     .mutation(async ({ ctx, input }) => {
-      const escalation = await ctx.prisma.escalation.findFirst({
-        where: { id: input.id, tenant_id: ctx.tenantId },
-      });
-
-      if (!escalation) {
-        throw new Error("Escalation not found");
-      }
-
-      return ctx.prisma.escalation.update({
-        where: { id: input.id },
-        data: { status: "claimed", claimed_at: new Date() },
-      });
+      const { modifyRecommendation } = await loadRecsModule();
+      return modifyRecommendation(
+        {
+          prisma: ctx.prisma,
+          tenantId: ctx.tenantId,
+          actor: ctx.firebaseUser?.uid ?? "unknown",
+        },
+        input,
+      );
     }),
 
-  resolve: protectedProcedure
-    .input(z.object({ id: z.string().uuid() }))
+  dismiss: adminProcedure
+    .input(
+      z.object({
+        id: z.string().uuid(),
+        reason: z.string().min(1).max(500),
+      }),
+    )
     .mutation(async ({ ctx, input }) => {
-      const escalation = await ctx.prisma.escalation.findFirst({
-        where: { id: input.id, tenant_id: ctx.tenantId },
-      });
-
-      if (!escalation) {
-        throw new Error("Escalation not found");
-      }
-
-      return ctx.prisma.escalation.update({
-        where: { id: input.id },
-        data: { status: "resolved", resolved_at: new Date() },
-      });
-    }),
-
-  dismiss: protectedProcedure
-    .input(z.object({ id: z.string().uuid() }))
-    .mutation(async ({ ctx, input }) => {
-      const escalation = await ctx.prisma.escalation.findFirst({
-        where: { id: input.id, tenant_id: ctx.tenantId },
-      });
-
-      if (!escalation) {
-        throw new Error("Escalation not found");
-      }
-
-      return ctx.prisma.escalation.update({
-        where: { id: input.id },
-        data: { status: "dismissed", dismissed_at: new Date() },
-      });
+      const { dismissRecommendation } = await loadRecsModule();
+      return dismissRecommendation(
+        {
+          prisma: ctx.prisma,
+          tenantId: ctx.tenantId,
+          actor: ctx.firebaseUser?.uid ?? "unknown",
+        },
+        input,
+      );
     }),
 });
 
@@ -3604,7 +3669,7 @@ export const appRouter = router({
   pipelineMicroObjectives: pipelineMicroObjectivesRouter,
   decisions: decisionsRouter,
   actions: actionsRouter,
-  escalations: escalationsRouter,
+  recommendations: recommendationsRouter,
   auditLog: auditLogRouter,
   brain: brainRouter,
   objectives: objectivesRouter,

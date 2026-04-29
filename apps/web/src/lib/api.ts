@@ -655,3 +655,107 @@ export const knowledgeIngestApi = {
   deleteSource: (sourceId: string) =>
     trpcMutation<{ sourceId: string }>('knowledgeIngest.deleteSource', { sourceId }),
 };
+
+/* ── Recommendations API (KAN-754) ──────────────────────────────────
+ * Backend: apps/api/src/router.ts → recommendationsRouter, delegates to
+ * packages/api/src/services/recommendations.ts.
+ *
+ * URL/API name asymmetry intentional: URL stays /escalations (existing IA);
+ * tRPC namespace is `recommendations` (the abstraction layer per ticket
+ * framing). KAN-756 reconciles if we ever rename the URL.
+ *
+ * Post-KAN-750 every Escalation row carries decisionId (when scope had a
+ * Decision) + context JSONB. UI must handle decisionId=null gracefully —
+ * guardrail-block + lead-assignment paths write null.
+ */
+
+export interface RecommendationListItem {
+  id: string;
+  contactId: string;
+  contact: {
+    id: string;
+    firstName: string | null;
+    lastName: string | null;
+    email: string | null;
+  };
+  decisionId: string | null;
+  severity: string;
+  status: string;
+  triggerType: string;
+  triggerReason: string | null;
+  aiSuggestion: string | null;
+  createdAt: string;
+  updatedAt: string;
+  resolvedBy: string | null;
+  resolvedAt: string | null;
+}
+
+export interface RecommendationDetail {
+  id: string;
+  contactId: string;
+  contact: {
+    id: string;
+    firstName: string | null;
+    lastName: string | null;
+    email: string | null;
+    phone: string | null;
+    lifecycleStage: string;
+  };
+  decisionId: string | null;
+  // null when decisionId is null (guardrail-block / lead-assignment paths)
+  decision: {
+    id: string;
+    strategySelected: string;
+    actionType: string;
+    confidence: number;
+    reasoning: string | null;
+    metadata: Record<string, unknown>;
+    createdAt: string;
+  } | null;
+  severity: string;
+  status: string;
+  triggerType: string;
+  triggerReason: string | null;
+  aiSuggestion: string | null;
+  context: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+  resolvedBy: string | null;
+  resolvedAt: string | null;
+}
+
+export interface SuggestedAction {
+  actionType: string;
+  channel: string | null;
+  payload: Record<string, unknown>;
+}
+
+export const recommendationsApi = {
+  list: (input?: {
+    status?: 'open' | 'claimed' | 'resolved' | 'dismissed';
+    severity?: 'low' | 'medium' | 'high' | 'critical';
+    limit?: number;
+    offset?: number;
+  }) =>
+    trpcQuery<{ items: RecommendationListItem[]; total: number; limit: number; offset: number }>(
+      'recommendations.list',
+      input ?? {},
+    ),
+  getDetail: (id: string) =>
+    trpcQuery<RecommendationDetail>('recommendations.getDetail', { id }),
+  accept: (id: string, modifiedAction?: SuggestedAction) =>
+    trpcMutation<{ id: string; status: string; publishedEventId: string | null }>(
+      'recommendations.accept',
+      modifiedAction ? { id, modifiedAction } : { id },
+    ),
+  modify: (id: string, suggestedAction: string) =>
+    trpcMutation<{ id: string; status: string; aiSuggestion: string | null }>(
+      'recommendations.modify',
+      { id, suggestedAction },
+    ),
+  dismiss: (id: string, reason: string) =>
+    trpcMutation<{ id: string; status: string }>(
+      'recommendations.dismiss',
+      { id, reason },
+    ),
+};
