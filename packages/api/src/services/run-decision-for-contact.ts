@@ -473,15 +473,23 @@ async function runAgentic(
 
   if (outcome === 'ESCALATED') {
     try {
-      await (prisma as unknown as { escalation: { create: (args: unknown) => Promise<unknown> } }).escalation.create({
+      await prisma.escalation.create({
         data: {
           tenantId,
           contactId,
+          decisionId: decision.id,
           triggerType: 'AGENTIC_GATE_DECISION',
           triggerReason: reasoning,
           severity: agenticPayload.confidence < 0.4 ? 'high' : 'medium',
           aiSuggestion: `${actionType}${channel ? ` via ${channel}` : ''}`,
           status: 'open',
+          context: {
+            confidence: agenticPayload.confidence,
+            strategy: agenticPayload.strategy,
+            action: actionType,
+            channel,
+            mode: 'agentic_live',
+          } as unknown as Prisma.InputJsonValue,
         },
       });
     } catch (err) {
@@ -833,7 +841,11 @@ async function runFreeform(
   ].join(' · ');
 
   // 7. Persist Decision row + (optionally) an Escalation row.
-  const decision = await prisma.$transaction(async (tx: any) => {
+  // KAN-750: tx is typed as Prisma.TransactionClient (was `tx: any` — that
+  // cast hid the schema-mismatch bug at line ~857 on every ESCALATED outcome:
+  // decisionId/reason/priority/context fields didn't exist, Prisma rejected
+  // the create at runtime, try/catch swallowed the error, the row was lost.
+  const decision = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     const row = await tx.decision.create({
       data: {
         tenantId,
@@ -848,7 +860,7 @@ async function runFreeform(
           threshold: confidenceThreshold,
           outcome,
           gaps: Array.isArray(gaps) ? gaps.slice(0, 10) : gaps,
-        } as unknown as Record<string, unknown>,
+        } as unknown as Prisma.InputJsonValue,
       },
     });
 
@@ -859,19 +871,25 @@ async function runFreeform(
             tenantId,
             contactId,
             decisionId: row.id,
-            reason: 'CONFIDENCE_BELOW_THRESHOLD',
-            priority: confidence < 0.4 ? 'HIGH' : 'MEDIUM',
-            status: 'PENDING',
+            triggerType: 'CONFIDENCE_BELOW_THRESHOLD',
+            triggerReason: reasoning,
+            severity: confidence < 0.4 ? 'high' : 'medium',
+            aiSuggestion: actionType,
+            status: 'open',
             context: {
               confidence,
               threshold: confidenceThreshold,
               strategy,
               action,
-            } as unknown as Record<string, unknown>,
+              mode: 'rules_freeform',
+            } as unknown as Prisma.InputJsonValue,
           },
         });
       } catch (err) {
-        console.error('[runDecisionForContact] escalation.create failed (schema mismatch?):', err);
+        // Defensive: canonical shape should never throw post-KAN-750. If this
+        // ever fires, the audit-trail-drift invariant test will catch it
+        // before prod (apps/api/src/__tests__/escalation-decision-invariant.test.ts).
+        console.error('[runDecisionForContact] escalation.create failed:', err);
       }
     }
 

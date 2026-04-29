@@ -502,7 +502,7 @@ async function createAssignmentEscalation(
   contactId: string,
   aiContext: { aiConfidence: number | null; confidenceThreshold: number; aiReasoning: string },
 ): Promise<string> {
-  const e: any = await prisma.escalation.create({
+  const e = await prisma.escalation.create({
     data: {
       tenantId,
       contactId,
@@ -511,6 +511,14 @@ async function createAssignmentEscalation(
       triggerReason: `AI confidence ${aiContext.aiConfidence ?? 'n/a'} below threshold ${aiContext.confidenceThreshold}. Manual triage required.`,
       aiSuggestion: aiContext.aiReasoning,
       status: 'open',
+      // KAN-750: decisionId left null — assignment escalations fire before any
+      // Decision row exists for this contact. context preserves the AI-confidence
+      // signal that drove the escalation for downstream review surfaces.
+      context: {
+        aiConfidence: aiContext.aiConfidence,
+        confidenceThreshold: aiContext.confidenceThreshold,
+        aiReasoning: aiContext.aiReasoning,
+      } as unknown as object,
     },
   });
   return e.id;

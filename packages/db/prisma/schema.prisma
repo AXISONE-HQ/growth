@@ -20,75 +20,76 @@ datasource db {
 // ─────────────────────────────────────────────
 
 model Tenant {
-  id                  String   @id @default(uuid())
-  name                String
-  slug                String   @unique
-  planTier            String   @default("free") @map("plan_tier")
-  blueprintId         String?  @map("blueprint_id")
-  aiPermissions       Json     @default("{}") @map("ai_permissions")
-  confidenceThreshold Int      @default(70) @map("confidence_threshold")
+  id                              String                @id @default(uuid())
+  name                            String
+  slug                            String                @unique
+  planTier                        String                @default("free") @map("plan_tier")
+  blueprintId                     String?               @map("blueprint_id")
+  aiPermissions                   Json                  @default("{}") @map("ai_permissions")
+  confidenceThreshold             Int                   @default(70) @map("confidence_threshold")
   // KAN-450 — AI Configuration: typed columns for the Settings → AI tab.
   // confidenceThreshold + aiPermissions stay as-is (Decision Engine consumers).
-  autoApproveEnabled  Boolean  @default(false) @map("auto_approve_enabled")
-  dailyActionLimit    Int      @default(100)   @map("daily_action_limit")
+  autoApproveEnabled              Boolean               @default(false) @map("auto_approve_enabled")
+  dailyActionLimit                Int                   @default(100) @map("daily_action_limit")
   // KAN-705: posture for the AI lead-assignment fallback when confidence is
   // below threshold AND no tenant rule fires. Default conservative.
-  belowThresholdPosture       LeadAssignmentPosture @default(stay_unassigned) @map("below_threshold_posture")
+  belowThresholdPosture           LeadAssignmentPosture @default(stay_unassigned) @map("below_threshold_posture")
   // Nullable Pipeline ID — only consulted when belowThresholdPosture =
   // default_pipeline. No FK constraint at the Prisma level (avoids the
   // Tenant↔Pipeline circular ref); validated at app level.
-  defaultAssignmentPipelineId String?               @map("default_assignment_pipeline_id")
+  defaultAssignmentPipelineId     String?               @map("default_assignment_pipeline_id")
   // KAN-705: confidence threshold (0..1) for AI assignment fallback. Default 0.5.
-  aiAssignmentConfidenceThreshold Float            @default(0.5) @map("ai_assignment_confidence_threshold")
+  aiAssignmentConfidenceThreshold Float                 @default(0.5) @map("ai_assignment_confidence_threshold")
   // KAN-738: agentic loop seam (Sprint 3 / S3.1). When false (default),
   // agentic runs in shadow alongside rules-based — only rules-based emits
   // action.decided. When true, agentic emits action.decided and rules-based
   // is skipped. UI toggle ships in Sprint 4.
-  agenticModeEnabled  Boolean  @default(false) @map("agentic_mode_enabled")
+  agenticModeEnabled              Boolean               @default(false) @map("agentic_mode_enabled")
   // KAN-741: Lead Inbox slug — first 8 chars of tenant UUID by default,
   // regenerable via admin tRPC mutation. Forms the inbox address as
   // <slug>@leads.<LEAD_INBOX_DOMAIN>. Nullable for gradual rollout (legacy
   // tenants stay null until first regenerateSlug call). Unique to prevent
   // collisions across tenants.
-  inboxSlug           String?  @unique @map("inbox_slug")
+  inboxSlug                       String?               @unique @map("inbox_slug")
   // KAN-741: per-tenant DKIM strict-mode override. Default true (strict —
   // reject DKIM=fail AND DKIM=none). Tenant can flip to false via UI for
   // accommodating contacts on legacy mail servers without DKIM signing.
-  inboxDkimStrict     Boolean  @default(true) @map("inbox_dkim_strict")
-  strategyPermissions Json     @default("{}")  @map("strategy_permissions")
-  guardrailSettings   Json     @default("{}")  @map("guardrail_settings")
-  settings            Json     @default("{}")
-  createdAt           DateTime @default(now()) @map("created_at")
-  updatedAt           DateTime @updatedAt @map("updated_at")
+  inboxDkimStrict                 Boolean               @default(true) @map("inbox_dkim_strict")
+  strategyPermissions             Json                  @default("{}") @map("strategy_permissions")
+  guardrailSettings               Json                  @default("{}") @map("guardrail_settings")
+  settings                        Json                  @default("{}")
+  createdAt                       DateTime              @default(now()) @map("created_at")
+  updatedAt                       DateTime              @updatedAt @map("updated_at")
 
   // Relations
-  blueprint       Blueprint?       @relation(fields: [blueprintId], references: [id])
-  users           User[]
-  contacts        Contact[]
-  brainSnapshots  BrainSnapshot[]
-  objectives      Objective[]
-  decisions       Decision[]
-  actions         Action[]
-  outcomes        Outcome[]
-  auditLogs       AuditLog[]
-  strategyWeights StrategyWeight[]
-  pipelines       Pipeline[]
-  microObjectives MicroObjective[]
-  guardrails      Guardrail[]
-  assignmentRules AssignmentRule[]
-  customers       Customer[]
-  conversations   Conversation[]
-  escalations     Escalation[]
-  knowledgeBase    KnowledgeBase[]
-  knowledgeSources KnowledgeSource[]
-  aiAgentConfigs   AiAgentConfig[]
-  contactStates    ContactState[]
+  blueprint              Blueprint?              @relation(fields: [blueprintId], references: [id])
+  users                  User[]
+  contacts               Contact[]
+  brainSnapshots         BrainSnapshot[]
+  objectives             Objective[]
+  decisions              Decision[]
+  actions                Action[]
+  outcomes               Outcome[]
+  auditLogs              AuditLog[]
+  strategyWeights        StrategyWeight[]
+  pipelines              Pipeline[]
+  microObjectives        MicroObjective[]
+  guardrails             Guardrail[]
+  assignmentRules        AssignmentRule[]
+  customers              Customer[]
+  conversations          Conversation[]
+  escalations            Escalation[]
+  knowledgeBase          KnowledgeBase[]
+  knowledgeSources       KnowledgeSource[]
+  aiAgentConfigs         AiAgentConfig[]
+  contactStates          ContactState[]
   agenticShadowDecisions AgenticShadowDecision[]
-  leadInboxEvents  LeadInboxEvent[]
-  apiKeys          TenantApiKey[]
+  leadInboxEvents        LeadInboxEvent[]
+  apiKeys                TenantApiKey[]
 
   //   tenantSettings  TenantSettings[]  // commented out for smoke build (model missing on main)
   channelConnections ChannelConnection[]
+
   @@map("tenants")
 }
 
@@ -153,17 +154,17 @@ model BrainSnapshot {
 // ─────────────────────────────────────────────
 
 model Contact {
-  id               String    @id @default(uuid())
-  tenantId         String    @map("tenant_id")
-  email            String?
-  phone            String?
-  firstName        String?   @map("first_name")
-  lastName         String?   @map("last_name")
-  externalIds      Json      @default("{}") @map("external_ids")
-  dataQualityScore Float     @default(0) @map("data_quality_score")
-  segment          String?
-  lifecycleStage   String    @default("new") @map("lifecycle_stage")
-  source           String?
+  id                     String    @id @default(uuid())
+  tenantId               String    @map("tenant_id")
+  email                  String?
+  phone                  String?
+  firstName              String?   @map("first_name")
+  lastName               String?   @map("last_name")
+  externalIds            Json      @default("{}") @map("external_ids")
+  dataQualityScore       Float     @default(0) @map("data_quality_score")
+  segment                String?
+  lifecycleStage         String    @default("new") @map("lifecycle_stage")
+  source                 String?
   // KAN-700: pipeline-aware lead state. Lead == Contact (product vocab vs
   // schema vocab — see KAN-700 closure comment). Both pipeline + stage are
   // nullable for V1 (existing contacts pre-assignment). microObjectiveProgress
@@ -175,17 +176,17 @@ model Contact {
   createdAt              DateTime  @default(now()) @map("created_at")
   updatedAt              DateTime  @updatedAt @map("updated_at")
 
-  tenant            Tenant             @relation(fields: [tenantId], references: [id])
-  contactStates     ContactState[]
-  decisions         Decision[]
-  outcomes          Outcome[]
-  customer          Customer?
-  conversations     Conversation[]
-  escalations       Escalation[]
-  actions           Action[]
-  currentPipeline   Pipeline?          @relation("ContactCurrentPipeline", fields: [currentPipelineId], references: [id], onDelete: SetNull)
-  currentStage      Stage?             @relation("ContactCurrentStage", fields: [currentStageId], references: [id], onDelete: SetNull)
-  stageHistory      LeadStageHistory[]
+  tenant          Tenant             @relation(fields: [tenantId], references: [id])
+  contactStates   ContactState[]
+  decisions       Decision[]
+  outcomes        Outcome[]
+  customer        Customer?
+  conversations   Conversation[]
+  escalations     Escalation[]
+  actions         Action[]
+  currentPipeline Pipeline?          @relation("ContactCurrentPipeline", fields: [currentPipelineId], references: [id], onDelete: SetNull)
+  currentStage    Stage?             @relation("ContactCurrentStage", fields: [currentStageId], references: [id], onDelete: SetNull)
+  stageHistory    LeadStageHistory[]
 
   @@index([tenantId])
   @@index([tenantId, email])
@@ -260,6 +261,7 @@ model Decision {
   contact      Contact            @relation(fields: [contactId], references: [id])
   actions      Action[]
   stageHistory LeadStageHistory[]
+  escalations  Escalation[]
 
   @@index([tenantId])
   @@index([tenantId, contactId])
@@ -280,18 +282,18 @@ model Decision {
 // Plaintext is shown ONCE at creation time — server NEVER returns it after,
 // not even via admin endpoints.
 model TenantApiKey {
-  id          String    @id @default(uuid())
-  tenantId    String    @map("tenant_id")
-  name        String
+  id         String    @id @default(uuid())
+  tenantId   String    @map("tenant_id")
+  name       String
   // First 12 hex chars of the entropy portion (after stripping `axone_live_`).
   // 48 bits → genuinely O(1) indexed lookup per request.
-  keyPrefix   String    @map("key_prefix")
+  keyPrefix  String    @map("key_prefix")
   // bcrypt of the remaining 20 hex chars.
-  keyHash     String    @map("key_hash")
-  createdAt   DateTime  @default(now()) @map("created_at")
-  lastUsedAt  DateTime? @map("last_used_at")
-  revokedAt   DateTime? @map("revoked_at")
-  revokedBy   String?   @map("revoked_by")
+  keyHash    String    @map("key_hash")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  lastUsedAt DateTime? @map("last_used_at")
+  revokedAt  DateTime? @map("revoked_at")
+  revokedBy  String?   @map("revoked_by")
 
   tenant Tenant @relation(fields: [tenantId], references: [id])
 
@@ -306,21 +308,21 @@ model TenantApiKey {
 // is the dedup key; Redis dedup gives us short-window dedup, this gives us
 // permanent dedup persistent across container restarts.
 model LeadInboxEvent {
-  id              String    @id @default(uuid())
-  tenantId        String    @map("tenant_id")
-  inboxAddress    String    @map("inbox_address")
-  resendEmailId   String?   @unique @map("resend_email_id")
-  fromAddress     String    @map("from_address")
-  subject         String?
-  bodyPreview     String?   @map("body_preview")
-  attachmentCount Int       @default(0) @map("attachment_count")
-  spfPass         Boolean   @map("spf_pass")
-  dkimPass        Boolean   @map("dkim_pass")
+  id               String   @id @default(uuid())
+  tenantId         String   @map("tenant_id")
+  inboxAddress     String   @map("inbox_address")
+  resendEmailId    String?  @unique @map("resend_email_id")
+  fromAddress      String   @map("from_address")
+  subject          String?
+  bodyPreview      String?  @map("body_preview")
+  attachmentCount  Int      @default(0) @map("attachment_count")
+  spfPass          Boolean  @map("spf_pass")
+  dkimPass         Boolean  @map("dkim_pass")
   // 'received' | 'rejected_spam' | 'rejected_unverified' | 'accepted'
-  status          String
-  rejectionReason String?   @map("rejection_reason")
+  status           String
+  rejectionReason  String?  @map("rejection_reason")
   createdContactId String?  @map("created_contact_id")
-  createdAt       DateTime  @default(now()) @map("created_at")
+  createdAt        DateTime @default(now()) @map("created_at")
 
   tenant Tenant @relation(fields: [tenantId], references: [id])
 
@@ -334,21 +336,21 @@ model LeadInboxEvent {
 // = true) does NOT write to this table — only the agentic Decision row is
 // persisted via the standard Decision model. Shadow mode is the default.
 model AgenticShadowDecision {
-  id                      String    @id @default(uuid())
-  tenantId                String    @map("tenant_id")
-  contactId               String    @map("contact_id")
+  id                     String   @id @default(uuid())
+  tenantId               String   @map("tenant_id")
+  contactId              String   @map("contact_id")
   // FK to Decision row from the rules-based path (always set in shadow mode
   // because rules-based always runs first and emits action.decided).
-  decisionId              String?   @map("decision_id")
-  agenticDecisionPayload  Json      @map("agentic_decision_payload")
-  rulesDecisionPayload    Json      @map("rules_decision_payload")
+  decisionId             String?  @map("decision_id")
+  agenticDecisionPayload Json     @map("agentic_decision_payload")
+  rulesDecisionPayload   Json     @map("rules_decision_payload")
   // Bounded set — see DivergenceFlag in @growth/shared/decision-payload.ts.
-  divergenceFlags         String[]  @map("divergence_flags")
+  divergenceFlags        String[] @map("divergence_flags")
   // Set when divergence_flags includes 'agentic_error'. Indexable for
   // "all failed agentic runs in window X" queries (KAN-745 follow-up will
   // build observability on top of this).
-  agenticError            String?   @map("agentic_error")
-  createdAt               DateTime  @default(now()) @map("created_at")
+  agenticError           String?  @map("agentic_error")
+  createdAt              DateTime @default(now()) @map("created_at")
 
   tenant Tenant @relation(fields: [tenantId], references: [id])
 
@@ -419,8 +421,8 @@ model ActionOutcome {
   tenantId   String   @map("tenant_id")
   decisionId String   @map("decision_id")
   contactId  String   @map("contact_id")
-  action     String   // 'email_send' | 'sms_send' | 'meta_send'
-  status     String   // 'sent' | 'delivered' | 'failed' | 'suppressed'
+  action     String // 'email_send' | 'sms_send' | 'meta_send'
+  status     String // 'sent' | 'delivered' | 'failed' | 'suppressed'
   occurredAt DateTime @map("occurred_at")
   metadata   Json?
   createdAt  DateTime @default(now()) @map("created_at")
@@ -538,30 +540,30 @@ enum KnowledgeCategory {
 }
 
 model Pipeline {
-  id                   String        @id @default(uuid())
-  tenantId             String        @map("tenant_id")
-  name                 String
-  description          String?
-  isActive             Boolean       @default(true) @map("is_active")
-  order                Int           @default(0)
-  objectiveType        ObjectiveType @map("objective_type")
-  objectiveDescription String?       @map("objective_description")
+  id                       String        @id @default(uuid())
+  tenantId                 String        @map("tenant_id")
+  name                     String
+  description              String?
+  isActive                 Boolean       @default(true) @map("is_active")
+  order                    Int           @default(0)
+  objectiveType            ObjectiveType @map("objective_type")
+  objectiveDescription     String?       @map("objective_description")
   // KAN-704: pipeline-tier auto-approve defaults. Resolution order is
   // Stage.autoApproveMatrix → this column → Tenant.autoApproveEnabled
   // (kill-switch) → platform default (auto-approve-defaults.ts). NULL means
   // "skip this tier" (same posture as Stage.autoApproveMatrix when empty).
-  defaultAutoApproveMatrix Json?      @map("default_auto_approve_matrix")
-  createdAt            DateTime      @default(now()) @map("created_at")
-  updatedAt            DateTime      @updatedAt @map("updated_at")
+  defaultAutoApproveMatrix Json?         @map("default_auto_approve_matrix")
+  createdAt                DateTime      @default(now()) @map("created_at")
+  updatedAt                DateTime      @updatedAt @map("updated_at")
 
-  tenant            Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  stages            Stage[]
-  microObjectives   PipelineMicroObjective[]
-  targets           Target[]
-  guardrails        Guardrail[]
-  knowledgeFilters  KnowledgeFilter[]
-  assignmentRules   AssignmentRule[]
-  contacts          Contact[]                @relation("ContactCurrentPipeline")
+  tenant           Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  stages           Stage[]
+  microObjectives  PipelineMicroObjective[]
+  targets          Target[]
+  guardrails       Guardrail[]
+  knowledgeFilters KnowledgeFilter[]
+  assignmentRules  AssignmentRule[]
+  contacts         Contact[]                @relation("ContactCurrentPipeline")
 
   @@index([tenantId])
   @@index([tenantId, isActive])
@@ -582,10 +584,10 @@ model Stage {
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")
 
-  pipeline           Pipeline           @relation(fields: [pipelineId], references: [id], onDelete: Cascade)
-  contacts           Contact[]          @relation("ContactCurrentStage")
-  fromStageHistory   LeadStageHistory[] @relation("StageFromHistory")
-  toStageHistory     LeadStageHistory[] @relation("StageToHistory")
+  pipeline         Pipeline           @relation(fields: [pipelineId], references: [id], onDelete: Cascade)
+  contacts         Contact[]          @relation("ContactCurrentStage")
+  fromStageHistory LeadStageHistory[] @relation("StageFromHistory")
+  toStageHistory   LeadStageHistory[] @relation("StageToHistory")
 
   @@index([pipelineId])
   @@index([pipelineId, order])
@@ -604,7 +606,7 @@ model MicroObjective {
   createdAt          DateTime @default(now()) @map("created_at")
   updatedAt          DateTime @updatedAt @map("updated_at")
 
-  tenant   Tenant?                  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenant    Tenant?                  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   pipelines PipelineMicroObjective[]
 
   @@index([tenantId])
@@ -717,13 +719,13 @@ enum LeadAssignmentPosture {
 }
 
 model LeadStageHistory {
-  id            String   @id @default(uuid())
+  id             String   @id @default(uuid())
   // leadId == contactId per KAN-700 closure note (Lead == Contact in this schema).
-  leadId        String   @map("lead_id")
-  fromStageId   String?  @map("from_stage_id")
-  toStageId     String   @map("to_stage_id")
-  reason        String?
-  decisionId    String?  @map("decision_id")
+  leadId         String   @map("lead_id")
+  fromStageId    String?  @map("from_stage_id")
+  toStageId      String   @map("to_stage_id")
+  reason         String?
+  decisionId     String?  @map("decision_id")
   transitionedAt DateTime @default(now()) @map("transitioned_at")
 
   contact   Contact   @relation(fields: [leadId], references: [id], onDelete: Cascade)
@@ -782,27 +784,36 @@ model Conversation {
   @@map("conversations")
 }
 
+// KAN-750 — decisionId + context columns reconcile the runFreeform/runAgentic
+// shape divergence (KAN-740 audit). decisionId nullable — guardrail-block +
+// lead-assignment paths don't have a Decision row in scope. ON DELETE SET NULL
+// preserves Escalation history if a future Decision purge job ever runs;
+// today Decisions are append-only so the behavior is academic but defensive.
 model Escalation {
   id            String    @id @default(uuid())
   tenantId      String    @map("tenant_id")
   contactId     String    @map("contact_id")
+  decisionId    String?   @map("decision_id")
   severity      String    @default("medium")
   triggerType   String    @map("trigger_type")
   triggerReason String?   @map("trigger_reason")
   aiSuggestion  String?   @map("ai_suggestion")
   status        String    @default("open")
+  context       Json?
   resolvedBy    String?   @map("resolved_by")
   resolvedAt    DateTime? @map("resolved_at")
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
 
-  tenant   Tenant  @relation(fields: [tenantId], references: [id])
-  contact  Contact @relation(fields: [contactId], references: [id])
-  resolver User?   @relation("ResolvedByUser", fields: [resolvedBy], references: [id])
+  tenant   Tenant    @relation(fields: [tenantId], references: [id])
+  contact  Contact   @relation(fields: [contactId], references: [id])
+  decision Decision? @relation(fields: [decisionId], references: [id], onDelete: SetNull)
+  resolver User?     @relation("ResolvedByUser", fields: [resolvedBy], references: [id])
 
   @@index([tenantId])
   @@index([tenantId, status])
   @@index([tenantId, severity])
+  @@index([decisionId])
   @@map("escalations")
 }
 
@@ -821,8 +832,8 @@ model KnowledgeBase {
 
   tenant Tenant @relation(fields: [tenantId], references: [id])
 
-  @@index([tenantId])
   @@unique([tenantId, category])
+  @@index([tenantId])
   @@map("knowledge_base")
 }
 
@@ -861,10 +872,10 @@ model ChannelConnection {
   id                String           @id @default(uuid())
   tenantId          String           @map("tenant_id")
   channelType       ChannelType      @map("channel_type")
-  provider          String           // "twilio" | "resend" | "meta" | ...
+  provider          String // "twilio" | "resend" | "meta" | ...
   providerAccountId String           @map("provider_account_id") // subaccount SID / subuser / page ID
   status            ConnectionStatus @default(PENDING)
-  label             String?          // human-readable display label (e.g. "Twilio SMS", "Messenger - <page>")
+  label             String? // human-readable display label (e.g. "Twilio SMS", "Messenger - <page>")
   credentialsRef    String           @map("credentials_ref") // Secret Manager path
   metadata          Json             @default("{}")
   complianceStatus  Json?            @map("compliance_status") // 10DLC, domain auth, app review
@@ -874,7 +885,7 @@ model ChannelConnection {
   createdAt         DateTime         @default(now()) @map("created_at")
   updatedAt         DateTime         @updatedAt @map("updated_at")
 
-  tenant            Tenant           @relation(fields: [tenantId], references: [id])
+  tenant Tenant @relation(fields: [tenantId], references: [id])
 
   @@unique([tenantId, channelType, providerAccountId])
   @@index([tenantId])
@@ -910,7 +921,7 @@ model EmailSuppression {
   id        String   @id @default(uuid())
   tenantId  String   @map("tenant_id")
   email     String
-  reason    String   // 'bounce' | 'spam' | 'unsubscribed' | 'manual'
+  reason    String // 'bounce' | 'spam' | 'unsubscribed' | 'manual'
   createdAt DateTime @default(now()) @map("created_at")
 
   @@unique([tenantId, email])
@@ -926,7 +937,7 @@ model NotificationPreference {
   id        String   @id @default(uuid())
   tenantId  String   @map("tenant_id")
   userId    String   @map("user_id") // Firebase UID; 'unknown' fallback for unauthenticated dev contexts
-  type      String   // 'escalation' | 'daily_digest' | 'weekly_report' | 'brain_update'
+  type      String // 'escalation' | 'daily_digest' | 'weekly_report' | 'brain_update'
   enabled   Boolean
   channel   String   @default("email")
   createdAt DateTime @default(now()) @map("created_at")
@@ -1014,22 +1025,22 @@ model KnowledgeSource {
 }
 
 model KnowledgeChunk {
-  id              String   @id @default(uuid())
-  sourceId        String   @map("source_id")
+  id               String                      @id @default(uuid())
+  sourceId         String                      @map("source_id")
   /// 0-based index of this chunk within the source.
-  chunkIndex      Int      @map("chunk_index")
+  chunkIndex       Int                         @map("chunk_index")
   /// Total chunks the source was split into. Stored on every chunk for
   /// quick "X of N" UI rendering without a count() round-trip.
-  totalChunks     Int      @map("total_chunks")
+  totalChunks      Int                         @map("total_chunks")
   /// Plain-text chunk content fed to retrieval ranking + LLM context.
-  content         String   @db.Text
+  content          String                      @db.Text
   /// pgvector(1536) — matches OpenAI text-embedding-3-small. Hardcoded
   /// dimension forces deliberation if the model ever changes.
-  embedding       Unsupported("vector(1536)")
-  embeddingModel  String   @map("embedding_model")
-  embeddingVersion String  @map("embedding_version")
-  tokenCount      Int      @map("token_count")
-  createdAt       DateTime @default(now()) @map("created_at")
+  embedding        Unsupported("vector(1536)")
+  embeddingModel   String                      @map("embedding_model")
+  embeddingVersion String                      @map("embedding_version")
+  tokenCount       Int                         @map("token_count")
+  createdAt        DateTime                    @default(now()) @map("created_at")
 
   source KnowledgeSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
 
@@ -1038,17 +1049,17 @@ model KnowledgeChunk {
 }
 
 model KnowledgeIngestion {
-  id              String                @id @default(uuid())
-  knowledgeSourceId String              @map("knowledge_source_id")
-  status          KnowledgeSourceStatus
-  startedAt       DateTime?             @map("started_at")
-  completedAt    DateTime?              @map("completed_at")
+  id                String                @id @default(uuid())
+  knowledgeSourceId String                @map("knowledge_source_id")
+  status            KnowledgeSourceStatus
+  startedAt         DateTime?             @map("started_at")
+  completedAt       DateTime?             @map("completed_at")
   /// For type=url crawls — URLs the crawler discovered. 0 for non-crawl jobs.
-  urlsDiscovered  Int                   @default(0) @map("urls_discovered")
-  urlsIndexed     Int                   @default(0) @map("urls_indexed")
-  errorCount      Int                   @default(0) @map("error_count")
-  errors          Json?
-  createdAt       DateTime              @default(now()) @map("created_at")
+  urlsDiscovered    Int                   @default(0) @map("urls_discovered")
+  urlsIndexed       Int                   @default(0) @map("urls_indexed")
+  errorCount        Int                   @default(0) @map("error_count")
+  errors            Json?
+  createdAt         DateTime              @default(now()) @map("created_at")
 
   source KnowledgeSource @relation(fields: [knowledgeSourceId], references: [id], onDelete: Cascade)
 
