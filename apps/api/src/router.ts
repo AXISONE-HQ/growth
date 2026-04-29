@@ -3393,6 +3393,87 @@ const knowledgeIngestRouter = router({
 });
 
 // ============================================================================
+// KAN-742 — Sprint 3 / S3.8 Lead API tRPC surface.
+//
+// Tenant API key management. Plaintext-once contract:
+//   - create returns plaintext ONCE (caller MUST display the modal
+//     acknowledgment gate before allowing dismissal)
+//   - list/revoke NEVER return plaintext, only metadata (name, prefix,
+//     lastUsedAt, revokedAt)
+//   - revoke is IMMEDIATE — auth middleware filters revokedAt: null on
+//     every request; no grace period, no caching
+// ============================================================================
+
+const tenantApiKeysRouter = router({
+  list: adminProcedure.query(async ({ ctx }) => {
+    const rows: any[] =
+      (await (ctx.prisma as any).tenantApiKey?.findMany({
+        where: { tenantId: ctx.tenantId },
+        orderBy: { createdAt: "desc" },
+      })) ?? [];
+    return rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      keyPrefix: r.keyPrefix,
+      createdAt: r.createdAt.toISOString(),
+      lastUsedAt: r.lastUsedAt?.toISOString() ?? null,
+      revokedAt: r.revokedAt?.toISOString() ?? null,
+      revokedBy: r.revokedBy,
+    }));
+  }),
+
+  // PLAINTEXT-ONCE — server returns the plaintext key in this response and
+  // NEVER again. The frontend modal MUST gate dismissal on user
+  // acknowledgment ("I've saved this key" + copy-to-clipboard) before
+  // closing. Document the one-time-view contract in the modal copy.
+  create: adminProcedure
+    .input(z.object({ name: z.string().min(1).max(100) }))
+    .mutation(async ({ ctx, input }) => {
+      const { generateApiKey } = await import("./services/api-key-auth.js");
+      const { plaintext, keyPrefix, keyHash } = await generateApiKey();
+      const created: any = await (ctx.prisma as any).tenantApiKey?.create({
+        data: {
+          tenantId: ctx.tenantId,
+          name: input.name,
+          keyPrefix,
+          keyHash,
+        },
+      });
+      // Plaintext returned ONCE in the create response. Server NEVER stores
+      // or logs the plaintext after this point.
+      return {
+        id: created.id,
+        name: created.name,
+        keyPrefix: created.keyPrefix,
+        plaintext,
+        createdAt: created.createdAt.toISOString(),
+      };
+    }),
+
+  revoke: adminProcedure
+    .input(z.object({ id: z.string().uuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const existing: any = await (ctx.prisma as any).tenantApiKey?.findFirst({
+        where: { id: input.id, tenantId: ctx.tenantId },
+        select: { id: true, revokedAt: true },
+      });
+      if (!existing) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "API key not found in this tenant" });
+      }
+      if (existing.revokedAt) {
+        // Idempotent — return current state
+        return { id: input.id, revokedAt: existing.revokedAt.toISOString() };
+      }
+      const revokedBy = ctx.firebaseUser?.uid ?? "unknown";
+      const updated: any = await (ctx.prisma as any).tenantApiKey?.update({
+        where: { id: input.id },
+        data: { revokedAt: new Date(), revokedBy },
+      });
+      return { id: updated.id, revokedAt: updated.revokedAt.toISOString() };
+    }),
+});
+
+// ============================================================================
 // KAN-741 — Sprint 3 / S3.11 Lead Inbox tRPC surface.
 //
 // Per-tenant inbox slug management + DKIM strict-mode override + recent
@@ -3535,6 +3616,7 @@ export const appRouter = router({
   wedge: wedgeRouter,
   outcomes: outcomesRouter,
   inbox: inboxRouter,
+  tenantApiKeys: tenantApiKeysRouter,
 });
 
 export type AppRouter = typeof appRouter;

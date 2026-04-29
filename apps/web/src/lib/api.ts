@@ -599,6 +599,33 @@ export interface LeadInboxEventRow {
   createdAt: string;
 }
 
+/* ── Tenant API Keys (KAN-742) ──────────────────────────
+ * Lead API key management. Plaintext returned ONCE on create — UI MUST
+ * gate the modal dismissal on user acknowledgment + copy-to-clipboard.
+ * Server NEVER returns plaintext after creation.
+ */
+
+export interface TenantApiKeySummary {
+  id: string;
+  name: string;
+  keyPrefix: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+  revokedBy: string | null;
+}
+
+export interface TenantApiKeyCreated extends Omit<TenantApiKeySummary, 'lastUsedAt' | 'revokedAt' | 'revokedBy'> {
+  /** Plaintext key — shown ONCE in this response. Server never returns it again. */
+  plaintext: string;
+}
+
+export const tenantApiKeysApi = {
+  list: () => trpcQuery<TenantApiKeySummary[]>('tenantApiKeys.list'),
+  create: (name: string) => trpcMutation<TenantApiKeyCreated>('tenantApiKeys.create', { name }),
+  revoke: (id: string) => trpcMutation<{ id: string; revokedAt: string }>('tenantApiKeys.revoke', { id }),
+};
+
 export const inboxApi = {
   getMyInboxAddress: () => trpcQuery<InboxAddressInfo>('inbox.getMyInboxAddress'),
   regenerateSlug: () =>
