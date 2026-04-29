@@ -101,13 +101,16 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        echo "[smoke] starting container ${{ inputs.image-tag }}"
+        # Docker container names allow [a-zA-Z0-9][a-zA-Z0-9_.-] only;
+        # `apps/api` (the natural app-name shape) has a `/`. Sanitize.
+        CONTAINER_NAME="smoke-$(echo '${{ inputs.app-name }}' | tr '/' '-')"
+        echo "[smoke] starting container ${{ inputs.image-tag }} as $CONTAINER_NAME"
         # Mount the GHA-provided service-account credentials into the
         # container so firebase-admin's applicationDefault() init succeeds.
         # /health doesn't go through Firebase auth, but module-load does
         # (apps/api/src/trpc.ts initializes the Admin SDK at boot).
         docker run -d \
-          --name smoke-${{ inputs.app-name }} \
+          --name "$CONTAINER_NAME" \
           --network host \
           -e PORT=${{ inputs.port }} \
           -e DATABASE_URL=postgresql://postgres:postgres@localhost:5432/growth \
@@ -123,6 +126,7 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
+        CONTAINER_NAME="smoke-$(echo '${{ inputs.app-name }}' | tr '/' '-')"
         echo "[smoke] probing http://localhost:${{ inputs.port }}${{ inputs.health-path }} (30s budget)"
         for i in $(seq 1 30); do
           if curl -fs -o /dev/null "http://localhost:${{ inputs.port }}${{ inputs.health-path }}"; then
@@ -133,7 +137,7 @@ runs:
         done
         echo "[smoke] FAIL — container did not respond 200 within 30s"
         echo "--- container logs ---"
-        docker logs smoke-${{ inputs.app-name }} || true
+        docker logs "$CONTAINER_NAME" || true
         echo "--- end container logs ---"
         exit 1
 
@@ -141,4 +145,5 @@ runs:
       if: always()
       shell: bash
       run: |
-        docker rm -f smoke-${{ inputs.app-name }} 2>/dev/null || true
+        CONTAINER_NAME="smoke-$(echo '${{ inputs.app-name }}' | tr '/' '-')"
+        docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
