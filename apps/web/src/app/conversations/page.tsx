@@ -1,159 +1,65 @@
 'use client';
 
+/**
+ * KAN-718 — /conversations is a demo-only route until the unified-inbox
+ * backend ships in a future sprint. The page renders mock data when
+ * `isDemoMode()` is true; outside demo mode it shows a "coming soon" empty
+ * state. Sidebar nav hides this route entirely when demo mode is off.
+ *
+ * Mock content lives in `./demo-fixtures.ts` — keeps module-scope of this
+ * file free of mock data so the May 6 drift-sweep classifier doesn't
+ * false-positive. Importing from a `*demo-fixtures*` file is one of the
+ * canonical demo-gating patterns (per `apps/web/src/lib/demo-mode.ts`).
+ *
+ * Removed the broken `conversationsApi` import (pre-KAN-689 cohort, 1 of
+ * the 4 broken-imports errors KAN-718 retires).
+ */
+
 import {
   MessageSquare, Search, Filter, Clock, Mail, Phone, MessageCircle,
   Send, ChevronDown, MoreHorizontal, Paperclip, Sparkles, User,
   ArrowUpRight, CheckCheck, AlertTriangle, Zap, Star, Archive
 } from 'lucide-react';
-import { useState, useEffect } from 'react';
-import { conversationsApi } from '@/lib/api';
+import { useState } from 'react';
+import { isDemoMode } from '@/lib/demo-mode';
+import { demoConversations } from './demo-fixtures';
 
-/* ─── Mock Data ─────────────────────────────────────── */
-const conversations = [
-  {
-    id: 1,
-    contact: 'Sarah Chen',
-    company: 'Meridian Consulting',
-    avatar: 'SC',
-    channel: 'Email',
-    channelIcon: Mail,
-    lastMessage: 'Thanks for the proposal — I have a few questions about the implementation timeline...',
-    time: '2m ago',
-    unread: true,
-    aiHandled: true,
-    strategy: 'Direct Conversion',
-    confidence: 92,
-    objective: 'Close Deal',
-    messages: [
-      { id: 1, sender: 'ai', text: 'Hi Sarah — following up on the proposal I sent Thursday. I noticed you opened it several times, so I wanted to check if you had any questions about the pricing or implementation approach.', time: '10:12 AM', channel: 'Email' },
-      { id: 2, sender: 'contact', text: 'Thanks for the proposal — I have a few questions about the implementation timeline. Can we do a phased rollout instead of the big-bang approach?', time: '10:18 AM', channel: 'Email' },
-      { id: 3, sender: 'ai', text: 'Absolutely! A phased rollout is something we recommend for teams your size. I can put together a revised timeline showing a 3-phase approach — would next Tuesday work for a 20-minute walkthrough?', time: '10:19 AM', channel: 'Email', pending: true },
-    ],
-  },
-  {
-    id: 2,
-    contact: 'Marcus Reid',
-    company: 'Forge Manufacturing',
-    avatar: 'MR',
-    channel: 'SMS',
-    channelIcon: Phone,
-    lastMessage: 'Got it, Thursday 2pm works for the demo. See you then!',
-    time: '8m ago',
-    unread: false,
-    aiHandled: true,
-    strategy: 'Guided Assistance',
-    confidence: 74,
-    objective: 'Book Meeting',
-    messages: [
-      { id: 1, sender: 'ai', text: 'Hi Marcus — based on your interest in our analytics module, I\'d love to set up a quick demo. Would Thursday or Friday work better this week?', time: '9:45 AM', channel: 'SMS' },
-      { id: 2, sender: 'contact', text: 'Got it, Thursday 2pm works for the demo. See you then!', time: '9:52 AM', channel: 'SMS' },
-    ],
-  },
-  {
-    id: 3,
-    contact: 'Brian Walker',
-    company: 'Vertex Analytics',
-    avatar: 'BW',
-    channel: 'Email',
-    channelIcon: Mail,
-    lastMessage: 'I\'m not sure this is the right fit for us anymore...',
-    time: '1h ago',
-    unread: true,
-    aiHandled: false,
-    strategy: 'Re-engagement',
-    confidence: 31,
-    objective: 'Re-engage',
-    escalated: true,
-    messages: [
-      { id: 1, sender: 'ai', text: 'Hi Brian — it\'s been a couple weeks since we last connected. I wanted to check in and see if there\'s anything I can help with regarding your evaluation.', time: '9:00 AM', channel: 'Email' },
-      { id: 2, sender: 'contact', text: 'I\'m not sure this is the right fit for us anymore. We\'ve had some internal changes and the budget situation has shifted.', time: '9:45 AM', channel: 'Email' },
-    ],
-  },
-  {
-    id: 4,
-    contact: 'Lisa Park',
-    company: 'Vantage Real Estate',
-    avatar: 'LP',
-    channel: 'WhatsApp',
-    channelIcon: MessageCircle,
-    lastMessage: 'Proposal looks great! Let me run it by my CFO this week.',
-    time: '2h ago',
-    unread: false,
-    aiHandled: true,
-    strategy: 'Direct Conversion',
-    confidence: 88,
-    objective: 'Close Deal',
-    messages: [
-      { id: 1, sender: 'ai', text: 'Hi Lisa — I\'ve attached the custom proposal based on our conversation. It includes the enterprise package with the integrations you requested.', time: '8:30 AM', channel: 'WhatsApp' },
-      { id: 2, sender: 'contact', text: 'Proposal looks great! Let me run it by my CFO this week.', time: '8:55 AM', channel: 'WhatsApp' },
-      { id: 3, sender: 'ai', text: 'Sounds good! I\'ll follow up Thursday if I haven\'t heard back. In the meantime, here\'s a case study from a similar real estate firm that saw 40% faster closings.', time: '8:56 AM', channel: 'WhatsApp' },
-    ],
-  },
-  {
-    id: 5,
-    contact: 'Jenny Liu',
-    company: 'Catalyst Ventures',
-    avatar: 'JL',
-    channel: 'Email',
-    channelIcon: Mail,
-    lastMessage: 'This case study is really helpful. Can you send more about the fintech use case?',
-    time: '3h ago',
-    unread: true,
-    aiHandled: true,
-    strategy: 'Trust Building',
-    confidence: 58,
-    objective: 'Qualify Lead',
-    messages: [
-      { id: 1, sender: 'ai', text: 'Hi Jenny — I thought you might find this case study interesting. It\'s from a fintech company similar to Catalyst that improved their pipeline velocity by 3x.', time: '7:15 AM', channel: 'Email' },
-      { id: 2, sender: 'contact', text: 'This case study is really helpful. Can you send more about the fintech use case?', time: '8:02 AM', channel: 'Email' },
-    ],
-  },
-  {
-    id: 6,
-    contact: 'Rachel Kim',
-    company: 'Apex Logistics',
-    avatar: 'RK',
-    channel: 'Email',
-    channelIcon: Mail,
-    lastMessage: 'Quick question — does your platform integrate with SAP?',
-    time: '4h ago',
-    unread: false,
-    aiHandled: true,
-    strategy: 'Guided Assistance',
-    confidence: 81,
-    objective: 'Qualify Lead',
-    messages: [
-      { id: 1, sender: 'contact', text: 'Quick question — does your platform integrate with SAP?', time: '6:30 AM', channel: 'Email' },
-      { id: 2, sender: 'ai', text: 'Great question! Yes, we have a native SAP integration that syncs contacts, deals, and activities bi-directionally. I can walk you through the setup — it typically takes about 15 minutes. Want me to schedule a quick call?', time: '6:31 AM', channel: 'Email' },
-    ],
-  },
-];
 
 const channelFilters = ['All', 'Email', 'SMS', 'WhatsApp'];
 const statusFilters = ['All', 'AI Handled', 'Escalated', 'Unread'];
 
 /* ─── Component ─────────────────────────────────────── */
 export default function ConversationsPage() {
-  const [selectedConversation, setSelectedConversation] = useState(conversations[0]);
+  // Hooks must always run, regardless of demo-mode gate (Rules of Hooks).
+  const [selectedConversation, setSelectedConversation] = useState(demoConversations[0]);
   const [channelFilter, setChannelFilter] = useState('All');
   const [statusFilter, setStatusFilter] = useState('All');
   const [searchQuery, setSearchQuery] = useState('');
-  const [apiConversations, setApiConversations] = useState<any[] | null>(null);
-  const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    conversationsApi.list({ limit: 50 })
-      .then((data) => {
-        if (data.conversations && data.conversations.length > 0) {
-          setApiConversations(data.conversations);
-        }
-      })
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  }, []);
+  // KAN-718: outside demo mode, render a polite "coming soon" empty state.
+  // The unified-inbox backend isn't a V1 deliverable; sales demos still get
+  // the mock UI when NEXT_PUBLIC_DEMO_MODE=true.
+  if (!isDemoMode()) {
+    return (
+      <div className="min-h-screen bg-gray-50">
+        <div className="max-w-3xl mx-auto px-6 py-16 text-center">
+          <div className="w-12 h-12 mx-auto mb-4 rounded-full bg-gray-100 flex items-center justify-center">
+            <MessageSquare className="w-6 h-6 text-gray-400" />
+          </div>
+          <h1 className="text-xl font-semibold text-gray-900 mb-2">
+            Conversations — coming soon
+          </h1>
+          <p className="text-sm text-gray-500 max-w-md mx-auto">
+            The unified inbox for AI-handled conversations across email, SMS,
+            and WhatsApp will land in a future release. Until then, individual
+            channel histories are visible from each contact's detail view.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
-  // Use API data when available, fall back to demo data
-  const activeConversations = apiConversations || conversations;
+  const activeConversations = demoConversations;
 
   const filtered = activeConversations.filter((c) => {
     if (channelFilter !== 'All' && c.channel !== channelFilter) return false;

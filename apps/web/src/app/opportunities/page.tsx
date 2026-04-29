@@ -465,7 +465,7 @@ function LaunchSuccessBanner({
             {result.errors > 0 && ` (${result.errors} failed)`}
           </p>
           <p className="text-emerald-200 text-sm mt-1">
-            <a href="/audit-log" className="underline hover:text-emerald-100">
+            <a href="/audit" className="underline hover:text-emerald-100">
               View decisions in audit log →
             </a>
           </p>
