@@ -52,6 +52,17 @@
 #   (the existing google-github-actions/auth step provides this) — the
 #   composite mounts it into the container so firebase-admin init succeeds.
 #
+# WHY NO MIGRATE SEED STEP
+#   The gate's purpose is "container starts and binds the port", not
+#   "migrations apply against vanilla Postgres". Running prisma migrate
+#   deploy here would either (a) fail on extensions that vanilla Postgres
+#   lacks (pgvector — migration KAN-706 needs it; would force pgvector/
+#   pgvector:pg15 image and bind the gate to that image's release cadence),
+#   or (b) duplicate what the v4 migrate gate already validates against
+#   real Cloud SQL. The container only needs DATABASE_URL parseable + a
+#   reachable Postgres for module-load (Prisma client is lazy; /health
+#   doesn't query). Anti-pattern guard: stay narrow.
+#
 # FAILURE MODE
 #   Smoke fails → composite step fails → caller's `Deploy to Cloud Run`
 #   step doesn't run → no broken revision lands. Same posture as the
@@ -86,27 +97,6 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Install workspace deps (pin Prisma to lockfile)
-      shell: bash
-      run: |
-        set -euo pipefail
-        echo "[smoke] npm ci to pin Prisma version (avoids npx-fetches-latest footgun)"
-        # Without this, `cd packages/db && npx prisma` falls back to fetching
-        # the latest Prisma from the npm registry (currently 7.8.0) which has
-        # a breaking change that rejects `url = env("DATABASE_URL")` in
-        # schema.prisma. The project is pinned to 5.22.0 — install locally so
-        # npx finds the lockfile-pinned binary instead of going to the registry.
-        npm ci --no-audit --no-fund
-
-    - name: Run prisma migrate deploy against ephemeral Postgres
-      shell: bash
-      run: |
-        set -euo pipefail
-        echo "[smoke] seeding ephemeral Postgres schema via prisma migrate deploy"
-        cd packages/db
-        DATABASE_URL=postgresql://postgres:postgres@localhost:5432/growth \
-          npx prisma migrate deploy
-
     - name: Start container detached
       shell: bash
       run: |
