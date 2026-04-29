@@ -11,12 +11,15 @@
  * exercise the multi-turn tool-use loop end-to-end without leaking real
  * tenant data into the LLM context yet.
  *
- * Cost-tracking: each Anthropic call publishes one llm.call event via the
- * existing setLLMCostPublisher wiring in llm-client.ts. KAN-745 (filed at
- * KAN-738 PR open) tracks the observability layer that will alert on
- * cost-doubling under shadow mode.
+ * KAN-745 PR A (this refactor): runner now goes through llm-client.complete()
+ * instead of the raw Anthropic SDK. This routes the agentic path's calls
+ * through the llm.call event-emit hook so per-tenant cost aggregation
+ * (PR B) can compute shadow-vs-rules ratios. The test seam (formerly
+ * `__setAnthropicClientForTest`) still works — it now delegates to
+ * llm-client's `__setLLMClientsForTest` so existing KAN-738/739/740 tests
+ * keep passing without modification.
  */
-import Anthropic from "@anthropic-ai/sdk";
+import type Anthropic from "@anthropic-ai/sdk";
 import { randomUUID } from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
 import {
@@ -28,6 +31,12 @@ import {
   TOOL_SCHEMAS,
   type ToolName,
 } from "@growth/shared";
+import {
+  complete as llmComplete,
+  __setLLMClientsForTest,
+  type AnthropicMessageParam,
+  type AnthropicToolParam,
+} from "./llm-client.js";
 
 const SONNET_4_6_MODEL = "claude-sonnet-4-6";
 const MAX_TOOL_USE_ITERATIONS = 8;
@@ -147,18 +156,21 @@ function wrapRealHandler(
 }
 
 // ─────────────────────────────────────────────
-// Anthropic client (lazy + test-injectable)
+// Test seam (KAN-745 PR A: now delegates to llm-client's seam)
 // ─────────────────────────────────────────────
 
-let _anthropic: Anthropic | null = null;
-function anthropicClient(): Anthropic {
-  if (!_anthropic) _anthropic = new Anthropic();
-  return _anthropic;
-}
-
-/** Test seam — replace SDK with a mock. */
+/**
+ * Test seam — back-compat alias for the existing KAN-738/739/740 test files.
+ * Delegates to `__setLLMClientsForTest` from llm-client. Mocks injected here
+ * are wired at the llm-client boundary, so the agentic loop's calls flow
+ * through `llmComplete()` → `callAnthropic()` → mocked `messages.create`.
+ *
+ * Existing tests pass `Anthropic` mock objects with `{ messages: { create } }` —
+ * the same shape llm-client's `callAnthropic` consumes, so those tests work
+ * unchanged.
+ */
 export function __setAnthropicClientForTest(client: Anthropic | null): void {
-  _anthropic = client;
+  __setLLMClientsForTest({ anthropic: client, pubsub: null });
 }
 
 // ─────────────────────────────────────────────
@@ -225,27 +237,43 @@ export async function runAgenticLoop(
   };
 
   const systemPrompt = buildSystemPrompt(input);
-  const messages: Anthropic.MessageParam[] = [
+  const messages: AnthropicMessageParam[] = [
     {
       role: "user",
       content: `Decide the next action for contact ${input.contactId} in tenant ${input.tenantId}. Use the tools to read context, then output your final decision as JSON matching this schema: { "strategy": string, "action": { "type": string, "channel": string | null, "payload": object }, "confidence": number (0..1), "outcome": "EXECUTED" | "ESCALATED", "reasoning": string }.`,
     },
   ];
 
+  const llmTools: AnthropicToolParam[] = tools.map((t) => ({
+    name: t.name,
+    description: t.description,
+    input_schema: t.input_schema,
+  }));
+
   let iterations = 0;
   for (let i = 0; i < MAX_TOOL_USE_ITERATIONS; i++) {
     iterations++;
-    const resp = await anthropicClient().messages.create({
-      model,
-      max_tokens: DEFAULT_MAX_TOKENS,
-      system: systemPrompt,
-      tools: tools.map((t) => ({
-        name: t.name,
-        description: t.description,
-        input_schema: t.input_schema as Anthropic.Tool.InputSchema,
-      })),
-      messages,
+    // KAN-745 PR A: route through llm-client.complete() so the agentic
+    // path's calls emit llm.call events with tenantId + costUsd. Empty
+    // userPrompt is OK because anthropicExtras.messages takes precedence.
+    const llmResult = await llmComplete({
+      tenantId: input.tenantId,
+      tier: "reasoning",
+      systemPrompt,
+      userPrompt: "",
+      maxTokens: DEFAULT_MAX_TOKENS,
+      callerTag: `agentic:iter${i}`,
+      anthropicExtras: { messages, tools: llmTools },
     });
+    const resp = llmResult.anthropicRaw;
+    if (!resp) {
+      throw new Error(
+        "agentic loop expected anthropicRaw on LLMCompleteResult — fallback path (OpenAI) doesn't support tool_use",
+      );
+    }
+    // Override the model variable so the subsequent block can reference it
+    // for messages.push (assistant content carries through unchanged).
+    void model;
 
     if (resp.stop_reason === "end_turn" || resp.stop_reason === "stop_sequence") {
       const textBlock = resp.content.find((b) => b.type === "text");
@@ -261,8 +289,13 @@ export async function runAgenticLoop(
     }
 
     // Append assistant turn (with tool_use blocks) and a user turn with tool_result blocks.
-    messages.push({ role: "assistant", content: resp.content });
-    const toolResults: Anthropic.ToolResultBlockParam[] = [];
+    messages.push({ role: "assistant", content: resp.content as AnthropicMessageParam["content"] });
+    const toolResults: Array<{
+      type: "tool_result";
+      tool_use_id: string;
+      content: string;
+      is_error?: boolean;
+    }> = [];
     for (const block of resp.content) {
       if (block.type !== "tool_use") continue;
       const tool = toolByName.get(block.name);

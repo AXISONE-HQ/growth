@@ -193,6 +193,7 @@ describe('aiAssignmentFallback', () => {
     __setLLMClientsForTest({ anthropic: makeAnthropicMock(create), pubsub: null });
 
     const out = await aiAssignmentFallback(
+      'tenant-test',
       { source: 'manual', segment: 'enterprise', lifecycleStage: 'qualified' },
       pipelines,
     );
@@ -207,7 +208,7 @@ describe('aiAssignmentFallback', () => {
     );
     __setLLMClientsForTest({ anthropic: makeAnthropicMock(create), pubsub: null });
 
-    const out = await aiAssignmentFallback({ source: 'manual' }, pipelines);
+    const out = await aiAssignmentFallback('tenant-test', { source: 'manual' }, pipelines);
     expect(out).toBeNull();
   });
 
@@ -217,7 +218,7 @@ describe('aiAssignmentFallback', () => {
     );
     __setLLMClientsForTest({ anthropic: makeAnthropicMock(create), pubsub: null });
 
-    const out = await aiAssignmentFallback({ source: 'manual' }, pipelines);
+    const out = await aiAssignmentFallback('tenant-test', { source: 'manual' }, pipelines);
     expect(out?.confidence).toBe(1);
   });
 
@@ -228,12 +229,12 @@ describe('aiAssignmentFallback', () => {
     }));
     __setLLMClientsForTest({ anthropic: makeAnthropicMock(create), pubsub: null });
 
-    const out = await aiAssignmentFallback({ source: 'manual' }, pipelines);
+    const out = await aiAssignmentFallback('tenant-test', { source: 'manual' }, pipelines);
     expect(out).toBeNull();
   });
 
   it('returns null when pipeline catalog is empty (no-op)', async () => {
-    const out = await aiAssignmentFallback({ source: 'manual' }, []);
+    const out = await aiAssignmentFallback('tenant-test', { source: 'manual' }, []);
     expect(out).toBeNull();
   });
 });

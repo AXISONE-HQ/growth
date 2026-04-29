@@ -162,6 +162,8 @@ interface AIFallbackOutput {
 }
 
 export async function aiAssignmentFallback(
+  // KAN-745 PR A: tenantId required for per-tenant cost partition.
+  tenantId: string,
   leadAttrs: LeadAttributes,
   pipelines: PipelineSummary[],
   knowledge: KnowledgeContext[] = [],
@@ -205,6 +207,7 @@ Respond with ONLY this JSON object (no other text, no markdown):
 }`;
 
   const llm = await llmComplete({
+    tenantId,
     tier: 'reasoning',
     systemPrompt: AI_FALLBACK_SYSTEM_PROMPT,
     userPrompt,
@@ -303,7 +306,7 @@ export async function assignLeadToPipeline(
   // 2. AI fallback tier.
   const pipelines = await loadTenantPipelines(prisma, tenantId);
   const knowledge: KnowledgeContext[] = []; // KAN-698 RAG hook — caller can inject; left empty by default for V1
-  const ai = await aiAssignmentFallback(leadAttrs, pipelines, knowledge);
+  const ai = await aiAssignmentFallback(tenantId, leadAttrs, pipelines, knowledge);
   const threshold = options.aiConfidenceThresholdOverride ?? tenant.aiAssignmentConfidenceThreshold ?? DEFAULT_AI_CONFIDENCE_THRESHOLD;
 
   if (ai && ai.confidence >= threshold) {
