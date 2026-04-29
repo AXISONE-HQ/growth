@@ -244,3 +244,23 @@ describe("KAN-750 — Escalation/Decision schema link", () => {
     expect(schema).toMatch(/escalations\s+Escalation\[\]/);
   });
 });
+
+describe("KAN-754 — broken escalationsRouter retired in favor of recommendationsRouter", () => {
+  it("apps/api router.ts mounts recommendations namespace, not the broken escalations namespace", () => {
+    const text = readFileSync(
+      resolve(REPO_ROOT, "apps", "api", "src", "router.ts"),
+      "utf8",
+    );
+    // The new namespace is mounted on the appRouter
+    expect(text).toMatch(/recommendations:\s*recommendationsRouter/);
+    // The old broken router is gone — predated KAN-689, would 500 at runtime
+    // because of fields that don't exist in the canonical Escalation schema.
+    expect(text).not.toMatch(/escalations:\s*escalationsRouter/);
+    expect(text).not.toMatch(/const\s+escalationsRouter\s*=/);
+    // The pre-KAN-689 broken Escalation field references — none of these
+    // exist in the canonical schema. Catches regression if a future PR
+    // copies the old shape into a new Escalation router/handler.
+    expect(text).not.toMatch(/escalation\.(findMany|findFirst|update)[\s\S]*?claimed_at/);
+    expect(text).not.toMatch(/escalation\.(findMany|findFirst|update)[\s\S]*?dismissed_at/);
+  });
+});
