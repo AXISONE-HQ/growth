@@ -318,15 +318,26 @@ export async function gateAndPublishComposed(
       .join('; ');
 
     try {
-      await (prisma as any).escalation.create({
+      await prisma.escalation.create({
         data: {
           tenantId: ctx.tenantId,
           contactId: ctx.contactId,
+          decisionId: ctx.decisionId,
           severity: 'high',
           triggerType: 'guardrail_block',
           triggerReason: blockedReason || 'guardrail blocked send',
           aiSuggestion: 'Review the AI-composed message and either approve a regenerated version or send manually.',
           status: 'open',
+          context: {
+            strategy: ctx.strategy ?? null,
+            confidence: ctx.confidenceScore ?? null,
+            violations: result.violations.map((v) => ({
+              checkType: v.checkType,
+              severity: v.severity,
+              description: v.description,
+            })),
+            objectiveId: ctx.objectiveId,
+          } as unknown as object,
         },
       });
     } catch (err) {
