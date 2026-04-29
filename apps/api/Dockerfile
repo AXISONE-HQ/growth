@@ -43,6 +43,10 @@ COPY packages/shared ./packages/shared
 COPY packages/api ./packages/api
 COPY apps/api ./apps/api
 RUN npx prisma generate --schema=./packages/db/prisma/schema.prisma
+# KAN-737 fix-forward: @growth/shared ships compiled dist/. Without this the
+# runtime image has the source but no dist/, and `@growth/shared` resolution
+# fails on container startup (router.ts:19 imports at module-load time).
+RUN npm run build --workspace=@growth/shared
 
 # ─────────────────────────────────────────────
 # runtime: minimal production image
