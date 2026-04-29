@@ -26,6 +26,24 @@ jobs:
       contents: read
       id-token: write
 
+    # KAN-747: Postgres service for the smoke-container-health gate.
+    # Empty schema (seeded by prisma migrate deploy in the composite). Used
+    # only to satisfy DATABASE_URL parsing at container module-load — /health
+    # doesn't query the DB.
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: growth
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-retries 10
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -191,6 +209,29 @@ jobs:
         run: |
           docker push ${{ env.IMAGE }}:${{ github.sha }}
           docker push ${{ env.IMAGE }}:latest
+
+      # ─────────────────────────────────────────────
+      # KAN-747: container health smoke gate
+      #
+      # Runs the freshly-built+pushed image against an ephemeral Postgres
+      # service and asserts /health returns 200 within 30s. Catches the
+      # Dockerfile-class gaps that bit Sprint 3 — KAN-737 workspace dist +
+      # KAN-742 bcrypt postinstall — BEFORE a broken revision deploys.
+      #
+      # If the smoke step fails, the next step (Deploy to Cloud Run) is
+      # skipped. No broken revision lands. Same fail-fast posture as the
+      # migrate gate above.
+      #
+      # Composite action self-documents the gate's catch list + anti-pattern
+      # guards. See .github/actions/smoke-container-health/action.yml.
+      # ─────────────────────────────────────────────
+      - name: Smoke-test container health (KAN-747)
+        uses: ./.github/actions/smoke-container-health
+        with:
+          image-tag: ${{ env.IMAGE }}:${{ github.sha }}
+          app-name: apps/api
+          port: '8080'
+          health-path: '/health'
 
       - name: Deploy to Cloud Run
         uses: google-github-actions/deploy-cloudrun@v2
