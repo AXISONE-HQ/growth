@@ -46,6 +46,18 @@ const EnvSchema = z.object({
   //   gcloud run services update growth-connectors \
   //     --update-secrets=RESEND_WEBHOOK_SIGNING_SECRET=growth-resend-webhook-secret:latest
   RESEND_WEBHOOK_SIGNING_SECRET: z.string().optional(),
+
+  // KAN-741. Domain that forms per-tenant inbox addresses as
+  // <tenant.inboxSlug>@<LEAD_INBOX_DOMAIN>. Apps/web also reads this for
+  // address display; both services should resolve to the same value.
+  LEAD_INBOX_DOMAIN: z.string().default('leads.axisone.app'),
+
+  // KAN-741. Audience the lead.received push subscriber uses to verify
+  // OIDC tokens on incoming Pub/Sub deliveries. Per KAN-731 lesson —
+  // audience MUST exactly match what the subscription is configured with.
+  // Set on the consumer (assignment worker, KAN-705) Cloud Run service via:
+  //   --set-env-vars=LEAD_RECEIVED_AUDIENCE=https://growth-api-biut5gfhuq-uc.a.run.app/pubsub/lead-received
+  LEAD_RECEIVED_AUDIENCE: z.string().optional(),
 });
 
 export const env = EnvSchema.parse(process.env);
