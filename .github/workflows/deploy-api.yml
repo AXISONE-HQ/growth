@@ -126,10 +126,14 @@ jobs:
       # real schema changes still RUN; manual dispatch becomes
       # "deploy-only, no migrate" which is the safer ops posture.
       #
-      # Port 5432 (not 5433 like local dev): GHA runner is a fresh VM with
-      # nothing else listening, so the Postgres default port is fine + matches
-      # the most natural connection-string pattern. Local dev uses 5433 to
-      # dodge any local Postgres conflicts.
+      # Port 5433 — matches the local-dev convention (`feedback_proxy_5433_
+      # points_at_prod`) AND avoids the job-level Postgres service KAN-747
+      # added at port 5432:5432 for the smoke gate. The collision surfaced on
+      # KAN-750's deploy (run 25126012445) — the first schema-touching PR
+      # after KAN-747's service landed. Lesson + audit pattern in
+      # `feedback_job_level_vs_step_level_resource_collision` + KAN-755.
+      # Until then 5432 worked because no other listener existed; the smoke
+      # gate's empty-schema Postgres now occupies it before this step runs.
       - name: Run migrate end-to-end (proxy + deploy + status + cleanup)
         if: github.event_name == 'push' && steps.filter.outputs.schema == 'true'
         run: |
@@ -138,7 +142,7 @@ jobs:
           trap '[ -n "$PROXY_PID" ] && kill "$PROXY_PID" 2>/dev/null || true' EXIT INT TERM
 
           echo "[KAN-709-v4] phase=proxy_start"
-          ./cloud-sql-proxy --port 5432 ${{ env.CLOUD_SQL_INSTANCE }} > proxy.log 2>&1 &
+          ./cloud-sql-proxy --port 5433 ${{ env.CLOUD_SQL_INSTANCE }} > proxy.log 2>&1 &
           PROXY_PID=$!
           echo "[KAN-709-v4] proxy started PROXY_PID=$PROXY_PID"
 
@@ -157,7 +161,7 @@ jobs:
           # process.env (KAN-709 v2 lesson). Without `export`, the assignment
           # is shell-local and `node -e` sees process.env.RAW_URL as undefined.
           export RAW_URL=$(gcloud secrets versions access latest --secret=growth-db-url-production --project=${{ env.PROJECT_ID }})
-          export DATABASE_URL=$(node -e "const u = new URL(process.env.RAW_URL); u.host = '127.0.0.1:5432'; u.searchParams.delete('host'); console.log(u.toString());")
+          export DATABASE_URL=$(node -e "const u = new URL(process.env.RAW_URL); u.host = '127.0.0.1:5433'; u.searchParams.delete('host'); console.log(u.toString());")
           cd packages/db
 
           echo "[KAN-709-v4] phase=migrate_deploy attempt=1"
