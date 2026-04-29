@@ -13,6 +13,7 @@ ENV NODE_ENV=production
 FROM base AS deps
 COPY package.json package-lock.json turbo.json ./
 COPY packages/db/package.json ./packages/db/
+COPY packages/shared/package.json ./packages/shared/
 COPY apps/knowledge-worker/package.json ./apps/knowledge-worker/
 RUN npm install --include=dev --no-audit --no-fund --ignore-scripts
 
@@ -22,8 +23,12 @@ RUN npm install --include=dev --no-audit --no-fund --ignore-scripts
 FROM deps AS build
 COPY tsconfig.json ./
 COPY packages/db ./packages/db
+COPY packages/shared ./packages/shared
 COPY apps/knowledge-worker ./apps/knowledge-worker
 RUN npx prisma generate --schema=./packages/db/prisma/schema.prisma
+# KAN-737 fix-forward: build @growth/shared dist/ before worker's tsc so
+# import resolution works in both build (tsc) and runtime (node) stages.
+RUN npm run build --workspace=@growth/shared
 RUN npx turbo run build --filter=@growth-ai/knowledge-worker
 
 # ─────────────────────────────────────────────
