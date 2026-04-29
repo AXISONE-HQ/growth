@@ -105,6 +105,12 @@ runs:
         # `apps/api` (the natural app-name shape) has a `/`. Sanitize.
         CONTAINER_NAME="smoke-$(echo '${{ inputs.app-name }}' | tr '/' '-')"
         echo "[smoke] starting container ${{ inputs.image-tag }} as $CONTAINER_NAME"
+        # HOSTNAME=0.0.0.0 forces Next.js standalone server.js to bind to
+        # all interfaces (default: container's os.hostname() — under
+        # --network host, that's the runner's hostname like 'runnervmeorf1',
+        # which curl on localhost can't reach). Hono in apps/api ignores
+        # HOSTNAME and binds 0.0.0.0 by default, so harmless there.
+        #
         # Mount the GHA-provided service-account credentials into the
         # container so firebase-admin's applicationDefault() init succeeds.
         # /health doesn't go through Firebase auth, but module-load does
@@ -113,6 +119,7 @@ runs:
           --name "$CONTAINER_NAME" \
           --network host \
           -e PORT=${{ inputs.port }} \
+          -e HOSTNAME=0.0.0.0 \
           -e DATABASE_URL=postgresql://postgres:postgres@localhost:5432/growth \
           -e NODE_ENV=production \
           -e GCP_PROJECT_ID=growth-493400 \
