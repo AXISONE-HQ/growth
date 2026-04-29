@@ -172,6 +172,7 @@ Respond with a JSON object with these fields:
 Return ONLY the JSON object, no markdown formatting.`;
 
   const llm = await llmComplete({
+    tenantId,
     tier: 'cheap',
     systemPrompt,
     userPrompt,

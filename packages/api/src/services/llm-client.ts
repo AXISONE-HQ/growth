@@ -49,10 +49,78 @@ export const TIER_MAP: Record<LLMTier, TierConfig> = {
 };
 
 // ─────────────────────────────────────────────
+// KAN-745 PR A — model pricing for cost-event computation
+// ─────────────────────────────────────────────
+
+/**
+ * Per-model price per million tokens, USD. Used at `llm.call` emit time to
+ * compute `costUsd` for the event payload.
+ *
+ * **REVIEW DISCIPLINE — quarterly:** Anthropic + OpenAI both adjust prices
+ * periodically. The `MODEL_PRICING_VERSION` constant below is bumped on each
+ * refresh so observability data can be filtered by which pricing snapshot
+ * was active. See `feedback_model_pricing_refresh_discipline` memory entry
+ * for the audit checklist.
+ *
+ * Values below are placeholders matched to publicly-listed pricing as of
+ * the constant's `version` date. Operator review required before going live
+ * with real billing — small discrepancies in cost ratios are tolerable for
+ * the shadow-vs-rules threshold use case (KAN-745), but absolute cost
+ * reporting will need true-up.
+ *
+ * Sources:
+ *   - Anthropic: https://www.anthropic.com/pricing
+ *   - OpenAI:    https://openai.com/api/pricing/
+ */
+export const MODEL_PRICING_VERSION = '2026-04-29-v1';
+
+interface ModelPrice {
+  /** USD per 1M input tokens */
+  inputPerMillion: number;
+  /** USD per 1M output tokens */
+  outputPerMillion: number;
+}
+
+export const MODEL_PRICING: Record<string, ModelPrice> = {
+  // Anthropic — reasoning + cheap tiers
+  'claude-sonnet-4-6': { inputPerMillion: 3.0, outputPerMillion: 15.0 },
+  'claude-haiku-4-5-20251001': { inputPerMillion: 1.0, outputPerMillion: 5.0 },
+  // OpenAI — fallback chain
+  'gpt-4o': { inputPerMillion: 2.5, outputPerMillion: 10.0 },
+  'gpt-4o-mini': { inputPerMillion: 0.15, outputPerMillion: 0.6 },
+  // OpenAI — embedding tier (no output tokens)
+  'text-embedding-3-small': { inputPerMillion: 0.02, outputPerMillion: 0 },
+};
+
+/**
+ * Compute USD cost for a given (model, inputTokens, outputTokens) tuple.
+ * Returns 0 for unknown models — better than throwing in the cost-tracking
+ * hot path; aggregator (KAN-745 PR B) flags zero-cost rows for review.
+ */
+export function computeCostUsd(
+  model: string,
+  inputTokens: number,
+  outputTokens: number,
+): number {
+  const price = MODEL_PRICING[model];
+  if (!price) return 0;
+  return (
+    (inputTokens / 1_000_000) * price.inputPerMillion +
+    (outputTokens / 1_000_000) * price.outputPerMillion
+  );
+}
+
+// ─────────────────────────────────────────────
 // Public API
 // ─────────────────────────────────────────────
 
 export interface LLMCompleteInput {
+  /**
+   * KAN-745 PR A: tenantId is required so the `llm.call` event can be
+   * partitioned per-tenant downstream. Caller must thread it through from
+   * the request context.
+   */
+  tenantId: string;
   /** 'reasoning' for quality-critical, 'cheap' for high-volume. */
   tier: 'reasoning' | 'cheap';
   systemPrompt?: string;
@@ -63,6 +131,38 @@ export interface LLMCompleteInput {
   jsonMode?: boolean;
   /** Free-form correlation tag for the cost-tracking event (e.g. 'message-composer:compose'). */
   callerTag?: string;
+  /**
+   * KAN-745 PR A: optional Anthropic-specific extras (tools + multi-turn
+   * messages + stop_sequences) for the agentic loop. When present, the
+   * Anthropic provider path uses these instead of the default single-turn
+   * `userPrompt → text` shape. OpenAI fallback isn't wired for tool-use
+   * yet — agentic callers stay anthropic-only by tier choice + this is
+   * fine for the shadow-mode use case.
+   */
+  anthropicExtras?: {
+    /** Multi-turn messages. When set, takes precedence over `userPrompt`. */
+    messages?: AnthropicMessageParam[];
+    /** Tool definitions for Anthropic's tool-use loop. */
+    tools?: AnthropicToolParam[];
+  };
+}
+
+/** Subset of @anthropic-ai/sdk's MessageParam — kept here to avoid leaking the SDK type. */
+export interface AnthropicMessageParam {
+  role: 'user' | 'assistant';
+  content:
+    | string
+    | Array<
+        | { type: 'text'; text: string }
+        | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
+        | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean }
+      >;
+}
+
+export interface AnthropicToolParam {
+  name: string;
+  description: string;
+  input_schema: Record<string, unknown>;
 }
 
 export interface LLMCompleteResult {
@@ -74,9 +174,28 @@ export interface LLMCompleteResult {
   latencyMs: number;
   /** True when primary provider failed and fallback succeeded. */
   fallbackUsed: boolean;
+  /**
+   * KAN-745 PR A: Anthropic-specific raw response when `anthropicExtras` was
+   * provided and the call took the Anthropic path. Lets agentic callers read
+   * `stop_reason` and structured `content` blocks (tool_use / text).
+   */
+  anthropicRaw?: AnthropicRawResponse;
+}
+
+/** Subset of @anthropic-ai/sdk's Message — exposed so the agentic loop can read tool_use blocks + stop_reason. */
+export interface AnthropicRawResponse {
+  id: string;
+  content: Array<
+    | { type: 'text'; text: string }
+    | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
+  >;
+  stop_reason: 'end_turn' | 'tool_use' | 'max_tokens' | 'stop_sequence' | string | null;
+  usage: { input_tokens: number; output_tokens: number };
 }
 
 export interface LLMEmbedInput {
+  /** KAN-745 PR A: tenantId required for per-tenant cost partition. */
+  tenantId: string;
   text: string | string[];
   callerTag?: string;
 }
@@ -169,22 +288,47 @@ async function callAnthropic(
   model: string,
   input: LLMCompleteInput,
 ): Promise<Omit<LLMCompleteResult, 'latencyMs' | 'fallbackUsed'>> {
+  // KAN-745 PR A: when anthropicExtras present, pass tools + multi-turn
+  // messages through. agentic-decision-runner uses this path; everyone
+  // else stays on the simple userPrompt → text shape.
+  const messages = input.anthropicExtras?.messages
+    ? input.anthropicExtras.messages
+    : [{ role: 'user' as const, content: input.userPrompt }];
+
   const resp = await anthropicClient().messages.create({
     model,
     max_tokens: input.maxTokens ?? 1024,
-    system: input.systemPrompt,
-    messages: [{ role: 'user', content: input.userPrompt }],
+    ...(input.systemPrompt ? { system: input.systemPrompt } : {}),
+    messages: messages as never,
+    ...(input.anthropicExtras?.tools ? { tools: input.anthropicExtras.tools as never } : {}),
   });
+
+  // For agentic (tool-use) callers, return the full content array via
+  // anthropicRaw so they can branch on stop_reason + read tool_use blocks.
+  // text comes from the FIRST text block (or empty if none — agentic loop
+  // is allowed to produce tool_use-only turns).
   const textContent = resp.content.find((c) => c.type === 'text');
-  if (!textContent || textContent.type !== 'text') {
-    throw new Error(`anthropic ${model}: no text content in response`);
-  }
+  const textValue = textContent && textContent.type === 'text' ? textContent.text : '';
+
+  // Robust against test mocks that omit `usage` — production responses
+  // always carry it, but tests that don't care about cost-tracking pass
+  // partial shapes. Default to 0/0 so the surrounding cost-event emit
+  // doesn't throw at access time.
+  const inputTokens = resp.usage?.input_tokens ?? 0;
+  const outputTokens = resp.usage?.output_tokens ?? 0;
+
   return {
-    text: textContent.text,
+    text: textValue,
     provider: 'anthropic',
     model,
-    inputTokens: resp.usage.input_tokens,
-    outputTokens: resp.usage.output_tokens,
+    inputTokens,
+    outputTokens,
+    anthropicRaw: {
+      id: resp.id ?? 'msg_test',
+      content: resp.content as AnthropicRawResponse['content'],
+      stop_reason: resp.stop_reason as AnthropicRawResponse['stop_reason'],
+      usage: { input_tokens: inputTokens, output_tokens: outputTokens },
+    },
   };
 }
 
@@ -238,11 +382,13 @@ export async function complete(input: LLMCompleteInput): Promise<LLMCompleteResu
       const out = await withRetry(() => callProvider(entry, input));
       const latencyMs = Date.now() - start;
       void emitLLMCallEvent({
+        tenantId: input.tenantId,
         provider: out.provider,
         model: out.model,
         tier: input.tier,
         inputTokens: out.inputTokens,
         outputTokens: out.outputTokens,
+        costUsd: computeCostUsd(out.model, out.inputTokens, out.outputTokens),
         latencyMs,
         success: true,
         fallbackUsed,
@@ -257,11 +403,13 @@ export async function complete(input: LLMCompleteInput): Promise<LLMCompleteResu
 
   const latencyMs = Date.now() - start;
   void emitLLMCallEvent({
+    tenantId: input.tenantId,
     provider: tier.primary.provider,
     model: tier.primary.model,
     tier: input.tier,
     inputTokens: 0,
     outputTokens: 0,
+    costUsd: 0,
     latencyMs,
     success: false,
     fallbackUsed,
@@ -281,11 +429,13 @@ export async function embed(input: LLMEmbedInput): Promise<LLMEmbedResult> {
     const latencyMs = Date.now() - start;
     const inputTokens = resp.usage?.prompt_tokens ?? 0;
     void emitLLMCallEvent({
+      tenantId: input.tenantId,
       provider: 'openai',
       model: entry.model,
       tier: 'embedding',
       inputTokens,
       outputTokens: 0,
+      costUsd: computeCostUsd(entry.model, inputTokens, 0),
       latencyMs,
       success: true,
       fallbackUsed: false,
@@ -301,11 +451,13 @@ export async function embed(input: LLMEmbedInput): Promise<LLMEmbedResult> {
   } catch (err) {
     const latencyMs = Date.now() - start;
     void emitLLMCallEvent({
+      tenantId: input.tenantId,
       provider: 'openai',
       model: entry.model,
       tier: 'embedding',
       inputTokens: 0,
       outputTokens: 0,
+      costUsd: 0,
       latencyMs,
       success: false,
       fallbackUsed: false,
@@ -326,11 +478,17 @@ export interface LLMCallEvent {
   eventId: string;
   eventType: 'llm.call';
   publishedAt: string;
+  /** KAN-745 PR A: tenantId for per-tenant aggregation downstream. */
+  tenantId: string;
   provider: LLMProvider;
   model: string;
   tier: LLMTier;
   inputTokens: number;
   outputTokens: number;
+  /** KAN-745 PR A: USD cost computed from MODEL_PRICING table at emit time. */
+  costUsd: number;
+  /** KAN-745 PR A: which pricing snapshot was active when this event emitted. */
+  pricingVersion: string;
   latencyMs: number;
   success: boolean;
   fallbackUsed: boolean;
@@ -339,18 +497,20 @@ export interface LLMCallEvent {
 }
 
 async function emitLLMCallEvent(
-  data: Omit<LLMCallEvent, 'eventId' | 'eventType' | 'publishedAt'>,
+  data: Omit<LLMCallEvent, 'eventId' | 'eventType' | 'publishedAt' | 'pricingVersion'>,
 ): Promise<void> {
   if (!_pubsub) return;
   const event: LLMCallEvent = {
     eventId: `evt_${randomUUID()}`,
     eventType: 'llm.call',
     publishedAt: new Date().toISOString(),
+    pricingVersion: MODEL_PRICING_VERSION,
     ...data,
   };
   try {
     await _pubsub.publish(LLM_CALL_TOPIC, Buffer.from(JSON.stringify(event)), {
       eventType: 'llm.call',
+      tenantId: event.tenantId,
       provider: event.provider,
       model: event.model,
       tier: event.tier,
