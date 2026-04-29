@@ -86,6 +86,7 @@ model Tenant {
   agenticShadowDecisions AgenticShadowDecision[]
   leadInboxEvents        LeadInboxEvent[]
   apiKeys                TenantApiKey[]
+  llmCostRollups         LlmCostRollup[]
 
   //   tenantSettings  TenantSettings[]  // commented out for smoke build (model missing on main)
   channelConnections ChannelConnection[]
@@ -1065,4 +1066,40 @@ model KnowledgeIngestion {
 
   @@index([knowledgeSourceId])
   @@map("knowledge_ingestions")
+}
+
+// ─────────────────────────────────────────────
+// KAN-745 PR B — LLM cost observability rollups
+// ─────────────────────────────────────────────
+//
+// In-process apps/api Pub/Sub subscriber consumes llm.call events from the
+// llm.call topic (KAN-699 emit + KAN-745 PR A augments) and UPSERTs into
+// this table on a per-(tenant, hourBucket, callerTagPrefix, pricingVersion)
+// key. Concurrent-safe: two subscriber instances flushing the same hour
+// bucket race on the unique key — Prisma's upsert handles the conflict.
+//
+// pricingVersion is part of the unique key so a quarterly MODEL_PRICING bump
+// (per `feedback_model_pricing_refresh_discipline`) doesn't conflict with
+// existing rollups. UI/router queries SUM across pricing versions for
+// display — pricingVersion is audit trail, not a user-facing dimension.
+
+model LlmCostRollup {
+  id                String   @id @default(uuid())
+  tenantId          String   @map("tenant_id")
+  hourBucket        DateTime @map("hour_bucket")
+  callerTagPrefix   String   @map("caller_tag_prefix")
+  callCount         Int      @default(0) @map("call_count")
+  totalInputTokens  Int      @default(0) @map("total_input_tokens")
+  totalOutputTokens Int      @default(0) @map("total_output_tokens")
+  totalCostUsd      Float    @default(0) @map("total_cost_usd")
+  pricingVersion    String   @map("pricing_version")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@unique([tenantId, hourBucket, callerTagPrefix, pricingVersion])
+  @@index([tenantId])
+  @@index([tenantId, hourBucket])
+  @@map("llm_cost_rollups")
 }
