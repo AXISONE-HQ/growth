@@ -47,6 +47,14 @@ RUN npx prisma generate --schema=./packages/db/prisma/schema.prisma
 # runtime image has the source but no dist/, and `@growth/shared` resolution
 # fails on container startup (router.ts:19 imports at module-load time).
 RUN npm run build --workspace=@growth/shared
+# KAN-742 fix-forward: bcrypt's prebuilt-install postinstall hook downloads
+# the native binding (lib/binding/napi-v3/bcrypt_lib.node) but is skipped by
+# the deps stage's --ignore-scripts. `npm rebuild bcrypt` re-runs the install
+# script, downloading the prebuilt linux/amd64 binary. Without this, runtime
+# fails at api-key-auth.ts module-load with:
+#   Error: Cannot find module '/app/node_modules/bcrypt/lib/binding/napi-v3/bcrypt_lib.node'
+#   code: 'MODULE_NOT_FOUND'
+RUN npm rebuild bcrypt
 
 # ─────────────────────────────────────────────
 # runtime: minimal production image
