@@ -730,6 +730,41 @@ export interface SuggestedAction {
   payload: Record<string, unknown>;
 }
 
+/* ── Observability API (KAN-745 PR B) ──────────────────────────────────
+ * Backend: apps/api/src/router.ts → observabilityRouter, delegates to
+ * packages/api/src/services/observability/llm-cost-rollup.ts.
+ *
+ * Admin-only. Surfaces per-tenant LLM cost rollups partitioned by
+ * callerTagPrefix (agentic / agentic-tool / message-composer /
+ * lead-assignment / recommendation / other). pricingVersion is flattened
+ * (SUM across versions) at query time — UI doesn't expose it.
+ */
+
+export interface ObservabilityRollupRow {
+  hourBucket: string; // ISO timestamp
+  callerTagPrefix: string;
+  callCount: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCostUsd: number;
+}
+
+export interface ObservabilityCurrentHourSummary {
+  hourBucket: string;
+  perPrefix: Array<{ callerTagPrefix: string; callCount: number; totalCostUsd: number }>;
+  agenticUsd: number;
+  nonAgenticUsd: number;
+  shadowRatio: number | null;
+  breachThreshold: boolean;
+}
+
+export const observabilityApi = {
+  list: (input: { fromHour: string; toHour: string }) =>
+    trpcQuery<ObservabilityRollupRow[]>('observability.list', input),
+  currentHour: () =>
+    trpcQuery<ObservabilityCurrentHourSummary>('observability.currentHour'),
+};
+
 /* ── Audit Log API (KAN-718 Day 10) ──────────────────────────────────
  * Backend: apps/api/src/router.ts → auditLogRouter, delegates to
  * packages/api/src/services/audit-log-router.ts.

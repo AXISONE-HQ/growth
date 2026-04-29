@@ -3667,6 +3667,49 @@ const inboxRouter = router({
     }),
 });
 
+// KAN-745 PR B — observability router (admin-only). Service files live in
+// packages/api/src/services/observability/ and are loaded via variable-
+// specifier dynamic imports per the established TS6059 hygiene pattern.
+interface ObservabilityModule {
+  listRollups: (
+    prisma: unknown,
+    tenantId: string,
+    input: { fromHour: Date; toHour: Date },
+  ) => Promise<unknown>;
+  currentHourSummary: (prisma: unknown, tenantId: string, now?: Date) => Promise<unknown>;
+}
+let _observabilityModule: ObservabilityModule | null = null;
+async function loadObservabilityModule(): Promise<ObservabilityModule> {
+  if (_observabilityModule) return _observabilityModule;
+  const spec = "../../../packages/api/src/services/observability/llm-cost-rollup.js";
+  _observabilityModule = (await import(spec)) as ObservabilityModule;
+  return _observabilityModule;
+}
+
+const observabilityRouter = router({
+  list: adminProcedure
+    .input(
+      z.object({
+        // ISO timestamps; router truncates to hour bucket. `toHour` is
+        // exclusive at hour boundary.
+        fromHour: z.string().datetime(),
+        toHour: z.string().datetime(),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      const { listRollups } = await loadObservabilityModule();
+      return listRollups(ctx.prisma, ctx.tenantId, {
+        fromHour: new Date(input.fromHour),
+        toHour: new Date(input.toHour),
+      });
+    }),
+
+  currentHour: adminProcedure.query(async ({ ctx }) => {
+    const { currentHourSummary } = await loadObservabilityModule();
+    return currentHourSummary(ctx.prisma, ctx.tenantId);
+  }),
+});
+
 export const appRouter = router({
   contacts: contactsRouter,
   pipelines: pipelinesRouter,
@@ -3690,6 +3733,7 @@ export const appRouter = router({
   outcomes: outcomesRouter,
   inbox: inboxRouter,
   tenantApiKeys: tenantApiKeysRouter,
+  observability: observabilityRouter,
 });
 
 export type AppRouter = typeof appRouter;
