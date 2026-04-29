@@ -3392,6 +3392,127 @@ const knowledgeIngestRouter = router({
     }),
 });
 
+// ============================================================================
+// KAN-741 — Sprint 3 / S3.11 Lead Inbox tRPC surface.
+//
+// Per-tenant inbox slug management + DKIM strict-mode override + recent
+// inbox events query. Slug = first 8 chars of tenant UUID by default
+// (regenerable via admin mutation). Inbox address forms as
+// <slug>@<LEAD_INBOX_DOMAIN>.
+//
+// Cast-loose `(prisma as any)` accessors on the new Tenant.inboxSlug /
+// inboxDkimStrict fields and the leadInboxEvent delegate keep the new
+// types out of the apps/api TS6059 graph (KAN-689 cohort discipline).
+// ============================================================================
+
+const inboxRouter = router({
+  // Read the active tenant's inbox slug + computed full address. Returns null
+  // slug when the tenant hasn't regenerated yet (legacy rows pre-KAN-741).
+  getMyInboxAddress: protectedProcedure.query(async ({ ctx }) => {
+    const tenant: any = await (ctx.prisma as any).tenant?.findUnique({
+      where: { id: ctx.tenantId },
+      select: { id: true, inboxSlug: true, inboxDkimStrict: true },
+    });
+    if (!tenant) {
+      throw new TRPCError({ code: "NOT_FOUND", message: "Tenant not found" });
+    }
+    // LEAD_INBOX_DOMAIN is read by the connectors service; the apps/api
+    // surface returns the slug + a hint domain. Frontend composes the
+    // displayed address; if the env var differs across services the
+    // frontend value lags but the receive-side address is still authoritative.
+    const domain = process.env.LEAD_INBOX_DOMAIN ?? "leads.axisone.app";
+    const address = tenant.inboxSlug ? `${tenant.inboxSlug}@${domain}` : null;
+    return {
+      slug: tenant.inboxSlug as string | null,
+      address,
+      dkimStrict: tenant.inboxDkimStrict as boolean,
+      domain,
+    };
+  }),
+
+  // Generate a new inbox slug. Admin-only. Sets the new slug; the old slug
+  // is overwritten (single-slug-per-tenant invariant). On collision (very
+  // unlikely with UUIDv4 entropy) the mutation retries up to 3 times with
+  // a fresh UUID.
+  regenerateSlug: adminProcedure.mutation(async ({ ctx }) => {
+    const generateSlug = (): string => {
+      // 8-char hex prefix from a fresh UUIDv4. Collision space is 16^8 = 4B.
+      // With ~10K tenants the birthday-collision probability is < 0.01%.
+      const id = (typeof crypto !== "undefined" && "randomUUID" in crypto)
+        ? (crypto as { randomUUID: () => string }).randomUUID()
+        : Array.from({ length: 32 }, () => Math.floor(Math.random() * 16).toString(16)).join("");
+      return id.replace(/-/g, "").slice(0, 8);
+    };
+    let slug: string | null = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const candidate = generateSlug();
+      const existing: any = await (ctx.prisma as any).tenant?.findUnique({
+        where: { inboxSlug: candidate },
+        select: { id: true },
+      });
+      if (!existing) {
+        slug = candidate;
+        break;
+      }
+    }
+    if (!slug) {
+      throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Slug collision after 3 attempts" });
+    }
+    await (ctx.prisma as any).tenant?.update({
+      where: { id: ctx.tenantId },
+      data: { inboxSlug: slug },
+    });
+    const domain = process.env.LEAD_INBOX_DOMAIN ?? "leads.axisone.app";
+    return { slug, address: `${slug}@${domain}`, domain };
+  }),
+
+  // Per-tenant DKIM strict-mode toggle. Admin-only. Default true (strict).
+  setDkimStrict: adminProcedure
+    .input(z.object({ strict: z.boolean() }))
+    .mutation(async ({ ctx, input }) => {
+      await (ctx.prisma as any).tenant?.update({
+        where: { id: ctx.tenantId },
+        data: { inboxDkimStrict: input.strict },
+      });
+      return { strict: input.strict };
+    }),
+
+  // List recent inbox events (audit + rejection visibility). Paginated;
+  // status filter optional. KAN-741 ships this endpoint; the frontend
+  // events table is deferrable to Sprint 4 if LoC tightens (per defer
+  // order in PR description).
+  listRecentEvents: protectedProcedure
+    .input(z.object({
+      limit: z.number().int().min(1).max(200).default(50),
+      offset: z.number().int().min(0).default(0),
+      statusFilter: z.string().optional(),
+    }))
+    .query(async ({ ctx, input }) => {
+      const where: any = { tenantId: ctx.tenantId };
+      if (input.statusFilter) where.status = input.statusFilter;
+      const rows: any[] =
+        (await (ctx.prisma as any).leadInboxEvent?.findMany({
+          where,
+          orderBy: { createdAt: "desc" },
+          take: input.limit,
+          skip: input.offset,
+        })) ?? [];
+      return rows.map((r) => ({
+        id: r.id,
+        inboxAddress: r.inboxAddress,
+        fromAddress: r.fromAddress,
+        subject: r.subject,
+        status: r.status,
+        rejectionReason: r.rejectionReason,
+        spfPass: r.spfPass,
+        dkimPass: r.dkimPass,
+        attachmentCount: r.attachmentCount,
+        createdContactId: r.createdContactId,
+        createdAt: r.createdAt.toISOString(),
+      }));
+    }),
+});
+
 export const appRouter = router({
   contacts: contactsRouter,
   pipelines: pipelinesRouter,
@@ -3413,6 +3534,7 @@ export const appRouter = router({
   settings: settingsRouter,
   wedge: wedgeRouter,
   outcomes: outcomesRouter,
+  inbox: inboxRouter,
 });
 
 export type AppRouter = typeof appRouter;

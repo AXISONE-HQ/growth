@@ -8,14 +8,84 @@ import { logger as pinoLogger } from './logger.js';
 import { registerAdapters } from './adapters/index.js';
 import { webhooksApp } from './webhooks/index.js';
 import { resendWebhookApp } from './webhooks/resend.js';
+import {
+  resendInboundWebhookApp,
+  setInboundHooks,
+  defaultPublishLeadReceived,
+} from './webhooks/resend-inbound.js';
+import { PrismaClient } from '@prisma/client';
 import { actionSendPushApp } from './subscribers/action-send-push.js';
 import { unsubscribeApp } from './routes/unsubscribe.js';
 import { buildOidcMiddleware } from './middleware/oidc.js';
 import { connectorsRouter } from './trpc/index.js';
 import { createContext } from './trpc/context.js';
 
+let _prisma: PrismaClient | null = null;
+function getPrisma(): PrismaClient {
+  if (!_prisma) _prisma = new PrismaClient();
+  return _prisma;
+}
+
 export function buildApp(): Hono {
   registerAdapters();
+
+  // KAN-741 — wire Lead Inbox webhook hooks with real Prisma + Pub/Sub
+  // publisher. Test seam stays available via __setInboundHooksForTest.
+  setInboundHooks({
+    resolveTenantBySlug: async (slug) => {
+      const t = await (getPrisma() as unknown as { tenant: { findUnique: (a: unknown) => Promise<{ id: string; inboxDkimStrict: boolean } | null> } }).tenant.findUnique({
+        where: { inboxSlug: slug },
+        select: { id: true, inboxDkimStrict: true },
+      });
+      return t;
+    },
+    upsertContactFromEmail: async ({ tenantId, email, firstName, lastName }) => {
+      // Upsert: find by tenantId+email, create if absent. Match is on
+      // (tenantId, email) — there's no unique index on that pair today, so
+      // we do a manual find→update or create.
+      const existing = await getPrisma().contact.findFirst({
+        where: { tenantId, email },
+        select: { id: true },
+      });
+      if (existing) {
+        await getPrisma().contact.update({
+          where: { id: existing.id },
+          data: { updatedAt: new Date() },
+        });
+        return { id: existing.id };
+      }
+      const created = await getPrisma().contact.create({
+        data: {
+          tenantId,
+          email,
+          firstName,
+          lastName,
+          source: 'inbox_email',
+          lifecycleStage: 'new',
+        },
+      });
+      return { id: created.id };
+    },
+    writeLeadInboxEvent: async (row) => {
+      await (getPrisma() as unknown as { leadInboxEvent: { create: (a: unknown) => Promise<unknown> } }).leadInboxEvent.create({
+        data: {
+          tenantId: row.tenantId,
+          inboxAddress: row.inboxAddress,
+          resendEmailId: row.resendEmailId,
+          fromAddress: row.fromAddress,
+          subject: row.subject,
+          bodyPreview: row.bodyPreview,
+          attachmentCount: row.attachmentCount,
+          spfPass: row.spfPass,
+          dkimPass: row.dkimPass,
+          status: row.status,
+          rejectionReason: row.rejectionReason,
+          createdContactId: row.createdContactId,
+        },
+      });
+    },
+    publishLeadReceived: defaultPublishLeadReceived,
+  });
 
   const app = new Hono();
 
@@ -42,6 +112,12 @@ export function buildApp(): Hono {
   // /webhooks/:provider dispatcher so the more-specific path wins routing
   // (Hono honors registration order). Svix-signed; public; no OIDC.
   app.route('/webhooks/resend', resendWebhookApp);
+
+  // KAN-741 — Resend Inbound webhook handler. Separate route from outbound
+  // /webhooks/resend so the dispatch is unambiguous (different svix secret,
+  // different downstream — outbound publishes action.executed, inbound
+  // publishes lead.received).
+  app.route('/webhooks/resend-inbound', resendInboundWebhookApp);
 
   // Public webhook ingress (generic dispatcher for Twilio / Meta — Resend
   // is handled above by its own dedicated handler).

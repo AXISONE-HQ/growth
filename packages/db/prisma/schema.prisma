@@ -45,6 +45,16 @@ model Tenant {
   // action.decided. When true, agentic emits action.decided and rules-based
   // is skipped. UI toggle ships in Sprint 4.
   agenticModeEnabled  Boolean  @default(false) @map("agentic_mode_enabled")
+  // KAN-741: Lead Inbox slug — first 8 chars of tenant UUID by default,
+  // regenerable via admin tRPC mutation. Forms the inbox address as
+  // <slug>@leads.<LEAD_INBOX_DOMAIN>. Nullable for gradual rollout (legacy
+  // tenants stay null until first regenerateSlug call). Unique to prevent
+  // collisions across tenants.
+  inboxSlug           String?  @unique @map("inbox_slug")
+  // KAN-741: per-tenant DKIM strict-mode override. Default true (strict —
+  // reject DKIM=fail AND DKIM=none). Tenant can flip to false via UI for
+  // accommodating contacts on legacy mail servers without DKIM signing.
+  inboxDkimStrict     Boolean  @default(true) @map("inbox_dkim_strict")
   strategyPermissions Json     @default("{}")  @map("strategy_permissions")
   guardrailSettings   Json     @default("{}")  @map("guardrail_settings")
   settings            Json     @default("{}")
@@ -74,6 +84,7 @@ model Tenant {
   aiAgentConfigs   AiAgentConfig[]
   contactStates    ContactState[]
   agenticShadowDecisions AgenticShadowDecision[]
+  leadInboxEvents  LeadInboxEvent[]
 
   //   tenantSettings  TenantSettings[]  // commented out for smoke build (model missing on main)
   channelConnections ChannelConnection[]
@@ -258,6 +269,35 @@ model Decision {
 // ─────────────────────────────────────────────
 // AGENT DISPATCHER (EXECUTE phase)
 // ─────────────────────────────────────────────
+
+// KAN-741 — Sprint 3 / S3.11 Lead Inbox.
+// Audit + idempotency row written on every inbound webhook hit (accepted,
+// rejected_spam, rejected_unverified). The resend_email_id unique constraint
+// is the dedup key; Redis dedup gives us short-window dedup, this gives us
+// permanent dedup persistent across container restarts.
+model LeadInboxEvent {
+  id              String    @id @default(uuid())
+  tenantId        String    @map("tenant_id")
+  inboxAddress    String    @map("inbox_address")
+  resendEmailId   String?   @unique @map("resend_email_id")
+  fromAddress     String    @map("from_address")
+  subject         String?
+  bodyPreview     String?   @map("body_preview")
+  attachmentCount Int       @default(0) @map("attachment_count")
+  spfPass         Boolean   @map("spf_pass")
+  dkimPass        Boolean   @map("dkim_pass")
+  // 'received' | 'rejected_spam' | 'rejected_unverified' | 'accepted'
+  status          String
+  rejectionReason String?   @map("rejection_reason")
+  createdContactId String?  @map("created_contact_id")
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, status])
+  @@map("lead_inbox_events")
+}
 
 // KAN-738 — Sprint 3 / S3.1 agentic loop seam.
 // One row per shadow-mode comparison run. Live mode (Tenant.agentic_mode_enabled

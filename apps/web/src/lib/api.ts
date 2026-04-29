@@ -573,6 +573,42 @@ export interface KnowledgeSourceDetail extends KnowledgeSourceListItem {
   }>;
 }
 
+/* ── Lead Inbox API (KAN-741) ──────────────────────────
+ * Per-tenant inbox address management + DKIM strict-mode toggle + recent
+ * inbox events query.
+ */
+
+export interface InboxAddressInfo {
+  slug: string | null;
+  address: string | null;
+  dkimStrict: boolean;
+  domain: string;
+}
+
+export interface LeadInboxEventRow {
+  id: string;
+  inboxAddress: string;
+  fromAddress: string;
+  subject: string | null;
+  status: 'received' | 'rejected_spam' | 'rejected_unverified' | 'rejected_unknown_slug' | 'accepted';
+  rejectionReason: string | null;
+  spfPass: boolean;
+  dkimPass: boolean;
+  attachmentCount: number;
+  createdContactId: string | null;
+  createdAt: string;
+}
+
+export const inboxApi = {
+  getMyInboxAddress: () => trpcQuery<InboxAddressInfo>('inbox.getMyInboxAddress'),
+  regenerateSlug: () =>
+    trpcMutation<{ slug: string; address: string; domain: string }>('inbox.regenerateSlug', {}),
+  setDkimStrict: (strict: boolean) =>
+    trpcMutation<{ strict: boolean }>('inbox.setDkimStrict', { strict }),
+  listRecentEvents: (input?: { limit?: number; offset?: number; statusFilter?: string }) =>
+    trpcQuery<LeadInboxEventRow[]>('inbox.listRecentEvents', input ?? {}),
+};
+
 export const knowledgeIngestApi = {
   request: (input: IngestRequest) =>
     trpcMutation<{ ingestionId: string; sourceId: string; status: 'pending' }>(
