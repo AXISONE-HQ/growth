@@ -1,0 +1,149 @@
+# =============================================================================
+# KAN-747 — CI parity check: container health smoke gate
+# =============================================================================
+#
+# WHAT THIS GATE CATCHES
+#   - Container fails to start (exit non-zero before binding the port)
+#   - Missing module errors at module-load time
+#       e.g. KAN-742 bcrypt: `Cannot find module '/app/node_modules/bcrypt/
+#       lib/binding/napi-v3/bcrypt_lib.node'` — `--ignore-scripts` skipped the
+#       prebuilt-install postinstall; production container crashed at startup
+#   - Native-binding compilation gaps
+#   - Workspace-dependency resolution failures
+#       e.g. KAN-737 / KAN-741: `@growth/shared` not built into dist/ before
+#       container start; production container crashed at module-load
+#   - Env var resolution failures (boot-time validation)
+#   - Port-binding issues (container starts but doesn't bind PORT=8080)
+#
+# WHAT THIS GATE EXPLICITLY DOES NOT CATCH (anti-pattern guard)
+#   - Behavior bugs at runtime — rely on the existing Test job (vitest)
+#   - Schema migration issues — rely on the v4 migrate gate already in
+#     deploy-api.yml (KAN-709 chain, structurally proven across 3 PRs)
+#   - tRPC contract drift — rely on Lint & Type Check job (tsc strict mode)
+#
+# Stays narrow on purpose: start the container, hit /health, expect 200
+# within 30s. Anything more (running tests inside the container, exercising
+# tRPC procedures, etc.) ballons CI time and replicates what unit tests
+# already do.
+#
+# IMPORT PATTERN (one-line)
+#   - uses: ./.github/actions/smoke-container-health
+#     with:
+#       image-tag: ${{ env.IMAGE }}:${{ github.sha }}
+#       app-name: apps/api
+#
+# CALLER REQUIREMENTS
+#   The job must declare a Postgres service (the composite assumes it's
+#   reachable at localhost:5432 with user=postgres pw=postgres db=growth):
+#
+#     services:
+#       postgres:
+#         image: postgres:15
+#         env:
+#           POSTGRES_USER: postgres
+#           POSTGRES_PASSWORD: postgres
+#           POSTGRES_DB: growth
+#         ports: ['5432:5432']
+#         options: >-
+#           --health-cmd "pg_isready -U postgres"
+#           --health-interval 5s --health-retries 10
+#
+#   Caller must also have a credentials file at $GOOGLE_APPLICATION_CREDENTIALS
+#   (the existing google-github-actions/auth step provides this) — the
+#   composite mounts it into the container so firebase-admin init succeeds.
+#
+# WHY NO MIGRATE SEED STEP
+#   The gate's purpose is "container starts and binds the port", not
+#   "migrations apply against vanilla Postgres". Running prisma migrate
+#   deploy here would either (a) fail on extensions that vanilla Postgres
+#   lacks (pgvector — migration KAN-706 needs it; would force pgvector/
+#   pgvector:pg15 image and bind the gate to that image's release cadence),
+#   or (b) duplicate what the v4 migrate gate already validates against
+#   real Cloud SQL. The container only needs DATABASE_URL parseable + a
+#   reachable Postgres for module-load (Prisma client is lazy; /health
+#   doesn't query). Anti-pattern guard: stay narrow.
+#
+# FAILURE MODE
+#   Smoke fails → composite step fails → caller's `Deploy to Cloud Run`
+#   step doesn't run → no broken revision lands. Same posture as the
+#   migrate-fails-block-deploy pattern in KAN-709 v4 (structurally proven).
+#
+# REUSED BY
+#   - apps/api    — this PR (KAN-747)
+#   - apps/web    — KAN-717 (deploy-web.yml)
+#   - apps/knowledge-worker — KAN-726 (deploy-knowledge-ingest-job.yml)
+#     adapter: JOB exit-code semantics (no listener); details in KAN-726
+# =============================================================================
+
+name: Smoke-test container health
+description: Builds + runs a container against ephemeral Postgres + verifies it starts and responds 200 to /health within 30s.
+
+inputs:
+  image-tag:
+    required: true
+    description: Pre-built+pushed image to smoke-test
+  app-name:
+    required: true
+    description: 'apps/api | apps/web | apps/knowledge-worker'
+  port:
+    required: false
+    default: '8080'
+    description: Container port to probe
+  health-path:
+    required: false
+    default: '/health'
+    description: Endpoint to GET; expects 200 within 30s
+
+runs:
+  using: composite
+  steps:
+    - name: Start container detached
+      shell: bash
+      run: |
+        set -euo pipefail
+        # Docker container names allow [a-zA-Z0-9][a-zA-Z0-9_.-] only;
+        # `apps/api` (the natural app-name shape) has a `/`. Sanitize.
+        CONTAINER_NAME="smoke-$(echo '${{ inputs.app-name }}' | tr '/' '-')"
+        echo "[smoke] starting container ${{ inputs.image-tag }} as $CONTAINER_NAME"
+        # Mount the GHA-provided service-account credentials into the
+        # container so firebase-admin's applicationDefault() init succeeds.
+        # /health doesn't go through Firebase auth, but module-load does
+        # (apps/api/src/trpc.ts initializes the Admin SDK at boot).
+        docker run -d \
+          --name "$CONTAINER_NAME" \
+          --network host \
+          -e PORT=${{ inputs.port }} \
+          -e DATABASE_URL=postgresql://postgres:postgres@localhost:5432/growth \
+          -e NODE_ENV=production \
+          -e GCP_PROJECT_ID=growth-493400 \
+          -e FIREBASE_PROJECT_ID=growth-493400 \
+          -e ADMIN_EMAILS=ci@example.com \
+          -v "${GOOGLE_APPLICATION_CREDENTIALS}:/tmp/gcp-sa.json:ro" \
+          -e GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcp-sa.json \
+          ${{ inputs.image-tag }}
+
+    - name: Wait for ${{ inputs.health-path }} 200
+      shell: bash
+      run: |
+        set -euo pipefail
+        CONTAINER_NAME="smoke-$(echo '${{ inputs.app-name }}' | tr '/' '-')"
+        echo "[smoke] probing http://localhost:${{ inputs.port }}${{ inputs.health-path }} (30s budget)"
+        for i in $(seq 1 30); do
+          if curl -fs -o /dev/null "http://localhost:${{ inputs.port }}${{ inputs.health-path }}"; then
+            echo "[smoke] container healthy after ${i}s"
+            exit 0
+          fi
+          sleep 1
+        done
+        echo "[smoke] FAIL — container did not respond 200 within 30s"
+        echo "--- container logs ---"
+        docker logs "$CONTAINER_NAME" || true
+        echo "--- end container logs ---"
+        exit 1
+
+    - name: Cleanup container
+      if: always()
+      shell: bash
+      run: |
+        CONTAINER_NAME="smoke-$(echo '${{ inputs.app-name }}' | tr '/' '-')"
+        docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
