@@ -48,7 +48,7 @@ import { evaluateThreshold } from './threshold-gate';
 // KAN-738: variable-specifier dynamic import keeps agentic-decision-runner.ts
 // out of the apps/api static graph (TS6059 cohort). Same pattern as
 // context-assembler.ts:tryAutoWireKnowledgeSearch. Tactical until KAN-689 lands.
-type AgenticLoopFn = (input: { tenantId: string; contactId: string }) => Promise<{
+type AgenticLoopFn = (input: { tenantId: string; contactId: string; prisma?: PrismaClient }) => Promise<{
   payload: DecisionPayload;
   iterations: number;
   latencyMs: number;
@@ -325,7 +325,7 @@ async function runShadow(
   const agenticLoop = await loadAgenticLoop().catch(() => null);
   const [rulesSettled, agenticSettled] = await Promise.allSettled([
     runFreeform(prisma, input, contact),
-    agenticLoop ? agenticLoop({ tenantId: input.tenantId, contactId: input.contactId }) : Promise.reject(new Error('agentic loop module unavailable')),
+    agenticLoop ? agenticLoop({ tenantId: input.tenantId, contactId: input.contactId, prisma }) : Promise.reject(new Error('agentic loop module unavailable')),
   ]);
 
   if (rulesSettled.status === 'rejected') {
@@ -418,7 +418,7 @@ async function runAgentic(
   let agenticPayload: DecisionPayload;
   try {
     const agenticLoop = await loadAgenticLoop();
-    const result = await agenticLoop({ tenantId, contactId });
+    const result = await agenticLoop({ tenantId, contactId, prisma });
     agenticPayload = result.payload;
   } catch (err) {
     // Live mode + agentic failure = rule-based fallback. Logs the failure as
