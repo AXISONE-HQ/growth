@@ -1,0 +1,114 @@
+name: Deploy Web to Cloud Run
+
+# KAN-717 — automated deploy for apps/web. Retires the manual
+# `gcloud builds submit + gcloud run deploy growth-web` dance that ran 3
+# times in Sprint 3 (KAN-708 + KAN-741 + KAN-742-fix manual deploys, ~5-10
+# min each + auth-refresh friction).
+#
+# Modeled on deploy-api.yml minus the schema-migrate phase (apps/web has
+# no schema). KAN-747 smoke-container-health composite imported between
+# Push + Deploy — same fail-fast posture.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/web/**'
+      - 'packages/**'
+      - '.github/workflows/deploy-web.yml'
+  workflow_dispatch:
+
+env:
+  PROJECT_ID: growth-493400
+  REGION: us-central1
+  SERVICE_NAME: growth-web
+  # Artifact Registry path — matches the manual deploy convention (KAN-708,
+  # KAN-741 manual deploys both used us-central1-docker.pkg.dev).
+  IMAGE: us-central1-docker.pkg.dev/growth-493400/growth-images/growth-web
+
+jobs:
+  build-and-deploy:
+    name: Build & Deploy Web
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    # KAN-747: Postgres service required by the smoke composite. apps/web
+    # doesn't query the DB at runtime (Next.js bundler resolves @growth/shared
+    # via dist/; no Prisma client at boot), but the composite is consistent
+    # across all importers — passes DATABASE_URL unconditionally; web ignores.
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: growth
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      # Artifact Registry auth (us-central1-docker.pkg.dev), not GCR.
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            -f apps/web/Dockerfile \
+            -t ${{ env.IMAGE }}:${{ github.sha }} \
+            -t ${{ env.IMAGE }}:latest \
+            .
+
+      - name: Push Docker image
+        run: |
+          docker push ${{ env.IMAGE }}:${{ github.sha }}
+          docker push ${{ env.IMAGE }}:latest
+
+      # ─────────────────────────────────────────────
+      # KAN-747: container health smoke gate (composite import).
+      #
+      # First reuse of the composite outside apps/api. Same fail-fast
+      # posture: smoke fail → step fail → Deploy to Cloud Run skipped.
+      # ─────────────────────────────────────────────
+      - name: Smoke-test container health (KAN-747)
+        uses: ./.github/actions/smoke-container-health
+        with:
+          image-tag: ${{ env.IMAGE }}:${{ github.sha }}
+          app-name: apps/web
+          port: '3000'
+          health-path: '/health'
+
+      - name: Deploy to Cloud Run
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: ${{ env.SERVICE_NAME }}
+          region: ${{ env.REGION }}
+          image: ${{ env.IMAGE }}:${{ github.sha }}
+
+      - name: Show deployment URL
+        run: |
+          URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
+            --region ${{ env.REGION }} \
+            --format 'value(status.url)')
+          echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Service:** ${{ env.SERVICE_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image:** ${{ env.IMAGE }}:${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **URL:** $URL" >> $GITHUB_STEP_SUMMARY
+          echo "Deployed to: $URL"
