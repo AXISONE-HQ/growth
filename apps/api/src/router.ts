@@ -151,113 +151,109 @@ import { runDecisionForContact } from "../../../packages/api/src/services/run-de
 // CONTACTS ROUTER
 // ============================================================================
 
+// KAN-718 Day 10 — `contactsRouter` replaces the broken pre-KAN-689 router
+// (snake_case + `name` / `company` / `status` fields that don't exist in the
+// canonical Contact schema). Service lives at packages/api/src/services/
+// contacts-router.ts; thin tRPC layer here. Variable-specifier dynamic
+// import keeps the service out of the apps/api static graph (TS6059 cohort).
+interface ContactsRouterModule {
+  listContacts: (
+    prisma: unknown,
+    tenantId: string,
+    input: { search?: string; lifecycleStage?: string; limit?: number; offset?: number },
+  ) => Promise<unknown>;
+  getContactById: (prisma: unknown, tenantId: string, id: string) => Promise<unknown>;
+  createContact: (
+    prisma: unknown,
+    tenantId: string,
+    input: {
+      email: string;
+      phone?: string | null;
+      firstName?: string | null;
+      lastName?: string | null;
+      segment?: string | null;
+      lifecycleStage?: string;
+      source?: string | null;
+    },
+  ) => Promise<unknown>;
+  updateContact: (
+    prisma: unknown,
+    tenantId: string,
+    input: {
+      id: string;
+      email?: string;
+      phone?: string | null;
+      firstName?: string | null;
+      lastName?: string | null;
+      segment?: string | null;
+      lifecycleStage?: string;
+      source?: string | null;
+    },
+  ) => Promise<unknown>;
+}
+let _contactsModule: ContactsRouterModule | null = null;
+async function loadContactsModule(): Promise<ContactsRouterModule> {
+  if (_contactsModule) return _contactsModule;
+  const spec = "../../../packages/api/src/services/contacts-router.js";
+  _contactsModule = (await import(spec)) as ContactsRouterModule;
+  return _contactsModule;
+}
+
 const contactsRouter = router({
   list: protectedProcedure
     .input(
       z.object({
-        page: z.number().min(1).default(1),
-        limit: z.number().min(1).max(100).default(20),
         search: z.string().optional(),
-        status: z.string().optional(),
-      })
+        lifecycleStage: z.string().optional(),
+        limit: z.number().min(1).max(200).default(50),
+        offset: z.number().min(0).default(0),
+      }),
     )
     .query(async ({ ctx, input }) => {
-      const skip = (input.page - 1) * input.limit;
-
-      const where = {
-        tenant_id: ctx.tenantId,
-        ...(input.search && {
-          OR: [
-            { name: { contains: input.search, mode: "insensitive" as const } },
-            { email: { contains: input.search, mode: "insensitive" as const } },
-          ],
-        }),
-        ...(input.status && { status: input.status }),
-      };
-
-      const [contacts, total] = await Promise.all([
-        ctx.prisma.contact.findMany({
-          where,
-          skip,
-          take: input.limit,
-          orderBy: { created_at: "desc" },
-        }),
-        ctx.prisma.contact.count({ where }),
-      ]);
-
-      return {
-        contacts,
-        pagination: {
-          page: input.page,
-          limit: input.limit,
-          total,
-          pages: Math.ceil(total / input.limit),
-        },
-      };
+      const { listContacts } = await loadContactsModule();
+      return listContacts(ctx.prisma, ctx.tenantId, input);
     }),
 
   getById: protectedProcedure
     .input(z.object({ id: z.string().uuid() }))
     .query(async ({ ctx, input }) => {
-      const contact = await ctx.prisma.contact.findFirst({
-        where: {
-          id: input.id,
-          tenant_id: ctx.tenantId,
-        },
-      });
-
-      if (!contact) {
-        throw new Error("Contact not found");
-      }
-
-      return contact;
+      const { getContactById } = await loadContactsModule();
+      return getContactById(ctx.prisma, ctx.tenantId, input.id);
     }),
 
   create: protectedProcedure
     .input(
       z.object({
-        name: z.string().min(1),
         email: z.string().email(),
-        phone: z.string().optional(),
-        company: z.string().optional(),
-        status: z.string().default("new"),
-      })
+        phone: z.string().nullable().optional(),
+        firstName: z.string().nullable().optional(),
+        lastName: z.string().nullable().optional(),
+        segment: z.string().nullable().optional(),
+        lifecycleStage: z.string().optional(),
+        source: z.string().nullable().optional(),
+      }),
     )
     .mutation(async ({ ctx, input }) => {
-      return ctx.prisma.contact.create({
-        data: {
-          ...input,
-          tenant_id: ctx.tenantId,
-        },
-      });
+      const { createContact } = await loadContactsModule();
+      return createContact(ctx.prisma, ctx.tenantId, input);
     }),
 
   update: protectedProcedure
     .input(
       z.object({
         id: z.string().uuid(),
-        name: z.string().optional(),
         email: z.string().email().optional(),
-        phone: z.string().optional(),
-        company: z.string().optional(),
-        status: z.string().optional(),
-      })
+        phone: z.string().nullable().optional(),
+        firstName: z.string().nullable().optional(),
+        lastName: z.string().nullable().optional(),
+        segment: z.string().nullable().optional(),
+        lifecycleStage: z.string().optional(),
+        source: z.string().nullable().optional(),
+      }),
     )
     .mutation(async ({ ctx, input }) => {
-      const { id, ...data } = input;
-
-      const existing = await ctx.prisma.contact.findFirst({
-        where: { id, tenant_id: ctx.tenantId },
-      });
-
-      if (!existing) {
-        throw new Error("Contact not found");
-      }
-
-      return ctx.prisma.contact.update({
-        where: { id },
-        data,
-      });
+      const { updateContact } = await loadContactsModule();
+      return updateContact(ctx.prisma, ctx.tenantId, input);
     }),
 });
 
@@ -529,42 +525,54 @@ const recommendationsRouter = router({
 // AUDIT LOG ROUTER
 // ============================================================================
 
+// KAN-718 Day 10 — `auditLogRouter` replaces the broken pre-KAN-689 router
+// (snake_case + `category` field that doesn't exist in the canonical
+// AuditLog schema; canonical filter is `actionType`). Service at
+// packages/api/src/services/audit-log-router.ts.
+interface AuditLogRouterModule {
+  listAuditLog: (
+    prisma: unknown,
+    tenantId: string,
+    input: {
+      includeInfrastructure?: boolean;
+      actionTypePrefix?: string;
+      limit?: number;
+      offset?: number;
+    },
+  ) => Promise<unknown>;
+  getAuditLogEntry: (prisma: unknown, tenantId: string, id: string) => Promise<unknown>;
+}
+let _auditLogModule: AuditLogRouterModule | null = null;
+async function loadAuditLogModule(): Promise<AuditLogRouterModule> {
+  if (_auditLogModule) return _auditLogModule;
+  const spec = "../../../packages/api/src/services/audit-log-router.js";
+  _auditLogModule = (await import(spec)) as AuditLogRouterModule;
+  return _auditLogModule;
+}
+
 const auditLogRouter = router({
   list: protectedProcedure
     .input(
       z.object({
-        category: z.string().optional(),
-        page: z.number().min(1).default(1),
-        limit: z.number().min(1).max(100).default(20),
-      })
+        // KAN-758 (Sprint 5+ Low) adds an admin toggle for this. Today the
+        // default keeps `brain.blueprint_*` hidden — fires on every server
+        // restart, drowns operator signal.
+        includeInfrastructure: z.boolean().optional(),
+        actionTypePrefix: z.string().optional(),
+        limit: z.number().min(1).max(200).default(50),
+        offset: z.number().min(0).default(0),
+      }),
     )
     .query(async ({ ctx, input }) => {
-      const skip = (input.page - 1) * input.limit;
+      const { listAuditLog } = await loadAuditLogModule();
+      return listAuditLog(ctx.prisma, ctx.tenantId, input);
+    }),
 
-      const where = {
-        tenant_id: ctx.tenantId,
-        ...(input.category && { category: input.category }),
-      };
-
-      const [logs, total] = await Promise.all([
-        ctx.prisma.auditLog.findMany({
-          where,
-          skip,
-          take: input.limit,
-          orderBy: { created_at: "desc" },
-        }),
-        ctx.prisma.auditLog.count({ where }),
-      ]);
-
-      return {
-        logs,
-        pagination: {
-          page: input.page,
-          limit: input.limit,
-          total,
-          pages: Math.ceil(total / input.limit),
-        },
-      };
+  getById: protectedProcedure
+    .input(z.object({ id: z.string().uuid() }))
+    .query(async ({ ctx, input }) => {
+      const { getAuditLogEntry } = await loadAuditLogModule();
+      return getAuditLogEntry(ctx.prisma, ctx.tenantId, input.id);
     }),
 });
 

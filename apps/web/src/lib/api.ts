@@ -730,6 +730,80 @@ export interface SuggestedAction {
   payload: Record<string, unknown>;
 }
 
+/* ── Audit Log API (KAN-718 Day 10) ──────────────────────────────────
+ * Backend: apps/api/src/router.ts → auditLogRouter, delegates to
+ * packages/api/src/services/audit-log-router.ts.
+ *
+ * Default filter excludes brain.blueprint_* infrastructure events. KAN-758
+ * (Sprint 5+ Low) adds an admin toggle to show all events.
+ */
+
+export interface AuditLogEntry {
+  id: string;
+  actor: string;
+  actionType: string;
+  payload: Record<string, unknown>;
+  reasoning: string | null;
+  createdAt: string;
+}
+
+export const auditLogApi = {
+  list: (input?: {
+    includeInfrastructure?: boolean;
+    actionTypePrefix?: string;
+    limit?: number;
+    offset?: number;
+  }) =>
+    trpcQuery<{
+      items: AuditLogEntry[];
+      total: number;
+      limit: number;
+      offset: number;
+      includeInfrastructure: boolean;
+    }>('auditLog.list', input ?? {}),
+  getById: (id: string) =>
+    trpcQuery<AuditLogEntry>('auditLog.getById', { id }),
+};
+
+/* ── Contacts API (KAN-718 Day 10) ──────────────────────────────────
+ * Backend: apps/api/src/router.ts → contactsRouter, delegates to
+ * packages/api/src/services/contacts-router.ts.
+ *
+ * Schema: name → firstName + lastName split; status → lifecycleStage.
+ * UI must render `${firstName ?? ''} ${lastName ?? ''}`.trim() with null-safety.
+ */
+
+export interface ContactListItem {
+  id: string;
+  email: string | null;
+  phone: string | null;
+  firstName: string | null;
+  lastName: string | null;
+  segment: string | null;
+  lifecycleStage: string;
+  source: string | null;
+  dataQualityScore: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const contactsApi = {
+  list: (input?: {
+    search?: string;
+    lifecycleStage?: string;
+    limit?: number;
+    offset?: number;
+  }) =>
+    trpcQuery<{
+      items: ContactListItem[];
+      total: number;
+      limit: number;
+      offset: number;
+    }>('contacts.list', input ?? {}),
+  getById: (id: string) =>
+    trpcQuery<ContactListItem>('contacts.getById', { id }),
+};
+
 export const recommendationsApi = {
   list: (input?: {
     status?: 'open' | 'claimed' | 'resolved' | 'dismissed';
