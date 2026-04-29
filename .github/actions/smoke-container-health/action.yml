@@ -86,6 +86,18 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Install workspace deps (pin Prisma to lockfile)
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "[smoke] npm ci to pin Prisma version (avoids npx-fetches-latest footgun)"
+        # Without this, `cd packages/db && npx prisma` falls back to fetching
+        # the latest Prisma from the npm registry (currently 7.8.0) which has
+        # a breaking change that rejects `url = env("DATABASE_URL")` in
+        # schema.prisma. The project is pinned to 5.22.0 — install locally so
+        # npx finds the lockfile-pinned binary instead of going to the registry.
+        npm ci --no-audit --no-fund
+
     - name: Run prisma migrate deploy against ephemeral Postgres
       shell: bash
       run: |
