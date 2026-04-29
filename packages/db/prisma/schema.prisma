@@ -85,6 +85,7 @@ model Tenant {
   contactStates    ContactState[]
   agenticShadowDecisions AgenticShadowDecision[]
   leadInboxEvents  LeadInboxEvent[]
+  apiKeys          TenantApiKey[]
 
   //   tenantSettings  TenantSettings[]  // commented out for smoke build (model missing on main)
   channelConnections ChannelConnection[]
@@ -269,6 +270,35 @@ model Decision {
 // ─────────────────────────────────────────────
 // AGENT DISPATCHER (EXECUTE phase)
 // ─────────────────────────────────────────────
+
+// KAN-742 — Sprint 3 / S3.8 Lead API.
+// Tenant-scoped API keys for the public POST /api/v1/leads endpoint.
+// Plaintext key is `axone_live_<32hex>`; we store keyPrefix (first 12 hex of
+// the entropy portion — NOT including brand prefix) and bcrypt-hashed
+// remainder. Lookup is O(1) via the keyPrefix index; bcrypt only runs
+// against the matched candidate row.
+// Plaintext is shown ONCE at creation time — server NEVER returns it after,
+// not even via admin endpoints.
+model TenantApiKey {
+  id          String    @id @default(uuid())
+  tenantId    String    @map("tenant_id")
+  name        String
+  // First 12 hex chars of the entropy portion (after stripping `axone_live_`).
+  // 48 bits → genuinely O(1) indexed lookup per request.
+  keyPrefix   String    @map("key_prefix")
+  // bcrypt of the remaining 20 hex chars.
+  keyHash     String    @map("key_hash")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  lastUsedAt  DateTime? @map("last_used_at")
+  revokedAt   DateTime? @map("revoked_at")
+  revokedBy   String?   @map("revoked_by")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@index([keyPrefix])
+  @@index([tenantId, revokedAt])
+  @@map("tenant_api_keys")
+}
 
 // KAN-741 — Sprint 3 / S3.11 Lead Inbox.
 // Audit + idempotency row written on every inbound webhook hit (accepted,
