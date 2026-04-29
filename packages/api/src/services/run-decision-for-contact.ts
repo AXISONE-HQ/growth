@@ -429,7 +429,31 @@ async function runAgentic(
 
   const channel = agenticPayload.action.channel;
   const actionType = agenticPayload.action.type;
-  const reasoning = agenticPayload.reasoning;
+  let reasoning = agenticPayload.reasoning;
+  let outcome: 'EXECUTED' | 'ESCALATED' = agenticPayload.outcome;
+
+  // KAN-740 — threshold-gate evaluation with full matrix args. Only run the
+  // gate when the agent picked an EXECUTED action; if the runner already
+  // routed to ESCALATED (e.g. HALLUCINATED_ACTION_REASON), short-circuit.
+  if (outcome === 'EXECUTED') {
+    try {
+      const gateDecision = await evaluateAgenticThreshold(prisma, {
+        tenantId,
+        contactId,
+        contact,
+        agenticPayload,
+      });
+      if (gateDecision.outcome === 'ESCALATED') {
+        outcome = 'ESCALATED';
+        reasoning = gateDecision.reasoning;
+      }
+    } catch (err) {
+      // Gate evaluation failure is conservative — escalate rather than emit.
+      console.error('[runAgentic] threshold-gate evaluation failed, defaulting to escalation:', err);
+      outcome = 'ESCALATED';
+      reasoning = `${reasoning} · threshold_gate_error: ${(err as Error).message}`;
+    }
+  }
 
   const decision = await prisma.decision.create({
     data: {
@@ -440,12 +464,30 @@ async function runAgentic(
       confidence: agenticPayload.confidence,
       reasoning,
       metadata: {
-        outcome: agenticPayload.outcome,
+        outcome,
         agenticPayload: agenticPayload.action.payload ?? {},
         mode: 'agentic_live',
       } as unknown as Prisma.InputJsonValue,
     },
   });
+
+  if (outcome === 'ESCALATED') {
+    try {
+      await (prisma as unknown as { escalation: { create: (args: unknown) => Promise<unknown> } }).escalation.create({
+        data: {
+          tenantId,
+          contactId,
+          triggerType: 'AGENTIC_GATE_DECISION',
+          triggerReason: reasoning,
+          severity: agenticPayload.confidence < 0.4 ? 'high' : 'medium',
+          aiSuggestion: `${actionType}${channel ? ` via ${channel}` : ''}`,
+          status: 'open',
+        },
+      });
+    } catch (err) {
+      console.error('[runAgentic] escalation.create failed:', err);
+    }
+  }
 
   logAndPublish(
     {
@@ -455,7 +497,7 @@ async function runAgentic(
       agentType: agenticPayload.strategy || 'agentic_loop',
       channel,
       actionType,
-      status: agenticPayload.outcome === 'EXECUTED' ? 'success' : 'escalated',
+      status: outcome === 'EXECUTED' ? 'success' : 'escalated',
       payload: { agenticPayload: agenticPayload.action.payload ?? {}, actor: actor.id, mode: 'agentic_live' },
       reasoning,
       confidenceScore: agenticPayload.confidence,
@@ -470,11 +512,13 @@ async function runAgentic(
     console.error('[runAgentic] audit-logger failed:', err);
   });
 
-  if (agenticPayload.outcome === 'EXECUTED') {
-    publishActionDecided(getPubSubClient(), {
+  const client = getPubSubClient();
+  const objectiveId = ((agenticPayload.action.payload as { objectiveId?: string } | undefined)?.objectiveId) ?? 'unknown';
+  if (outcome === 'EXECUTED') {
+    publishActionDecided(client, {
       tenantId,
       contactId,
-      objectiveId: ((agenticPayload.action.payload as { objectiveId?: string } | undefined)?.objectiveId) ?? 'unknown',
+      objectiveId,
       actionType,
       channel,
       actionPayload: (agenticPayload.action.payload ?? {}) as Record<string, unknown>,
@@ -485,6 +529,25 @@ async function runAgentic(
     }).catch((err: unknown) => {
       console.error(`[runAgentic] publishActionDecided failed decisionId=${decision.id}:`, err);
     });
+  } else {
+    publishEscalationTriggered(client, {
+      tenantId,
+      contactId,
+      objectiveId,
+      reason: 'AGENTIC_GATE_DECISION',
+      riskFlags: [],
+      proposedAction: {
+        actionType,
+        channel,
+        payload: (agenticPayload.action.payload ?? {}) as Record<string, unknown>,
+      },
+      strategy: agenticPayload.strategy,
+      confidenceScore: agenticPayload.confidence,
+      reasoning,
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+    }).catch((err: unknown) => {
+      console.error(`[runAgentic] publishEscalationTriggered failed decisionId=${decision.id}:`, err);
+    });
   }
 
   return {
@@ -492,10 +555,95 @@ async function runAgentic(
     strategy: agenticPayload.strategy,
     action: { type: actionType, payload: agenticPayload.action.payload ?? {} },
     confidence: agenticPayload.confidence,
-    outcome: agenticPayload.outcome,
+    outcome,
     reasoning,
     latencyMs: Date.now() - started,
   };
+}
+
+/**
+ * KAN-740 — wrap evaluateThreshold with the full KAN-704 matrix args. Loads
+ * Stage.autoApproveMatrix + Pipeline.defaultAutoApproveMatrix from the
+ * contact's currentStageId + currentPipelineId. Pulls tenantConfig fields
+ * from Tenant. The runner returns 0..1 confidence; threshold-gate expects
+ * 0..100 — multiply at the boundary.
+ *
+ * Returns: { outcome: 'EXECUTED' | 'ESCALATED', reasoning: string }.
+ *
+ * Conservative bias: any unrecognized gate decision → ESCALATED. Matches
+ * the runFreeform safety posture.
+ *
+ * Variable-specifier dynamic import keeps threshold-gate.ts out of the
+ * apps/api static graph (TS6059 hygiene; same pattern as agentic-decision-
+ * runner.ts).
+ */
+async function evaluateAgenticThreshold(
+  prisma: PrismaClient,
+  args: {
+    tenantId: string;
+    contactId: string;
+    contact: Record<string, unknown> & { tenant: { confidenceThreshold: number | null } & Record<string, unknown> };
+    agenticPayload: DecisionPayload;
+  },
+): Promise<{ outcome: 'EXECUTED' | 'ESCALATED'; reasoning: string }> {
+  const { tenantId, contactId, contact, agenticPayload } = args;
+  const tenantRaw = contact.tenant as Record<string, unknown>;
+
+  // Load matrices from Stage + Pipeline rows when contact has them.
+  const currentStageId = (contact as { currentStageId?: string | null }).currentStageId ?? null;
+  const currentPipelineId = (contact as { currentPipelineId?: string | null }).currentPipelineId ?? null;
+
+  const [stageRow, pipelineRow] = await Promise.all([
+    currentStageId
+      ? prisma.stage.findUnique({ where: { id: currentStageId }, select: { autoApproveMatrix: true } })
+      : Promise.resolve(null),
+    currentPipelineId
+      ? prisma.pipeline.findFirst({
+          where: { id: currentPipelineId, tenantId },
+          select: { defaultAutoApproveMatrix: true },
+        })
+      : Promise.resolve(null),
+  ]);
+
+  const stageMatrix = (stageRow?.autoApproveMatrix ?? null) as Record<string, unknown> | null;
+  const pipelineMatrix = (pipelineRow?.defaultAutoApproveMatrix ?? null) as Record<string, unknown> | null;
+
+  const gateInput = {
+    contactId,
+    tenantId,
+    objectiveId: ((agenticPayload.action.payload as { objectiveId?: string } | undefined)?.objectiveId) ?? 'unknown',
+    overallConfidence: agenticPayload.confidence * 100, // 0..1 → 0..100
+    riskFlags: [],
+    actionType: agenticPayload.action.type,
+    channel: agenticPayload.action.channel,
+    actionPayload: (agenticPayload.action.payload ?? {}) as Record<string, unknown>,
+    actionReasoning: agenticPayload.reasoning,
+    selectedStrategy: agenticPayload.strategy,
+    strategyReasoning: agenticPayload.reasoning,
+    tenantConfig: {
+      confidenceThreshold: tenantRaw.confidenceThreshold ?? 70,
+      autoEscalateFlags: (tenantRaw.autoEscalateFlags ?? []) as string[],
+      blockedActionTypes: (tenantRaw.blockedActionTypes ?? []) as string[],
+      requireHumanApproval: (tenantRaw.requireHumanApproval ?? false) as boolean,
+      autoApproveEnabled: (tenantRaw.autoApproveEnabled ?? true) as boolean,
+    },
+    stageMatrix,
+    pipelineMatrix,
+    dailyAutoActionCount: 0,
+  };
+
+  const result = await (evaluateThreshold as unknown as (i: typeof gateInput) => Promise<{ decision: string; reasoning: string }>)(gateInput);
+  const decision = result?.decision ?? 'human_review';
+  const gateReasoning = result?.reasoning ?? 'threshold-gate decision';
+
+  // Map gate decisions to outcomes. 'approved' → EXECUTED; everything else
+  // (human_review / auto_escalated / blocked / unknown) → ESCALATED.
+  const outcome: 'EXECUTED' | 'ESCALATED' = decision === 'approved' ? 'EXECUTED' : 'ESCALATED';
+  const reasoning = decision === 'approved'
+    ? agenticPayload.reasoning
+    : `${agenticPayload.reasoning} · threshold_gate=${decision}: ${gateReasoning}`;
+
+  return { outcome, reasoning };
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

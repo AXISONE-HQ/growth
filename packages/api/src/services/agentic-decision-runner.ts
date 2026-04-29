@@ -20,6 +20,9 @@ import Anthropic from "@anthropic-ai/sdk";
 import { randomUUID } from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
 import {
+  ACTION_TYPES,
+  HALLUCINATED_ACTION_REASON,
+  isActionType,
   type DecisionPayload,
   TOOL_NAMES,
   TOOL_SCHEMAS,
@@ -328,6 +331,7 @@ function buildSystemPrompt(_input: RunAgenticInput): string {
     "Your job: decide the next best action for a contact based on their pipeline, recent activity, and tenant knowledge.",
     "You have access to read-only tools — call them as needed to gather context.",
     "All decisions are tenant-scoped: only consider data from the calling tenant.",
+    `Your final decision MUST pick action.type from this canonical set: ${ACTION_TYPES.join(", ")}. Any other value will be rejected and the contact will be escalated for human review.`,
     "Output your final decision as a single JSON object matching the schema in the user message. Do not include any other prose in your final turn.",
   ].join(" ");
 }
@@ -349,19 +353,34 @@ function parseFinalDecision(text: string): DecisionPayload {
     throw new Error(`agentic final turn JSON parse failed: ${(err as Error).message}`);
   }
   const obj = parsed as Record<string, unknown>;
-  // Loose validation — the LLM is generally well-behaved on Sonnet 4.6 with
-  // explicit schema in the prompt. Strict zod parse would also be reasonable;
-  // KAN-739 adds it once the contract stabilizes.
+  // KAN-740 — runner-boundary action-type validation. LLM may hallucinate
+  // an actionType outside ACTION_TYPES; rather than passing it through (which
+  // would corrupt action.decided downstream consumers), coerce to escalation
+  // with HALLUCINATED_ACTION_REASON in the reasoning.
+  const rawActionType = ((obj.action as Record<string, unknown>)?.type ?? "no_op") as unknown;
+  const validActionType = isActionType(rawActionType);
+  const actionType = validActionType ? (rawActionType as string) : "escalate";
+  const reasoning = !validActionType
+    ? `${HALLUCINATED_ACTION_REASON}: LLM returned actionType=${JSON.stringify(rawActionType)}; expected one of [${ACTION_TYPES.join(", ")}]`
+    : typeof obj.reasoning === "string"
+    ? obj.reasoning
+    : "";
+  const outcome: DecisionPayload["outcome"] = !validActionType
+    ? "ESCALATED"
+    : obj.outcome === "ESCALATED"
+    ? "ESCALATED"
+    : "EXECUTED";
+
   return {
     strategy: typeof obj.strategy === "string" ? obj.strategy : "agentic_loop",
     action: {
-      type: ((obj.action as Record<string, unknown>)?.type ?? "no_op") as string,
+      type: actionType,
       channel: ((obj.action as Record<string, unknown>)?.channel ?? null) as string | null,
       payload: ((obj.action as Record<string, unknown>)?.payload ?? {}) as Record<string, unknown>,
     },
     confidence: typeof obj.confidence === "number" ? obj.confidence : 0,
-    outcome: obj.outcome === "ESCALATED" ? "ESCALATED" : "EXECUTED",
-    reasoning: typeof obj.reasoning === "string" ? obj.reasoning : "",
+    outcome,
+    reasoning,
   };
 }
 
