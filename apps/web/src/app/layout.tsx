@@ -22,32 +22,42 @@ import {
 } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
 import { AuthProvider, useAuth } from '@/lib/AuthContext';
+import { isDemoMode } from '@/lib/demo-mode';
+import { DemoModeBanner } from '@/components/demo-mode-banner';
 
-const navItems = [
+// KAN-718 nav surgery:
+//   - /pipelines (mock) → redirect to /settings/pipelines (KAN-702 real)
+//   - /pipelines/create (mock) → redirect to /settings/pipelines/new
+//   - /audit-log (literal dupe of /audit) → deleted; /audit kept
+//   - /competitors (broken imports, no API) → deleted
+//   - /conversations (V1+ feature, no backend) → demoOnly flag; visible in
+//     dev/staging for sales demos, hidden in prod
+const navItems: Array<{
+  href: string;
+  label: string;
+  icon: typeof LayoutDashboard;
+  badge?: number;
+  demoOnly?: boolean;
+}> = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  { href: '/pipelines', label: 'Pipelines', icon: Activity },
   { href: '/opportunities', label: 'Opportunities', icon: Target },
-  { href: '/conversations', label: 'Conversations', icon: MessageSquare },
-  { href: '/escalations', label: 'Escalations', icon: AlertTriangle, badge: 3 },
+  { href: '/conversations', label: 'Conversations', icon: MessageSquare, demoOnly: true },
+  { href: '/escalations', label: 'Escalations', icon: AlertTriangle },
   { href: '/customers', label: 'Customers', icon: Users },
   { href: '/audit', label: 'Audit Log', icon: FileText },
   { href: '/knowledge', label: 'Knowledge Center', icon: BookOpen },
-  { href: '/competitors', label: 'Competitive Set', icon: Shield },
-    { href: '/settings', label: 'Settings', icon: Settings },
+  { href: '/settings', label: 'Settings', icon: Settings },
 ];
 
 const pageTitle: Record<string, string> = {
   '/dashboard': 'Dashboard',
-  '/pipelines': 'Pipelines',
-  '/pipelines/create': 'Create Pipeline',
   '/opportunities': 'Opportunities',
   '/conversations': 'Conversations',
   '/escalations': 'Escalations',
   '/customers': 'Customers',
   '/audit': 'Audit Log',
   '/knowledge': 'Knowledge Center',
-    '/competitors': 'Competitive Set',
-    '/settings': 'Settings',
+  '/settings': 'Settings',
 };
 
 function AppShell({ children }: { children: React.ReactNode }) {
@@ -109,6 +119,11 @@ function AppShell({ children }: { children: React.ReactNode }) {
           {navItems.map((item) => {
             const Icon = item.icon;
             const isActive = pathname === item.href || pathname.startsWith(item.href + '/');
+
+            // KAN-718: hide demo-only routes when DEMO_MODE is off (prod default).
+            if (item.demoOnly && !isDemoMode()) {
+              return null;
+            }
 
             // Hide admin-only items from members
             if ('adminOnly' in item && item.adminOnly && user.role !== 'admin') {
@@ -188,6 +203,8 @@ function AppShell({ children }: { children: React.ReactNode }) {
 
       {/* Main Content */}
       <main className="ml-60 flex-1 min-h-screen">
+        {/* KAN-718: top-of-page demo-mode disclaimer when NEXT_PUBLIC_DEMO_MODE is on */}
+        <DemoModeBanner />
         {/* Top Bar */}
         <header className="flex items-center justify-between px-8 py-3 border-b border-gray-200 bg-white sticky top-0 z-40">
           <div className="flex items-center gap-4">

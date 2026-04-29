@@ -1,12 +1,22 @@
 'use client';
 
+/**
+ * KAN-718 — /conversations is a demo-only route until the unified-inbox
+ * backend ships in a future sprint. The page renders mock data in
+ * NEXT_PUBLIC_DEMO_MODE; outside demo mode it shows a "coming soon" empty
+ * state. Sidebar nav hides this route entirely when demo mode is off.
+ *
+ * Removed the broken `conversationsApi` import (pre-KAN-689 cohort, 1 of
+ * the 4 broken-imports errors KAN-718 retires).
+ */
+
 import {
   MessageSquare, Search, Filter, Clock, Mail, Phone, MessageCircle,
   Send, ChevronDown, MoreHorizontal, Paperclip, Sparkles, User,
   ArrowUpRight, CheckCheck, AlertTriangle, Zap, Star, Archive
 } from 'lucide-react';
-import { useState, useEffect } from 'react';
-import { conversationsApi } from '@/lib/api';
+import { useState } from 'react';
+import { isDemoMode } from '@/lib/demo-mode';
 
 /* ─── Mock Data ─────────────────────────────────────── */
 const conversations = [
@@ -134,26 +144,36 @@ const statusFilters = ['All', 'AI Handled', 'Escalated', 'Unread'];
 
 /* ─── Component ─────────────────────────────────────── */
 export default function ConversationsPage() {
+  // Hooks must always run, regardless of demo-mode gate (Rules of Hooks).
   const [selectedConversation, setSelectedConversation] = useState(conversations[0]);
   const [channelFilter, setChannelFilter] = useState('All');
   const [statusFilter, setStatusFilter] = useState('All');
   const [searchQuery, setSearchQuery] = useState('');
-  const [apiConversations, setApiConversations] = useState<any[] | null>(null);
-  const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    conversationsApi.list({ limit: 50 })
-      .then((data) => {
-        if (data.conversations && data.conversations.length > 0) {
-          setApiConversations(data.conversations);
-        }
-      })
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  }, []);
+  // KAN-718: outside demo mode, render a polite "coming soon" empty state.
+  // The unified-inbox backend isn't a V1 deliverable; sales demos still get
+  // the mock UI when NEXT_PUBLIC_DEMO_MODE=true.
+  if (!isDemoMode()) {
+    return (
+      <div className="min-h-screen bg-gray-50">
+        <div className="max-w-3xl mx-auto px-6 py-16 text-center">
+          <div className="w-12 h-12 mx-auto mb-4 rounded-full bg-gray-100 flex items-center justify-center">
+            <MessageSquare className="w-6 h-6 text-gray-400" />
+          </div>
+          <h1 className="text-xl font-semibold text-gray-900 mb-2">
+            Conversations — coming soon
+          </h1>
+          <p className="text-sm text-gray-500 max-w-md mx-auto">
+            The unified inbox for AI-handled conversations across email, SMS,
+            and WhatsApp will land in a future release. Until then, individual
+            channel histories are visible from each contact's detail view.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
-  // Use API data when available, fall back to demo data
-  const activeConversations = apiConversations || conversations;
+  const activeConversations = conversations;
 
   const filtered = activeConversations.filter((c) => {
     if (channelFilter !== 'All' && c.channel !== channelFilter) return false;
