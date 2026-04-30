@@ -1,5 +1,5 @@
 /**
- * llm-client — KAN-699 (Sprint 0.3)
+ * llm-client — KAN-699 (Sprint 0.3) + KAN-734 (Sprint 5)
  *
  * Unified LLM provider abstraction. Wraps Anthropic (primary) + OpenAI (fallback)
  * SDKs behind one interface. Adds:
@@ -8,21 +8,33 @@
  *   - automatic fallback to alternate provider on persistent rate-limit
  *   - cost-tracking event emission to llm.call Pub/Sub topic
  *
- * Single call site today: message-composer.ts (cheap tier, JSON mode).
- * Sprint 3-4 agentic loop will add many more — must consume this interface.
+ * KAN-734 extracted MODEL_PRICING / computeCostUsd / LLMCallEvent / emitLLMCallEvent
+ * to `@growth/llm-cost-tracking` so apps/knowledge-worker can emit the same shape
+ * for embedding cost coverage. Symbols are re-exported here for backward-compat
+ * with existing test imports (kept zero-churn surface).
  */
 
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
-import { randomUUID } from 'crypto';
-import type { PubSubClient } from './action-decided-publisher.js';
+import {
+  computeCostUsd,
+  emitLLMCallEvent as emitCostEvent,
+  MODEL_PRICING_VERSION,
+  type LLMCallEvent,
+  type LLMProvider,
+  type LLMTier,
+  type PubSubClient,
+} from '@growth/llm-cost-tracking';
+
+// Re-export the moved symbols so existing internal imports + test files
+// continue to work unchanged. KAN-734's extraction is internal refactor;
+// surface contract is preserved.
+export { MODEL_PRICING, MODEL_PRICING_VERSION, computeCostUsd } from '@growth/llm-cost-tracking';
+export type { LLMCallEvent, LLMProvider, LLMTier, PubSubClient } from '@growth/llm-cost-tracking';
 
 // ─────────────────────────────────────────────
 // Tier → provider chain
 // ─────────────────────────────────────────────
-
-export type LLMTier = 'reasoning' | 'cheap' | 'embedding';
-export type LLMProvider = 'anthropic' | 'openai';
 
 interface ProviderEntry {
   provider: LLMProvider;
@@ -47,68 +59,6 @@ export const TIER_MAP: Record<LLMTier, TierConfig> = {
     primary: { provider: 'openai', model: 'text-embedding-3-small' },
   },
 };
-
-// ─────────────────────────────────────────────
-// KAN-745 PR A — model pricing for cost-event computation
-// ─────────────────────────────────────────────
-
-/**
- * Per-model price per million tokens, USD. Used at `llm.call` emit time to
- * compute `costUsd` for the event payload.
- *
- * **REVIEW DISCIPLINE — quarterly:** Anthropic + OpenAI both adjust prices
- * periodically. The `MODEL_PRICING_VERSION` constant below is bumped on each
- * refresh so observability data can be filtered by which pricing snapshot
- * was active. See `feedback_model_pricing_refresh_discipline` memory entry
- * for the audit checklist.
- *
- * Values below are placeholders matched to publicly-listed pricing as of
- * the constant's `version` date. Operator review required before going live
- * with real billing — small discrepancies in cost ratios are tolerable for
- * the shadow-vs-rules threshold use case (KAN-745), but absolute cost
- * reporting will need true-up.
- *
- * Sources:
- *   - Anthropic: https://www.anthropic.com/pricing
- *   - OpenAI:    https://openai.com/api/pricing/
- */
-export const MODEL_PRICING_VERSION = '2026-04-29-v1';
-
-interface ModelPrice {
-  /** USD per 1M input tokens */
-  inputPerMillion: number;
-  /** USD per 1M output tokens */
-  outputPerMillion: number;
-}
-
-export const MODEL_PRICING: Record<string, ModelPrice> = {
-  // Anthropic — reasoning + cheap tiers
-  'claude-sonnet-4-6': { inputPerMillion: 3.0, outputPerMillion: 15.0 },
-  'claude-haiku-4-5-20251001': { inputPerMillion: 1.0, outputPerMillion: 5.0 },
-  // OpenAI — fallback chain
-  'gpt-4o': { inputPerMillion: 2.5, outputPerMillion: 10.0 },
-  'gpt-4o-mini': { inputPerMillion: 0.15, outputPerMillion: 0.6 },
-  // OpenAI — embedding tier (no output tokens)
-  'text-embedding-3-small': { inputPerMillion: 0.02, outputPerMillion: 0 },
-};
-
-/**
- * Compute USD cost for a given (model, inputTokens, outputTokens) tuple.
- * Returns 0 for unknown models — better than throwing in the cost-tracking
- * hot path; aggregator (KAN-745 PR B) flags zero-cost rows for review.
- */
-export function computeCostUsd(
-  model: string,
-  inputTokens: number,
-  outputTokens: number,
-): number {
-  const price = MODEL_PRICING[model];
-  if (!price) return 0;
-  return (
-    (inputTokens / 1_000_000) * price.inputPerMillion +
-    (outputTokens / 1_000_000) * price.outputPerMillion
-  );
-}
 
 // ─────────────────────────────────────────────
 // Public API
@@ -367,6 +317,15 @@ async function callProvider(
 // Main entrypoints
 // ─────────────────────────────────────────────
 
+/**
+ * Thin wrapper that forwards the module-level `_pubsub` to the stateless
+ * emitter in @growth/llm-cost-tracking. Keeps boot-time wiring (`setLLMCostPublisher`)
+ * + test seam (`__setLLMClientsForTest`) backward-compatible.
+ */
+function emit(event: Omit<LLMCallEvent, 'eventId' | 'eventType' | 'publishedAt' | 'pricingVersion'>): void {
+  void emitCostEvent({ pubsub: _pubsub, event });
+}
+
 export async function complete(input: LLMCompleteInput): Promise<LLMCompleteResult> {
   const tier = TIER_MAP[input.tier];
   const chain: ProviderEntry[] = [tier.primary];
@@ -381,7 +340,7 @@ export async function complete(input: LLMCompleteInput): Promise<LLMCompleteResu
     try {
       const out = await withRetry(() => callProvider(entry, input));
       const latencyMs = Date.now() - start;
-      void emitLLMCallEvent({
+      emit({
         tenantId: input.tenantId,
         provider: out.provider,
         model: out.model,
@@ -402,7 +361,7 @@ export async function complete(input: LLMCompleteInput): Promise<LLMCompleteResu
   }
 
   const latencyMs = Date.now() - start;
-  void emitLLMCallEvent({
+  emit({
     tenantId: input.tenantId,
     provider: tier.primary.provider,
     model: tier.primary.model,
@@ -428,7 +387,7 @@ export async function embed(input: LLMEmbedInput): Promise<LLMEmbedResult> {
     );
     const latencyMs = Date.now() - start;
     const inputTokens = resp.usage?.prompt_tokens ?? 0;
-    void emitLLMCallEvent({
+    emit({
       tenantId: input.tenantId,
       provider: 'openai',
       model: entry.model,
@@ -450,7 +409,7 @@ export async function embed(input: LLMEmbedInput): Promise<LLMEmbedResult> {
     };
   } catch (err) {
     const latencyMs = Date.now() - start;
-    void emitLLMCallEvent({
+    emit({
       tenantId: input.tenantId,
       provider: 'openai',
       model: entry.model,
@@ -468,57 +427,4 @@ export async function embed(input: LLMEmbedInput): Promise<LLMEmbedResult> {
   }
 }
 
-// ─────────────────────────────────────────────
-// Cost-tracking event
-// ─────────────────────────────────────────────
-
-const LLM_CALL_TOPIC = 'llm.call';
-
-export interface LLMCallEvent {
-  eventId: string;
-  eventType: 'llm.call';
-  publishedAt: string;
-  /** KAN-745 PR A: tenantId for per-tenant aggregation downstream. */
-  tenantId: string;
-  provider: LLMProvider;
-  model: string;
-  tier: LLMTier;
-  inputTokens: number;
-  outputTokens: number;
-  /** KAN-745 PR A: USD cost computed from MODEL_PRICING table at emit time. */
-  costUsd: number;
-  /** KAN-745 PR A: which pricing snapshot was active when this event emitted. */
-  pricingVersion: string;
-  latencyMs: number;
-  success: boolean;
-  fallbackUsed: boolean;
-  callerTag?: string;
-  error?: string;
-}
-
-async function emitLLMCallEvent(
-  data: Omit<LLMCallEvent, 'eventId' | 'eventType' | 'publishedAt' | 'pricingVersion'>,
-): Promise<void> {
-  if (!_pubsub) return;
-  const event: LLMCallEvent = {
-    eventId: `evt_${randomUUID()}`,
-    eventType: 'llm.call',
-    publishedAt: new Date().toISOString(),
-    pricingVersion: MODEL_PRICING_VERSION,
-    ...data,
-  };
-  try {
-    await _pubsub.publish(LLM_CALL_TOPIC, Buffer.from(JSON.stringify(event)), {
-      eventType: 'llm.call',
-      tenantId: event.tenantId,
-      provider: event.provider,
-      model: event.model,
-      tier: event.tier,
-    });
-  } catch (err) {
-    // Cost-tracking is best-effort. If the topic doesn't exist yet (until
-    // the gcloud topic create lands) or the publish fails, we log and move
-    // on — never break an LLM call because telemetry failed.
-    console.error('[llm-client] cost-event publish failed', err);
-  }
-}
+void MODEL_PRICING_VERSION; // Tree-shake guard: keep the import live so re-export stays bound.

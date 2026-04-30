@@ -28,42 +28,22 @@ import { z } from 'zod';
 import { Storage } from '@google-cloud/storage';
 import { randomUUID } from 'crypto';
 import { parse } from 'csv-parse/sync';
-import Anthropic from '@anthropic-ai/sdk';
+import {
+  UNIFIED_SCHEMA_FIELDS,
+  runHaikuFieldMapping,
+  runFallbackMapping,
+  type FieldMapping,
+  type UnifiedField,
+} from './csv-import-haiku-mapping.js';
 
 const router = Router();
 const prisma = new PrismaClient();
 const storage = new Storage();
-const anthropic = new Anthropic();
 
 const BUCKET_NAME = process.env.GCS_IMPORT_BUCKET || 'growth-csv-imports';
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 const MAX_ROWS = 50_000;
 const SAMPLE_SIZE = 5; // Rows sent to Haiku for mapping inference
-
-// —— Unified Contact Schema (target fields) ———————————————
-
-const UNIFIED_SCHEMA_FIELDS = [
-  { field: 'email', type: 'string', description: 'Email address' },
-  { field: 'phone', type: 'string', description: 'Phone number (any format)' },
-  { field: 'firstName', type: 'string', description: 'First name / given name' },
-  { field: 'lastName', type: 'string', description: 'Last name / surname / family name' },
-  { field: 'segment', type: 'string', description: 'Customer segment or category' },
-  { field: 'lifecycleStage', type: 'string', description: 'Lifecycle stage (lead, prospect, customer, churned)' },
-  { field: 'source', type: 'string', description: 'Lead source or acquisition channel' },
-  { field: 'company', type: 'string', description: 'Company or organization name' },
-  { field: 'title', type: 'string', description: 'Job title or role' },
-  { field: 'city', type: 'string', description: 'City' },
-  { field: 'state', type: 'string', description: 'State or province' },
-  { field: 'country', type: 'string', description: 'Country' },
-  { field: 'postalCode', type: 'string', description: 'Postal / ZIP code' },
-  { field: 'website', type: 'string', description: 'Website URL' },
-  { field: 'notes', type: 'string', description: 'Notes or comments' },
-  { field: 'tags', type: 'string', description: 'Tags or labels (comma-separated)' },
-  { field: 'externalId', type: 'string', description: 'External system ID' },
-  { field: '_skip', type: 'special', description: 'Column should be ignored / not mapped' },
-] as const;
-
-type UnifiedField = (typeof UNIFIED_SCHEMA_FIELDS)[number]['field'];
 
 // —— Zod Schemas ——————————————————————————————————————
 
@@ -89,14 +69,6 @@ const ImportJobStatusSchema = z.object({
 });
 
 // —— Type Definitions ————————————————————————————————
-
-interface FieldMapping {
-  csvColumn: string;
-  targetField: UnifiedField;
-  confidence: number;
-  sampleValues: string[];
-  reasoning: string;
-}
 
 interface ImportJob {
   id: string;
@@ -248,8 +220,8 @@ router.post('/csv/upload', async (req: Request, res: Response) => {
       data: { status: 'mapping' },
     });
 
-    // Run AI mapping
-    const mappings = await runHaikuFieldMapping(headers, sampleRows);
+    // Run AI mapping (KAN-734: routed through llm-client → llm.call cost event with tenantId)
+    const mappings = await runHaikuFieldMapping(headers, sampleRows, tenantId);
 
     // Update job with mappings
     await prisma.importJob.update({
@@ -292,202 +264,9 @@ router.post('/csv/upload', async (req: Request, res: Response) => {
   }
 });
 
-// —— KAN-109: Haiku-Powered Field Mapping ————————————
-
-/**
- * Use Anthropic Haiku to infer column-to-schema mappings.
- * Sends column headers + sample values → gets structured JSON response.
- */
-async function runHaikuFieldMapping(
-  headers: string[],
-  sampleRows: Record<string, string>[]
-): Promise<FieldMapping[]> {
-  // Build context for Haiku
-  const schemaDescription = UNIFIED_SCHEMA_FIELDS.map(
-    (f) => `  - ${f.field}: ${f.description} (${f.type})`
-  ).join('\n');
-
-  const columnSamples = headers.map((header) => {
-    const values = sampleRows.map((row) => row[header] || '').filter(Boolean);
-    return `  - "${header}": [${values.map((v) => `"${v}"`).join(', ')}]`;
-  }).join('\n');
-
-  const prompt = `You are a data mapping assistant. Given CSV column headers with sample values, map each column to the most appropriate field in our unified contact schema.
-
-## Unified Contact Schema Fields:
-${schemaDescription}
-
-## CSV Columns with Sample Values:
-${columnSamples}
-
-## Instructions:
-- Map each CSV column to exactly ONE schema field, or "_skip" if no match.
-- Consider column names, data patterns, and sample values.
-- Provide a confidence score (0.0 to 1.0) for each mapping.
-- Common patterns: "e-mail" → email, "fname" → firstName, "lname" → lastName, "tel" → phone, "zip" → postalCode.
-
-## Response Format (JSON array):
-[
-  {
-    "csvColumn": "column_name",
-    "targetField": "schema_field",
-    "confidence": 0.95,
-    "reasoning": "brief explanation"
-  }
-]
-
-Return ONLY the JSON array, no other text.`;
-
-  try {
-    const response = await anthropic.messages.create({
-      model: 'claude-3-haiku-20240307',
-      max_tokens: 2048,
-      temperature: 0,
-      messages: [{ role: 'user', content: prompt }],
-    });
-
-    // Extract text response
-    const textContent = response.content.find((c) => c.type === 'text');
-    if (!textContent || textContent.type !== 'text') {
-      throw new Error('No text response from Haiku');
-    }
-
-    // Parse JSON from response
-    const jsonText = textContent.text.trim();
-    const jsonMatch = jsonText.match(/\[[\s\S]*\]/);
-    if (!jsonMatch) {
-      throw new Error('Could not extract JSON array from Haiku response');
-    }
-
-    const rawMappings = JSON.parse(jsonMatch[0]);
-
-    // Validate and enrich mappings with sample values
-    const mappings: FieldMapping[] = rawMappings.map((m: any) => ({
-      csvColumn: m.csvColumn,
-      targetField: m.targetField || '_skip',
-      confidence: Math.min(1, Math.max(0, Number(m.confidence) || 0)),
-      sampleValues: sampleRows.map((row) => row[m.csvColumn] || '').filter(Boolean).slice(0, 3),
-      reasoning: m.reasoning || '',
-    }));
-
-    // Ensure all headers are covered
-    const mappedColumns = new Set(mappings.map((m: FieldMapping) => m.csvColumn));
-    for (const header of headers) {
-      if (!mappedColumns.has(header)) {
-        mappings.push({
-          csvColumn: header,
-          targetField: '_skip',
-          confidence: 0,
-          sampleValues: sampleRows.map((row) => row[header] || '').filter(Boolean).slice(0, 3),
-          reasoning: 'No matching schema field found',
-        });
-      }
-    }
-
-    return mappings;
-  } catch (error: any) {
-    console.error('Haiku field mapping error:', error);
-
-    // Fallback: attempt basic heuristic mapping
-    return runFallbackMapping(headers, sampleRows);
-  }
-}
-
-/**
- * Fallback heuristic mapping when Haiku is unavailable.
- * Uses simple keyword matching on column headers.
- */
-function runFallbackMapping(
-  headers: string[],
-  sampleRows: Record<string, string>[]
-): FieldMapping[] {
-  const heuristicMap: Record<string, UnifiedField> = {
-    email: 'email',
-    'e-mail': 'email',
-    'email_address': 'email',
-    'emailaddress': 'email',
-    phone: 'phone',
-    telephone: 'phone',
-    tel: 'phone',
-    mobile: 'phone',
-    'phone_number': 'phone',
-    'phonenumber': 'phone',
-    'cell': 'phone',
-    'first_name': 'firstName',
-    'firstname': 'firstName',
-    'first name': 'firstName',
-    fname: 'firstName',
-    'given_name': 'firstName',
-    'last_name': 'lastName',
-    'lastname': 'lastName',
-    'last name': 'lastName',
-    lname: 'lastName',
-    'family_name': 'lastName',
-    surname: 'lastName',
-    name: 'firstName', // Ambiguous, default to firstName
-    segment: 'segment',
-    category: 'segment',
-    group: 'segment',
-    'lifecycle_stage': 'lifecycleStage',
-    'lifecyclestage': 'lifecycleStage',
-    stage: 'lifecycleStage',
-    status: 'lifecycleStage',
-    source: 'source',
-    'lead_source': 'source',
-    'leadsource': 'source',
-    channel: 'source',
-    company: 'company',
-    organization: 'company',
-    org: 'company',
-    'company_name': 'company',
-    title: 'title',
-    'job_title': 'title',
-    jobtitle: 'title',
-    role: 'title',
-    position: 'title',
-    city: 'city',
-    town: 'city',
-    state: 'state',
-    province: 'state',
-    region: 'state',
-    country: 'country',
-    nation: 'country',
-    'postal_code': 'postalCode',
-    'postalcode': 'postalCode',
-    zip: 'postalCode',
-    'zip_code': 'postalCode',
-    zipcode: 'postalCode',
-    website: 'website',
-    url: 'website',
-    web: 'website',
-    notes: 'notes',
-    comment: 'notes',
-    comments: 'notes',
-    description: 'notes',
-    tags: 'tags',
-    label: 'tags',
-    labels: 'tags',
-    'external_id': 'externalId',
-    'externalid': 'externalId',
-    id: 'externalId',
-    'customer_id': 'externalId',
-  };
-
-  return headers.map((header) => {
-    const normalized = header.toLowerCase().trim().replace(/[\s\-]+/g, '_');
-    const match = heuristicMap[normalized] || heuristicMap[header.toLowerCase().trim()];
-
-    return {
-      csvColumn: header,
-      targetField: match || '_skip',
-      confidence: match ? 0.7 : 0,
-      sampleValues: sampleRows.map((row) => row[header] || '').filter(Boolean).slice(0, 3),
-      reasoning: match
-        ? `Heuristic match: "${header}" → ${match}`
-        : 'No heuristic match found (fallback mode)',
-    };
-  });
-}
+// —— KAN-109 / KAN-734: Haiku-powered field mapping moved to csv-import-haiku-mapping.ts ——
+// runHaikuFieldMapping + runFallbackMapping + UNIFIED_SCHEMA_FIELDS imported above.
+// Re-exports retained at the bottom of this file for back-compat.
 
 // —— KAN-110: Mapping Preview and Confirmation API ————
 

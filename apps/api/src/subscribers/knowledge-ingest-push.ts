@@ -65,8 +65,16 @@ const IngestRequestedEventSchema = z.object({
  *
  * Returns "dispatched" on success, "already-exists" if the execution name
  * was already used (idempotency hit), or throws on other errors.
+ *
+ * KAN-734: TENANT_ID env override is forwarded so the worker can emit
+ * llm.call cost events with the right tenant attribution. Worker also
+ * falls back to row.tenantId if the env is missing — belt-and-suspenders
+ * during the rollout window.
  */
-async function dispatchIngestJob(ingestionId: string): Promise<"dispatched" | "already-exists"> {
+async function dispatchIngestJob(
+  ingestionId: string,
+  tenantId: string,
+): Promise<"dispatched" | "already-exists"> {
   const jobPath = `projects/${PROJECT_ID}/locations/${REGION}/jobs/${JOB_NAME}`;
   // Cloud Run execution names must be DNS-1123 (lowercase, max 63 chars,
   // no leading/trailing hyphens). Use the ingestionId UUID (36 chars + 7-char
@@ -78,7 +86,10 @@ async function dispatchIngestJob(ingestionId: string): Promise<"dispatched" | "a
       overrides: {
         containerOverrides: [
           {
-            env: [{ name: "INGESTION_ID", value: ingestionId }],
+            env: [
+              { name: "INGESTION_ID", value: ingestionId },
+              { name: "TENANT_ID", value: tenantId },
+            ],
           },
         ],
       },
@@ -127,7 +138,7 @@ knowledgeIngestPushApp.post("/knowledge-ingest", async (c) => {
   }
 
   try {
-    const result = await dispatchIngestJob(event.ingestionId);
+    const result = await dispatchIngestJob(event.ingestionId, event.tenantId);
     console.log(
       `[knowledge-ingest-push] ${result} eventId=${event.eventId} tenantId=${event.tenantId} ingestionId=${event.ingestionId}`,
     );

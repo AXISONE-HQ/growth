@@ -1,5 +1,6 @@
 /**
  * KAN-707 PR B — Knowledge ingestion worker (Cloud Run job binary).
+ * KAN-734 — Boot-wires costPublisher so the default embedFn emits llm.call.
  *
  * Invoked by the apps/api push subscriber via Cloud Run Jobs API. Reads the
  * INGESTION_ID from env, queries the KnowledgeIngestion + KnowledgeSource
@@ -24,10 +25,33 @@
 import "dotenv/config";
 import { PrismaClient } from "@prisma/client";
 import { Storage } from "@google-cloud/storage";
+import { PubSub } from "@google-cloud/pubsub";
+import type { PubSubClient } from "@growth/llm-cost-tracking";
 import { runHandler } from "./handlers/run-handler.js";
 
 const prisma = new PrismaClient();
 const storage = new Storage();
+
+/**
+ * KAN-734: thin adapter so PubSub.topic(...).publishMessage satisfies the
+ * structural PubSubClient interface in @growth/llm-cost-tracking. Lazy-
+ * created so a missing GCP credential doesn't crash workers running locally
+ * with no cost-emit need (boot still succeeds; cost emit is best-effort).
+ */
+function makeCostPublisher(): PubSubClient | undefined {
+  try {
+    const pubsub = new PubSub();
+    return {
+      async publish(topic: string, data: Buffer, attributes?: Record<string, string>): Promise<string> {
+        const msg = await pubsub.topic(topic).publishMessage({ data, attributes });
+        return msg;
+      },
+    };
+  } catch (err) {
+    console.warn("[worker] cost publisher unavailable — embedding cost events will be skipped", err);
+    return undefined;
+  }
+}
 
 async function main(): Promise<number> {
   const ingestionId = process.env.INGESTION_ID;
@@ -36,6 +60,8 @@ async function main(): Promise<number> {
     return 1;
   }
   console.log(`[worker] start ingestionId=${ingestionId}`);
+
+  const costPublisher = makeCostPublisher();
 
   const exitCode = await runHandler({
     ingestionId,
@@ -51,6 +77,7 @@ async function main(): Promise<number> {
       const [buffer] = await storage.bucket(bucket).file(path).download();
       return buffer;
     },
+    costPublisher,
   });
 
   await prisma.$disconnect();
