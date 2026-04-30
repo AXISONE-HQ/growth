@@ -29,6 +29,7 @@ import { actionDecidedPushApp } from "./subscribers/action-decided-push.js";
 import { actionExecutedPushApp } from "./subscribers/action-executed-push.js";
 import { knowledgeIngestPushApp } from "./subscribers/knowledge-ingest-push.js";
 import { llmCallPushApp } from "./subscribers/llm-call-push.js";
+import { leadReceivedPushApp } from "./subscribers/lead-received-push.js";
 import { leadApiApp } from "./routes/lead-api.js";
 import { getPubSubClient } from "../../../packages/api/src/lib/pubsub-client.js";
 import { setLLMCostPublisher } from "../../../packages/api/src/services/llm-client.js";
@@ -89,6 +90,8 @@ app.route("/pubsub", actionExecutedPushApp);
 app.route("/pubsub", knowledgeIngestPushApp);
 // KAN-745 PR B — llm.call cost-event subscriber
 app.route("/pubsub", llmCallPushApp);
+// KAN-774 — lead.received → assignLeadToPipeline (closes Lead Inbox consumer gap)
+app.route("/pubsub", leadReceivedPushApp);
 
 // ============================================================================
 // PUBLIC LEAD API (KAN-742) — API-key authenticated, rate-limited, idempotent
