@@ -26,6 +26,7 @@ COPY apps/connectors/package.json ./apps/connectors/
 COPY apps/web/package.json ./apps/web/
 COPY packages/connector-contracts/package.json ./packages/connector-contracts/
 COPY packages/db/package.json ./packages/db/
+COPY packages/llm-cost-tracking/package.json ./packages/llm-cost-tracking/
 COPY packages/shared/package.json ./packages/shared/
 # --ignore-scripts: source isn't here yet, so postinstall hooks (tsc in
 # connector-contracts; prisma generate in packages/db) would fail. They're
@@ -39,6 +40,7 @@ FROM deps AS build
 COPY tsconfig.json ./
 COPY packages/connector-contracts ./packages/connector-contracts
 COPY packages/db ./packages/db
+COPY packages/llm-cost-tracking ./packages/llm-cost-tracking
 COPY packages/shared ./packages/shared
 COPY packages/api ./packages/api
 COPY apps/api ./apps/api
@@ -47,6 +49,11 @@ RUN npx prisma generate --schema=./packages/db/prisma/schema.prisma
 # runtime image has the source but no dist/, and `@growth/shared` resolution
 # fails on container startup (router.ts:19 imports at module-load time).
 RUN npm run build --workspace=@growth/shared
+# KAN-734 fix-forward: same pattern for @growth/llm-cost-tracking. Without
+# this dist/ build, packages/api/src/services/llm-client.ts crashes at
+# module-load with ERR_MODULE_NOT_FOUND on @growth/llm-cost-tracking.
+# Caught by KAN-747 smoke gate (working as intended).
+RUN npm run build --workspace=@growth/llm-cost-tracking
 # KAN-742 fix-forward: bcrypt's prebuilt-install postinstall hook downloads
 # the native binding (lib/binding/napi-v3/bcrypt_lib.node) but is skipped by
 # the deps stage's --ignore-scripts. `npm rebuild bcrypt` re-runs the install
