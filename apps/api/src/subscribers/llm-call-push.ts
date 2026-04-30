@@ -5,13 +5,12 @@
  *   gcloud pubsub subscriptions create llm-call-cost-aggregator-sub \
  *     --topic=llm.call \
  *     --push-endpoint=$GROWTH_API_URL/pubsub/llm-call \
- *     --push-auth-service-account=growth-api-pubsub@growth-493400.iam.gserviceaccount.com \
+ *     --push-auth-service-account=pubsub-invoker@growth-493400.iam.gserviceaccount.com \
  *     --push-auth-token-audience=$GROWTH_API_URL/pubsub/llm-call
  *
- * The audience MUST equal the env var `LLM_CALL_AUDIENCE` set on the
- * growth-api Cloud Run service (per-subscriber audience per the KAN-741
- * pattern; KAN-732 will retire this when canonical request-URL-derived
- * audience lands).
+ * Audience MUST equal `pushEndpoint` exactly. KAN-732 retires per-subscriber
+ * audience env vars: the verifyPubsubOidc helper now derives the expected
+ * audience from the inbound request URL (`https://${host}${path}`).
  *
  * Flow: Pub/Sub push → POST /pubsub/llm-call → verify OIDC → base64-decode →
  *       handleLlmCallEvent (validates, UPSERTs rollup, evaluates threshold) → 200.
@@ -31,8 +30,8 @@
  */
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { OAuth2Client } from 'google-auth-library';
 import { prisma } from '../prisma.js';
+import { verifyPubsubOidc } from '../lib/oidc-pubsub-verify.js';
 
 // Variable-specifier dynamic import keeps the aggregator out of the
 // apps/api static graph (TS6059 cohort hygiene). Manually-declared types
@@ -53,7 +52,6 @@ async function loadAggregatorModule(): Promise<AggregatorModule> {
 
 export const llmCallPushApp = new Hono();
 
-const oauth = new OAuth2Client();
 const PushEnvelopeSchema = z.object({
   message: z.object({
     data: z.string(),
@@ -63,34 +61,14 @@ const PushEnvelopeSchema = z.object({
   subscription: z.string().optional(),
 });
 
-async function verifyOidc(authHeader: string | undefined, audience: string): Promise<boolean> {
-  if (!authHeader?.startsWith('Bearer ')) return false;
-  const token = authHeader.slice('Bearer '.length);
-  try {
-    const ticket = await oauth.verifyIdToken({ idToken: token, audience });
-    return !!ticket.getPayload();
-  } catch {
-    return false;
-  }
-}
-
 llmCallPushApp.post('/llm-call', async (c) => {
-  const skipAuth = process.env.NODE_ENV === 'test' || process.env.PUBSUB_PUSH_SKIP_AUTH === 'true';
-  if (!skipAuth) {
-    // Per-subscriber audience env var per the KAN-741 pattern (mirrors
-    // KNOWLEDGE_INGEST_AUDIENCE in knowledge-ingest-push.ts:114). The
-    // initial KAN-745 PR B shipped against APP_API_URL which is
-    // action-decided's audience — semantically wrong for llm-call.
-    // Subscription audience: https://growth-api-biut5gfhuq-uc.a.run.app/pubsub/llm-call
-    // KAN-732 (canonical request-URL-derived audience) eliminates this class
-    // structurally; until then, per-subscriber env var is the workaround.
-    const audience = process.env.LLM_CALL_AUDIENCE;
-    if (!audience) {
-      console.error('[llm-call-push] LLM_CALL_AUDIENCE unset — rejecting');
-      return c.text('server misconfigured', 500);
-    }
-    const ok = await verifyOidc(c.req.header('authorization'), audience);
-    if (!ok) return c.text('unauthorized', 401);
+  // KAN-732: shared helper derives audience from request URL — retires the
+  // LLM_CALL_AUDIENCE env-var read + local verifyOidc helper. KAN-741's
+  // per-subscriber audience pattern is no longer needed; the audience-
+  // mismatch class that surfaced in PR #79 fix-forward is now structurally
+  // impossible.
+  if (!(await verifyPubsubOidc(c))) {
+    return c.text('unauthorized', 401);
   }
 
   let envelope: z.infer<typeof PushEnvelopeSchema>;

@@ -28,12 +28,11 @@
  */
 import { Hono } from "hono";
 import { z } from "zod";
-import { OAuth2Client } from "google-auth-library";
 import { JobsClient } from "@google-cloud/run";
+import { verifyPubsubOidc } from "../lib/oidc-pubsub-verify.js";
 
 export const knowledgeIngestPushApp = new Hono();
 
-const oauth = new OAuth2Client();
 const jobsClient = new JobsClient();
 
 const PROJECT_ID = process.env.GCP_PROJECT_ID || "growth-493400";
@@ -60,17 +59,6 @@ const IngestRequestedEventSchema = z.object({
   payload: z.unknown(),
   enqueuedAt: z.string(),
 });
-
-async function verifyOidc(authHeader: string | undefined, audience: string): Promise<boolean> {
-  if (!authHeader?.startsWith("Bearer ")) return false;
-  const token = authHeader.slice("Bearer ".length);
-  try {
-    const ticket = await oauth.verifyIdToken({ idToken: token, audience });
-    return !!ticket.getPayload();
-  } catch {
-    return false;
-  }
-}
 
 /**
  * Dispatch a Cloud Run job execution with a deterministic name.
@@ -111,20 +99,14 @@ async function dispatchIngestJob(ingestionId: string): Promise<"dispatched" | "a
   }
 }
 
-// Subscriber-specific OIDC audience. APP_API_URL is action-decided's audience;
-// reusing it across subscribers caused KAN-731 (smoke-test failure: every
-// Pub/Sub push 401'd because the action-decided URL didn't match the
-// subscription-signed `aud` claim). Each new subscriber declares its own
-// audience env var until KAN-732 (canonical request-URL-derived audience)
-// lands and consolidates.
-const KNOWLEDGE_INGEST_AUDIENCE_DEFAULT = "https://growth-api-biut5gfhuq-uc.a.run.app/pubsub/knowledge-ingest";
+// KAN-732: per-subscriber audience env var (KNOWLEDGE_INGEST_AUDIENCE) +
+// hardcoded fallback retired in favor of the shared verifyPubsubOidc helper
+// which derives audience from the request URL. The KAN-731 incident this
+// previously protected against is now structurally impossible.
 
 knowledgeIngestPushApp.post("/knowledge-ingest", async (c) => {
-  const skipAuth = process.env.NODE_ENV === "test" || process.env.PUBSUB_PUSH_SKIP_AUTH === "true";
-  if (!skipAuth) {
-    const audience = process.env.KNOWLEDGE_INGEST_AUDIENCE ?? KNOWLEDGE_INGEST_AUDIENCE_DEFAULT;
-    const ok = await verifyOidc(c.req.header("authorization"), audience);
-    if (!ok) return c.text("unauthorized", 401);
+  if (!(await verifyPubsubOidc(c))) {
+    return c.text("unauthorized", 401);
   }
 
   let envelope: z.infer<typeof PushEnvelopeSchema>;
