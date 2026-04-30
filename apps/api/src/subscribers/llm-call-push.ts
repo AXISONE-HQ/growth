@@ -4,9 +4,14 @@
  * Cloud Run Pub/Sub push endpoint. Subscription provisioned operator-side:
  *   gcloud pubsub subscriptions create llm-call-cost-aggregator-sub \
  *     --topic=llm.call \
- *     --push-endpoint=$APP_API_URL/pubsub/llm-call \
+ *     --push-endpoint=$GROWTH_API_URL/pubsub/llm-call \
  *     --push-auth-service-account=growth-api-pubsub@growth-493400.iam.gserviceaccount.com \
- *     --push-auth-token-audience=$APP_API_URL
+ *     --push-auth-token-audience=$GROWTH_API_URL/pubsub/llm-call
+ *
+ * The audience MUST equal the env var `LLM_CALL_AUDIENCE` set on the
+ * growth-api Cloud Run service (per-subscriber audience per the KAN-741
+ * pattern; KAN-732 will retire this when canonical request-URL-derived
+ * audience lands).
  *
  * Flow: Pub/Sub push → POST /pubsub/llm-call → verify OIDC → base64-decode →
  *       handleLlmCallEvent (validates, UPSERTs rollup, evaluates threshold) → 200.
@@ -72,9 +77,16 @@ async function verifyOidc(authHeader: string | undefined, audience: string): Pro
 llmCallPushApp.post('/llm-call', async (c) => {
   const skipAuth = process.env.NODE_ENV === 'test' || process.env.PUBSUB_PUSH_SKIP_AUTH === 'true';
   if (!skipAuth) {
-    const audience = process.env.APP_API_URL;
+    // Per-subscriber audience env var per the KAN-741 pattern (mirrors
+    // KNOWLEDGE_INGEST_AUDIENCE in knowledge-ingest-push.ts:114). The
+    // initial KAN-745 PR B shipped against APP_API_URL which is
+    // action-decided's audience — semantically wrong for llm-call.
+    // Subscription audience: https://growth-api-biut5gfhuq-uc.a.run.app/pubsub/llm-call
+    // KAN-732 (canonical request-URL-derived audience) eliminates this class
+    // structurally; until then, per-subscriber env var is the workaround.
+    const audience = process.env.LLM_CALL_AUDIENCE;
     if (!audience) {
-      console.error('[llm-call-push] APP_API_URL unset — rejecting');
+      console.error('[llm-call-push] LLM_CALL_AUDIENCE unset — rejecting');
       return c.text('server misconfigured', 500);
     }
     const ok = await verifyOidc(c.req.header('authorization'), audience);
