@@ -1,13 +1,44 @@
 /**
  * Cross-service Cloud Monitoring alert policies + notification channels.
  *
- * Usage (operator-imperative, mirrors connectors.tf):
- *   cd infra/terraform
- *   terraform init   # state backend operator-managed
- *   terraform plan   -var project_id=growth-493400 -var fred_email=fred@axisone.ca
- *   terraform apply  -var project_id=growth-493400 -var fred_email=fred@axisone.ca
+ * ─── ⚠️ APPLY PROTOCOL — Sprint 5 reality (`feedback_terraform_unmanaged_aspirational_state`) ──
  *
- * Idempotent: re-running apply is safe.
+ * `connectors.tf` is unmanaged-aspirational: scaffolded as documentation,
+ * never actually `terraform apply`-ed. Live GCP resources (connectors-sa,
+ * Pub/Sub topics, Cloud Run service) were created imperatively via
+ * gcloud/Console. A naive `terraform apply` from this directory will attempt
+ * to create those existing resources → 409 ALREADY_EXISTS errors.
+ *
+ * **MUST use `-target` flags until KAN-772 reconciliation lands.** Targeted
+ * apply is the Sprint 5 workaround. Full state import / reconciliation is
+ * the Sprint 6+ epic.
+ *
+ * Usage (Sprint 5 — Cloud Shell, operator-imperative):
+ *
+ *   cd ~/growth/infra/terraform
+ *   terraform init
+ *   terraform plan \
+ *     -target=google_monitoring_alert_policy.agentic_cost_threshold_breach \
+ *     -target=google_monitoring_notification_channel.email_fred \
+ *     -var project_id=growth-493400 \
+ *     -var fred_email=fred@axisone.ca
+ *
+ *   terraform apply \
+ *     -target=google_monitoring_alert_policy.agentic_cost_threshold_breach \
+ *     -target=google_monitoring_notification_channel.email_fred \
+ *     -var project_id=growth-493400 \
+ *     -var fred_email=fred@axisone.ca
+ *
+ * Idempotent on the targeted resources: re-running `apply` with the same
+ * `-target` flags is safe.
+ *
+ * ─── State backend — Sprint 5 = local Cloud Shell ────────────
+ *
+ * State lives in `terraform.tfstate` in the operator's Cloud Shell home
+ * directory. **Not portable** across environments (other Cloud Shell
+ * sessions, local machines, GHA workflows) until KAN-773 migrates to a
+ * GCS-backed remote backend. KAN-770 (Terraform GHA) requires KAN-773 to
+ * land first.
  *
  * Covers Jira: KAN-759 (agentic-cost-threshold-breach alert policy).
  *
