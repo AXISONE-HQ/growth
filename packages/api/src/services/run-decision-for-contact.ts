@@ -43,7 +43,7 @@ import { analyzeGapsForContact } from './objective-gap-analyzer';
 import { selectStrategy } from './strategy-selector';
 import { determineAction } from './action-determiner';
 import { scoreConfidence } from './confidence-scorer';
-import { evaluateThreshold } from './threshold-gate';
+import { evaluateThreshold, type ThresholdGateInput } from './threshold-gate';
 
 // KAN-738: variable-specifier dynamic import keeps agentic-decision-runner.ts
 // out of the apps/api static graph (TS6059 cohort). Same pattern as
@@ -437,11 +437,21 @@ async function runAgentic(
   // routed to ESCALATED (e.g. HALLUCINATED_ACTION_REASON), short-circuit.
   if (outcome === 'EXECUTED') {
     try {
-      const gateDecision = await evaluateAgenticThreshold(prisma, {
+      const gateDecision = await evaluateThresholdWithMatrix(prisma, {
         tenantId,
         contactId,
         contact,
-        agenticPayload,
+        actionType: agenticPayload.action.type,
+        channel: agenticPayload.action.channel,
+        actionPayload: (agenticPayload.action.payload ?? {}) as Record<string, unknown>,
+        actionReasoning: agenticPayload.reasoning,
+        selectedStrategy: agenticPayload.strategy,
+        strategyReasoning: agenticPayload.reasoning,
+        objectiveId:
+          ((agenticPayload.action.payload as { objectiveId?: string } | undefined)?.objectiveId) ??
+          'unknown',
+        riskFlags: [],
+        overallConfidence: agenticPayload.confidence * 100,
       });
       if (gateDecision.outcome === 'ESCALATED') {
         outcome = 'ESCALATED';
@@ -585,16 +595,37 @@ async function runAgentic(
  * apps/api static graph (TS6059 hygiene; same pattern as agentic-decision-
  * runner.ts).
  */
-async function evaluateAgenticThreshold(
+/**
+ * KAN-749 — generalized threshold gate evaluation with full KAN-704 matrix args.
+ *
+ * Loads stage + pipeline matrices from DB, composes the full ThresholdGateInput,
+ * calls the gate, maps result back to {outcome, reasoning}. Reusable from both
+ * code paths (runAgentic + runFreeform) — KAN-749's symmetric-governance MVP.
+ *
+ * actionType is passed AS-IS from the caller. Under MVP shape, callers may emit
+ * vocab that doesn't match the matrix's semantic vocab (KAN-763 Phase C will
+ * unify); on miss, resolveAutoApproveEntry returns null + the gate falls back
+ * to tenantConfig.confidenceThreshold (legacy flat path). Vocab fall-through
+ * telemetry tracked in KAN-768.
+ */
+export async function evaluateThresholdWithMatrix(
   prisma: PrismaClient,
   args: {
     tenantId: string;
     contactId: string;
     contact: Record<string, unknown> & { tenant: { confidenceThreshold: number | null } & Record<string, unknown> };
-    agenticPayload: DecisionPayload;
+    actionType: string;
+    channel: string | null;
+    actionPayload: Record<string, unknown>;
+    actionReasoning: string;
+    selectedStrategy: string;
+    strategyReasoning: string;
+    objectiveId: string;
+    riskFlags: string[];
+    overallConfidence: number; // 0..100
   },
 ): Promise<{ outcome: 'EXECUTED' | 'ESCALATED'; reasoning: string }> {
-  const { tenantId, contactId, contact, agenticPayload } = args;
+  const { tenantId, contactId, contact } = args;
   const tenantRaw = contact.tenant as Record<string, unknown>;
 
   // Load matrices from Stage + Pipeline rows when contact has them.
@@ -616,40 +647,44 @@ async function evaluateAgenticThreshold(
   const stageMatrix = (stageRow?.autoApproveMatrix ?? null) as Record<string, unknown> | null;
   const pipelineMatrix = (pipelineRow?.defaultAutoApproveMatrix ?? null) as Record<string, unknown> | null;
 
-  const gateInput = {
+  const gateInput: ThresholdGateInput = {
     contactId,
     tenantId,
-    objectiveId: ((agenticPayload.action.payload as { objectiveId?: string } | undefined)?.objectiveId) ?? 'unknown',
-    overallConfidence: agenticPayload.confidence * 100, // 0..1 → 0..100
-    riskFlags: [],
-    actionType: agenticPayload.action.type,
-    channel: agenticPayload.action.channel,
-    actionPayload: (agenticPayload.action.payload ?? {}) as Record<string, unknown>,
-    actionReasoning: agenticPayload.reasoning,
-    selectedStrategy: agenticPayload.strategy,
-    strategyReasoning: agenticPayload.reasoning,
+    objectiveId: args.objectiveId,
+    overallConfidence: args.overallConfidence,
+    riskFlags: args.riskFlags,
+    actionType: args.actionType,
+    channel: args.channel,
+    actionPayload: args.actionPayload,
+    actionReasoning: args.actionReasoning,
+    selectedStrategy: args.selectedStrategy,
+    strategyReasoning: args.strategyReasoning,
     tenantConfig: {
-      confidenceThreshold: tenantRaw.confidenceThreshold ?? 70,
+      confidenceThreshold: (tenantRaw.confidenceThreshold ?? 70) as number,
       autoEscalateFlags: (tenantRaw.autoEscalateFlags ?? []) as string[],
       blockedActionTypes: (tenantRaw.blockedActionTypes ?? []) as string[],
       requireHumanApproval: (tenantRaw.requireHumanApproval ?? false) as boolean,
       autoApproveEnabled: (tenantRaw.autoApproveEnabled ?? true) as boolean,
     },
-    stageMatrix,
-    pipelineMatrix,
+    stageMatrix: stageMatrix as ThresholdGateInput['stageMatrix'],
+    pipelineMatrix: pipelineMatrix as ThresholdGateInput['pipelineMatrix'],
     dailyAutoActionCount: 0,
   };
 
-  const result = await (evaluateThreshold as unknown as (i: typeof gateInput) => Promise<{ decision: string; reasoning: string }>)(gateInput);
-  const decision = result?.decision ?? 'human_review';
-  const gateReasoning = result?.reasoning ?? 'threshold-gate decision';
+  const result = await evaluateThreshold(gateInput);
+  const decision = result.decision;
+  const gateReasoning = result.reasoning;
 
   // Map gate decisions to outcomes. 'approved' → EXECUTED; everything else
-  // (human_review / auto_escalated / blocked / unknown) → ESCALATED.
+  // (human_review / auto_escalated / blocked) → ESCALATED.
+  //
+  // KAN-749 MVP: gate reasoning is preserved on BOTH branches (was dropped
+  // on 'approved' pre-PR3 in evaluateAgenticThreshold). This gives downstream
+  // observability the matrix-vs-legacy signal — the `legacy threshold` /
+  // `auto-approve matrix threshold` substring is the proxy for KAN-768's
+  // typed vocab_fallthrough event.
   const outcome: 'EXECUTED' | 'ESCALATED' = decision === 'approved' ? 'EXECUTED' : 'ESCALATED';
-  const reasoning = decision === 'approved'
-    ? agenticPayload.reasoning
-    : `${agenticPayload.reasoning} · threshold_gate=${decision}: ${gateReasoning}`;
+  const reasoning = `${args.actionReasoning} · gate=${decision}: ${gateReasoning}`;
 
   return { outcome, reasoning };
 }
@@ -820,24 +855,56 @@ async function runFreeform(
       ? confidenceRaw
       : confidenceRaw?.score ?? confidenceRaw?.confidence ?? 0;
 
-  // 6. Threshold Gate.
-  const gateRaw: any = (evaluateThreshold as any)({ confidence, threshold: confidenceThreshold });
-  const gateDecision: string =
-    typeof gateRaw === 'string' ? gateRaw : gateRaw?.decision ?? gateRaw?.result ?? 'fail';
-  const outcome: 'EXECUTED' | 'ESCALATED' =
-    gateDecision === 'pass' || gateDecision === 'PASS' || gateDecision === 'execute'
-      ? 'EXECUTED'
-      : 'ESCALATED';
-
   const strategyType: string = strategy?.type ?? strategy?.selected ?? String(strategy);
   const actionType: string = action?.type ?? action?.actionType ?? String(action);
   const channel: string | null = action?.channel ?? null;
+
+  // 6. Threshold Gate — KAN-749 MVP: symmetric matrix wiring with runAgentic.
+  //
+  // actionType is passed AS-IS (likely determiner vocab like 'send_message').
+  // Under MVP, vocab mismatch with the matrix's semantic vocab is tolerated:
+  // resolveAutoApproveEntry returns null on miss → gate falls back to
+  // tenantConfig.confidenceThreshold (legacy flat path). KAN-763 (Phase C)
+  // will unify; KAN-768 will add typed telemetry on the fall-through.
+  //
+  // TODO(KAN-763): runFreeform doesn't always have objectiveId; sentinel
+  // 'unknown' avoids null-throw but pollutes downstream telemetry. Phase C
+  // should reshape ThresholdGateInputSchema to allow null objectiveId.
+  let gateResult: { outcome: 'EXECUTED' | 'ESCALATED'; reasoning: string };
+  try {
+    gateResult = await evaluateThresholdWithMatrix(prisma, {
+      tenantId,
+      contactId,
+      contact,
+      actionType,
+      channel,
+      actionPayload: (action?.payload ?? {}) as Record<string, unknown>,
+      actionReasoning: `Action: ${actionType}`,
+      selectedStrategy: strategyType,
+      strategyReasoning: `Strategy: ${strategyType}`,
+      objectiveId:
+        ((action?.payload as { objectiveId?: string } | undefined)?.objectiveId) ??
+        'unknown',
+      riskFlags: [],
+      overallConfidence: confidence * 100, // 0..1 → 0..100 (gate input scale)
+    });
+  } catch (err) {
+    // Mirror runAgentic's posture (line 451-455): gate evaluation failure
+    // escalates conservatively rather than silently emitting.
+    console.error('[runFreeform] threshold-gate evaluation failed, defaulting to escalation:', err);
+    gateResult = {
+      outcome: 'ESCALATED',
+      reasoning: `threshold_gate_error: ${(err as Error).message}`,
+    };
+  }
+  const outcome: 'EXECUTED' | 'ESCALATED' = gateResult.outcome;
 
   const reasoning = [
     `Strategy: ${strategyType}`,
     `Action: ${actionType}`,
     `Confidence: ${(confidence * 100).toFixed(0)}% vs threshold ${(confidenceThreshold * 100).toFixed(0)}%`,
     `Outcome: ${outcome}`,
+    gateResult.reasoning,
   ].join(' · ');
 
   // 7. Persist Decision row + (optionally) an Escalation row.
