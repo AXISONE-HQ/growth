@@ -8,8 +8,9 @@
  *     (with threshold-breach indicator if > 2.5)
  *   - Rolling 24-hour per-prefix table
  *   - Pricing-version footnote (refresh discipline)
- *   - KAN-734 disclosure tooltip — knowledge-worker + csv-import bypass
- *     means embedding cost not yet tracked here
+ *   - KAN-734 (Sprint 5) shipped: worker embedding cost + CSV column-mapping
+ *     cost both flow through @growth/llm-cost-tracking → llm.call topic →
+ *     LlmCostRollup, surfaced in this dashboard alongside apps/api LLM cost.
  *
  * Empty state: when no rollup rows exist (pre-traffic), the cards show
  * $0.00 and the table renders the column header only with a directional
@@ -261,23 +262,16 @@ export default function ObservabilityPage() {
                 </p>
               </div>
               <div className="flex items-start gap-2 text-xs text-gray-500">
-                <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5 text-amber-500" />
+                <Info className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
                 <p>
-                  <span title="Knowledge worker (KAN-734) and CSV column-mapping LLM costs not included. See KAN-734.">
-                    <span className="underline decoration-dotted cursor-help">
-                      Embedding + CSV column-mapping costs not tracked here
-                    </span>
-                  </span>{' '}
-                  — knowledge-worker bypass (
-                  <a
-                    href="https://axisone-team.atlassian.net/browse/KAN-734"
-                    target="_blank"
-                    rel="noreferrer"
-                    className="underline hover:text-gray-700"
-                  >
-                    KAN-734
-                  </a>
-                  ) and csv-import.ts bypass remain dark in V1.
+                  KAN-734 (Sprint 5): worker embedding cost (model{' '}
+                  <span className="font-mono">text-embedding-3-small</span>, callerTag{' '}
+                  <span className="font-mono">knowledge-worker:embed</span>) and CSV
+                  column-mapping cost (callerTag{' '}
+                  <span className="font-mono">csv-import:column-mapping</span>) now
+                  emit through the shared{' '}
+                  <span className="font-mono">@growth/llm-cost-tracking</span> package
+                  and roll up into this dashboard.
                 </p>
               </div>
             </div>

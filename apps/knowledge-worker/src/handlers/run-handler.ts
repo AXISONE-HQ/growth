@@ -1,13 +1,26 @@
 /**
  * KAN-707 PR B — Worker run handler (extracted for testability).
+ * KAN-734 — Per-batch llm.call cost emission for embedding spend visibility.
  *
  * Pure orchestration: reads the ingestion row, idempotency-checks, dispatches
  * to the right path handler, embeds chunks via OpenAI, writes to the DB,
  * transitions status. All external deps (prisma, fetcher, downloadFile,
- * embedFn) are injected so unit tests can stub them.
+ * embedFn, costPublisher) are injected so unit tests can stub them.
+ *
+ * KAN-734 cost-tracking: when `costPublisher` is set (boot-wired in index.ts),
+ * the default embedFn emits one llm.call event per batch via
+ * @growth/llm-cost-tracking — same shape apps/api emits, so the KAN-745
+ * aggregator UPSERTs worker rows into the same tenant-day rollup. Tests pass
+ * `costPublisher: undefined` and assert the no-op path; the dedicated
+ * cost-emit test injects a mock publisher and asserts the event shape.
  */
 import type { PrismaClient } from "@prisma/client";
 import OpenAI from "openai";
+import {
+  computeCostUsd,
+  emitLLMCallEvent,
+  type PubSubClient,
+} from "@growth/llm-cost-tracking";
 import { pathHandlers } from "../services/knowledge-paths/index.js";
 import type { Chunk } from "../services/knowledge-chunker.js";
 
@@ -19,19 +32,53 @@ export interface RunHandlerDeps {
   prisma: PrismaClient;
   fetcher: typeof globalThis.fetch;
   downloadFile: (gcsRef: string) => Promise<Buffer>;
-  /** Optional override for unit tests — defaults to OpenAI text-embedding-3-small. */
+  /** Optional override for unit tests — defaults to OpenAI text-embedding-3-small with cost emission. */
   embedFn?: (texts: string[]) => Promise<number[][]>;
+  /**
+   * KAN-734: optional cost publisher. When set, the default embedFn emits an
+   * llm.call event per batch. When unset (tests, local dev without ADC), emit
+   * is a no-op — embedding still works.
+   */
+  costPublisher?: PubSubClient;
 }
 
-async function defaultEmbedFn(texts: string[]): Promise<number[][]> {
-  const client = new OpenAI();
-  const r = await client.embeddings.create({ model: EMBEDDING_MODEL, input: texts });
-  return r.data.map((d) => d.embedding);
+/**
+ * Exported factory so tests can inject a fake OpenAI client to verify the
+ * cost-emit path without a live API key. Production calls pass `undefined`
+ * for openaiOverride; the closure constructs `new OpenAI()` once.
+ */
+export function makeDefaultEmbedFn(
+  tenantId: string,
+  costPublisher: PubSubClient | undefined,
+  openaiOverride?: { embeddings: { create: (args: { model: string; input: string | string[] }) => Promise<{ data: { embedding: number[] }[]; usage?: { prompt_tokens?: number } }> } },
+): (texts: string[]) => Promise<number[][]> {
+  const client = openaiOverride ?? new OpenAI();
+  return async (texts: string[]): Promise<number[][]> => {
+    const start = Date.now();
+    const r = await client.embeddings.create({ model: EMBEDDING_MODEL, input: texts });
+    const inputTokens = r.usage?.prompt_tokens ?? 0;
+    void emitLLMCallEvent({
+      pubsub: costPublisher,
+      event: {
+        tenantId,
+        provider: "openai",
+        model: EMBEDDING_MODEL,
+        tier: "embedding",
+        inputTokens,
+        outputTokens: 0,
+        costUsd: computeCostUsd(EMBEDDING_MODEL, inputTokens, 0),
+        latencyMs: Date.now() - start,
+        success: true,
+        fallbackUsed: false,
+        callerTag: "knowledge-worker:embed",
+      },
+    });
+    return r.data.map((d) => d.embedding);
+  };
 }
 
 export async function runHandler(deps: RunHandlerDeps): Promise<number> {
   const { ingestionId, prisma } = deps;
-  const embedFn = deps.embedFn ?? defaultEmbedFn;
 
   // Idempotency guard — re-dispatch under Pub/Sub redelivery becomes a no-op.
   const row = await (prisma as any).knowledgeIngestion?.findUnique({
@@ -52,6 +99,12 @@ export async function runHandler(deps: RunHandlerDeps): Promise<number> {
     console.error(`[worker] ingestionId=${ingestionId} has no source row`);
     return 1;
   }
+
+  // KAN-734: tenantId from env override (set by knowledge-ingest-push) wins,
+  // falls back to the row. Either path is valid; env is faster + matches the
+  // event payload the subscriber received.
+  const tenantId = process.env.TENANT_ID || (row.tenantId as string);
+  const embedFn = deps.embedFn ?? makeDefaultEmbedFn(tenantId, deps.costPublisher);
 
   // pending → processing
   await (prisma as any).knowledgeIngestion.update({

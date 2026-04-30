@@ -1,0 +1,13 @@
+name,email,phone,company,title,address,city,state,zip,country,source,notes
+Sarah Chen,sarah.chen@acmecorp.com,+1-415-555-0142,Acme Corp,VP Marketing,500 Market St,San Francisco,CA,94103,USA,linkedin,Top-of-funnel Q3 webinar attendee
+James Miller,jmiller@apexdigital.io,415.555.0188,Apex Digital,CTO,1 Hacker Way,Menlo Park,CA,94025,USA,referral,Referred by Lisa H.
+Priya Patel,priya@nimbus.cloud,+44 20 7946 0958,Nimbus Cloud Ltd,Head of Growth,12 Old Street,London,,EC1V 9BX,UK,inbound,Replied to outbound seq #4
+Marco Bianchi,m.bianchi@volpe.it,+39 02 1234 5678,Volpe Industriale,Plant Manager,Via Roma 22,Milano,MI,20100,Italy,trade-show,SNIA expo lead
+Anika Schultz,anika.schultz@bergmann.de,+49 30 12345678,Bergmann GmbH,Sales Director,Friedrichstr 100,Berlin,,10117,Germany,cold-email,Opened 3x clicked once
+Diego Ramos,diego@solar-mx.com,+52 55 5512 3456,Solar MX,Operations Lead,Av Reforma 222,Mexico City,CDMX,06600,Mexico,event,CES 2026 booth visit
+Yuki Tanaka,y.tanaka@kazoku.co.jp,+81 3 1234 5678,Kazoku K.K.,Director of Sales,Shibuya 3-2-1,Tokyo,,150-0002,Japan,partner,Intro from regional reseller
+Olivia Carter,o.carter@brightline.uk,+44 161 555 0190,Brightline UK,COO,5 Albert Square,Manchester,,M2 5DB,UK,inbound,Filled out demo form
+Rafael Souza,rafael.souza@tropicaltech.com.br,+55 11 91234 5678,Tropical Tech,Head of Engineering,Av Paulista 1000,Sao Paulo,SP,01310-100,Brazil,linkedin,Active on 3 mutual posts
+Nadia Hassan,nhassan@levantai.me,+961 1 123456,Levant AI,CEO,Hamra Street,Beirut,,1103,Lebanon,referral,Co-founder intro
+Emma O'Reilly,emma@dublincoffee.ie,+353 1 5550123,Dublin Coffee Co,Marketing Lead,Grafton St 14,Dublin,,D02,Ireland,event,Web Summit 2025 contact
+Lin Wei,lin.wei@hangzhou-soft.cn,+86 571 8888 1234,Hangzhou Software,Product Manager,West Lake Rd 88,Hangzhou,Zhejiang,310007,China,partner,JV evaluation
