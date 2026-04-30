@@ -1,6 +1,6 @@
 /**
  * KAN-732 — structural regression guard for OIDC audience handling across
- * all 4 push subscribers.
+ * all push subscribers.
  *
  * Originally KAN-731's typo-safety test for `KNOWLEDGE_INGEST_AUDIENCE`.
  * Repurposed by KAN-732: now asserts the canonical request-URL-derived
@@ -12,6 +12,18 @@
  * subscriber goes through `verifyPubsubOidc(c)` from the shared helper.
  * This test catches any regression that copy-pastes the old per-subscriber
  * env-var pattern back into the codebase.
+ *
+ * **SCOPE NOTE (KAN-774):** Filename `knowledge-ingest-audience.test.ts` is
+ * historical — this suite now covers ALL push subscribers (KAN-732's 4 +
+ * KAN-774's lead-received-push = 5 total). KAN-776 tracks the rename to
+ * `pubsub-subscriber-audience.test.ts` (Sprint 6+, Low; single-file rename
+ * PR with zero cohort impact). Filename retained until the rename ticket
+ * lands so this file's git history stays continuous.
+ *
+ * **ADDING A NEW PUSH SUBSCRIBER:** add the filename to `SUBSCRIBERS` below.
+ * Drift-prevention guarantees apply automatically: import-shape, no-local-
+ * helper, no-local-OAuth2Client, no-retired-env-var. KAN-732's audience-
+ * mismatch class stays structurally impossible for the new subscriber.
  */
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
@@ -24,6 +36,7 @@ const SUBSCRIBERS = [
   "action-executed-push.ts",
   "knowledge-ingest-push.ts",
   "llm-call-push.ts",
+  "lead-received-push.ts", // KAN-774 — Lead Inbox consumer subscriber
 ];
 
 function loadSrc(name: string): string {
@@ -61,6 +74,9 @@ describe("KAN-732 — retired audience env-var reads stay retired", () => {
     "process.env.APP_API_URL",
     "process.env.KNOWLEDGE_INGEST_AUDIENCE",
     "process.env.LLM_CALL_AUDIENCE",
+    "process.env.LEAD_RECEIVED_AUDIENCE", // KAN-774 — never adopted; structurally
+                                          // unneeded post-KAN-732 (verifyPubsubOidc
+                                          // derives audience from request URL).
   ];
 
   for (const name of SUBSCRIBERS) {
