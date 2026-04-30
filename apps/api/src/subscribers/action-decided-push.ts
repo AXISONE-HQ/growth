@@ -20,8 +20,8 @@
  */
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { OAuth2Client } from 'google-auth-library';
 import { prisma } from '../prisma.js';
+import { verifyPubsubOidc } from '../lib/oidc-pubsub-verify.js';
 import { getPubSubClient } from '../../../../packages/api/src/lib/pubsub-client.js';
 import { ActionDecidedEventSchema } from '../../../../packages/api/src/services/action-decided-publisher.js';
 import {
@@ -33,7 +33,6 @@ import { loadKnowledge } from '../../../../packages/api/src/services/context-ass
 
 export const actionDecidedPushApp = new Hono();
 
-const oauth = new OAuth2Client();
 const PushEnvelopeSchema = z.object({
   message: z.object({
     data: z.string(),
@@ -45,27 +44,11 @@ const PushEnvelopeSchema = z.object({
 
 const NIL_UUID = '00000000-0000-0000-0000-000000000000';
 
-async function verifyOidc(authHeader: string | undefined, audience: string): Promise<boolean> {
-  if (!authHeader?.startsWith('Bearer ')) return false;
-  const token = authHeader.slice('Bearer '.length);
-  try {
-    const ticket = await oauth.verifyIdToken({ idToken: token, audience });
-    return !!ticket.getPayload();
-  } catch {
-    return false;
-  }
-}
-
 actionDecidedPushApp.post('/action-decided', async (c) => {
-  const skipAuth = process.env.NODE_ENV === 'test' || process.env.PUBSUB_PUSH_SKIP_AUTH === 'true';
-  if (!skipAuth) {
-    const audience = process.env.APP_API_URL;
-    if (!audience) {
-      console.error('[action-decided-push] APP_API_URL unset — rejecting');
-      return c.text('server misconfigured', 500);
-    }
-    const ok = await verifyOidc(c.req.header('authorization'), audience);
-    if (!ok) return c.text('unauthorized', 401);
+  // KAN-732: shared helper derives audience from request URL — retires the
+  // per-subscriber APP_API_URL env-var read + local verifyOidc helper.
+  if (!(await verifyPubsubOidc(c))) {
+    return c.text('unauthorized', 401);
   }
 
   let envelope: z.infer<typeof PushEnvelopeSchema>;

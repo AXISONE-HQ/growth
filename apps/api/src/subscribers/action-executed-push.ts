@@ -19,7 +19,7 @@
  */
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { OAuth2Client } from 'google-auth-library';
+import { verifyPubsubOidc } from '../lib/oidc-pubsub-verify.js';
 // Inline the schema for ActionExecutedEvent — packages/connector-contracts is
 // not a workspace dep of apps/api. Mirrors the canonical shape at
 // packages/connector-contracts/src/events.ts.
@@ -43,8 +43,6 @@ import { prisma } from '../prisma.js';
 
 export const actionExecutedPushApp = new Hono();
 
-const oauth = new OAuth2Client();
-
 const PushEnvelopeSchema = z.object({
   message: z.object({
     data: z.string(),
@@ -54,17 +52,6 @@ const PushEnvelopeSchema = z.object({
   subscription: z.string().optional(),
 });
 
-async function verifyOidc(authHeader: string | undefined, audience: string): Promise<boolean> {
-  if (!authHeader?.startsWith('Bearer ')) return false;
-  const token = authHeader.slice('Bearer '.length);
-  try {
-    const ticket = await oauth.verifyIdToken({ idToken: token, audience });
-    return !!ticket.getPayload();
-  } catch {
-    return false;
-  }
-}
-
 const CHANNEL_TO_ACTION: Record<string, string> = {
   EMAIL: 'email_send',
   SMS: 'sms_send',
@@ -73,15 +60,9 @@ const CHANNEL_TO_ACTION: Record<string, string> = {
 };
 
 actionExecutedPushApp.post('/action-executed', async (c) => {
-  const skipAuth = process.env.NODE_ENV === 'test' || process.env.PUBSUB_PUSH_SKIP_AUTH === 'true';
-  if (!skipAuth) {
-    const audience = process.env.APP_API_URL;
-    if (!audience) {
-      console.error('[action-executed-push] APP_API_URL unset — rejecting');
-      return c.text('server misconfigured', 500);
-    }
-    const ok = await verifyOidc(c.req.header('authorization'), audience);
-    if (!ok) return c.text('unauthorized', 401);
+  // KAN-732: shared helper derives audience from request URL.
+  if (!(await verifyPubsubOidc(c))) {
+    return c.text('unauthorized', 401);
   }
 
   let envelope: z.infer<typeof PushEnvelopeSchema>;
