@@ -30,6 +30,11 @@ COPY packages/db ./packages/db
 COPY packages/shared ./packages/shared
 COPY apps/connectors ./apps/connectors
 RUN npx prisma generate --schema=./packages/db/prisma/schema.prisma
+# KAN-741 fix-forward: @growth/shared ships compiled dist/. Without explicit
+# build, the runtime image has the source but no dist/, and tsc resolution
+# from connectors fails on `import { LeadReceivedEventSchema } from '@growth/shared'`.
+# Mirrors the apps/api KAN-737/PR #83 pattern.
+RUN npm run build --workspace=@growth/shared
 RUN npx turbo run build --filter=@growth-ai/connectors
 
 # ─────────────────────────────────────────────
