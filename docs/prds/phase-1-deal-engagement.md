@@ -322,7 +322,7 @@ Production has 18 `decisions` rows but 0 `actions` rows. Three hypotheses:
 - (b) Source from `Contact.metadata` or pipeline-stage entry actions if present
 - (c) Require value in the close-transition action payload as a new schema field
 
-**Recommendation: (a).** Phase 1 establishes the `Deal` row; value enrichment is a Phase 1.1 follow-up that doesn't block the schema.
+**Recommendation: (a) with optional metadata hint.** Default behavior: `value = Contact.metadata?.dealValue ?? null`, `currency = Contact.metadata?.dealCurrency ?? "USD"`. Inbound flows that have value information (Formspree custom field, sales-agent qualification output) write `dealValue`/`dealCurrency` into `Contact.metadata` at ingestion time; the threshold-gate reads them at close-won transition. Flows that don't have value info insert NULL, and a downstream enrichment agent can backfill. This avoids adding a new column to `Contact` and keeps the threshold-gate stateless.
 
 ---
 
