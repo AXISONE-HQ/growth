@@ -159,7 +159,7 @@ Both models attach to `Contact`, not a separate `Lead`, because **Lead == Contac
 
 | File | Change |
 |------|--------|
-| `packages/db/prisma/schema.prisma` | New models + enums + relations on Tenant/Contact (Section 3 above). New migration generated via `prisma migrate dev --name add_deal_engagement_kan_TBD` (replace `TBD` with the Sprint 6 implementation ticket number once filed — match the ticket-prefixed convention used by `apps/connectors/...kan_741_*` and `apps/api/...kan_774_*`). CI runs `prisma migrate deploy` per `reference_schema_pr_ci_migrate_step` discipline. |
+| `packages/db/prisma/schema.prisma` | New models + enums + relations on Tenant/Contact (Section 3 above). New migration generated via `prisma migrate dev --name add_deal_engagement_kan_786` (KAN-786 is the Sprint 6 implementation ticket; matches the ticket-prefixed convention used by `apps/connectors/...kan_741_*` and `apps/api/...kan_774_*`). CI runs `prisma migrate deploy` per `reference_schema_pr_ci_migrate_step` discipline. |
 | `apps/api/src/services/threshold-gate.ts:36-37,92-97` | Extend `transition_to_closed_won` and `transition_to_closed_lost` action handlers to insert a `Deal` row (status=`closed_won`/`closed_lost`, `closedAt=now()`, value/currency from action metadata if present, else null) **alongside** the existing Pipeline stage transition. Idempotent on re-fire (use `(tenantId, contactId, status='closed_won')` upsert key derivation, not a hard UNIQUE — reps can be earned multiple times across deal cycles). |
 | `apps/api/src/services/behavioral-learner.ts:9` | (Decision needed — see §9 Open questions) replace Pub/Sub subscription to `growth.engagement.logged` with direct Prisma reads from new `engagement` table, OR keep Pub/Sub and add Engagement persistence as a sibling subscriber. Recommend the latter for now (preserves existing decoupling) but PR author can swap. |
 | `packages/api/src/services/agentic-tools.ts` | Wire AI agent action emit path to call `engagementService.logEngagement()`. Every action dispatched becomes one `Engagement` row with `engagementType` derived from `actionType` (e.g., `email_send` → `engagementType="email_send"`, signalClass=`neutral`; opens/clicks/replies arrive later from webhooks). Use the 3-taxonomy guidance from `decision_kan_749_mvp_shape_rationale` — pass `actionType` AS-IS, defer vocab refactor. |
@@ -258,7 +258,7 @@ export class EngagementService {
 
 ## 6. Acceptance criteria
 
-- [ ] `prisma migrate dev --name add_deal_engagement_kan_TBD` (TBD = Sprint 6 impl ticket per Edit 6 convention) generates migration; CI green; `prisma migrate deploy` lands cleanly in staging then prod via the deploy-api.yml path-gated step (per `reference_schema_pr_ci_migrate_step`)
+- [ ] `prisma migrate dev --name add_deal_engagement_kan_786` (KAN-786 = Sprint 6 impl ticket) generates migration; CI green; `prisma migrate deploy` lands cleanly in staging then prod via the deploy-api.yml path-gated step (per `reference_schema_pr_ci_migrate_step`)
 - [ ] `Deal` model exists with the exact schema in §3; `DealStatus` enum present
 - [ ] `Engagement` model exists with the exact schema in §3; `SignalClass` enum present
 - [ ] `Tenant` and `Contact` relations updated; Prisma client regenerated; `enum-drift.test.ts` PAIRS extended for the 2 new enums (per `reference_enum_drift_pairs_discipline`)
