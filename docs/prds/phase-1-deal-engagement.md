@@ -50,13 +50,15 @@ The current data model collapses three distinct product concepts into one struct
 Verification query at sprint close:
 ```sql
 SELECT 'deals' AS t, COUNT(*) AS n,
-       COUNT(*) FILTER (WHERE metadata->>'source' != 'seed') AS real_n
+       COUNT(*) FILTER (WHERE metadata->>'source' IS DISTINCT FROM 'seed') AS real_n
 FROM deals
 UNION ALL
-SELECT 'engagements', COUNT(*),
-       COUNT(*) FILTER (WHERE metadata->>'source' != 'seed') AS real_n
+SELECT 'engagements' AS t, COUNT(*) AS n,
+       COUNT(*) FILTER (WHERE metadata->>'source' IS DISTINCT FROM 'seed') AS real_n
 FROM engagements;
 ```
+
+> **Why `IS DISTINCT FROM` not `!=`:** `metadata->>'source'` returns NULL when the `source` key is absent, and `NULL != 'seed'` evaluates to NULL (not TRUE) — every untagged real row would be silently dropped from the count. `IS DISTINCT FROM` treats NULL as a real value and returns TRUE.
 Pass criteria: `real_n >= 1` for both rows.
 
 ---
