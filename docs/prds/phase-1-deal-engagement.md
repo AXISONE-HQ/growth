@@ -258,7 +258,7 @@ export class EngagementService {
 
 ## 6. Acceptance criteria
 
-- [ ] `prisma migrate dev --name add_deal_engagement` generates migration; CI green; `prisma migrate deploy` lands cleanly in staging then prod via the deploy-api.yml path-gated step (per `reference_schema_pr_ci_migrate_step`)
+- [ ] `prisma migrate dev --name add_deal_engagement_kan_TBD` (TBD = Sprint 6 impl ticket per Edit 6 convention) generates migration; CI green; `prisma migrate deploy` lands cleanly in staging then prod via the deploy-api.yml path-gated step (per `reference_schema_pr_ci_migrate_step`)
 - [ ] `Deal` model exists with the exact schema in §3; `DealStatus` enum present
 - [ ] `Engagement` model exists with the exact schema in §3; `SignalClass` enum present
 - [ ] `Tenant` and `Contact` relations updated; Prisma client regenerated; `enum-drift.test.ts` PAIRS extended for the 2 new enums (per `reference_enum_drift_pairs_discipline`)
