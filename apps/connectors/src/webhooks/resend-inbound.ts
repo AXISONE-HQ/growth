@@ -227,6 +227,19 @@ resendInboundWebhookApp.post(
   const attachmentCount = Array.isArray(data.attachments) ? data.attachments.length : 0;
   const spfPass = data.spf?.pass === true;
   const dkimPass = data.dkim?.pass === true;
+  // KAN-741 fix-forward (2026-05-02): the gate decision uses the EXPLICITLY-
+  // FAILED signal, not the inverse of "pass". Resend Inbound's webhook payload
+  // does not always populate `data.spf` / `data.dkim` (verified empirically:
+  // 3 real-email smokes from Formspree / iCloud-via-mkze.vc / Outlook all
+  // arrived without these fields and were silently rejected as
+  // `rejected_spam`). When the field is absent, we trust Resend's upstream
+  // SES-layer filtering — Resend would not webhook the email if SES considered
+  // it spam. The gate now rejects only on EXPLICIT failure (pass === false).
+  // The audit row still records `spfPass`/`dkimPass` as the boolean shape it
+  // had before — `false` when the field is absent — preserving forensic
+  // signal in `lead_inbox_events.spf_pass` / `dkim_pass` columns.
+  const spfExplicitlyFailed = data.spf?.pass === false;
+  const dkimExplicitlyFailed = data.dkim?.pass === false;
 
   // ── Redis short-window dedup
   if (resendEmailId) {
@@ -302,7 +315,7 @@ resendInboundWebhookApp.post(
     return c.text("OK", 200);
   }
 
-  if (!spfPass) {
+  if (spfExplicitlyFailed) {
     await safeWriteAuditRow({
       tenantId: tenant.id,
       inboxAddress,
@@ -320,11 +333,13 @@ resendInboundWebhookApp.post(
     return c.text("OK", 200);
   }
 
-  // DKIM strict mode (default): reject DKIM=fail AND DKIM=none.
-  // Lenient mode (per-tenant override): accept DKIM=none, only reject DKIM=fail.
-  // The Resend payload's dkim.pass=true means signed and verified; absence
-  // of a dkim.pass field means no signature present.
-  if (tenant.inboxDkimStrict && !dkimPass) {
+  // DKIM strict mode (default): reject only on EXPLICIT DKIM=fail.
+  // Pre-KAN-741-fix-forward, this rejected DKIM=fail AND DKIM=none under
+  // strict mode. Empirically Resend's payload omits `dkim` for most emails;
+  // treating "none" as "fail" rejected 100% of real inbound. Now: explicit
+  // `dkim.pass === false` is the only DKIM-strict rejection signal. If the
+  // field is absent, trust Resend's upstream filtering.
+  if (tenant.inboxDkimStrict && dkimExplicitlyFailed) {
     await safeWriteAuditRow({
       tenantId: tenant.id,
       inboxAddress,
