@@ -20,6 +20,8 @@ The current data model collapses three distinct product concepts into one struct
 - `Contact.currentStageId` is the **only "deal-like" signal today** — when a stage transition fires `transition_to_closed_won`, the contact's pipeline stage flips to a terminal stage, but **no row is created** to represent the closed-won opportunity
 - Empirically: `lead_stage_history` is **0 rows** in production; not a single transition has been recorded end-to-end
 
+Phase 3 will split Lead from Contact (1 Contact → N Leads), at which point the FK on `deals.contact_id` and `engagements.contact_id` is renamed to `lead_id` and the rows are repointed via a backfill migration. **Phase 3 is scheduled debt** — target sprint TBD pending Phase 1+2 ingestion volume, but no later than the first design partner with multiple leads per contact (currently zero, expected by Sprint 9–10).
+
 **(b) Engagement is event-only and unwired.**
 - `engagement-logger.ts` defines an `EngagementStore` interface but **the only impl is `InMemoryEngagementStore`** (in-process array, zero persistence)
 - The module's Express route (`createEngagementLoggerRouter`) is **never mounted** — apps/api uses Hono/tRPC, not Express
