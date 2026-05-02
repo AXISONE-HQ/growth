@@ -284,6 +284,72 @@ describe("inbound webhook — SPF/DKIM enforcement", () => {
     expect(ctx.publishedEvents).toHaveLength(1);
   });
 
+  // KAN-741 fix-forward (2026-05-02): the gate decision uses EXPLICITLY-FAILED
+  // signals. Resend's webhook payload often omits data.spf / data.dkim entirely
+  // — empirically 100% of real-world smokes (Formspree, mkze.vc, hotmail.com)
+  // arrived without these fields and were silently rejected as spam under the
+  // pre-fix "if (!spfPass)" / "if (!dkimPass under strict)" logic. The tests
+  // below pin the new behavior: absent fields => pass through, explicit false
+  // => reject.
+
+  it("accepts when data.spf is absent (Resend payload shape — trust SES upstream)", async () => {
+    const ctx = makeHooks({ resolvedTenant: { id: TENANT_A, inboxDkimStrict: false } });
+    __setInboundHooksForTest(ctx.hooks);
+
+    const app = makeApp();
+    const { spf, dkim, ...dataNoSpfDkim } = validInboundPayload.data;
+    void spf; void dkim;
+    const payload = { ...validInboundPayload, data: dataNoSpfDkim };
+    const res = await app.request("/webhooks/resend-inbound", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+
+    expect(res.status).toBe(200);
+    expect(ctx.auditRows[0].status).toBe("accepted");
+    expect(ctx.publishedEvents).toHaveLength(1);
+  });
+
+  it("accepts when data.dkim is absent under strict mode (was rejected pre-fix)", async () => {
+    const ctx = makeHooks({ resolvedTenant: { id: TENANT_A, inboxDkimStrict: true } });
+    __setInboundHooksForTest(ctx.hooks);
+
+    const app = makeApp();
+    const { dkim, ...dataNoDkim } = validInboundPayload.data;
+    void dkim;
+    const payload = { ...validInboundPayload, data: { ...dataNoDkim, spf: { pass: true } } };
+    const res = await app.request("/webhooks/resend-inbound", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+
+    expect(res.status).toBe(200);
+    expect(ctx.auditRows[0].status).toBe("accepted");
+    expect(ctx.publishedEvents).toHaveLength(1);
+  });
+
+  it("accepts when both data.spf and data.dkim are absent (real-world Resend shape)", async () => {
+    const ctx = makeHooks({ resolvedTenant: { id: TENANT_A, inboxDkimStrict: true } });
+    __setInboundHooksForTest(ctx.hooks);
+
+    const app = makeApp();
+    const { spf, dkim, ...dataNoSpfDkim } = validInboundPayload.data;
+    void spf; void dkim;
+    const payload = { ...validInboundPayload, data: dataNoSpfDkim };
+    const res = await app.request("/webhooks/resend-inbound", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+
+    expect(res.status).toBe(200);
+    expect(ctx.auditRows[0].status).toBe("accepted");
+    expect(ctx.publishedEvents).toHaveLength(1);
+    // Audit row still records spfPass=false / dkimPass=false (forensic signal:
+    // Resend didn't tell us either passed). Behavior change is gate-side only.
+    expect(ctx.auditRows[0].spfPass).toBe(false);
+    expect(ctx.auditRows[0].dkimPass).toBe(false);
+  });
+
   it("rejects anonymous domains regardless of SPF/DKIM", async () => {
     const ctx = makeHooks({ resolvedTenant: { id: TENANT_A, inboxDkimStrict: false } });
     __setInboundHooksForTest(ctx.hooks);
