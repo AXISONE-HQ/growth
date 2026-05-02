@@ -73,10 +73,11 @@ Verbatim Prisma model — to be appended to `packages/db/prisma/schema.prisma`:
 // ─────────────────────────────────────────────
 
 model Deal {
-  id        String     @id @default(cuid())
-  tenantId  String     @map("tenant_id")
-  contactId String     @map("contact_id")
-  value     Decimal?   @db.Decimal(12, 2)
+  id            String     @id @default(cuid())
+  tenantId      String     @map("tenant_id")
+  contactId     String     @map("contact_id")
+  correlationId String?    @unique @map("correlation_id")
+  value         Decimal?   @db.Decimal(12, 2)
   currency  String     @default("USD") @db.VarChar(3)
   status    DealStatus @default(open)
   closedAt  DateTime?  @map("closed_at")
@@ -104,6 +105,7 @@ model Engagement {
   id             String      @id @default(cuid())
   tenantId       String      @map("tenant_id")
   contactId      String      @map("contact_id")
+  correlationId  String?     @unique @map("correlation_id")
   engagementType String      @map("engagement_type")
   signalClass    SignalClass @map("signal_class")
   channel        String?
@@ -164,6 +166,8 @@ Both models attach to `Contact`, not a separate `Lead`, because **Lead == Contac
 |------|---------|
 | `apps/api/src/services/engagement-service.ts` | **NEW** Prisma-backed Engagement service. Replaces dead `engagement-logger.ts`. Public API (3 methods, narrow surface): |
 
+**Idempotency contract:** All writes accept an optional `correlationId`; if provided and a row already exists with that value, the write is a no-op (return existing row). This makes Pub/Sub redelivery and handler retries safe by construction. Recommended `correlationId` sources: Resend message id for inbound-derived engagements, decision id for threshold-gate-derived deals, downstream agent action id for agent-emitted engagements.
+
 ```ts
 // apps/api/src/services/engagement-service.ts (NEW)
 
@@ -174,6 +178,11 @@ export interface EngagementInput {
   channel?: string | null;
   occurredAt: Date;
   metadata?: Record<string, unknown>;
+  /** Optional natural-key dedup token. If provided and a row with this
+   *  correlationId already exists, the write is a no-op (returns the
+   *  existing row). Pub/Sub redelivery + handler retries safe by
+   *  construction. */
+  correlationId?: string;
 }
 
 export class EngagementService {
