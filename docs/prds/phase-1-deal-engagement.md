@@ -74,6 +74,7 @@ Verbatim Prisma model — to be appended to `packages/db/prisma/schema.prisma`:
 // PHASE 1 — Deal + Engagement (Sprint 6)
 // ─────────────────────────────────────────────
 
+/// Phase 1 — see docs/prds/phase-1-deal-engagement.md
 model Deal {
   id            String     @id @default(cuid())
   tenantId      String     @map("tenant_id")
@@ -103,6 +104,7 @@ enum DealStatus {
   @@map("deal_status")
 }
 
+/// Phase 1 — see docs/prds/phase-1-deal-engagement.md
 model Engagement {
   id             String      @id @default(cuid())
   tenantId       String      @map("tenant_id")
@@ -157,10 +159,14 @@ Both models attach to `Contact`, not a separate `Lead`, because **Lead == Contac
 
 | File | Change |
 |------|--------|
-| `packages/db/prisma/schema.prisma` | New models + enums + relations on Tenant/Contact (Section 3 above). New migration generated via `prisma migrate dev --name add_deal_engagement`. CI runs `prisma migrate deploy` per `reference_schema_pr_ci_migrate_step` discipline. |
+| `packages/db/prisma/schema.prisma` | New models + enums + relations on Tenant/Contact (Section 3 above). New migration generated via `prisma migrate dev --name add_deal_engagement_kan_TBD` (replace `TBD` with the Sprint 6 implementation ticket number once filed — match the ticket-prefixed convention used by `apps/connectors/...kan_741_*` and `apps/api/...kan_774_*`). CI runs `prisma migrate deploy` per `reference_schema_pr_ci_migrate_step` discipline. |
 | `apps/api/src/services/threshold-gate.ts:36-37,92-97` | Extend `transition_to_closed_won` and `transition_to_closed_lost` action handlers to insert a `Deal` row (status=`closed_won`/`closed_lost`, `closedAt=now()`, value/currency from action metadata if present, else null) **alongside** the existing Pipeline stage transition. Idempotent on re-fire (use `(tenantId, contactId, status='closed_won')` upsert key derivation, not a hard UNIQUE — reps can be earned multiple times across deal cycles). |
 | `apps/api/src/services/behavioral-learner.ts:9` | (Decision needed — see §9 Open questions) replace Pub/Sub subscription to `growth.engagement.logged` with direct Prisma reads from new `engagement` table, OR keep Pub/Sub and add Engagement persistence as a sibling subscriber. Recommend the latter for now (preserves existing decoupling) but PR author can swap. |
 | `packages/api/src/services/agentic-tools.ts` | Wire AI agent action emit path to call `engagementService.logEngagement()`. Every action dispatched becomes one `Engagement` row with `engagementType` derived from `actionType` (e.g., `email_send` → `engagementType="email_send"`, signalClass=`neutral`; opens/clicks/replies arrive later from webhooks). Use the 3-taxonomy guidance from `decision_kan_749_mvp_shape_rationale` — pass `actionType` AS-IS, defer vocab refactor. |
+
+### Seeds posture
+
+**No seed data for `deals` or `engagements` in `packages/db/prisma/seed.ts`.** The success metric in §2 requires real ingestion to count, and seeded rows would either inflate the metric (if untagged) or require the `metadata->>'source' = 'seed'` exclusion to work perfectly across every query path. Cleaner to start empty and let real flows populate. If demo data is needed for design partner onboarding, write a separate `scripts/demo-seed-deal-engagement.ts` that runs on demand against a named demo tenant only — never via `prisma migrate seed`.
 
 ### Files to create
 
@@ -261,7 +267,11 @@ export class EngagementService {
 - [ ] `apps/api/src/services/agentic-tools.ts` emits an `Engagement` row on action dispatch (unit test asserting Prisma engagement.create called; e2e: trigger one decision via existing decision-engine integration test, observe one `Engagement` row land)
 - [ ] `behavioral-learner.ts` either reads from the `engagement` table directly OR subscribes to `growth.engagement.logged` with a sibling Engagement-persistence subscriber — **decision documented in PR description with trade-off** (see §9 below)
 - [ ] **Empirical end-of-sprint smoke (load-bearing per `feedback_kan_745_cost_observability_shipped`):** at least 1 real `Deal` row and 1 real `Engagement` row exist in production; verification query from §2 returns `real_n >= 1` for both
-- [ ] No regression on `lead_inbox_events` flow (KAN-741 Track A close validation matrix re-runs green)
+- [ ] **Track A regression check:** After Phase 1 deploy, re-run the 4-query verification matrix from yesterday's Track A close-out. All four must pass before Phase 1 is declared shipped — same matrix that closed Track A; reusing it ensures Phase 1's schema additions don't regress the producer→consumer chain.
+  1. **growth-api consumer log:** `gcloud run services logs read growth-api --region us-central1 --limit=50 | grep -E "lead-received-push|assigned"` — expect a fresh `assigned contactId=... tenantId=... mode=unassigned` line for the smoke email sent post-deploy
+  2. **Pub/Sub publish count:** `gcloud pubsub topics describe lead.received --format='value(name)'` plus a count check on the subscription metric — expect monotonic increment vs. pre-deploy baseline
+  3. **`lead_inbox_events` row:** `SELECT id, status, resend_email_id, created_at FROM lead_inbox_events ORDER BY created_at DESC LIMIT 1;` — expect new row with `status='accepted'` and the smoke email's Resend message id (note: success-class status string is `accepted`, verified empirically yesterday)
+  4. **Contact created:** `SELECT id, email, tenant_id, created_at FROM contacts WHERE created_at > NOW() - INTERVAL '5 minutes' ORDER BY created_at DESC;` — expect the smoke sender's email present (or dedup hit on existing contact, which is also valid)
 
 ---
 
