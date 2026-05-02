@@ -47,6 +47,16 @@ const EnvSchema = z.object({
   //     --update-secrets=RESEND_WEBHOOK_SIGNING_SECRET=growth-resend-webhook-secret:latest
   RESEND_WEBHOOK_SIGNING_SECRET: z.string().optional(),
 
+  // KAN-741 / Sprint 6. Separate Svix signing secret for the inbound
+  // (`email.received`) webhook at /webhooks/resend-inbound. Resend's dashboard
+  // issues a distinct Svix signing secret per webhook endpoint, so inbound
+  // and outbound (delivery events on /webhooks/resend) cannot share one.
+  // Optional at boot — when unset, the inbound middleware falls back to
+  // RESEND_WEBHOOK_SIGNING_SECRET via buildSvixMiddleware() (legacy shared-
+  // secret behavior, preserved for back-compat). Bind via:
+  //   --update-secrets=RESEND_INBOUND_WEBHOOK_SIGNING_SECRET=resend-inbound-webhook-secret:latest
+  RESEND_INBOUND_WEBHOOK_SIGNING_SECRET: z.string().optional(),
+
   // KAN-741. Domain that forms per-tenant inbox addresses as
   // <tenant.inboxSlug>@<LEAD_INBOX_DOMAIN>. Apps/web also reads this for
   // address display; both services should resolve to the same value.

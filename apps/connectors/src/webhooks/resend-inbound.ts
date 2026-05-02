@@ -204,7 +204,10 @@ export function isAnonymousDomain(email: string): boolean {
 // Route
 // ─────────────────────────────────────────────
 
-resendInboundWebhookApp.post("/", buildSvixMiddleware(), async (c) => {
+resendInboundWebhookApp.post(
+  "/",
+  buildSvixMiddleware({ signingSecret: env.RESEND_INBOUND_WEBHOOK_SIGNING_SECRET }),
+  async (c) => {
   const svix = getSvixContext(c);
   const payload = svix.payload as unknown as ResendInboundPayload;
 
