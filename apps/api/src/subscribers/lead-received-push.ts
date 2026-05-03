@@ -168,6 +168,65 @@ async function loadEngagementModule(): Promise<EngagementModule> {
 }
 
 // ─────────────────────────────────────────────
+// KAN-815 Phase 2 wiring — module loaders for the substrate the trigger
+// invokes after the engagement-write transaction commits. Brain Service
+// (KAN-794) is the only one wired in 815a; stage-transition-engine
+// (KAN-796a) and message-shaper/send-policy/legacy-publish (KAN-797a +
+// KAN-798a + KAN-660 dispatch) are wired in 815b/815c.
+// ─────────────────────────────────────────────
+
+interface BrainServiceModule {
+  evaluateDealState: (
+    prisma: unknown,
+    dealId: string,
+    options?: { tier?: 'cheap' | 'reasoning'; recentEngagementLimit?: number },
+  ) => Promise<{
+    dealId: string;
+    evaluatedAt: Date;
+    currentStateSnapshot: {
+      dealStatus: string;
+      currentStageName: string;
+      currentStageOutcomeType: string;
+      daysInCurrentStage: number;
+      engagementCount: number;
+      lastEngagementType: string | null;
+      lastEngagementClass: string | null;
+      daysSinceLastEngagement: number | null;
+      moProgressPercent: number | null;
+      pipelineName: string;
+      pipelineObjectiveType: string;
+    };
+    nextBestAction: {
+      type:
+        | 'send_follow_up'
+        | 'wait_for_response'
+        | 'advance_stage'
+        | 'escalate_to_human'
+        | 'close_deal_lost'
+        | 'no_action';
+      targetStageId?: string;
+      suggestedChannel?: 'email' | 'sms' | 'meta_messenger';
+      suggestedTone?: 'curious' | 'professional' | 'urgent' | 'closing';
+      reasoning: string;
+    };
+    confidence: number;
+    modelTier: 'cheap' | 'reasoning';
+    llmInputTokens: number;
+    llmOutputTokens: number;
+  }>;
+}
+let _brainServiceModule: BrainServiceModule | null = null;
+async function loadBrainServiceModule(): Promise<BrainServiceModule> {
+  if (_brainServiceModule) return _brainServiceModule;
+  const spec = '../../../../packages/api/src/services/brain-service.js';
+  _brainServiceModule = (await import(spec)) as BrainServiceModule;
+  return _brainServiceModule;
+}
+
+/** Captured Brain decision shape — convenience alias for in-handler code. */
+type Phase2BrainDecision = Awaited<ReturnType<BrainServiceModule['evaluateDealState']>>;
+
+// ─────────────────────────────────────────────
 // Hono app
 // ─────────────────────────────────────────────
 
@@ -237,18 +296,33 @@ leadReceivedPushApp.post('/lead-received', async (c) => {
       `[lead-received-push] assigned contactId=${event.contactId} tenantId=${event.tenantId} mode=${assignment.mode}`,
     );
 
+    let dealId: string | null = null;
     if (
       assignment.mode === 'rule' ||
       assignment.mode === 'ai_fallback' ||
       assignment.mode === 'default_pipeline'
     ) {
-      await writePhase1Deal(event, contact.tenantId, assignment);
+      dealId = await writePhase1Deal(event, contact.tenantId, assignment);
     } else {
       // Phase 1 posture: ambiguous routing produces Contact-only state.
       // Phase 2 KAN-794/795 resolves via Customer Decision meta-pipeline.
       console.warn(
         `[lead-received-push] phase-1-ambiguous-assignment-deal-skipped contactId=${event.contactId} tenantId=${event.tenantId} mode=${assignment.mode}`,
       );
+    }
+
+    // KAN-815a Phase 2 wiring trigger. Runs AFTER the engagement-write
+    // transaction commits — Brain reads the just-written Engagement as
+    // input. Wrapped in its own try/catch: Brain or downstream consumer
+    // failures must NOT propagate (inbound Engagement is already
+    // committed; failing the response would trigger Pub/Sub redelivery
+    // and potentially double-write the Engagement).
+    if (dealId) {
+      await wirePhase2Consumers(dealId, event.eventId).catch((err) => {
+        console.warn(
+          `[lead-received-push] phase-2-wiring-error dealId=${dealId} eventId=${event.eventId} err=${(err as Error)?.message ?? String(err)}`,
+        );
+      });
     }
 
     return c.text('ok', 200);
@@ -277,7 +351,7 @@ async function writePhase1Deal(
   event: z.infer<typeof LeadReceivedEventSchema>,
   tenantId: string,
   assignment: { mode: string; pipelineId?: string; stageId?: string | null },
-): Promise<void> {
+): Promise<string | null> {
   const pipelineId = assignment.pipelineId;
   if (!pipelineId) {
     // Should not reach here — caller filtered modes that always include
@@ -285,7 +359,7 @@ async function writePhase1Deal(
     console.error(
       `[lead-received-push] invariant-violation: assignment.mode=${assignment.mode} without pipelineId (eventId=${event.eventId})`,
     );
-    return;
+    return null;
   }
 
   // Find the initial Stage of the assigned Pipeline. The KAN-791 partial
@@ -302,7 +376,7 @@ async function writePhase1Deal(
     console.error(
       `[lead-received-push] no-initial-stage-for-pipeline pipelineId=${pipelineId} eventId=${event.eventId} — Deal NOT created`,
     );
-    return;
+    return null;
   }
 
   // Normalize the inbound email payload (KAN-792). Failure-isolated by
@@ -325,7 +399,7 @@ async function writePhase1Deal(
   // Single transaction — Deal.correlationId UNIQUE catches Pub/Sub
   // redelivery; logEngagement does its own correlationId existence
   // check before insert.
-  await prisma.$transaction(async (tx) => {
+  const dealId = await prisma.$transaction(async (tx) => {
     const deal = await tx.deal.create({
       data: {
         tenantId,
@@ -377,7 +451,34 @@ async function writePhase1Deal(
         extractionConfidence: normalized.extractionConfidence,
       },
     });
+
+    // Return dealId so the caller can pass it to KAN-815 Phase 2 wiring.
+    return deal.id as string;
   });
+
+  return dealId;
+}
+
+// ─────────────────────────────────────────────
+// KAN-815 Phase 2 wiring — invoked AFTER the engagement-write transaction
+// commits. Brain Service evaluates the just-written Deal state and routes
+// the decision to consumers (KAN-815b stage transitions / KAN-815c message
+// dispatch). All failures isolated via .catch in the caller — Phase 2
+// errors must not propagate (inbound Engagement is already committed).
+// ─────────────────────────────────────────────
+
+async function wirePhase2Consumers(dealId: string, eventId: string): Promise<void> {
+  // Step 1: Brain evaluation — single LLM call per inbound; same decision
+  // is passed through to all consumers (no double-eval per Phase 2 design).
+  const { evaluateDealState } = await loadBrainServiceModule();
+  const brainDecision: Phase2BrainDecision = await evaluateDealState(prisma, dealId);
+
+  console.log(
+    `[lead-received-push] phase-2-brain-evaluated dealId=${dealId} eventId=${eventId} actionType=${brainDecision.nextBestAction.type} confidence=${brainDecision.confidence.toFixed(2)} tokens=${brainDecision.llmInputTokens}/${brainDecision.llmOutputTokens}`,
+  );
+
+  // KAN-815b stage-transition consumer wired in commit 2.
+  // KAN-815c message-dispatch consumer wired in commit 3.
 }
 
 /**
