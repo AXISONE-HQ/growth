@@ -18,7 +18,7 @@
  * ──────────────────────────────────────────────────────────────────────────────
  */
 
-import type { Prisma, PrismaClient } from '@prisma/client';
+import type { DealStatus, Prisma, PrismaClient } from '@prisma/client';
 import { TRPCError } from '@trpc/server';
 
 // ✅ VERIFIED exports against the real service files (2026-04-23):
@@ -404,6 +404,71 @@ async function persistShadowRow(
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Phase 1 (KAN-786) — record closed_won/_lost outcomes as Deal rows.
+//
+// Decoupled from any Pipeline stage transition: the transition_to_closed_won
+// and transition_to_closed_lost action types have NO executor in the current
+// codebase (catalog-only entries in threshold-gate.ts:92-97; KAN-789 tracks
+// the missing executor). This hook records the outcome as the Deal data trail
+// regardless. Pipeline stage state will reconcile when KAN-789 lands.
+//
+// value/currency hardcoded to null/USD per Q9.3 — Contact.metadata field
+// doesn't exist on the schema (KAN-790 tracks the value-enrichment product
+// decision: typed columns vs metadata blob vs decision-scope source).
+//
+// Idempotent via correlationId = decision.id (PRD Edit 2). Same decision
+// firing twice → exactly one Deal row. Different decisions on same contact
+// → multiple Deal rows (multi-cycle closed_won works correctly).
+//
+// Deal-write failure must NOT abort decision orchestration — best-effort
+// try/catch logs and continues.
+// ──────────────────────────────────────────────────────────────────────────────
+
+export async function maybeWritePhase1Deal(
+  prisma: PrismaClient,
+  args: {
+    decisionId: string;
+    tenantId: string;
+    contactId: string;
+    actionType: string;
+    outcome: 'EXECUTED' | 'ESCALATED';
+  },
+): Promise<void> {
+  if (args.outcome !== 'EXECUTED') return;
+  if (
+    args.actionType !== 'transition_to_closed_won' &&
+    args.actionType !== 'transition_to_closed_lost'
+  ) {
+    return;
+  }
+
+  try {
+    const existing = await prisma.deal.findUnique({
+      where: { correlationId: args.decisionId },
+    });
+    if (existing) return; // correlationId idempotency — same decision.id → no duplicate
+
+    await prisma.deal.create({
+      data: {
+        tenantId: args.tenantId,
+        contactId: args.contactId,
+        correlationId: args.decisionId,
+        status: (args.actionType === 'transition_to_closed_won'
+          ? 'closed_won'
+          : 'closed_lost') as DealStatus,
+        closedAt: new Date(),
+        value: null,         // KAN-790: enrichment deferred (Contact.metadata field doesn't exist)
+        currency: 'USD',     // KAN-790: enrichment deferred
+        metadata: {} as object,
+      },
+    });
+  } catch (err) {
+    // Phase 1 isolation: Deal-write failure must not abort decision orchestration.
+    console.error('[runDecisionForContact] phase-1-deal-write failed:', err);
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Live agentic mode — agentic emits action.decided, rules-based skipped.
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -506,6 +571,15 @@ async function runAgentic(
       console.error('[runAgentic] escalation.create failed:', err);
     }
   }
+
+  // Phase 1 (KAN-786): write Deal row for closed_won/_lost outcomes.
+  await maybeWritePhase1Deal(prisma, {
+    decisionId: decision.id,
+    tenantId,
+    contactId,
+    actionType,
+    outcome,
+  });
 
   logAndPublish(
     {
@@ -961,6 +1035,15 @@ async function runFreeform(
     }
 
     return row;
+  });
+
+  // Phase 1 (KAN-786): write Deal row for closed_won/_lost outcomes.
+  await maybeWritePhase1Deal(prisma, {
+    decisionId: decision.id,
+    tenantId,
+    contactId,
+    actionType,
+    outcome,
   });
 
   // 8. Audit log (fire-and-forget).
