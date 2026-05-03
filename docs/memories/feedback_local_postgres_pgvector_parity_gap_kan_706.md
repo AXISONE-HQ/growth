@@ -1,12 +1,12 @@
 # feedback_local_postgres_pgvector_parity_gap_kan_706
 
-**Trigger:** Setting up local Postgres for growth backend dev work hits **5 distinct toolchain layers**, each a separate failure mode. "Install pgvector" is a single sentence; the actual setup is a multi-stage recipe.
+**Trigger:** Setting up local Postgres for growth backend dev work hits **6 distinct toolchain layers**, each a separate failure mode. "Install pgvector" is a single sentence; the actual setup is a multi-stage recipe.
 
-**Empirical anchor:** Caught during KAN-786 Phase 1 sub-cohort (a) execution on 2026-05-02. Each layer surfaced as a separate hard-stop. The 5 layers are independent — fixing one doesn't preempt the next.
+**Empirical anchor:** Layers 1-5 caught during KAN-786 Phase 1 sub-cohort (a) execution on 2026-05-02. Layer 6 caught during KAN-791 schema-pivot smoke re-run on 2026-05-03. Each layer surfaced as a separate hard-stop. The layers are independent — fixing one doesn't preempt the next.
 
 ---
 
-## The 5 layers, in order
+## The 6 layers, in order
 
 ### Layer 1 — Prod proxy default-aim
 
@@ -94,6 +94,41 @@ ls /Library/Developer/CommandLineTools/SDKs/        # should include current mac
 ### Layer 5 — Prisma vector-index silent-drop drift
 
 See companion entry: [`feedback_prisma_vector_index_silent_drop_drift.md`](./feedback_prisma_vector_index_silent_drop_drift.md). Every `prisma migrate dev` will spuriously generate `DROP INDEX "knowledge_chunks_embedding_hnsw_idx"`. Strip before commit. Tracked at [KAN-787](https://axisone-team.atlassian.net/browse/KAN-787).
+
+### Layer 6 — pgvector smoke pattern revision (CREATE → SELECT → SKIP DROP)
+
+The canonical pgvector verification smoke was previously:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+SELECT '[1,2,3]'::vector;
+DROP EXTENSION vector;
+```
+
+Post-KAN-786, the DROP step fails:
+
+```
+ERROR:  cannot drop extension vector because other objects depend on it
+DETAIL:  column embedding of table knowledge_chunks depends on type vector
+HINT:    Use DROP ... CASCADE to drop the dependent objects too.
+```
+
+Reason: `knowledge_chunks.embedding` is now a `vector` type column (load-bearing for KAN-707 RAG). The DROP was always belt-and-suspenders cleanup, not a correctness check — CREATE+SELECT alone verifies the extension is loaded + functional. **DROP CASCADE on prod is destructive (drops the embedding column) — never run as part of a smoke.**
+
+**Updated recipe:**
+
+```sql
+-- Verify extension loadable (idempotent)
+CREATE EXTENSION IF NOT EXISTS vector;
+
+-- Verify type works
+SELECT '[1,2,3]'::vector AS smoke_vector;
+
+-- Optional confirmation (no destructive cleanup)
+SELECT extname, extversion FROM pg_extension WHERE extname = 'vector';
+```
+
+Treat smoke as PASS when CREATE + SELECT succeed. Skip the DROP. If a future change makes the embedding column non-load-bearing, the DROP step can be reintroduced — but the pattern of "verify the operational state, don't tear it down" is the durable lesson.
 
 ---
 
