@@ -226,6 +226,106 @@ async function loadBrainServiceModule(): Promise<BrainServiceModule> {
 /** Captured Brain decision shape — convenience alias for in-handler code. */
 type Phase2BrainDecision = Awaited<ReturnType<BrainServiceModule['evaluateDealState']>>;
 
+interface MessageShaperModule {
+  shapeMessage: (
+    prisma: unknown,
+    dealId: string,
+    options?: {
+      tier?: 'cheap' | 'reasoning';
+      brainDecision?: Phase2BrainDecision;
+      recentOutboundLimit?: number;
+      forceChannel?: 'email' | 'sms' | 'meta_messenger';
+    },
+  ) => Promise<
+    | {
+        type: 'shaped';
+        message: {
+          dealId: string;
+          shapedAt: Date;
+          channel: 'email' | 'sms' | 'meta_messenger';
+          subject?: string;
+          body: string;
+          tone: 'curious' | 'professional' | 'urgent' | 'closing';
+          rationale: string;
+          antiRepetitionContextCount: number;
+          modelTier: 'cheap' | 'reasoning';
+          llmInputTokens: number;
+          llmOutputTokens: number;
+        };
+        brainDecision: Phase2BrainDecision;
+      }
+    | { type: 'no_shape'; dealId: string; reason: string; brainDecision?: Phase2BrainDecision }
+  >;
+}
+let _messageShaperModule: MessageShaperModule | null = null;
+async function loadMessageShaperModule(): Promise<MessageShaperModule> {
+  if (_messageShaperModule) return _messageShaperModule;
+  const spec = '../../../../packages/api/src/services/message-shaper.js';
+  _messageShaperModule = (await import(spec)) as MessageShaperModule;
+  return _messageShaperModule;
+}
+
+interface SendPolicyModule {
+  evaluateSendPolicy: (
+    prisma: unknown,
+    tenantId: string,
+    contactId: string,
+    message: { channel: 'email' | 'sms' | 'meta_messenger' },
+    options?: { skipSuppression?: boolean; skipRateLimit?: boolean; skipTimeOfDay?: boolean },
+  ) => Promise<
+    | { type: 'allow'; reason: string }
+    | { type: 'deny'; reason: string; ruleViolated: 'suppression' | 'rate_limit' }
+    | { type: 'defer'; reason: string; deferUntil: Date }
+  >;
+}
+let _sendPolicyModule: SendPolicyModule | null = null;
+async function loadSendPolicyModule(): Promise<SendPolicyModule> {
+  if (_sendPolicyModule) return _sendPolicyModule;
+  const spec = '../../../../packages/api/src/services/send-policy.js';
+  _sendPolicyModule = (await import(spec)) as SendPolicyModule;
+  return _sendPolicyModule;
+}
+
+/**
+ * Legacy publish helpers from message-composer.ts (KAN-660/661 dispatch
+ * infrastructure). KAN-815c reuses these — no new connector code. Note that
+ * publishActionSend takes a PubSubClient as first arg + a ComposedMessage
+ * (legacy shape with subject/body/unsubscribeUrl). KAN-815c maps the
+ * Phase 2 ShapedMessage to ComposedMessage at the call site.
+ */
+interface MessageComposerModule {
+  publishActionSend: (
+    client: unknown,
+    input: {
+      tenantId: string;
+      contactId: string;
+      decisionId: string;
+      toEmail: string;
+      composed: { subject: string; body: string; unsubscribeUrl: string };
+      connectionId: string;
+    },
+  ) => Promise<string>;
+  resolveEmailConnectionId: (prisma: unknown, tenantId: string) => Promise<string | null>;
+}
+let _messageComposerModule: MessageComposerModule | null = null;
+async function loadMessageComposerModule(): Promise<MessageComposerModule> {
+  if (_messageComposerModule) return _messageComposerModule;
+  const spec = '../../../../packages/api/src/services/message-composer.js';
+  _messageComposerModule = (await import(spec)) as MessageComposerModule;
+  return _messageComposerModule;
+}
+
+interface PubSubClientModule {
+  getPubSubClient: () => unknown;
+}
+let _pubsubClientModule: PubSubClientModule | null = null;
+async function loadPubSubClientModule(): Promise<PubSubClientModule> {
+  if (_pubsubClientModule) return _pubsubClientModule;
+  const spec = '../../../../packages/api/src/lib/pubsub-client.js';
+  _pubsubClientModule = (await import(spec)) as PubSubClientModule;
+  return _pubsubClientModule;
+}
+
 interface StageTransitionEngineModule {
   evaluateStageTransition: (
     prisma: unknown,
@@ -527,7 +627,150 @@ async function wirePhase2Consumers(dealId: string, eventId: string): Promise<voi
     );
   }
 
-  // KAN-815c message-dispatch consumer wired in commit 3.
+  // KAN-815c message-dispatch consumer. Brain decision to send_follow_up
+  // routes through shape → policy → Decision row shim → publishActionSend.
+  // Email-only MVP per Phase 2 architectural decision (sms/meta_messenger
+  // dispatch deferred to KAN-800/801 Phase 3 connectors); non-email shaped
+  // output is logged + skipped here.
+  if (brainDecision.nextBestAction.type === 'send_follow_up') {
+    await dispatchPhase2Send(dealId, eventId, brainDecision);
+  }
+}
+
+async function dispatchPhase2Send(
+  dealId: string,
+  eventId: string,
+  brainDecision: Phase2BrainDecision,
+): Promise<void> {
+  // 1. Shape the message via KAN-797a. Pass the pre-computed brainDecision
+  //    to avoid double Brain eval.
+  const { shapeMessage } = await loadMessageShaperModule();
+  const shapeResult = await shapeMessage(prisma, dealId, { brainDecision });
+  if (shapeResult.type !== 'shaped') {
+    console.warn(
+      `[lead-received-push] phase-2-shape-no-shape dealId=${dealId} eventId=${eventId} reason=${shapeResult.reason}`,
+    );
+    return;
+  }
+  const shaped = shapeResult.message;
+
+  // 2. Channel branch — email-only MVP. SMS + Messenger dispatch deferred
+  //    to KAN-800/801 Phase 3 connectors.
+  if (shaped.channel !== 'email') {
+    console.log(
+      `[lead-received-push] phase-2-dispatch-channel-not-yet-supported dealId=${dealId} eventId=${eventId} channel=${shaped.channel} — KAN-800/801 will wire these channels`,
+    );
+    return;
+  }
+
+  // 3. Load Deal + Contact for tenantId/contactId/recipient email lookup.
+  //    publishActionSend needs toEmail + connectionId; the trigger only
+  //    has dealId, so re-load here. (Could be threaded through from
+  //    wirePhase2Consumers caller for one fewer query, but the savings
+  //    are negligible vs the LLM round-trip already paid.)
+  const deal = await prisma.deal.findUnique({
+    where: { id: dealId },
+    select: {
+      id: true,
+      tenantId: true,
+      contactId: true,
+      contact: { select: { id: true, email: true } },
+    },
+  });
+  if (!deal || !deal.contact?.email) {
+    console.warn(
+      `[lead-received-push] phase-2-dispatch-no-recipient dealId=${dealId} eventId=${eventId} — Contact missing or email null`,
+    );
+    return;
+  }
+
+  // 4. Send Policy gate per KAN-798a.
+  const { evaluateSendPolicy } = await loadSendPolicyModule();
+  const policyResult = await evaluateSendPolicy(prisma, deal.tenantId, deal.contactId, {
+    channel: 'email',
+  });
+  if (policyResult.type === 'deny') {
+    console.warn(
+      `[lead-received-push] phase-2-send-policy-denied dealId=${dealId} eventId=${eventId} ruleViolated=${policyResult.ruleViolated} reason=${policyResult.reason}`,
+    );
+    return;
+  }
+  if (policyResult.type === 'defer') {
+    // Phase 2 MVP: log + skip. KAN-814 cron evaluator (sub-cohort c of
+    // KAN-796) will pick up deferred sends in future.
+    console.log(
+      `[lead-received-push] phase-2-send-policy-deferred dealId=${dealId} eventId=${eventId} deferUntil=${policyResult.deferUntil.toISOString()} reason=${policyResult.reason}`,
+    );
+    return;
+  }
+
+  // 5. ChannelConnection lookup for Resend connector dispatch.
+  const { publishActionSend, resolveEmailConnectionId } = await loadMessageComposerModule();
+  const connectionId = await resolveEmailConnectionId(prisma, deal.tenantId);
+  if (!connectionId) {
+    console.warn(
+      `[lead-received-push] phase-2-dispatch-no-connection dealId=${dealId} eventId=${eventId} tenantId=${deal.tenantId} — no ACTIVE EMAIL ChannelConnection`,
+    );
+    return;
+  }
+
+  // 6. Decision row shim per KAN-815c architectural decision (Option A).
+  //    Writes a real audit anchor for "Brain decided to send X at time T"
+  //    in its OWN transaction (separate from the engagement-write tx that
+  //    already committed). KAN-805 Shared Learning Layer will read these
+  //    rows to learn from Brain's decisions.
+  const decisionRow = await prisma.decision.create({
+    data: {
+      tenantId: deal.tenantId,
+      contactId: deal.contactId,
+      strategySelected: 'brain_phase_2_v1',
+      actionType: brainDecision.nextBestAction.type,
+      confidence: brainDecision.confidence,
+      reasoning: brainDecision.nextBestAction.reasoning,
+      metadata: {
+        dealId,
+        eventId,
+        brainEvaluatedAt: brainDecision.evaluatedAt.toISOString(),
+        brainModelTier: brainDecision.modelTier,
+        brainInputTokens: brainDecision.llmInputTokens,
+        brainOutputTokens: brainDecision.llmOutputTokens,
+        currentStageId: brainDecision.currentStateSnapshot.currentStageName, // snapshot-side label
+        currentStageName: brainDecision.currentStateSnapshot.currentStageName,
+        daysInCurrentStage: brainDecision.currentStateSnapshot.daysInCurrentStage,
+        shaperTier: shaped.modelTier,
+        shaperInputTokens: shaped.llmInputTokens,
+        shaperOutputTokens: shaped.llmOutputTokens,
+        shapedTone: shaped.tone,
+      },
+    },
+  });
+
+  // 7. Construct ComposedMessage (legacy shape) from ShapedMessage.
+  //    Email channel guarantees subject (KAN-797a parser strict-rejects
+  //    email without subject — sibling discipline to KAN-794
+  //    VALID_ACTION_TYPES allowlist). Falls back to a synthetic subject
+  //    only as defense-in-depth.
+  const publicWebhookBaseUrl = process.env.PUBLIC_WEBHOOK_BASE_URL ?? 'https://example.invalid';
+  const composed = {
+    subject: shaped.subject ?? '(no subject)',
+    body: shaped.body,
+    unsubscribeUrl: `${publicWebhookBaseUrl}/unsubscribe/${deal.contactId}`,
+  };
+
+  // 8. Publish to action.send for Resend connector to actually send.
+  const { getPubSubClient } = await loadPubSubClientModule();
+  const messageId = await publishActionSend(getPubSubClient(), {
+    tenantId: deal.tenantId,
+    contactId: deal.contactId,
+    decisionId: decisionRow.id,
+    toEmail: deal.contact.email,
+    composed,
+    connectionId,
+  });
+
+  console.log(
+    `[lead-received-push] phase-2-dispatch-published dealId=${dealId} eventId=${eventId} decisionId=${decisionRow.id} channel=email pubsubMessageId=${messageId} brainConfidence=${brainDecision.confidence.toFixed(2)} shaperTokens=${shaped.llmInputTokens}/${shaped.llmOutputTokens}`,
+  );
 }
 
 /**
