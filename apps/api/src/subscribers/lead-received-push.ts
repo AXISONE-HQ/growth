@@ -1,5 +1,5 @@
 /**
- * lead.received push subscriber — KAN-774
+ * lead.received push subscriber — KAN-774 + KAN-793
  *
  * Cloud Run Pub/Sub push endpoint. Closes the consumer gap surfaced during
  * KAN-741 audit (Lead Inbox producer was complete but consumer subscriber
@@ -19,22 +19,54 @@
  * audience from the inbound request URL. No LEAD_RECEIVED_AUDIENCE env var
  * needed.
  *
- * Flow: Pub/Sub push → POST /pubsub/lead-received → verify OIDC → base64-decode
- *       → LeadReceivedEventSchema.parse (from @growth/shared)
- *       → assignLeadToPipeline(prisma, contactId, { skipIfAssigned: true })
- *       → 200.
+ * Flow (KAN-793 — Phase 1 epic 3 of 3):
+ *   Pub/Sub push → POST /pubsub/lead-received → verify OIDC → base64-decode
+ *   → LeadReceivedEventSchema.parse
+ *   → load Contact (need tenantId for bootstrap)
+ *   → ensureTenantHasDefaultPipeline(tenantId)            ← KAN-793 lazy bootstrap
+ *   → assignLeadToPipeline(prisma, contactId, ...)        ← rules / AI / posture
+ *   → if mode ∈ {rule,ai_fallback,default_pipeline}:
+ *       normalizeInbound(email payload)                   ← KAN-792 normalizer
+ *       find startingStage(pipelineId, isInitial=true)
+ *       tx: create Deal + DealStageHistory + Engagement   ← KAN-791 lifecycle entities
+ *   → else (unassigned/escalated): log warn + skip Deal write
+ *   → 200.
  *
- * Idempotency: skipIfAssigned=true makes redelivery a no-op when the contact
- * is already on a pipeline. assignLeadToPipeline writes its own audit log
- * row per call regardless of mode.
+ * Sequencing invariant (PRD §4 KAN-793):
+ *   ensure-then-assign-then-write — the bootstrap eliminates the "no
+ *   Pipelines exist" failure mode so assignLeadToPipeline always has at
+ *   least one Pipeline to route to. Deal.pipelineId always matches the
+ *   assignment's pipelineId by construction (no divergence with
+ *   Contact.currentPipelineId — both come from the same assignment.result).
+ *
+ * Idempotency:
+ *   - skipIfAssigned=true makes redelivery a no-op when the contact is
+ *     already on a pipeline. assignLeadToPipeline writes its own audit log
+ *     row per call regardless of mode.
+ *   - Deal.correlationId = `deal:lead-received:${event.eventId}` (UNIQUE
+ *     constraint) → second delivery for the same eventId hits the unique
+ *     and is caught as a no-op (logged + 200).
+ *   - Engagement.correlationId = `engagement:lead-received:${event.eventId}`
+ *     handled inside logEngagement (existing-row return).
+ *
+ * Phase 1 ambiguous-routing posture:
+ *   When assignment.mode === 'unassigned' or 'escalated', the Contact still
+ *   exists (PRD §9.4 — no lead dropped) but no Deal is created. Phase 2
+ *   (KAN-794 Brain Service + KAN-795 Customer Decision meta-pipeline) will
+ *   resolve the ambiguous case asynchronously. For Phase 1 MVP this is
+ *   logged as a warn; if it fires at scale, file a follow-up ticket.
  *
  * Error policy:
  *   - 200 (ack + drop) on malformed envelope / invalid LeadReceivedEvent
  *     payload (poison-message defense; redelivery won't help if the producer
  *     emitted a bad shape).
+ *   - 200 (ack + log error) on Contact-not-found — producer should have
+ *     created the Contact before publishing; redelivery won't conjure it.
+ *   - 200 (ack + log error) on Deal correlationId UNIQUE collision (Pub/Sub
+ *     redelivery, idempotent by construction).
  *   - 401 on missing/invalid OIDC token.
- *   - 500 (nack → Pub/Sub retries up to 5x → DLQ) on Prisma errors or other
- *     transient failures inside assignLeadToPipeline.
+ *   - 500 (nack → Pub/Sub retries up to 5x → DLQ) on Prisma errors / other
+ *     transient failures inside the assignment + Deal-write transaction.
  *   - 200 on `assignLeadToPipeline` returning escalated/unassigned modes —
  *     these are valid governance decisions, not errors.
  */
@@ -44,9 +76,12 @@ import { LeadReceivedEventSchema } from '@growth/shared';
 import { prisma } from '../prisma.js';
 import { verifyPubsubOidc } from '../lib/oidc-pubsub-verify.js';
 
-// Variable-specifier dynamic import keeps lead-assignment.ts out of the
-// apps/api static graph (TS6059 cohort hygiene). Manually-declared types
-// per the established pattern (mirrors llm-call-push.ts).
+// ─────────────────────────────────────────────
+// Variable-specifier dynamic imports — TS6059 cohort hygiene per
+// reference_variable_specifier_dynamic_import. Manually-declared types
+// mirror the canonical signatures in packages/api/src/services/.
+// ─────────────────────────────────────────────
+
 interface AssignmentModule {
   assignLeadToPipeline: (
     prisma: unknown,
@@ -61,6 +96,80 @@ async function loadAssignmentModule(): Promise<AssignmentModule> {
   _assignmentModule = (await import(spec)) as AssignmentModule;
   return _assignmentModule;
 }
+
+interface BootstrapModule {
+  ensureTenantHasDefaultPipeline: (
+    prisma: unknown,
+    tenantId: string,
+  ) => Promise<{ id: string }>;
+}
+let _bootstrapModule: BootstrapModule | null = null;
+async function loadBootstrapModule(): Promise<BootstrapModule> {
+  if (_bootstrapModule) return _bootstrapModule;
+  const spec = '../../../../packages/api/src/services/default-pipeline-bootstrap.js';
+  _bootstrapModule = (await import(spec)) as BootstrapModule;
+  return _bootstrapModule;
+}
+
+interface NormalizerModule {
+  normalizeInbound: (input: {
+    source: 'email';
+    tenantId: string;
+    payload: {
+      fromAddress: string;
+      subject?: string | null;
+      bodyPreview?: string | null;
+      attachmentCount?: number;
+    };
+  }) => Promise<{
+    source: string;
+    preParsed: { senderEmail: string; senderNameGuess: string | null; subject: string | null; bodyText: string | null };
+    extracted: {
+      firstName: string | null;
+      lastName: string | null;
+      company: string | null;
+      phone: string | null;
+      intentSummary: string | null;
+      qualificationSignals: string[];
+    };
+    extractionConfidence: 'high' | 'medium' | 'low';
+    extractionError: string | null;
+  }>;
+}
+let _normalizerModule: NormalizerModule | null = null;
+async function loadNormalizerModule(): Promise<NormalizerModule> {
+  if (_normalizerModule) return _normalizerModule;
+  const spec = '../../../../packages/api/src/services/lead-normalizer.js';
+  _normalizerModule = (await import(spec)) as NormalizerModule;
+  return _normalizerModule;
+}
+
+interface EngagementModule {
+  logEngagement: (
+    prisma: unknown,
+    input: {
+      tenantId: string;
+      dealId: string;
+      contactId: string;
+      engagementType: string;
+      channel?: string | null;
+      occurredAt: Date;
+      metadata?: Record<string, unknown>;
+      correlationId?: string;
+    },
+  ) => Promise<unknown>;
+}
+let _engagementModule: EngagementModule | null = null;
+async function loadEngagementModule(): Promise<EngagementModule> {
+  if (_engagementModule) return _engagementModule;
+  const spec = '../../../../packages/api/src/services/engagement-service.js';
+  _engagementModule = (await import(spec)) as EngagementModule;
+  return _engagementModule;
+}
+
+// ─────────────────────────────────────────────
+// Hono app
+// ─────────────────────────────────────────────
 
 export const leadReceivedPushApp = new Hono();
 
@@ -102,20 +211,181 @@ leadReceivedPushApp.post('/lead-received', async (c) => {
     return c.text('ok', 200);
   }
 
-  try {
-    const { assignLeadToPipeline } = await loadAssignmentModule();
-    const result = await assignLeadToPipeline(prisma, event.contactId, {
-      skipIfAssigned: true,
-    });
-    console.log(
-      `[lead-received-push] assigned contactId=${event.contactId} tenantId=${event.tenantId} mode=${result.mode}`,
+  // Load Contact for tenantId (producer created it pre-publish).
+  const contact = await prisma.contact.findUnique({
+    where: { id: event.contactId },
+    select: { id: true, tenantId: true },
+  });
+  if (!contact) {
+    console.error(
+      `[lead-received-push] contact not found eventId=${event.eventId} contactId=${event.contactId} — ack+drop (producer invariant violation; redelivery cannot recover)`,
     );
     return c.text('ok', 200);
+  }
+
+  try {
+    // KAN-793 sequencing: ensure-then-assign-then-write.
+    const { ensureTenantHasDefaultPipeline } = await loadBootstrapModule();
+    await ensureTenantHasDefaultPipeline(prisma, contact.tenantId);
+
+    const { assignLeadToPipeline } = await loadAssignmentModule();
+    const assignment = await assignLeadToPipeline(prisma, event.contactId, {
+      skipIfAssigned: true,
+    });
+
+    console.log(
+      `[lead-received-push] assigned contactId=${event.contactId} tenantId=${event.tenantId} mode=${assignment.mode}`,
+    );
+
+    if (
+      assignment.mode === 'rule' ||
+      assignment.mode === 'ai_fallback' ||
+      assignment.mode === 'default_pipeline'
+    ) {
+      await writePhase1Deal(event, contact.tenantId, assignment);
+    } else {
+      // Phase 1 posture: ambiguous routing produces Contact-only state.
+      // Phase 2 KAN-794/795 resolves via Customer Decision meta-pipeline.
+      console.warn(
+        `[lead-received-push] phase-1-ambiguous-assignment-deal-skipped contactId=${event.contactId} tenantId=${event.tenantId} mode=${assignment.mode}`,
+      );
+    }
+
+    return c.text('ok', 200);
   } catch (err) {
+    // Idempotency catch — repeated delivery of the same eventId hits
+    // Deal.correlationId UNIQUE. Treat as no-op (200).
+    if (isUniqueConstraintViolation(err)) {
+      console.log(
+        `[lead-received-push] idempotent-redelivery eventId=${event.eventId} contactId=${event.contactId} — ack`,
+      );
+      return c.text('ok', 200);
+    }
     console.error(
-      `[lead-received-push] assignment failed contactId=${event.contactId} — nack`,
+      `[lead-received-push] assignment+deal write failed contactId=${event.contactId} eventId=${event.eventId} — nack`,
       err,
     );
     return c.text('retry', 500);
   }
 });
+
+// ─────────────────────────────────────────────
+// Deal + DealStageHistory + Engagement write — KAN-793
+// ─────────────────────────────────────────────
+
+async function writePhase1Deal(
+  event: z.infer<typeof LeadReceivedEventSchema>,
+  tenantId: string,
+  assignment: { mode: string; pipelineId?: string; stageId?: string | null },
+): Promise<void> {
+  const pipelineId = assignment.pipelineId;
+  if (!pipelineId) {
+    // Should not reach here — caller filtered modes that always include
+    // pipelineId. Guard preserves the invariant explicitly.
+    console.error(
+      `[lead-received-push] invariant-violation: assignment.mode=${assignment.mode} without pipelineId (eventId=${event.eventId})`,
+    );
+    return;
+  }
+
+  // Find the initial Stage of the assigned Pipeline. The KAN-791 partial
+  // UNIQUE index guarantees at most one isInitial Stage per Pipeline; the
+  // KAN-793 bootstrap guarantees the default Pipeline always has one. For
+  // tenant-created Pipelines this still depends on the editor not breaking
+  // the invariant — the index would catch it; this lookup either finds
+  // the Stage or skips the Deal write.
+  const startingStage = await prisma.stage.findFirst({
+    where: { pipelineId, isInitial: true },
+    select: { id: true },
+  });
+  if (!startingStage) {
+    console.error(
+      `[lead-received-push] no-initial-stage-for-pipeline pipelineId=${pipelineId} eventId=${event.eventId} — Deal NOT created`,
+    );
+    return;
+  }
+
+  // Normalize the inbound email payload (KAN-792). Failure-isolated by
+  // design — extractionConfidence='low' on LLM error; we still write the
+  // Deal + Engagement so the lead lands.
+  const { normalizeInbound } = await loadNormalizerModule();
+  const normalized = await normalizeInbound({
+    source: 'email',
+    tenantId,
+    payload: {
+      fromAddress: event.metadata.fromAddress ?? '',
+      subject: event.metadata.subject ?? null,
+      bodyPreview: event.metadata.bodyPreview ?? null,
+      attachmentCount: event.metadata.attachmentCount,
+    },
+  });
+
+  const { logEngagement } = await loadEngagementModule();
+
+  // Single transaction — Deal.correlationId UNIQUE catches Pub/Sub
+  // redelivery; logEngagement does its own correlationId existence
+  // check before insert.
+  await prisma.$transaction(async (tx) => {
+    const deal = await tx.deal.create({
+      data: {
+        tenantId,
+        contactId: event.contactId,
+        pipelineId,
+        currentStageId: startingStage.id,
+        enteredStageAt: new Date(),
+        value: 0,
+        currency: 'USD',
+        // event.eventId is UUID-shaped + always present per
+        // LeadReceivedEventSchema; safe as the idempotency anchor across
+        // Pub/Sub redeliveries.
+        correlationId: `deal:lead-received:${event.eventId}`,
+        microObjectiveProgress: {},
+        metadata: {
+          source: 'track_a_email_inbound',
+          assignmentMode: assignment.mode,
+          normalizedLeadConfidence: normalized.extractionConfidence,
+          ...(normalized.extractionError && {
+            normalizerError: normalized.extractionError,
+          }),
+        },
+      },
+    });
+
+    await tx.dealStageHistory.create({
+      data: {
+        dealId: deal.id,
+        fromStageId: null,
+        toStageId: startingStage.id,
+        triggeredBy: 'normalizer',
+        metadata: { source: 'track_a_email_inbound', eventId: event.eventId },
+      },
+    });
+
+    await logEngagement(tx, {
+      tenantId,
+      dealId: deal.id,
+      contactId: event.contactId,
+      engagementType: 'email_received',
+      channel: 'email',
+      // event.receivedAt is the canonical inbound timestamp (root-level on
+      // LeadReceivedEventSchema, not nested in metadata).
+      occurredAt: new Date(event.receivedAt),
+      correlationId: `engagement:lead-received:${event.eventId}`,
+      metadata: {
+        senderEmail: normalized.preParsed.senderEmail,
+        subject: normalized.preParsed.subject,
+        extractionConfidence: normalized.extractionConfidence,
+      },
+    });
+  });
+}
+
+/**
+ * Detect Prisma UNIQUE constraint violation. Caught at the top-level handler
+ * to make Pub/Sub redelivery (same eventId) a 200 no-op.
+ */
+function isUniqueConstraintViolation(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const code = (err as { code?: unknown }).code;
+  return code === 'P2002';
+}

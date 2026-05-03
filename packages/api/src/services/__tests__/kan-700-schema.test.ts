@@ -3,11 +3,14 @@
  *
  * Verifies the generated Prisma client surfaces:
  *   - All 6 new enums with the correct member set
- *   - The 8 new models (Pipeline, Stage, MicroObjective, PipelineMicroObjective,
- *     Target, Guardrail, KnowledgeFilter, LeadStageHistory) with the required
- *     field shapes (compile-time + runtime smoke)
- *   - Contact extensions (currentPipelineId / currentStageId /
- *     microObjectiveProgress / enteredStageAt) on the Contact type
+ *   - The 7 new models (Pipeline, Stage, MicroObjective, PipelineMicroObjective,
+ *     Target, Guardrail, KnowledgeFilter) with the required field shapes
+ *     (compile-time + runtime smoke). KAN-791 dropped LeadStageHistory; the
+ *     deal-scoped successor DealStageHistory has its own coverage in the
+ *     KAN-791 integration tests.
+ *   - Contact extensions (currentPipelineId / currentStageId / enteredStageAt)
+ *     on the Contact type. KAN-791 dropped Contact.microObjectiveProgress
+ *     (moved to Deal.microObjectiveProgress).
  *
  * No DB round-trip — that lives in the integration tests (separate runner)
  * once the migration has been deployed. These tests catch accidental enum
@@ -28,7 +31,6 @@ import {
   type Target,
   type Guardrail,
   type KnowledgeFilter,
-  type LeadStageHistory,
   type Contact,
 } from '@prisma/client';
 
@@ -185,32 +187,15 @@ describe('KAN-700 model shapes', () => {
     expect(kf.knowledgeCategory).toBe('products');
   });
 
-  it('LeadStageHistory captures from/to/decision/reason for an audit trail', () => {
-    const h: Pick<
-      LeadStageHistory,
-      'id' | 'leadId' | 'fromStageId' | 'toStageId' | 'reason' | 'decisionId'
-    > = {
-      id: 'h1',
-      leadId: 'c1',
-      fromStageId: 's1',
-      toStageId: 's2',
-      reason: 'reply received',
-      decisionId: 'd1',
-    };
-    expect(h.fromStageId).toBe('s1');
-    expect(h.toStageId).toBe('s2');
-  });
-
-  it('Contact extensions: currentPipelineId / currentStageId / microObjectiveProgress / enteredStageAt', () => {
+  it('Contact extensions: currentPipelineId / currentStageId / enteredStageAt (KAN-791 dropped microObjectiveProgress, moved to Deal)', () => {
     const c: Pick<
       Contact,
-      'id' | 'tenantId' | 'currentPipelineId' | 'currentStageId' | 'microObjectiveProgress' | 'enteredStageAt'
+      'id' | 'tenantId' | 'currentPipelineId' | 'currentStageId' | 'enteredStageAt'
     > = {
       id: 'c1',
       tenantId: 't1',
       currentPipelineId: 'p1',
       currentStageId: 's1',
-      microObjectiveProgress: { mo1: { completed: true, completedAt: '2026-04-26', evidence: 'replied' } },
       enteredStageAt: new Date(),
     };
     expect(c.currentPipelineId).toBe('p1');

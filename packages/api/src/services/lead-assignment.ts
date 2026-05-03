@@ -253,8 +253,10 @@ const DEFAULT_AI_CONFIDENCE_THRESHOLD = 0.5;
  *
  * Side effects (per assignment branch):
  *   - rule / ai_fallback / default_pipeline → updates Contact.currentPipelineId
- *     + currentStageId (initial stage of the chosen pipeline) + enteredStageAt;
- *     writes a LeadStageHistory row (fromStageId=null on initial assignment).
+ *     + currentStageId (initial stage of the chosen pipeline) + enteredStageAt.
+ *     KAN-793: stage-transition audit moved to DealStageHistory, written by
+ *     the caller (lead-received-push) when it creates the Deal that wraps
+ *     this assignment. assignLeadToPipeline no longer writes stage history.
  *   - escalated → creates an Escalation row, no Contact update.
  *   - unassigned → no DB writes other than the audit log.
  *
@@ -292,7 +294,7 @@ export async function assignLeadToPipeline(
   const matched = evaluateRules(rules, leadAttrs);
   if (matched) {
     const stageId = await resolveInitialStageId(prisma, matched.pipelineId);
-    await persistAssignment(prisma, contactId, matched.pipelineId, stageId, 'rule', matched.id);
+    await persistAssignment(prisma, contactId, matched.pipelineId, stageId);
     await emitAuditLog(prisma, {
       tenantId,
       contactId,
@@ -311,7 +313,7 @@ export async function assignLeadToPipeline(
 
   if (ai && ai.confidence >= threshold) {
     const stageId = await resolveInitialStageId(prisma, ai.pipelineId);
-    await persistAssignment(prisma, contactId, ai.pipelineId, stageId, 'ai_fallback', null);
+    await persistAssignment(prisma, contactId, ai.pipelineId, stageId);
     await emitAuditLog(prisma, {
       tenantId,
       contactId,
@@ -337,7 +339,7 @@ export async function assignLeadToPipeline(
   if (posture === 'default_pipeline' && tenant.defaultAssignmentPipelineId) {
     const targetPipelineId = tenant.defaultAssignmentPipelineId;
     const stageId = await resolveInitialStageId(prisma, targetPipelineId);
-    await persistAssignment(prisma, contactId, targetPipelineId, stageId, 'default_pipeline', null);
+    await persistAssignment(prisma, contactId, targetPipelineId, stageId);
     await emitAuditLog(prisma, {
       tenantId,
       contactId,
@@ -471,13 +473,15 @@ async function resolveInitialStageId(
   return stage?.id ?? null;
 }
 
+// KAN-793: stage-transition audit moved to DealStageHistory (deal-scoped per
+// KAN-791). Written by the caller when it creates the Deal — same write
+// transaction. Removes the cast-loose `(prisma as any).leadStageHistory`
+// silent no-op that survived the KAN-791 schema drop.
 async function persistAssignment(
   prisma: PrismaClient,
   contactId: string,
   pipelineId: string,
   stageId: string | null,
-  mode: AssignmentResult['mode'],
-  ruleId: string | null,
 ): Promise<void> {
   await prisma.contact.update({
     where: { id: contactId },
@@ -487,16 +491,6 @@ async function persistAssignment(
       enteredStageAt: stageId ? new Date() : null,
     } as any,
   });
-  if (stageId) {
-    await (prisma as any).leadStageHistory?.create({
-      data: {
-        leadId: contactId,
-        fromStageId: null,
-        toStageId: stageId,
-        reason: ruleId ? `assignment:rule:${ruleId}` : `assignment:${mode}`,
-      },
-    });
-  }
 }
 
 async function createAssignmentEscalation(
