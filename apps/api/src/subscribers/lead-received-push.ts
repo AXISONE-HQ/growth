@@ -226,6 +226,40 @@ async function loadBrainServiceModule(): Promise<BrainServiceModule> {
 /** Captured Brain decision shape — convenience alias for in-handler code. */
 type Phase2BrainDecision = Awaited<ReturnType<BrainServiceModule['evaluateDealState']>>;
 
+interface StageTransitionEngineModule {
+  evaluateStageTransition: (
+    prisma: unknown,
+    dealId: string,
+    options?: {
+      tier?: 'cheap' | 'reasoning';
+      minConfidenceForTransition?: number;
+      triggeredBy?: 'normalizer' | 'agent' | 'human' | 'system' | 'rule';
+      // KAN-815b: forwards a pre-computed BrainDecision to avoid double Brain
+      // eval. Note: stage-transition-engine's KAN-796a public API doesn't
+      // currently accept a brainDecision pre-pass — it always re-evaluates.
+      // KAN-815b accepts the cost of one extra Brain call OR future KAN-815b+
+      // can extend the engine API to accept brainDecision. For MVP we accept
+      // the double-eval; the extra Brain call is the same cost as one
+      // additional consumer-side call and the engine's terminal-Stage
+      // short-circuit handles already-closed Deals without LLM.
+    },
+  ) => Promise<{
+    type: 'transitioned' | 'no_transition' | 'skipped';
+    dealId: string;
+    fromStageId?: string;
+    toStageId?: string;
+    reason?: string;
+    transitionRowId?: string;
+  }>;
+}
+let _stageTransitionEngineModule: StageTransitionEngineModule | null = null;
+async function loadStageTransitionEngineModule(): Promise<StageTransitionEngineModule> {
+  if (_stageTransitionEngineModule) return _stageTransitionEngineModule;
+  const spec = '../../../../packages/api/src/services/stage-transition-engine.js';
+  _stageTransitionEngineModule = (await import(spec)) as StageTransitionEngineModule;
+  return _stageTransitionEngineModule;
+}
+
 // ─────────────────────────────────────────────
 // Hono app
 // ─────────────────────────────────────────────
@@ -477,7 +511,22 @@ async function wirePhase2Consumers(dealId: string, eventId: string): Promise<voi
     `[lead-received-push] phase-2-brain-evaluated dealId=${dealId} eventId=${eventId} actionType=${brainDecision.nextBestAction.type} confidence=${brainDecision.confidence.toFixed(2)} tokens=${brainDecision.llmInputTokens}/${brainDecision.llmOutputTokens}`,
   );
 
-  // KAN-815b stage-transition consumer wired in commit 2.
+  // KAN-815b stage-transition consumer. Brain decisions to advance or close
+  // route to stage-transition-engine which writes Deal.currentStageId +
+  // DealStageHistory in its own transaction. Engine has its own terminal-
+  // Stage short-circuit (per feedback_stage_transition_engine_brain_consumer_pattern)
+  // so already-closed Deals return skipped:already_terminal without LLM call.
+  if (
+    brainDecision.nextBestAction.type === 'advance_stage' ||
+    brainDecision.nextBestAction.type === 'close_deal_lost'
+  ) {
+    const { evaluateStageTransition } = await loadStageTransitionEngineModule();
+    const transitionResult = await evaluateStageTransition(prisma, dealId);
+    console.log(
+      `[lead-received-push] phase-2-stage-transition dealId=${dealId} eventId=${eventId} brainAction=${brainDecision.nextBestAction.type} resultType=${transitionResult.type}${transitionResult.reason ? ` reason=${transitionResult.reason}` : ''}${transitionResult.toStageId ? ` toStageId=${transitionResult.toStageId}` : ''}`,
+    );
+  }
+
   // KAN-815c message-dispatch consumer wired in commit 3.
 }
 
