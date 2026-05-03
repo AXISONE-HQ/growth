@@ -39,6 +39,17 @@ const dealCreateMock = vi.fn();
 const dealStageHistoryCreateMock = vi.fn();
 const transactionMock = vi.fn();
 
+// KAN-815 — Phase 2 substrate mocks
+const evaluateDealStateMock = vi.fn();
+const evaluateStageTransitionMock = vi.fn();
+const shapeMessageMock = vi.fn();
+const evaluateSendPolicyMock = vi.fn();
+const publishActionSendMock = vi.fn();
+const resolveEmailConnectionIdMock = vi.fn();
+const getPubSubClientMock = vi.fn();
+const dealFindUniqueMock = vi.fn();
+const decisionCreateMock = vi.fn();
+
 vi.mock("../lib/oidc-pubsub-verify.js", () => ({
   verifyPubsubOidc: verifyPubsubOidcMock,
 }));
@@ -47,6 +58,8 @@ vi.mock("../prisma.js", () => ({
   prisma: {
     contact: { findUnique: contactFindUniqueMock },
     stage: { findFirst: stageFindFirstMock },
+    deal: { findUnique: dealFindUniqueMock },
+    decision: { create: decisionCreateMock },
     $transaction: transactionMock,
   },
 }));
@@ -65,6 +78,32 @@ vi.mock("../../../../packages/api/src/services/lead-normalizer.js", () => ({
 
 vi.mock("../../../../packages/api/src/services/engagement-service.js", () => ({
   logEngagement: logEngagementMock,
+}));
+
+// KAN-815 Phase 2 module mocks
+vi.mock("../../../../packages/api/src/services/brain-service.js", () => ({
+  evaluateDealState: evaluateDealStateMock,
+}));
+
+vi.mock("../../../../packages/api/src/services/stage-transition-engine.js", () => ({
+  evaluateStageTransition: evaluateStageTransitionMock,
+}));
+
+vi.mock("../../../../packages/api/src/services/message-shaper.js", () => ({
+  shapeMessage: shapeMessageMock,
+}));
+
+vi.mock("../../../../packages/api/src/services/send-policy.js", () => ({
+  evaluateSendPolicy: evaluateSendPolicyMock,
+}));
+
+vi.mock("../../../../packages/api/src/services/message-composer.js", () => ({
+  publishActionSend: publishActionSendMock,
+  resolveEmailConnectionId: resolveEmailConnectionIdMock,
+}));
+
+vi.mock("../../../../packages/api/src/lib/pubsub-client.js", () => ({
+  getPubSubClient: getPubSubClientMock,
 }));
 
 const { leadReceivedPushApp } = await import("../subscribers/lead-received-push.js");
@@ -161,6 +200,11 @@ function setupHappyPathMocks(opts: {
   });
   dealCreateMock.mockResolvedValue({ id: DEAL_A });
   dealStageHistoryCreateMock.mockResolvedValue({ id: "dsh_a" });
+
+  // KAN-815 Phase 2 wiring defaults — Brain returns wait_for_response so no
+  // consumers fire by default. Existing tests that don't override this
+  // continue to pass; new KAN-815 tests override per-case.
+  evaluateDealStateMock.mockResolvedValue(buildBrainDecisionFixture({ type: "wait_for_response" }));
 }
 
 beforeEach(() => {
@@ -174,7 +218,85 @@ beforeEach(() => {
   dealCreateMock.mockReset();
   dealStageHistoryCreateMock.mockReset();
   transactionMock.mockReset();
+  // KAN-815 Phase 2 mocks
+  evaluateDealStateMock.mockReset();
+  evaluateStageTransitionMock.mockReset();
+  shapeMessageMock.mockReset();
+  evaluateSendPolicyMock.mockReset();
+  publishActionSendMock.mockReset();
+  resolveEmailConnectionIdMock.mockReset();
+  getPubSubClientMock.mockReset();
+  dealFindUniqueMock.mockReset();
+  decisionCreateMock.mockReset();
 });
+
+// KAN-815 fixture builders
+function buildBrainDecisionFixture(overrides: {
+  type:
+    | "send_follow_up"
+    | "wait_for_response"
+    | "advance_stage"
+    | "escalate_to_human"
+    | "close_deal_lost"
+    | "no_action";
+  confidence?: number;
+  suggestedChannel?: "email" | "sms" | "meta_messenger";
+  suggestedTone?: "curious" | "professional" | "urgent" | "closing";
+  reasoning?: string;
+}) {
+  return {
+    dealId: DEAL_A,
+    evaluatedAt: new Date(),
+    currentStateSnapshot: {
+      dealStatus: "open",
+      currentStageName: "New",
+      currentStageOutcomeType: "open",
+      daysInCurrentStage: 0,
+      engagementCount: 1,
+      lastEngagementType: "email_received",
+      lastEngagementClass: "positive",
+      daysSinceLastEngagement: 0,
+      moProgressPercent: null,
+      pipelineName: "KAN-702 Verify Pipeline",
+      pipelineObjectiveType: "book_appointment",
+    },
+    nextBestAction: {
+      type: overrides.type,
+      reasoning: overrides.reasoning ?? "Test decision.",
+      ...(overrides.suggestedChannel && { suggestedChannel: overrides.suggestedChannel }),
+      ...(overrides.suggestedTone && { suggestedTone: overrides.suggestedTone }),
+    },
+    confidence: overrides.confidence ?? 0.85,
+    modelTier: "reasoning" as const,
+    llmInputTokens: 500,
+    llmOutputTokens: 120,
+  };
+}
+
+function buildShapedMessageFixture(overrides: {
+  channel?: "email" | "sms" | "meta_messenger";
+  subject?: string;
+  body?: string;
+}) {
+  const channel = overrides.channel ?? "email";
+  return {
+    type: "shaped" as const,
+    message: {
+      dealId: DEAL_A,
+      shapedAt: new Date(),
+      channel,
+      ...(channel === "email" && { subject: overrides.subject ?? "Quick question" }),
+      body: overrides.body ?? "Hi Alice — saw your reply yesterday. Curious what caught your eye?",
+      tone: "curious" as const,
+      rationale: "Open-ended discovery.",
+      antiRepetitionContextCount: 0,
+      modelTier: "reasoning" as const,
+      llmInputTokens: 510,
+      llmOutputTokens: 95,
+    },
+    brainDecision: buildBrainDecisionFixture({ type: "send_follow_up" }),
+  };
+}
 
 // ─────────────────────────────────────────────
 // KAN-774 — preserved boundary cases
@@ -384,5 +506,332 @@ describe("KAN-793 — error + edge cases", () => {
       assignmentMode: "rule",
       normalizedLeadConfidence: "medium",
     });
+  });
+});
+
+// ─────────────────────────────────────────────
+// KAN-815 — Phase 2 wiring integration tests
+// ─────────────────────────────────────────────
+
+function setupPhase2DispatchMocks() {
+  // Default: Brain returns send_follow_up + email; shape returns shaped;
+  // policy allows; Contact has email; ChannelConnection found; Decision row
+  // created; publish succeeds. Tests override individual mocks per case.
+  evaluateDealStateMock.mockResolvedValueOnce(
+    buildBrainDecisionFixture({
+      type: "send_follow_up",
+      suggestedChannel: "email",
+      suggestedTone: "curious",
+    }),
+  );
+  shapeMessageMock.mockResolvedValueOnce(buildShapedMessageFixture({ channel: "email" }));
+  evaluateSendPolicyMock.mockResolvedValueOnce({ type: "allow", reason: "All policy checks passed" });
+  dealFindUniqueMock.mockResolvedValueOnce({
+    id: DEAL_A,
+    tenantId: TENANT_A,
+    contactId: CONTACT_A,
+    contact: { id: CONTACT_A, email: "alice@acme.com" },
+  });
+  resolveEmailConnectionIdMock.mockResolvedValueOnce("conn_email_active");
+  decisionCreateMock.mockResolvedValueOnce({ id: "decision_brain_v1" });
+  getPubSubClientMock.mockReturnValueOnce({ publish: vi.fn() });
+  publishActionSendMock.mockResolvedValueOnce("pubsub_msg_id_123");
+}
+
+describe("KAN-815 — Phase 2 wiring (Brain trigger framework + consumer dispatch)", () => {
+  // ── Test 1 — Brain wait_for_response → no transition, no shape, no dispatch (existing-behavior regression)
+  it("Brain returns wait_for_response → no consumers fire (production unchanged)", async () => {
+    setupHappyPathMocks(); // Brain default = wait_for_response
+
+    const res = await postEnvelope(buildPushEnvelope());
+
+    expect(res.status).toBe(200);
+    expect(evaluateDealStateMock).toHaveBeenCalledOnce();
+    expect(evaluateStageTransitionMock).not.toHaveBeenCalled();
+    expect(shapeMessageMock).not.toHaveBeenCalled();
+    expect(evaluateSendPolicyMock).not.toHaveBeenCalled();
+    expect(publishActionSendMock).not.toHaveBeenCalled();
+    expect(decisionCreateMock).not.toHaveBeenCalled();
+  });
+
+  // ── Test 2 — Brain advance_stage → stage-transition called
+  it("Brain returns advance_stage → evaluateStageTransition fires; no shape/dispatch", async () => {
+    setupHappyPathMocks();
+    evaluateDealStateMock.mockReset();
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecisionFixture({ type: "advance_stage", confidence: 0.9 }),
+    );
+    evaluateStageTransitionMock.mockResolvedValueOnce({
+      type: "transitioned",
+      dealId: DEAL_A,
+      fromStageId: STAGE_INITIAL,
+      toStageId: "stage_qualified",
+      transitionRowId: "dsh_new",
+    });
+
+    const res = await postEnvelope(buildPushEnvelope());
+
+    expect(res.status).toBe(200);
+    expect(evaluateStageTransitionMock).toHaveBeenCalledOnce();
+    expect(evaluateStageTransitionMock.mock.calls[0]![1]).toBe(DEAL_A);
+    expect(shapeMessageMock).not.toHaveBeenCalled();
+    expect(publishActionSendMock).not.toHaveBeenCalled();
+  });
+
+  // ── Test 3 — Brain close_deal_lost → stage-transition called
+  it("Brain returns close_deal_lost → evaluateStageTransition fires", async () => {
+    setupHappyPathMocks();
+    evaluateDealStateMock.mockReset();
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecisionFixture({ type: "close_deal_lost", confidence: 0.7 }),
+    );
+    evaluateStageTransitionMock.mockResolvedValueOnce({
+      type: "skipped",
+      dealId: DEAL_A,
+      reason: "no_terminal_lost_stage_in_pipeline",
+    });
+
+    const res = await postEnvelope(buildPushEnvelope());
+
+    expect(res.status).toBe(200);
+    expect(evaluateStageTransitionMock).toHaveBeenCalledOnce();
+  });
+
+  // ── Test 4 — send_follow_up + shape allow + policy allow → publishActionSend called with correct payload
+  it("Brain send_follow_up + shape allow + policy allow → publishActionSend called", async () => {
+    setupHappyPathMocks();
+    evaluateDealStateMock.mockReset();
+    setupPhase2DispatchMocks();
+
+    const res = await postEnvelope(buildPushEnvelope());
+
+    expect(res.status).toBe(200);
+    expect(publishActionSendMock).toHaveBeenCalledOnce();
+    const callArgs = publishActionSendMock.mock.calls[0]!;
+    const publishInput = callArgs[1] as {
+      tenantId: string;
+      contactId: string;
+      decisionId: string;
+      toEmail: string;
+      composed: { subject: string; body: string; unsubscribeUrl: string };
+      connectionId: string;
+    };
+    expect(publishInput.tenantId).toBe(TENANT_A);
+    expect(publishInput.contactId).toBe(CONTACT_A);
+    expect(publishInput.decisionId).toBe("decision_brain_v1");
+    expect(publishInput.toEmail).toBe("alice@acme.com");
+    expect(publishInput.composed.subject).toBe("Quick question");
+    expect(publishInput.composed.body).toContain("Alice");
+    expect(publishInput.composed.unsubscribeUrl).toContain("/unsubscribe/");
+    expect(publishInput.composed.unsubscribeUrl).toContain(CONTACT_A);
+    expect(publishInput.connectionId).toBe("conn_email_active");
+  });
+
+  // ── Test 5 — send_follow_up + shape returns no_shape → publishActionSend NOT called
+  it("Brain send_follow_up + shape returns no_shape → publishActionSend NOT called; warn log", async () => {
+    setupHappyPathMocks();
+    evaluateDealStateMock.mockReset();
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecisionFixture({ type: "send_follow_up", suggestedChannel: "email" }),
+    );
+    shapeMessageMock.mockResolvedValueOnce({
+      type: "no_shape",
+      dealId: DEAL_A,
+      reason: "Message Shaper fallback: LLM call failed.",
+    });
+
+    const res = await postEnvelope(buildPushEnvelope());
+
+    expect(res.status).toBe(200);
+    expect(shapeMessageMock).toHaveBeenCalledOnce();
+    expect(evaluateSendPolicyMock).not.toHaveBeenCalled();
+    expect(publishActionSendMock).not.toHaveBeenCalled();
+    expect(decisionCreateMock).not.toHaveBeenCalled();
+  });
+
+  // ── Test 6 — send_follow_up + shape allow + policy deny → publishActionSend NOT called
+  it("Brain send_follow_up + shape allow + policy deny → publishActionSend NOT called; warn log with ruleViolated", async () => {
+    setupHappyPathMocks();
+    evaluateDealStateMock.mockReset();
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecisionFixture({ type: "send_follow_up", suggestedChannel: "email" }),
+    );
+    shapeMessageMock.mockResolvedValueOnce(buildShapedMessageFixture({ channel: "email" }));
+    dealFindUniqueMock.mockResolvedValueOnce({
+      id: DEAL_A,
+      tenantId: TENANT_A,
+      contactId: CONTACT_A,
+      contact: { id: CONTACT_A, email: "alice@acme.com" },
+    });
+    evaluateSendPolicyMock.mockResolvedValueOnce({
+      type: "deny",
+      reason: "Contact suppressed for email: email_unsubscribe on 2026-04-01T12:00:00.000Z",
+      ruleViolated: "suppression",
+    });
+
+    const res = await postEnvelope(buildPushEnvelope());
+
+    expect(res.status).toBe(200);
+    expect(evaluateSendPolicyMock).toHaveBeenCalledOnce();
+    expect(publishActionSendMock).not.toHaveBeenCalled();
+    expect(decisionCreateMock).not.toHaveBeenCalled();
+  });
+
+  // ── Test 7 — send_follow_up + shape allow + policy defer → publishActionSend NOT called
+  it("Brain send_follow_up + shape allow + policy defer → publishActionSend NOT called; info log with deferUntil", async () => {
+    setupHappyPathMocks();
+    evaluateDealStateMock.mockReset();
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecisionFixture({ type: "send_follow_up", suggestedChannel: "email" }),
+    );
+    shapeMessageMock.mockResolvedValueOnce(buildShapedMessageFixture({ channel: "email" }));
+    dealFindUniqueMock.mockResolvedValueOnce({
+      id: DEAL_A,
+      tenantId: TENANT_A,
+      contactId: CONTACT_A,
+      contact: { id: CONTACT_A, email: "alice@acme.com" },
+    });
+    evaluateSendPolicyMock.mockResolvedValueOnce({
+      type: "defer",
+      reason: "Outside tenant send window (9:00-21:00 UTC)",
+      deferUntil: new Date("2026-05-04T09:00:00.000Z"),
+    });
+
+    const res = await postEnvelope(buildPushEnvelope());
+
+    expect(res.status).toBe(200);
+    expect(publishActionSendMock).not.toHaveBeenCalled();
+    expect(decisionCreateMock).not.toHaveBeenCalled();
+  });
+
+  // ── Test 8 — Brain throws → Phase 2 wiring caught, no propagation, inbound still committed (regression)
+  it("Brain throws → Phase 2 wiring caught (response still 200, engagement-write committed)", async () => {
+    setupHappyPathMocks();
+    evaluateDealStateMock.mockReset();
+    evaluateDealStateMock.mockRejectedValueOnce(new Error("Brain Service unavailable"));
+
+    const res = await postEnvelope(buildPushEnvelope());
+
+    // Inbound chain succeeded — engagement was committed BEFORE Brain wiring.
+    expect(res.status).toBe(200);
+    expect(dealCreateMock).toHaveBeenCalledOnce(); // Phase 1 write happened
+    // Phase 2 fired Brain but failed; downstream consumers never invoked.
+    expect(evaluateDealStateMock).toHaveBeenCalledOnce();
+    expect(evaluateStageTransitionMock).not.toHaveBeenCalled();
+    expect(shapeMessageMock).not.toHaveBeenCalled();
+  });
+
+  // ── Test 9 — evaluateDealState called exactly ONCE per inbound (no double-eval)
+  it("evaluateDealState called exactly ONCE per inbound (no double-eval)", async () => {
+    setupHappyPathMocks();
+    evaluateDealStateMock.mockReset();
+    setupPhase2DispatchMocks();
+
+    await postEnvelope(buildPushEnvelope());
+
+    expect(evaluateDealStateMock).toHaveBeenCalledOnce();
+  });
+
+  // ── Test 10 — engagement-write commits BEFORE Phase 2 wiring runs (atomicity sequencing)
+  it("engagement-write transaction commits BEFORE Phase 2 Brain eval fires", async () => {
+    setupHappyPathMocks();
+    const callOrder: string[] = [];
+    transactionMock.mockReset();
+    transactionMock.mockImplementation(async (cb: (tx: unknown) => Promise<unknown>) => {
+      callOrder.push("tx-start");
+      const tx = {
+        deal: { create: dealCreateMock },
+        dealStageHistory: { create: dealStageHistoryCreateMock },
+      };
+      const result = await cb(tx);
+      callOrder.push("tx-commit");
+      return result;
+    });
+    evaluateDealStateMock.mockReset();
+    evaluateDealStateMock.mockImplementationOnce(async () => {
+      callOrder.push("brain-eval");
+      return buildBrainDecisionFixture({ type: "wait_for_response" });
+    });
+
+    await postEnvelope(buildPushEnvelope());
+
+    expect(callOrder).toEqual(["tx-start", "tx-commit", "brain-eval"]);
+  });
+
+  // ── Test 11 — KAN-815c Decision row written with spec'd shape
+  it("send_follow_up dispatch writes Decision row with brain_phase_2_v1 strategy + Brain metadata", async () => {
+    setupHappyPathMocks();
+    evaluateDealStateMock.mockReset();
+    setupPhase2DispatchMocks();
+
+    await postEnvelope(buildPushEnvelope());
+
+    expect(decisionCreateMock).toHaveBeenCalledOnce();
+    const decisionArgs = decisionCreateMock.mock.calls[0]![0] as {
+      data: {
+        tenantId: string;
+        contactId: string;
+        strategySelected: string;
+        actionType: string;
+        confidence: number;
+        reasoning: string;
+        metadata: Record<string, unknown>;
+      };
+    };
+    expect(decisionArgs.data.tenantId).toBe(TENANT_A);
+    expect(decisionArgs.data.contactId).toBe(CONTACT_A);
+    expect(decisionArgs.data.strategySelected).toBe("brain_phase_2_v1");
+    expect(decisionArgs.data.actionType).toBe("send_follow_up");
+    expect(decisionArgs.data.confidence).toBe(0.85);
+    expect(decisionArgs.data.metadata).toMatchObject({
+      dealId: DEAL_A,
+      brainModelTier: "reasoning",
+      shaperTier: "reasoning",
+    });
+  });
+
+  // ── Test 12 — KAN-815c channel skip: shape returns sms → publishActionSend NOT called, info log
+  it("send_follow_up + shape returns channel=sms → publishActionSend NOT called (Phase 3 deferred)", async () => {
+    setupHappyPathMocks();
+    evaluateDealStateMock.mockReset();
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecisionFixture({ type: "send_follow_up", suggestedChannel: "sms" }),
+    );
+    shapeMessageMock.mockResolvedValueOnce(buildShapedMessageFixture({ channel: "sms" }));
+
+    const res = await postEnvelope(buildPushEnvelope());
+
+    expect(res.status).toBe(200);
+    expect(shapeMessageMock).toHaveBeenCalledOnce();
+    // Channel skip happens BEFORE policy / connection lookup / publish.
+    expect(evaluateSendPolicyMock).not.toHaveBeenCalled();
+    expect(dealFindUniqueMock).not.toHaveBeenCalled();
+    expect(publishActionSendMock).not.toHaveBeenCalled();
+    expect(decisionCreateMock).not.toHaveBeenCalled();
+  });
+
+  // ── Test 13 — KAN-815c connection lookup miss: resolveEmailConnectionId returns null → no dispatch
+  it("send_follow_up + policy allow + no ACTIVE EMAIL ChannelConnection → publishActionSend NOT called; warn log", async () => {
+    setupHappyPathMocks();
+    evaluateDealStateMock.mockReset();
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecisionFixture({ type: "send_follow_up", suggestedChannel: "email" }),
+    );
+    shapeMessageMock.mockResolvedValueOnce(buildShapedMessageFixture({ channel: "email" }));
+    dealFindUniqueMock.mockResolvedValueOnce({
+      id: DEAL_A,
+      tenantId: TENANT_A,
+      contactId: CONTACT_A,
+      contact: { id: CONTACT_A, email: "alice@acme.com" },
+    });
+    evaluateSendPolicyMock.mockResolvedValueOnce({ type: "allow", reason: "ok" });
+    resolveEmailConnectionIdMock.mockResolvedValueOnce(null); // no active connection
+
+    const res = await postEnvelope(buildPushEnvelope());
+
+    expect(res.status).toBe(200);
+    expect(resolveEmailConnectionIdMock).toHaveBeenCalledOnce();
+    expect(decisionCreateMock).not.toHaveBeenCalled(); // Decision row not written when dispatch can't happen
+    expect(publishActionSendMock).not.toHaveBeenCalled();
   });
 });
