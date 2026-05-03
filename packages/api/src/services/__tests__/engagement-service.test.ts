@@ -18,6 +18,10 @@ import {
 
 const TENANT_A = "11111111-1111-1111-1111-111111111111";
 const CONTACT_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+// KAN-791 — every Engagement requires a Deal. Tests use a fixed dealId
+// for the happy-path fixtures; correlationId-dedup tests still verify
+// engagement-level idempotency without needing distinct deals.
+const DEAL_A = "dddddddd-dddd-dddd-dddd-dddddddddddd";
 
 function makeMockPrisma() {
   const findUnique = vi.fn(
@@ -26,6 +30,7 @@ function makeMockPrisma() {
   const create = vi.fn(async ({ data }: { data: Record<string, unknown> }): Promise<Engagement> => ({
     id: "eng_" + Math.random().toString(36).slice(2, 10),
     tenantId: data.tenantId as string,
+    dealId: data.dealId as string,
     contactId: data.contactId as string,
     correlationId: (data.correlationId as string | undefined) ?? null,
     engagementType: data.engagementType as string,
@@ -76,6 +81,7 @@ describe("logEngagement — create path", () => {
   it("creates a row with correct fields, signalClass derived from engagementType", async () => {
     const input: EngagementInput = {
       tenantId: TENANT_A,
+      dealId: DEAL_A,
       contactId: CONTACT_A,
       engagementType: "email_open",
       channel: "email",
@@ -89,6 +95,7 @@ describe("logEngagement — create path", () => {
     expect(mock.create).toHaveBeenCalledTimes(1);
     const createArgs = mock.create.mock.calls[0]![0] as { data: Record<string, unknown> };
     expect(createArgs.data.tenantId).toBe(TENANT_A);
+    expect(createArgs.data.dealId).toBe(DEAL_A);
     expect(createArgs.data.contactId).toBe(CONTACT_A);
     expect(createArgs.data.engagementType).toBe("email_open");
     expect(createArgs.data.signalClass).toBe("positive");
@@ -102,6 +109,7 @@ describe("logEngagement — create path", () => {
   it("defaults metadata to {} when not provided", async () => {
     await logEngagement(mock.prisma, {
       tenantId: TENANT_A,
+      dealId: DEAL_A,
       contactId: CONTACT_A,
       engagementType: "email_send",
       occurredAt: new Date("2026-05-03T12:00:00Z"),
@@ -118,6 +126,7 @@ describe("logEngagement — correlationId idempotency contract (PRD §4)", () =>
     const mock = makeMockPrisma();
     const input: EngagementInput = {
       tenantId: TENANT_A,
+      dealId: DEAL_A,
       contactId: CONTACT_A,
       engagementType: "email_reply",
       occurredAt: new Date("2026-05-03T12:00:00Z"),
@@ -146,6 +155,7 @@ describe("logEngagement — correlationId idempotency contract (PRD §4)", () =>
     const mock = makeMockPrisma();
     const input: EngagementInput = {
       tenantId: TENANT_A,
+      dealId: DEAL_A,
       contactId: CONTACT_A,
       engagementType: "email_send",
       occurredAt: new Date("2026-05-03T12:00:00Z"),

@@ -1,30 +1,41 @@
 /**
- * KAN-786 Phase 1 — Engagement service (module-scoped functions).
+ * KAN-786 (sub-cohort b) + KAN-791 (lifecycle pivot) — Engagement service.
  *
- * Replaces the dead engagement-logger.ts (~430 LoC, never wired into a
- * production runtime — see KAN-782 for deletion). Surfaces a Prisma-backed
- * write path for AI-agent action emits + future channel webhook signals
- * (email opens, clicks, replies, bounces, etc.) per
- * docs/prds/phase-1-deal-engagement.md §4.
+ * Module-scoped functions for the Prisma-backed Engagement write path.
+ * Replaces dead engagement-logger.ts (~430 LoC, KAN-782 deletion target).
+ *
+ * KAN-791 PIVOT (2026-05-03): Engagement now attaches to Deal via REQUIRED
+ * dealId FK. EngagementInput.dealId is mandatory; callers MUST create the
+ * Deal first. Per PRD §9.5 atomicity invariant — there is no moment when
+ * an Engagement exists without a Deal. Track A (KAN-793) Normalizer
+ * creates Deal first, then logs inbound Engagement with dealId = deal.id.
+ * contactId stays as denormalized fast-query field for cheap
+ * (tenantId, contactId, occurredAt) queries without joining through Deal.
  *
  * Shape: module-scoped exported functions taking `prisma` as first arg —
  * matches sibling-service convention in this directory (agentic-tools.ts,
- * threshold-gate.ts). PRD §4 originally specified a class-based shape; the
- * sub-cohort (b) audit on 2026-05-02 confirmed module-fn convention is
- * dominant + the PRD was amended to match.
+ * threshold-gate.ts).
  *
  * Idempotency: `correlationId` is the natural-key dedup token. When provided
  * AND a row already exists with that value, `logEngagement` returns the
- * existing row as a no-op. Pub/Sub redelivery + handler retries are safe by
- * construction. Recommended `correlationId` sources:
+ * existing row as a no-op. Pub/Sub redelivery + handler retries are safe.
+ * Recommended `correlationId` sources:
  *   - Resend webhook message id for inbound-derived engagements
- *   - Decision id for threshold-gate-derived events
- *   - Action id for agent-emitted engagements (sub-cohort (d))
+ *   - Decision id for decision-derived events
+ *   - Action id for agent-emitted engagements
  */
 import type { Engagement, PrismaClient, SignalClass } from "@prisma/client";
 
 export interface EngagementInput {
   tenantId: string;
+  /** KAN-791 — REQUIRED. Engagement attaches to Deal; queryable to Contact
+   *  via FK chain. Per PRD §9.5 atomicity invariant: Deal must exist before
+   *  Engagement is written. Track A (KAN-793) Normalizer creates the Deal
+   *  first, then logs the inbound Engagement with dealId = deal.id. */
+  dealId: string;
+  /** Denormalized fast-query field; redundant with deal.contactId but kept
+   *  for cheap (tenantId, contactId, occurredAt) queries on a Contact's
+   *  engagement history without joining through Deal. */
   contactId: string;
   engagementType: string;
   channel?: string | null;
@@ -51,6 +62,7 @@ export async function logEngagement(
   return prisma.engagement.create({
     data: {
       tenantId: input.tenantId,
+      dealId: input.dealId,
       contactId: input.contactId,
       engagementType: input.engagementType,
       signalClass: classifySignal(input.engagementType),
