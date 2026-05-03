@@ -160,8 +160,8 @@ Both models attach to `Contact`, not a separate `Lead`, because **Lead == Contac
 | File | Change |
 |------|--------|
 | `packages/db/prisma/schema.prisma` | New models + enums + relations on Tenant/Contact (Section 3 above). New migration generated via `prisma migrate dev --name add_deal_engagement_kan_786` (KAN-786 is the Sprint 6 implementation ticket; matches the ticket-prefixed convention used by `apps/connectors/...kan_741_*` and `apps/api/...kan_774_*`). CI runs `prisma migrate deploy` per `reference_schema_pr_ci_migrate_step` discipline. |
-| `apps/api/src/services/threshold-gate.ts:36-37,92-97` | Extend `transition_to_closed_won` and `transition_to_closed_lost` action handlers to insert a `Deal` row (status=`closed_won`/`closed_lost`, `closedAt=now()`, value/currency from action metadata if present, else null) **alongside** the existing Pipeline stage transition. Idempotent on re-fire (use `(tenantId, contactId, status='closed_won')` upsert key derivation, not a hard UNIQUE — reps can be earned multiple times across deal cycles). |
-| `apps/api/src/services/behavioral-learner.ts:9` | (Decision needed — see §9 Open questions) replace Pub/Sub subscription to `growth.engagement.logged` with direct Prisma reads from new `engagement` table, OR keep Pub/Sub and add Engagement persistence as a sibling subscriber. Recommend the latter for now (preserves existing decoupling) but PR author can swap. |
+| `packages/api/src/services/threshold-gate.ts:36-37,92-97` | Extend `transition_to_closed_won` and `transition_to_closed_lost` action handlers to insert a `Deal` row (status=`closed_won`/`closed_lost`, `closedAt=now()`, value/currency from action metadata if present, else null) **alongside** the existing Pipeline stage transition. Idempotent on re-fire (use `(tenantId, contactId, status='closed_won')` upsert key derivation, not a hard UNIQUE — reps can be earned multiple times across deal cycles). |
+| `packages/api/src/services/behavioral-learner.ts:9` | (Decision needed — see §9 Open questions) replace Pub/Sub subscription to `growth.engagement.logged` with direct Prisma reads from new `engagement` table, OR keep Pub/Sub and add Engagement persistence as a sibling subscriber. Recommend the latter for now (preserves existing decoupling) but PR author can swap. |
 | `packages/api/src/services/agentic-tools.ts` | Wire AI agent action emit path to call `engagementService.logEngagement()`. Every action dispatched becomes one `Engagement` row with `engagementType` derived from `actionType` (e.g., `email_send` → `engagementType="email_send"`, signalClass=`neutral`; opens/clicks/replies arrive later from webhooks). Use the 3-taxonomy guidance from `decision_kan_749_mvp_shape_rationale` — pass `actionType` AS-IS, defer vocab refactor. |
 
 ### Seeds posture
@@ -172,12 +172,16 @@ Both models attach to `Contact`, not a separate `Lead`, because **Lead == Contac
 
 | File | Purpose |
 |------|---------|
-| `apps/api/src/services/engagement-service.ts` | **NEW** Prisma-backed Engagement service. Replaces dead `engagement-logger.ts`. Public API (3 methods, narrow surface): |
+| `packages/api/src/services/engagement-service.ts` | **NEW** Prisma-backed Engagement service. Replaces dead `engagement-logger.ts`. Public API (3 methods, narrow surface): |
 
 **Idempotency contract:** All writes accept an optional `correlationId`; if provided and a row already exists with that value, the write is a no-op (return existing row). This makes Pub/Sub redelivery and handler retries safe by construction. Recommended `correlationId` sources: Resend message id for inbound-derived engagements, decision id for threshold-gate-derived deals, downstream agent action id for agent-emitted engagements.
 
+**Service expressed as module-scoped functions** to match sibling-service convention in `packages/api/src/services/` (e.g., `agentic-tools.ts`, `threshold-gate.ts`). The 3-method API contract + `correlationId` idempotency from prior PRD revisions is preserved verbatim — only the shape adapts. Prisma types are imported from `@prisma/client` directly (the canonical pattern across `apps/api/src/router.ts:4` and the rest of the repo; `@growth/db` alias is not wired — see CLAUDE.md gotcha #2).
+
 ```ts
-// apps/api/src/services/engagement-service.ts (NEW)
+// packages/api/src/services/engagement-service.ts (NEW)
+
+import type { Engagement, PrismaClient, SignalClass } from "@prisma/client";
 
 export interface EngagementInput {
   tenantId: string;
@@ -193,46 +197,75 @@ export interface EngagementInput {
   correlationId?: string;
 }
 
-export class EngagementService {
-  constructor(private prisma: PrismaClient) {}
-
-  async logEngagement(input: EngagementInput): Promise<Engagement> {
-    return this.prisma.engagement.create({
-      data: {
-        tenantId: input.tenantId,
-        contactId: input.contactId,
-        engagementType: input.engagementType,
-        signalClass: classifySignal(input.engagementType), // reuse logic from engagement-logger.ts:164
-        channel: input.channel ?? null,
-        occurredAt: input.occurredAt,
-        metadata: input.metadata ?? {},
-      },
+export async function logEngagement(
+  prisma: PrismaClient,
+  input: EngagementInput,
+): Promise<Engagement> {
+  if (input.correlationId) {
+    const existing = await prisma.engagement.findUnique({
+      where: { correlationId: input.correlationId },
     });
+    if (existing) return existing;
   }
 
-  async listForContact(
-    tenantId: string,
-    contactId: string,
-    opts?: { since?: Date; limit?: number }
-  ): Promise<Engagement[]> {
-    return this.prisma.engagement.findMany({
-      where: {
-        tenantId,
-        contactId,
-        ...(opts?.since && { occurredAt: { gte: opts.since } }),
-      },
-      orderBy: { occurredAt: 'desc' },
-      take: opts?.limit ?? 100,
-    });
-  }
+  return prisma.engagement.create({
+    data: {
+      tenantId: input.tenantId,
+      contactId: input.contactId,
+      engagementType: input.engagementType,
+      signalClass: classifySignal(input.engagementType),
+      channel: input.channel ?? null,
+      occurredAt: input.occurredAt,
+      metadata: (input.metadata ?? {}) as object,
+      ...(input.correlationId && { correlationId: input.correlationId }),
+    },
+  });
+}
 
-  async listSinceForLearning(after: Date, limit = 1000): Promise<Engagement[]> {
-    return this.prisma.engagement.findMany({
-      where: { occurredAt: { gte: after } },
-      orderBy: { occurredAt: 'asc' },
-      take: limit,
-    });
-  }
+export async function listEngagementsForContact(
+  prisma: PrismaClient,
+  tenantId: string,
+  contactId: string,
+  opts?: { since?: Date; limit?: number },
+): Promise<Engagement[]> {
+  return prisma.engagement.findMany({
+    where: {
+      tenantId,
+      contactId,
+      ...(opts?.since && { occurredAt: { gte: opts.since } }),
+    },
+    orderBy: { occurredAt: "desc" },
+    take: opts?.limit ?? 100,
+  });
+}
+
+export async function listEngagementsSinceForLearning(
+  prisma: PrismaClient,
+  after: Date,
+  limit = 1000,
+): Promise<Engagement[]> {
+  return prisma.engagement.findMany({
+    where: { occurredAt: { gte: after } },
+    orderBy: { occurredAt: "asc" },
+    take: limit,
+  });
+}
+
+function classifySignal(engagementType: string): SignalClass {
+  const positive = new Set([
+    "email_open",
+    "email_click",
+    "email_reply",
+    "form_submit",
+  ]);
+  const negative = new Set([
+    "email_bounce",
+    "email_unsubscribe",
+    "contact_optout",
+  ]);
+  if (positive.has(engagementType)) return "positive" as SignalClass;
+  if (negative.has(engagementType)) return "negative" as SignalClass;
+  return "neutral" as SignalClass;
 }
 ```
 
@@ -262,9 +295,9 @@ export class EngagementService {
 - [ ] `Deal` model exists with the exact schema in §3; `DealStatus` enum present
 - [ ] `Engagement` model exists with the exact schema in §3; `SignalClass` enum present
 - [ ] `Tenant` and `Contact` relations updated; Prisma client regenerated; `enum-drift.test.ts` PAIRS extended for the 2 new enums (per `reference_enum_drift_pairs_discipline`)
-- [ ] `apps/api/src/services/threshold-gate.ts` inserts a `Deal` row on `transition_to_closed_won` / `transition_to_closed_lost` (unit test in same PR, integration test on the threshold-gate flow)
-- [ ] `apps/api/src/services/engagement-service.ts` is created; `engagement-service.test.ts` covers the 3 methods
-- [ ] `apps/api/src/services/agentic-tools.ts` emits an `Engagement` row on action dispatch (unit test asserting Prisma engagement.create called; e2e: trigger one decision via existing decision-engine integration test, observe one `Engagement` row land)
+- [ ] `packages/api/src/services/threshold-gate.ts` inserts a `Deal` row on `transition_to_closed_won` / `transition_to_closed_lost` (unit test in same PR, integration test on the threshold-gate flow)
+- [ ] `packages/api/src/services/engagement-service.ts` is created; `engagement-service.test.ts` covers the 3 methods
+- [ ] `packages/api/src/services/agentic-tools.ts` emits an `Engagement` row on action dispatch (unit test asserting Prisma engagement.create called; e2e: trigger one decision via existing decision-engine integration test, observe one `Engagement` row land)
 - [ ] `behavioral-learner.ts` either reads from the `engagement` table directly OR subscribes to `growth.engagement.logged` with a sibling Engagement-persistence subscriber — **decision documented in PR description with trade-off** (see §9 below)
 - [ ] **Empirical end-of-sprint smoke (load-bearing per `feedback_kan_745_cost_observability_shipped`):** at least 1 real `Deal` row and 1 real `Engagement` row exist in production; verification query from §2 returns `real_n >= 1` for both
 - [ ] **Track A regression check:** After Phase 1 deploy, re-run the 4-query verification matrix from yesterday's Track A close-out. All four must pass before Phase 1 is declared shipped — same matrix that closed Track A; reusing it ensures Phase 1's schema additions don't regress the producer→consumer chain.
