@@ -154,15 +154,30 @@ model Deal {
 
 /// KAN-791 — Stage gets outcomeType + cadence (drives terminal-detection + Phase 2 Stages Evolution Logic, KAN-796)
 model Stage {
-  // ... existing fields preserved ...
-  // NEW:
+  // ... existing fields preserved (id, pipelineId, name, order, isInitial, isTerminal,
+  // entryActions, transitionRules, autoApproveMatrix, createdAt, updatedAt) ...
+  // NEW (KAN-791):
   outcomeType       StageOutcomeType @default(open) @map("outcome_type")
-  // NEW: per-tenant per-Pipeline per-Stage follow-up cadence config (consumer ships in KAN-796)
+  // NEW (KAN-791): per-tenant per-Pipeline per-Stage follow-up cadence config.
+  // Stored in Phase 1; consumer ships in Phase 2 KAN-796 (AI Stages Evolution Logic).
+  // Default platform cadence per Stage shipped via the lazy-bootstrap helper (see §4 KAN-793).
   followUpCadence   Json             @default("{}") @map("follow_up_cadence")
-  // NEW relation:
-  dealsCurrent      Deal[]           @relation("DealCurrentStage")
+  // NEW relations (KAN-791):
+  dealsCurrent      Deal[]             @relation("DealCurrentStage")
   dealStageFromHist DealStageHistory[] @relation("DealStageFromHistory")
   dealStageToHist   DealStageHistory[] @relation("DealStageToHistory")
+
+  // KAN-791 INVARIANT: at most one isInitial Stage per Pipeline.
+  // Prisma's @@unique doesn't natively support partial indexes — append raw SQL
+  // to the migration (the spurious-DROP workaround per KAN-787 already requires
+  // manual migration.sql editing; same workflow):
+  //
+  //   CREATE UNIQUE INDEX stages_one_initial_per_pipeline_idx
+  //     ON stages (pipeline_id) WHERE is_initial = true;
+  //
+  // Enforces the schema invariant the lazy-bootstrap helper (KAN-793,
+  // ensureTenantHasDefaultPipeline) and the Track A consumer rely on. Schema
+  // invariants beat runtime checks.
 }
 
 enum StageOutcomeType {
@@ -180,16 +195,26 @@ model DealStageHistory {
   fromStageId    String?  @map("from_stage_id")
   toStageId      String   @map("to_stage_id")
   transitionedAt DateTime @default(now()) @map("transitioned_at")
-  /// 'normalizer' | 'agent' | 'human' | 'system' | 'rule:<rule_id>' — extensible string for V1
+  /// Semantic descriptor — bounded set: 'normalizer' | 'agent' | 'human' | 'system' | 'rule'
+  /// Stays human-readable for log/UI display + queryable as a category index.
   triggeredBy    String   @map("triggered_by")
+  /// Typed FK populated only when the transition came from a Decision firing.
+  /// Phase 2 KAN-796 (AI Stages Evolution Logic) emits decision-driven transitions
+  /// at scale; Phase 1 transitions (Normalizer-driven) leave this null.
+  /// `triggeredBy` is the descriptive category; `decisionId` is the precise FK.
+  /// Both can coexist (e.g., triggeredBy='agent' + decisionId=<id> for agent-emitted
+  /// decisions) or only one (e.g., triggeredBy='human' + decisionId=null for manual moves).
+  decisionId     String?  @map("decision_id")
   metadata       Json     @default("{}")
 
-  deal      Deal   @relation(fields: [dealId], references: [id], onDelete: Cascade)
-  fromStage Stage? @relation("DealStageFromHistory", fields: [fromStageId], references: [id], onDelete: SetNull)
-  toStage   Stage  @relation("DealStageToHistory", fields: [toStageId], references: [id], onDelete: Restrict)
+  deal      Deal      @relation(fields: [dealId], references: [id], onDelete: Cascade)
+  fromStage Stage?    @relation("DealStageFromHistory", fields: [fromStageId], references: [id], onDelete: SetNull)
+  toStage   Stage     @relation("DealStageToHistory", fields: [toStageId], references: [id], onDelete: Restrict)
+  decision  Decision? @relation(fields: [decisionId], references: [id], onDelete: SetNull)
 
   @@index([dealId, transitionedAt])
   @@index([toStageId])
+  @@index([decisionId])
   @@map("deal_stage_history")
 }
 
@@ -277,7 +302,35 @@ Phase 1 splits across **three Sprint 6 epics**, each with its own implementation
 |------|--------|
 | `apps/api/src/subscribers/lead-received-push.ts` (or the equivalent push-subscriber file from KAN-774) | After validating the `lead.received` event, call `normalizeInbound(...)` to produce `{ contact, deal, inboundEngagement }`. Replace the existing `assignLeadToPipeline` flow with: (1) upsert Contact, (2) resolve tenant's default Pipeline + its starting Stage (the Stage where `isInitial: true`), (3) create Deal with `pipelineId` + `currentStageId` set to the starting Stage + `correlationId = leadInboxEventId` (Resend message id; Pub/Sub redelivery safe), (4) create inbound `Engagement` with `dealId = deal.id`, `engagementType = 'lead_received'`, `signalClass = 'positive'`, `correlationId = leadInboxEventId + ":inbound"`, (5) write `DealStageHistory` entry with `fromStageId = null`, `toStageId = starting_stage.id`, `triggeredBy = 'normalizer'`. |
 | `apps/connectors/src/webhooks/resend-inbound.ts` | No code change required at the connector layer — the existing Resend webhook publishes `lead.received` to Pub/Sub; the consumer above does the normalize+write. Connector stays thin. |
-| `packages/api/src/services/lead-assignment.ts` (existing — `assignLeadToPipeline`) | Update or replace: assignment flow now operates on Deals (assigning a Deal to a pipeline), not on Contacts directly. Per the lifecycle pivot, "assignment" is "create Deal in starting Stage of routed Pipeline." The existing `mode=unassigned` posture (per `reference_lead_inbox.md` operator step 2 + `belowThresholdPosture` enum) maps to "Deal not yet routed to a Pipeline" — handle by either deferring Deal creation OR creating Deal with `pipelineId` of the tenant's `defaultAssignmentPipelineId` (Phase 1 picks the latter; Pipeline routing AI per KAN-795 supersedes in Phase 2). |
+| `packages/api/src/services/lead-assignment.ts` (existing — `assignLeadToPipeline`) | Update or replace: assignment flow now operates on Deals (assigning a Deal to a pipeline), not on Contacts directly. Per the lifecycle pivot, "assignment" is "create Deal in starting Stage of routed Pipeline." Routing resolution chain: (1) try `Tenant.defaultAssignmentPipelineId`; (2) if NULL, try the tenant's only Pipeline if `findMany` returns exactly 1; (3) if still NULL, **lazy-bootstrap** the platform-default Pipeline via `ensureTenantHasDefaultPipeline(tenantId)` (see helper below). Phase 1 always succeeds in producing a Pipeline+Stage to route to — never drops the lead. Pipeline routing AI per KAN-795 supersedes in Phase 2. |
+
+#### Lazy-bootstrap helper — `ensureTenantHasDefaultPipeline(tenantId)` (Q9.4 resolution, in KAN-793 scope)
+
+When a Track A inbound fires for a tenant with **zero Pipelines** (or a NULL `defaultAssignmentPipelineId` + multiple/zero Pipelines making fallback ambiguous), the consumer auto-bootstraps a **platform-default Pipeline + 7 Stages** before writing the Deal. Idempotent: if the Pipeline already exists (lookup by `name = "Default Sales Pipeline"` + `tenantId`), return its id — no second bootstrap.
+
+**Helper location:** Embed in the KAN-793 consumer for Phase 1 (`apps/api/src/subscribers/lead-received-push.ts` or sibling). Promote to a shared service in Phase 5 onboarding work (KAN-807 Tenant Onboarding Wizard).
+
+**Platform-default Pipeline shape:**
+
+| Pipeline name |
+|---|
+| `Default Sales Pipeline` |
+
+**Platform-default Stages (created in order, with `followUpCadence` JSON shape per the KAN-796 consumer spec):**
+
+| order | name | outcomeType | isInitial | isTerminal | followUpCadence (no_response_hours / max_attempts / stalled_after_days) |
+|---|---|---|---|---|---|
+| 0 | New | `open` | true | false | `{ "noResponseHours": 24, "maxAttempts": 4, "stalledAfterDays": 30 }` |
+| 1 | Contacted | `open` | false | false | `{ "noResponseHours": 48, "maxAttempts": 4, "stalledAfterDays": 30 }` |
+| 2 | Qualified | `open` | false | false | `{ "noResponseHours": 72, "maxAttempts": 4, "stalledAfterDays": 30 }` |
+| 3 | Proposal Sent | `open` | false | false | `{ "noResponseHours": 168, "maxAttempts": 3, "stalledAfterDays": 30 }` |
+| 4 | Negotiating | `open` | false | false | `{ "noResponseHours": 24, "maxAttempts": 6, "stalledAfterDays": 14 }` |
+| 5 | Closed Won | `terminal_won` | false | true | `{}` (n/a — terminal stages don't have follow-up cadence) |
+| 6 | Closed Lost | `terminal_lost` | false | true | `{}` (n/a) |
+
+After bootstrap completes, also populate `Tenant.defaultAssignmentPipelineId` so subsequent leads route via path (1) without re-checking. Tenants can rename, reorder, add, or remove Stages once the Tenant Onboarding Wizard ships (KAN-807); until then this default works for any inbound.
+
+**Idempotency guarantee:** the helper must be safe to call multiple times concurrently. Use a tenant-scoped advisory lock OR a `findFirst({ where: { tenantId, name: "Default Sales Pipeline" } })` check before the create — first writer wins, later writers find existing and return early.
 
 ### Seeds posture
 
@@ -299,9 +352,22 @@ Phase 1 splits across **three Sprint 6 epics**, each with its own implementation
 **Phase 1 explicit simplifications (consumed by the Phase 2+ tickets above):**
 
 - Stage transitions are written by **simple writer functions** (no AI yet) — the Normalizer writes the initial transition on intake; downstream stage moves come from human triggers or future automation
-- Pipeline routing is **hardcoded** to `Tenant.defaultAssignmentPipelineId` (most prod tenants have exactly 1 Pipeline; AI routing per KAN-795 supersedes)
+- Pipeline routing falls through 3 paths: `Tenant.defaultAssignmentPipelineId` → tenant's only Pipeline if exactly 1 → **lazy-bootstrap platform-default Pipeline** (per Q9.4 + §4 KAN-793 helper). Phase 1 always succeeds in producing a Pipeline+Stage; never drops the lead. AI routing per KAN-795 supersedes
 - `Stage.followUpCadence` is **stored, not consumed** — the column exists so the schema is forward-compatible with KAN-796; Phase 1 doesn't read it
 - `Deal.value` defaults to `0` — value enrichment from Contact metadata or upstream signals is **out of Phase 1 scope** (per KAN-790 deferral; revisit when first design partner needs value tracking)
+- Stage transitions in Phase 1 happen ONLY at intake (Normalizer writes the `null → starting_stage` transition). No mid-lifecycle transitions are written by Phase 1 code; humans can transition via direct DB or upcoming UI; AI-driven advancement ships in KAN-796.
+
+**Phase 2 reader-migration deferral list (sites that will NOT be migrated in KAN-791; deferred to the absorbing Phase 2 epic):**
+
+The following Contact-lifecycle column reads stay reading from `Contact` via the read-shim during Phase 1. Migration to `Deal`-side reads happens in the Phase 2 epic that owns the consumer:
+
+| Read site | Phase 2 epic that absorbs |
+|---|---|
+| `packages/api/src/services/message-composer.ts:88-117` (live runtime — reads `microObjectiveProgress` for outbound message context) | KAN-797 (AI Communication Shaper) — Shaper takes over message composition, will read from Deal directly |
+| `packages/api/src/services/agentic-tools.ts:105,149,367` (5 read sites for agentic tool context) | KAN-794 (Brain Service) — Brain consumes Deal-shaped context; agentic tools become Brain-mediated |
+| `packages/api/src/services/context-assembler.ts:537,586` (Brain-context assembly) | KAN-794 (Brain Service) — context-assembler becomes part of Brain Service or replaced |
+
+**KAN-791 migrates ONLY the read sites that Phase 1 code paths exercise** (essentially: any read inside the new lead-normalizer + Track A consumer + EngagementService dealId-required paths). Other consumers stay reading from Contact via the read-shim. Per audit-first: less migration risk in Phase 1, clearer scope for Phase 2 epics.
 
 **Already-superseded in the pivot:**
 
@@ -315,6 +381,10 @@ Phase 1 splits across **three Sprint 6 epics**, each with its own implementation
 - KAN-788 dev-env refresh
 - KAN-783 decision/action chain audit
 - Vestigial JSON column drops + ContactState drop — Phase 2 cleanup pass
+
+**Phase 5 — KAN-808 callout (tenant Pipeline retirement workflow):**
+
+`Deal.pipelineId` and `Deal.currentStageId` use `onDelete: Restrict` per §3 — correct for Phase 1 (don't orphan Deals when a Pipeline or Stage is deleted), but means a tenant **cannot delete a Pipeline or Stage that has any associated Deals**, including closed_won/_lost terminal-state Deals from years ago. Once design partners want to retire / archive old Pipelines, **KAN-808 (tenant Pipeline retirement workflow)** must implement either: (a) soft-delete pattern (`isArchived: Boolean` flag instead of row removal), (b) bulk-reassignment of historical Deals to a "retired" pseudo-Pipeline before drop, or (c) hard-delete cascade with explicit user confirmation. Phase 1 doesn't need to solve this — `onDelete: Restrict` correctly fails-loud if anyone tries.
 
 ---
 
@@ -410,21 +480,26 @@ Production has 18 `decisions` rows but 0 `actions` rows (per yesterday's empiric
 
 Per `feedback_prd_assumed_infrastructure_check_kan_786` anchor #2 — defer to defaults + file enrichment follow-up; don't silently bind to a semantically-wrong existing field.
 
-### Q9.4 — Default Pipeline routing for Phase 1
+### Q9.4 — Default Pipeline routing — lazy-bootstrap (RESOLVED)
 
-Phase 1 hardcodes Pipeline routing to `Tenant.defaultAssignmentPipelineId` (the existing column from KAN-705). Most prod tenants have exactly 1 Pipeline (per the 1-pipeline empirical anchor from yesterday's audit). For Phase 1 this is sufficient.
+**Resolution (2026-05-03):** Phase 1 routes via a 3-path fallback chain that **always succeeds in producing a Pipeline+Stage** — never drops a lead due to missing tenant configuration. Lead = revenue; the worst failure mode would be silently dropping inbound during onboarding-incomplete state. Fred's call: "in production, leads = revenue" → lazy bootstrap (option (c)) over atomic-or-nothing (option (a)).
 
-**Edge cases for the implementer:**
-- Tenant has NO `defaultAssignmentPipelineId` set: fall back to "the only Pipeline this tenant has" if `Pipeline.findMany({ where: { tenantId } })` returns exactly 1; otherwise log warning + skip Deal creation (Engagement still writes; KAN-795 will resolve at-runtime).
-- Tenant has `defaultAssignmentPipelineId` but the referenced Pipeline has no `isInitial: true` Stage: log warning + skip Deal creation. KAN-791 schema requires every Pipeline to have an isInitial Stage; this should be unreachable post-migration but defensive logging is cheap.
+**Routing fallback chain (in order):**
+1. `Tenant.defaultAssignmentPipelineId` (existing column from KAN-705) — if set, use it
+2. If NULL: `Pipeline.findMany({ where: { tenantId } })` — if exactly 1, use it (most prod tenants); also populate `defaultAssignmentPipelineId` for next time
+3. If still 0 Pipelines: **lazy-bootstrap** the platform-default Pipeline + 7 Stages via `ensureTenantHasDefaultPipeline(tenantId)` (helper specced in §4 KAN-793). Idempotent. Populate `defaultAssignmentPipelineId` after bootstrap.
 
-**KAN-795 (AI Pipeline Routing Logic, Phase 2) supersedes this hardcoded approach.**
+**Edge case — Pipeline exists but has no `isInitial: true` Stage:** unreachable post-KAN-791 because the schema invariant (`@@unique([pipelineId]) WHERE isInitial = true` enforced via raw SQL partial index per §3) requires every Pipeline to have at most one isInitial Stage. The lazy-bootstrap helper creates Stage 0 with `isInitial: true`, so freshly-bootstrapped Pipelines always satisfy the invariant. If somehow a Pipeline exists with zero isInitial Stages (legacy data), log + skip and fall through to lazy-bootstrap of a sibling Pipeline. Don't mutate the existing one (could be deliberate).
 
-### Q9.5 — Engagement.dealId for inbound-before-Deal-exists edge
+**KAN-795 (AI Pipeline Routing Logic, Phase 2) supersedes the hardcoded fallback** — the AI router replaces step 1 of the chain (intelligent routing based on lead signal); steps 2+3 remain as defaults until KAN-795 ships per-tenant configuration UI. Lazy-bootstrap stays canonical even after KAN-795 — it's the "tenant has zero config" floor.
 
-`Engagement.dealId` is REQUIRED (FK NOT NULL). For Track A intake, the Normalizer creates the Deal first and then writes the inbound Engagement with `dealId = deal.id`. **Atomic invariant: there is no moment when an Engagement exists without a Deal.** The Normalizer's transaction (or sequential ordering with idempotent writes) must enforce this.
+### Q9.5 — Engagement.dealId atomicity (RESOLVED — no longer in conflict)
 
-If the Deal write fails: the inbound Engagement write must NOT proceed (would violate the FK; Prisma rejects). Recommend wrapping in `prisma.$transaction([...])` for atomicity. If an event-driven retry path exists later (e.g., a downstream consumer that needs to log an Engagement before the Deal is recreated), require an upstream lookup or skip — never fabricate a synthetic Deal to satisfy the FK.
+`Engagement.dealId` is REQUIRED (FK NOT NULL). Q9.4's lazy-bootstrap resolution **eliminates the previous conflict** — Deal always exists at the moment Engagement is written, because the Normalizer creates it first (potentially via lazy-bootstrap of the Pipeline first if needed). No atomicity concern remains in Phase 1.
+
+**Implementation invariant** (still important even without conflict): the Normalizer's intake flow produces `{ contact, deal, inboundEngagement }` in dependency order — Pipeline (lazy-bootstrap if needed) → Contact (upsert) → Deal (create with FK to Pipeline + Stage + Contact) → DealStageHistory (create with FK to Deal) → Engagement (create with FK to Deal). Recommend `prisma.$transaction([...])` for the Deal+History+Engagement triplet (the lazy-bootstrap can be a sibling transaction outside; idempotent helper handles concurrent-safety via tenant-scoped advisory lock or findFirst-then-create pattern).
+
+If the Deal write somehow fails mid-transaction: Prisma rolls back the entire transaction; no Engagement is written; consumer retries on next Pub/Sub redelivery; correlationId idempotency (per Edit 2) prevents duplicate Deals on retry. Failure-loud, not silent-degraded.
 
 ### Q9.6 — LLM model selection in the Normalizer (KAN-792)
 
