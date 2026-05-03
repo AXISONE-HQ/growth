@@ -13,101 +13,150 @@
 
 ## 1. Problem statement
 
-The current data model collapses three distinct product concepts into one structural shape, blocking the Learning Loop from observing real outcomes:
+> **Architectural pivot (2026-05-03):** Phase 1 was originally scoped as "add Deal + Engagement entities" with Deal as an outcome-only record (status enum: open/closed_won/closed_lost). The Sprint 6 architectural review replaced this with **Deal as the lifecycle entity** — every lead arriving creates a Deal in the starting Stage of the routed Pipeline; closed_won/closed_lost are just terminal Stages. See §10 (Architectural Context) for the 5-phase / 20-epic roadmap this PRD now sits inside.
 
-**(a) Lead == Contact (KAN-700 deliberate convention).**
-- `LeadStageHistory.leadId` FKs to `contacts.id`; in-code comments confirm "Lead == Contact in this schema"
-- `Contact.currentStageId` is the **only "deal-like" signal today** — when a stage transition fires `transition_to_closed_won`, the contact's pipeline stage flips to a terminal stage, but **no row is created** to represent the closed-won opportunity
-- Empirically: `lead_stage_history` is **0 rows** in production; not a single transition has been recorded end-to-end
+Today's data model has **four concrete gaps** that block the Brain's learning loop and the AI normalization layer:
 
-Phase 3 will split Lead from Contact (1 Contact → N Leads), at which point the FK on `deals.contact_id` and `engagements.contact_id` is renamed to `lead_id` and the rows are repointed via a backfill migration. **Phase 3 is scheduled debt** — target sprint TBD pending Phase 1+2 ingestion volume, but no later than the first design partner with multiple leads per contact (currently zero, expected by Sprint 9–10).
+**(a) Inbound leads arrive as basic Contacts, no AI extraction.** Track A inbound (Resend webhook) creates a `Contact` row with raw `from_address` + `subject` + `body_preview`. No structured field extraction (company name, role, intent, deal-stage signal). Brain Service, when it ships in Phase 2 (KAN-794), has no rich data to consume — every lead is a name + email blob.
 
-**(b) Engagement is event-only and unwired.**
-- `engagement-logger.ts` defines an `EngagementStore` interface but **the only impl is `InMemoryEngagementStore`** (in-process array, zero persistence)
-- The module's Express route (`createEngagementLoggerRouter`) is **never mounted** — apps/api uses Hono/tRPC, not Express
-- `engagement-logger.ts` has **zero imports anywhere** in `apps/` or `packages/` (excluding tests/dist)
-- Pub/Sub topic `growth.engagement.logged` is referenced by `behavioral-learner.ts` as a subscriber, but **nothing publishes to it**
-- Net: every engagement signal in production is lost; the Learning Service has no input
+**(b) Lead lifecycle tracking is fragmented across three competing places.** `Contact.currentStageId` (Pipeline state on Contact, 7 contacts have it set in prod) + `lead_stage_history` table (0 rows in prod — never written) + threshold-gate special-case `transition_to_closed_won`/`_lost` action types (catalog-only, no executor — see KAN-789). No single source of truth; downstream consumers have to triangulate. The Phase 3 Lead/Contact split (KAN-785, now superseded — see §9.5) was a band-aid for the same root issue.
 
-**(c) Both gaps block the Brain's learning loop.**
-- The AI normalization layer needs Lead-shaped + Engagement-shaped rows to route through the Learning System's per-contact-per-MO progress tracking
-- Without Deal: closed-won/lost outcomes don't feed the `Outcome` model; learning loop never observes a real revenue signal
-- Without Engagement: every AI agent action (`agentic-tools.ts`) and every contact touchpoint is invisible to the Brain's behavioral model
-- Empirically: `outcomes` table is **0 rows**; the Learning Loop has produced exactly zero observations in production
+**(c) Closed-won outcomes have no persistent row anywhere.** When (or if) a `transition_to_closed_won` decision is approved, the existing code path... does nothing (KAN-789). No `Outcome` row, no audit, no learning signal. The `outcomes` table is 0 rows in prod.
+
+**(d) Engagement is in-memory dead code.** `engagement-logger.ts` (~430 LoC) defines an `EngagementStore` interface but the only impl is `InMemoryEngagementStore` — never mounted, never imported (KAN-782 deletion target). Every engagement signal in production is lost; behavioral-learner.ts has no input.
+
+**Phase 1 closes all four gaps in one architectural shift:**
+1. **Deal becomes the lifecycle entity** — created at intake, transitions through Stages, terminal Stages carry `outcomeType: terminal_won | terminal_lost` (no separate status enum). Single source of truth for lead lifecycle.
+2. **AI Lead Normalizer** (KAN-792) parses inbound and creates Contact + Deal + inbound Engagement in one atomic flow. Source-aware pre-parsers + AI extraction.
+3. **Track A inbound integration** (KAN-793) wires the Normalizer into the existing Resend webhook + assignment-worker chain. Replaces the bare `assignLeadToPipeline` flow.
+4. **Engagement persists with `dealId`** (required FK) — every signal attaches to the Deal it's about. Replaces the dead in-memory logger.
+
+This addresses Fred's "massage lead to fit databases" goal directly: the AI Normalizer does the massaging at intake; the Deal model gives the lifecycle a concrete row to point at.
 
 ---
 
 ## 2. Desired outcome
 
-**Measurable result + tier impact:**
+**Measurable result:**
 
-- **Add `Deal` model** → tenants can query closed-won opportunities, report revenue-class metrics (replacing the `orders_placed` `TargetMetric` enum value's purely-aggregate read path), feed the `Outcome` learning system with real terminal events
-- **Add `Engagement` model** → every AI agent action emit and every contact touchpoint becomes a queryable row, enabling per-contact-per-MO progress tracking and closing the input gap to `behavioral-learner.ts`
-- **Replace dead `engagement-logger.ts`** → ~430 LoC of unreachable code retired; sibling cohort-shrinking opportunity per `feedback_first_cohort_shrinking_pr` and `feedback_kan_762_csv_import_dead_code_deletion`
+- **Real Deal rows from Track A inbound**, in the starting Stage of the routed Pipeline, populated by the AI Normalizer (not synthetic seeds, not closed-won-only outcome shells)
+- **Real Engagement rows tied to Deals via `deal_id`** — both inbound (created by the Normalizer at intake) and downstream (agent action emits via the existing EngagementService from sub-cohort (b))
+- **Source-of-truth lifecycle:** `Contact.currentStageId` + `lead_stage_history` retire (deprecation in Phase 1, drop in Phase 2 cleanup); Deal lifecycle is canonical
 
-**Success metric (end of Sprint 6):**
+**Success metric (end of Sprint 6 — KAN-791/792/793 closed):**
 
-> Both `deals` and `engagements` tables hold non-zero rows in production, populated by **real ingestion** (ThresholdGate close transitions + AI agent action emits), **not synthetic seeds**.
-
-Verification query at sprint close:
 ```sql
-SELECT 'deals' AS t, COUNT(*) AS n,
-       COUNT(*) FILTER (WHERE metadata->>'source' IS DISTINCT FROM 'seed') AS real_n
-FROM deals
-UNION ALL
-SELECT 'engagements' AS t, COUNT(*) AS n,
-       COUNT(*) FILTER (WHERE metadata->>'source' IS DISTINCT FROM 'seed') AS real_n
-FROM engagements;
+-- Real Deal rows from Track A inbound, in starting Stage of routed Pipeline
+SELECT COUNT(*) FROM deals
+WHERE created_at > '2026-05-04'
+  AND metadata->>'source' IS DISTINCT FROM 'seed';
+
+-- Real Engagement rows tied to Deals from inbound + agent emit
+SELECT COUNT(*) FROM engagements
+WHERE created_at > '2026-05-04'
+  AND deal_id IS NOT NULL;
 ```
 
-> **Why `IS DISTINCT FROM` not `!=`:** `metadata->>'source'` returns NULL when the `source` key is absent, and `NULL != 'seed'` evaluates to NULL (not TRUE) — every untagged real row would be silently dropped from the count. `IS DISTINCT FROM` treats NULL as a real value and returns TRUE.
-Pass criteria: `real_n >= 1` for both rows.
+> **Why `IS DISTINCT FROM` not `!=`:** `metadata->>'source'` returns NULL when the `source` key is absent, and `NULL != 'seed'` evaluates to NULL (not TRUE) — every untagged real row would be silently dropped from the count. `IS DISTINCT FROM` treats NULL as a real value and returns TRUE. (Detail preserved from original Edit 1; same SQL semantics apply post-pivot.)
+
+**Pass criteria:** both queries return `>= 1` from **real Track A traffic** at end of Sprint 6 (no demo-seed rows; no synthetic smoke fixtures — must come from a real inbound email through the pivoted flow).
 
 ---
 
 ## 3. Schema changes
 
-Verbatim Prisma model — to be appended to `packages/db/prisma/schema.prisma`:
+The original Phase 1 enum-based Deal design (`status DealStatus @default(open)`) is **replaced** by the lifecycle model below. Sub-cohort (a) work shipped a foundation that's forward-compatible — KAN-791 extends those tables, doesn't rebuild them.
+
+### What KAN-791 adds / changes
 
 ```prisma
 // ─────────────────────────────────────────────
-// PHASE 1 — Deal + Engagement (Sprint 6)
+// PHASE 1 PIVOT (KAN-791) — Deal-as-Lifecycle
+// See docs/prds/phase-1-deal-engagement.md (PIVOT 2026-05-03)
 // ─────────────────────────────────────────────
 
-/// Phase 1 — see docs/prds/phase-1-deal-engagement.md
+/// Phase 1 — Deal as the lifecycle entity (KAN-791)
 model Deal {
-  id            String     @id @default(cuid())
-  tenantId      String     @map("tenant_id")
-  contactId     String     @map("contact_id")
-  correlationId String?    @unique @map("correlation_id")
-  value         Decimal?   @db.Decimal(12, 2)
-  currency      String     @default("USD") @db.VarChar(3)
-  status        DealStatus @default(open)
-  closedAt      DateTime?  @map("closed_at")
-  metadata      Json       @default("{}")
-  createdAt     DateTime   @default(now()) @map("created_at")
-  updatedAt     DateTime   @updatedAt @map("updated_at")
+  id                     String   @id @default(cuid())
+  tenantId               String   @map("tenant_id")
+  contactId              String   @map("contact_id")
+  correlationId          String?  @unique @map("correlation_id")
+  // NEW (KAN-791) — pipeline + stage state moves from Contact to Deal
+  pipelineId             String   @map("pipeline_id")
+  currentStageId         String   @map("current_stage_id")
+  enteredStageAt         DateTime @default(now()) @map("entered_stage_at")
+  // NEW (KAN-791) — per-Deal MO progress (moved from Contact.microObjectiveProgress)
+  microObjectiveProgress Json     @default("{}") @map("micro_objective_progress")
+  // CHANGED (KAN-791) — value defaults to 0 (Decimal, not nullable) per Fred
+  value                  Decimal  @default(0) @db.Decimal(12, 2)
+  currency               String   @default("USD") @db.VarChar(3)
+  // REMOVED (KAN-791) — `status DealStatus` + `closedAt` enum approach.
+  // closed_won/closed_lost are now Stages with outcomeType, not Deal columns.
+  // closedAt derivable from DealStageHistory.transitionedAt where toStage.outcomeType != 'open'.
+  metadata               Json     @default("{}")
+  createdAt              DateTime @default(now()) @map("created_at")
+  updatedAt              DateTime @updatedAt @map("updated_at")
 
-  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  tenant       Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  contact      Contact            @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  pipeline     Pipeline           @relation(fields: [pipelineId], references: [id], onDelete: Restrict)
+  currentStage Stage              @relation("DealCurrentStage", fields: [currentStageId], references: [id], onDelete: Restrict)
+  engagements  Engagement[]
+  stageHistory DealStageHistory[]
 
-  @@index([tenantId, status])
+  @@index([tenantId, currentStageId])
+  @@index([tenantId, pipelineId])
   @@index([tenantId, contactId])
   @@map("deals")
 }
 
-enum DealStatus {
-  open
-  closed_won
-  closed_lost
-
-  @@map("deal_status")
+/// KAN-791 — Stage gets outcomeType + cadence (drives terminal-detection + Phase 2 Stages Evolution Logic, KAN-796)
+model Stage {
+  // ... existing fields preserved ...
+  // NEW:
+  outcomeType       StageOutcomeType @default(open) @map("outcome_type")
+  // NEW: per-tenant per-Pipeline per-Stage follow-up cadence config (consumer ships in KAN-796)
+  followUpCadence   Json             @default("{}") @map("follow_up_cadence")
+  // NEW relation:
+  dealsCurrent      Deal[]           @relation("DealCurrentStage")
+  dealStageFromHist DealStageHistory[] @relation("DealStageFromHistory")
+  dealStageToHist   DealStageHistory[] @relation("DealStageToHistory")
 }
 
-/// Phase 1 — see docs/prds/phase-1-deal-engagement.md
+enum StageOutcomeType {
+  open
+  terminal_won
+  terminal_lost
+
+  @@map("stage_outcome_type")
+}
+
+/// KAN-791 — DealStageHistory replaces lead_stage_history (deal-scoped, not contact-scoped)
+model DealStageHistory {
+  id             String   @id @default(cuid())
+  dealId         String   @map("deal_id")
+  fromStageId    String?  @map("from_stage_id")
+  toStageId      String   @map("to_stage_id")
+  transitionedAt DateTime @default(now()) @map("transitioned_at")
+  /// 'normalizer' | 'agent' | 'human' | 'system' | 'rule:<rule_id>' — extensible string for V1
+  triggeredBy    String   @map("triggered_by")
+  metadata       Json     @default("{}")
+
+  deal      Deal   @relation(fields: [dealId], references: [id], onDelete: Cascade)
+  fromStage Stage? @relation("DealStageFromHistory", fields: [fromStageId], references: [id], onDelete: SetNull)
+  toStage   Stage  @relation("DealStageToHistory", fields: [toStageId], references: [id], onDelete: Restrict)
+
+  @@index([dealId, transitionedAt])
+  @@index([toStageId])
+  @@map("deal_stage_history")
+}
+
+/// KAN-791 — Engagement.dealId becomes REQUIRED (Engagement attaches to Deal, queryable to Contact via FK chain)
 model Engagement {
   id             String      @id @default(cuid())
   tenantId       String      @map("tenant_id")
+  // CHANGED (KAN-791): dealId required; contactId stays as denormalized fast-query field
+  dealId         String      @map("deal_id")
   contactId      String      @map("contact_id")
   correlationId  String?     @unique @map("correlation_id")
   engagementType String      @map("engagement_type")
@@ -118,38 +167,37 @@ model Engagement {
   createdAt      DateTime    @default(now()) @map("created_at")
 
   tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  deal    Deal    @relation(fields: [dealId], references: [id], onDelete: Cascade)
   contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
 
+  @@index([tenantId, dealId, occurredAt])
   @@index([tenantId, contactId, occurredAt])
   @@index([tenantId, engagementType])
   @@map("engagements")
 }
-
-enum SignalClass {
-  positive
-  negative
-  neutral
-
-  @@map("signal_class")
-}
 ```
 
-Plus relations to add on existing `Tenant` and `Contact` models:
-```prisma
-// In model Tenant {} relations block:
-deals       Deal[]
-engagements Engagement[]
+### What KAN-791 deprecates (read-side only in Phase 1; drop migration in Phase 2 cleanup)
 
-// In model Contact {} relations block:
-deals       Deal[]
-engagements Engagement[]
-```
+- `Contact.currentStageId` → readers migrate to `Deal.currentStageId` (read-shim during Phase 1; column dropped in Phase 2)
+- `Contact.currentPipelineId` → readers migrate to `Deal.pipelineId` (same shim pattern)
+- `Contact.microObjectiveProgress` → moved to `Deal.microObjectiveProgress` (Phase 1 migration backfills existing 7 prod contacts to a default Deal row)
+- `lead_stage_history` table → replaced by `deal_stage_history` (0 prod rows; safe drop in Phase 2)
 
-**Lead vs Contact note:**
-Both models attach to `Contact`, not a separate `Lead`, because **Lead == Contact in current schema (KAN-700 deliberate convention)**. Phase 3 (Lead split) will rebind these. The migration is non-breaking either way — the relation can be moved later by renaming the FK column from `contact_id` → `lead_id`, no column-shape change.
+### What sub-cohort (a) shipped that stays canonical
 
-**Cuid vs Uuid choice:**
-`cuid()` matches the recently-added `ActionOutcome` model (line 421 of schema.prisma); both are append-mostly time-ordered tables benefitting from cuid's lexicographic sortability. Other Phase-1-adjacent models use `uuid()`; this is acceptable schema-level inconsistency, narrowly scoped.
+- `Deal` table base — KAN-791 extends with the new columns above; doesn't rebuild from scratch
+- `Engagement` table base — KAN-791 makes `dealId` required (was implicit) + adds the `(tenantId, dealId, occurredAt)` index
+- `correlationId` UNIQUE idempotency contract — preserved verbatim, same Edit 2 semantics
+- `SignalClass` enum — preserved
+- pgvector + KAN-787 drift workaround discipline — applies to KAN-791's migration too
+
+### What sub-cohort (a) shipped that retires
+
+- `DealStatus` enum (`open` | `closed_won` | `closed_lost`) — replaced by `StageOutcomeType` on Stage. KAN-791 migration drops the enum + the `Deal.status` column.
+- `Deal.closedAt` column — derivable from `DealStageHistory.transitionedAt` where `toStage.outcomeType != 'open'`. Drop in same migration.
+
+**Migration discipline:** Per KAN-787, every `prisma migrate dev` will spuriously emit `DROP INDEX "knowledge_chunks_embedding_hnsw_idx"` — strip before commit (workaround documented in `docs/memories/feedback_prisma_vector_index_silent_drop_drift.md`). Per session memory `feedback_prd_assumed_infrastructure_check_kan_786`, KAN-791 implementation runs the three-dimensional pre-flight check (path / execution-path / schema-field) before any "extend X" claim.
 
 ---
 
