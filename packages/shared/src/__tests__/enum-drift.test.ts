@@ -32,8 +32,8 @@ import {
   LeadAssignmentPosture,
   KnowledgeSourceType,
   KnowledgeSourceStatus,
-  DealStatus,
   SignalClass,
+  StageOutcomeType,
 } from "@prisma/client";
 import {
   ObjectiveTypeEnum,
@@ -43,8 +43,8 @@ import {
   LeadAssignmentPostureEnum,
   KnowledgeSourceTypeEnum,
   KnowledgeSourceStatusEnum,
-  DealStatusEnum,
   SignalClassEnum,
+  StageOutcomeTypeEnum,
 } from "../enums.js";
 
 interface EnumPair {
@@ -90,14 +90,14 @@ const PAIRS: EnumPair[] = [
     zodValues: KnowledgeSourceStatusEnum.options,
   },
   {
-    name: "DealStatus",
-    prismaValues: Object.values(DealStatus),
-    zodValues: DealStatusEnum.options,
-  },
-  {
     name: "SignalClass",
     prismaValues: Object.values(SignalClass),
     zodValues: SignalClassEnum.options,
+  },
+  {
+    name: "StageOutcomeType",
+    prismaValues: Object.values(StageOutcomeType),
+    zodValues: StageOutcomeTypeEnum.options,
   },
 ];
 

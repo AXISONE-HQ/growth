@@ -55,12 +55,20 @@ export const KnowledgeSourceStatusEnum = z.enum([
 ]);
 export type KnowledgeSourceStatus = z.infer<typeof KnowledgeSourceStatusEnum>;
 
-// KAN-786 Phase 1 — Deal status (open / closed_won / closed_lost) per
-// docs/prds/phase-1-deal-engagement.md §3
-export const DealStatusEnum = z.enum(["open", "closed_won", "closed_lost"]);
-export type DealStatus = z.infer<typeof DealStatusEnum>;
+// KAN-791 Phase 1 PIVOT — DealStatus enum REMOVED. Deal lifecycle state is
+// now derived from Deal.currentStageId → Stage.outcomeType. Closed_won/_lost
+// are Stages with outcomeType=terminal_won/terminal_lost (not Deal columns).
 
-// KAN-786 Phase 1 — Engagement signal class per
-// docs/prds/phase-1-deal-engagement.md §3
+// KAN-786 Phase 1 — Engagement signal class
 export const SignalClassEnum = z.enum(["positive", "negative", "neutral"]);
 export type SignalClass = z.infer<typeof SignalClassEnum>;
+
+// KAN-791 Phase 1 PIVOT — Stage outcome type. Drives terminal-detection.
+// Phase 2 KAN-796 (AI Stages Evolution Logic) reads this to know which
+// Stages mark deal closure.
+export const StageOutcomeTypeEnum = z.enum([
+  "open",
+  "terminal_won",
+  "terminal_lost",
+]);
+export type StageOutcomeType = z.infer<typeof StageOutcomeTypeEnum>;
