@@ -50,10 +50,11 @@ function makeMockPrisma() {
 }
 
 describe("classifySignal — initial taxonomy per PRD §4", () => {
-  it("returns positive for known positive types", () => {
+  it("returns positive for known positive types (KAN-793: email_received added — Track A inbound = contact-initiated engagement)", () => {
     expect(classifySignal("email_open")).toBe("positive");
     expect(classifySignal("email_click")).toBe("positive");
     expect(classifySignal("email_reply")).toBe("positive");
+    expect(classifySignal("email_received")).toBe("positive");
     expect(classifySignal("form_submit")).toBe("positive");
   });
 

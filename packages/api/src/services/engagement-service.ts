@@ -117,10 +117,16 @@ export function classifySignal(engagementType: string): SignalClass {
   return "neutral" as SignalClass;
 }
 
+// Positive signals: contact-initiated engagement OR confirmed-engaged outcome
+// of an AI-driven outreach. KAN-793: email_received is contact-initiated
+// (Track A inbound = the contact reaching out), treated equivalently to
+// email_reply. Brain Service (Phase 2 KAN-794) reads this signal to know
+// "this contact wants to talk."
 const POSITIVE_TYPES = new Set([
   "email_open",
   "email_click",
   "email_reply",
+  "email_received",
   "form_submit",
 ]);
 
