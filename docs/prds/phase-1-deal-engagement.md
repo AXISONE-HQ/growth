@@ -2,12 +2,54 @@
 
 | Field | Value |
 |-------|-------|
-| **Status** | Draft |
+| **Status** | Draft (Phase 1 of 5-phase roadmap; pivoted 2026-05-03) |
 | **Priority** | P1 |
 | **Loop Phase** | Cross-cutting (Ingest + Understand + Execute) |
 | **Tier** | All |
-| **Author** | drafted 2026-05-02 from empirical schema audit + open-question resolution pass |
+| **Author** | drafted 2026-05-02; pivoted 2026-05-03 to Deal-as-lifecycle per architectural review |
 | **Audit-first state** | All schema/code claims grounded in grep + prod row counts (see "Empirical anchors" below) |
+| **Sprint 6 epics** | KAN-791 (schema pivot) + KAN-792 (AI Lead Normalizer) + KAN-793 (Track A → Deal integration) |
+
+---
+
+## 10. Architectural Context
+
+> **Note:** Section is numbered §10 (chronologically the 10th section to be added during the 2026-05-03 pivot) but positioned at the top so future readers see the roadmap framing before diving into the implementation detail. The original §1-§9 reading order is preserved below.
+
+Phase 1 sits inside a **5-phase / 20-epic roadmap** committed 2026-05-03. The full roadmap and per-epic specs live at the Confluence page below; this PRD covers Phase 1 only.
+
+📄 **Confluence roadmap:** [SD/4227074 — 5-phase roadmap (KAN-791 through KAN-810)](https://axisone-team.atlassian.net/wiki/spaces/SD/pages/4227074)
+
+### The 5 phases (one-line summary each)
+
+1. **Phase 1 (THIS PRD) — Lifecycle + Intake** (Sprint 6, KAN-791/792/793). Make `Deal` the lifecycle entity; add AI Lead Normalizer for inbound; wire Track A → Deal at intake. Sub-cohorts (a)+(b) shipped foundation under KAN-786 (Deal/Engagement base tables + EngagementService); pivot extends, doesn't rebuild.
+2. **Phase 2 — Brain + Stages Evolution** (Sprint 7, KAN-794/795/796). Brain Service consumes the lifecycle data trail; AI Pipeline Routing Logic (replaces hardcoded `defaultAssignmentPipelineId`); AI Stages Evolution Logic (consumes `followUpCadence`).
+3. **Phase 3 — Communication Engine** (Sprint 8, KAN-797/798). AI Communication Shaper (tone/channel/timing); Send Policy (rate limits, quiet hours, suppression).
+4. **Phase 4 — Multi-channel + Connectors** (Sprint 9+, KAN-799 through KAN-805). Inbound/outbound for SMS, WhatsApp, voice; HubSpot/Meta Lead Ads integrations.
+5. **Phase 5 — Cost & Observability** (Sprint 10+, KAN-806 through KAN-810). LLM cost tier optimization (KAN-806); telemetry roll-up; per-tenant dashboards; quarterly model-pricing refresh discipline (per `feedback_model_pricing_refresh_discipline`).
+
+### How Phase 1 fits
+
+Phase 1 is **the data-foundation phase**. It establishes the row shapes (Deal as lifecycle, Engagement persisted with `dealId`, DealStageHistory transitions, StageOutcomeType terminals) that every subsequent phase consumes. Phase 2 reads the rows; Phase 3 acts on them; Phase 4 widens the producer side; Phase 5 instruments the cost side.
+
+Concretely: Phase 2's Brain Service can't exist without Phase 1's Engagement+Deal data; Phase 3's Communication Shaper can't shape without Phase 2's Brain output; Phase 4's connectors all write through the same Phase 1 schema. The dependency chain runs strictly forward.
+
+### What's IN Phase 1 vs OUT (full list in §5)
+
+**IN Phase 1:** lifecycle schema, AI Lead Normalizer (MVP, single source = email), Track A integration. Phase 1 ships with:
+- Stage transitions written by simple writers (no AI orchestration yet — Phase 2 KAN-796)
+- Pipeline routing hardcoded to `Tenant.defaultAssignmentPipelineId` (no AI routing yet — Phase 2 KAN-795)
+- `Deal.value` defaults to 0 (no enrichment yet — KAN-790 deferred indefinitely until product decision)
+- `Stage.followUpCadence` stored but not consumed (Phase 2 KAN-796)
+- Engagement signals from inbound + agent emit (Phase 4 widens to webhooks for opens/clicks/replies/bounces)
+
+**OUT of Phase 1 (Phase 2+):** Brain Service, AI Pipeline routing, AI Stages Evolution, AI Communication Shaper, Send Policy, multi-channel connectors, cost optimization. See §5 for the full deferred list.
+
+### Forward-compatibility notes
+
+Sub-cohort (a) (KAN-786 commits a37d3c3 + 759d0ae merged via PR #91 work) shipped Deal + Engagement base tables + SignalClass enum + enum-drift PAIRS extension. KAN-791 EXTENDS those tables (adds columns, makes `Engagement.dealId` required, drops the early `DealStatus` enum + `Deal.closedAt`) — does NOT rebuild from scratch. Sub-cohort (b) (commit d6e8e16) shipped EngagementService at `packages/api/src/services/engagement-service.ts`; KAN-791 makes `dealId` REQUIRED in `EngagementInput` (additive change to the shape).
+
+Sub-cohort (c)'s WIP commits (b51a48c + 93b6dee on `feat/kan-786-phase-1-deal-engagement`) — the orchestrator Deal-write hook for closed_won/_lost — are **CANCELLED by the pivot**. Those commits stay in branch history (audit trail of what was attempted) but never merge. The pivot's intake-side Deal creation (KAN-793) replaces the decision-side hook completely.
 
 ---
 
@@ -345,32 +387,65 @@ The empirical end-of-sprint smoke is the load-bearing proof — DO NOT close the
 
 ### Q9.1 — `behavioral-learner.ts` Pub/Sub vs direct Prisma read
 
-The existing dead `engagement-logger.ts` emits to Pub/Sub topic `growth.engagement.logged`. `behavioral-learner.ts` is documented as a subscriber. But the topic has **never received a message in production** (the publisher is dead).
+The existing dead `engagement-logger.ts` emits to Pub/Sub topic `growth.engagement.logged`. `behavioral-learner.ts` is documented as a subscriber. But the topic has **never received a message in production** (the publisher is dead). Question survives the Phase 1 pivot — Engagement is still written by EngagementService at intake (KAN-793) + downstream (sub-cohort (b) flow); the read-path question for behavioral-learner.ts is independent of how Engagement is produced.
 
-Two options for the new `EngagementService.logEngagement` path:
+Two options:
+- **(a) Direct Prisma write only.** `behavioral-learner.ts` reads from the `engagement` table on a schedule via `listEngagementsSinceForLearning(after)`. Simpler, fewer moving parts, no topic to provision.
+- **(b) Prisma write + Pub/Sub publish (sibling subscribers).** `logEngagement` writes to Prisma AND publishes to `growth.engagement.logged`. Other subscribers can fan out. Adds a topic per `feedback_pubsub_route_registration_vs_subscription_config` — requires real-delivery smoke before declaring wired.
 
-- **(a) Direct Prisma write only.** `behavioral-learner.ts` reads from the `engagement` table on a schedule via `listSinceForLearning(after)`. Simpler, fewer moving parts, no topic to provision.
-- **(b) Prisma write + Pub/Sub publish (sibling subscribers).** `EngagementService.logEngagement` writes to Prisma AND publishes to `growth.engagement.logged`. `behavioral-learner.ts` subscribes for real-time updates. Other subscribers can fan out (e.g., real-time dashboard counters). Adds a topic to provision per `feedback_pubsub_route_registration_vs_subscription_config` — requires real-delivery smoke before declaring wired (`feedback_oidc_audience_smoke_test_required`).
+**Recommendation: start with (a).** Lower configuration surface, cleaner Phase 1 scope. Phase 2's KAN-794 Brain Service can revisit if real-time SLAs require it.
 
-**Recommendation: start with (a).** Lower configuration surface, cleaner Phase 1 scope, no new topic provisioning. Migrate to (b) only if/when real-time learning loop SLAs require it. Document the choice + reasoning in the PR description.
+### Q9.2 — `18 decisions / 0 actions` divergence (KAN-783)
 
-### Q9.2 — `18 decisions / 0 actions` divergence
-
-Production has 18 `decisions` rows but 0 `actions` rows. Three hypotheses:
+Production has 18 `decisions` rows but 0 `actions` rows (per yesterday's empirical anchors). Three hypotheses:
 - (a) Shadow mode: agentic decisions persisted to `AgenticShadowDecision` instead of emitting `Action`s
-- (b) Action dispatch path is broken — KAN-689 cohort suspect (`router.ts:661,689` Objective writes have schema-drift-broken field names; similar fragility may exist in the action-emit path)
-- (c) Decisions exist but the threshold gate filtered all of them below dispatch threshold
+- (b) Action dispatch path is broken — KAN-689 cohort suspect
+- (c) Decisions exist but threshold gate filtered all below dispatch threshold
 
-**Out of Phase 1 scope.** File as separate audit ticket (KAN-AUDIT-decision-action-chain-divergence below). Does NOT block this PRD because Phase 1's `Engagement` writer hooks into `agentic-tools.ts` upstream of any action dispatch — even if dispatch is broken, the Engagement row will still land at decision time.
+**Out of Phase 1 scope** — KAN-783 owns this. Even less of a blocker post-pivot: Phase 1's data trail (Deal + Engagement) is established at intake (KAN-793), upstream of any action dispatch. Decision→Action divergence affects downstream telemetry but not Phase 1's success metric.
 
-### Q9.3 — `Deal.value` source
+### Q9.3 — `Deal.value` source (KAN-790)
 
-`threshold-gate.ts` close transitions don't currently carry a `value` payload. Options:
-- (a) Leave `Deal.value` null on insert; populate later via a separate `updateDealValue` mutation
-- (b) Source from `Contact.metadata` or pipeline-stage entry actions if present
-- (c) Require value in the close-transition action payload as a new schema field
+`Deal.value` defaults to `0` in Phase 1 (per the lifecycle pivot — was `null` in pre-pivot draft). Empirical schema check found `Contact.metadata` field doesn't exist — assumption from earlier draft was wrong. Value-enrichment product decision deferred to **[KAN-790](https://axisone-team.atlassian.net/browse/KAN-790)** — options: add typed `Contact.dealValue Decimal` + `Contact.dealCurrency Varchar(3)` columns, add `Contact.metadata Json`, source from `Decision.metadata`, or add override inputs at decision-time.
 
-**Phase 1 recommendation (revised after sub-cohort (c) pre-flight #4): hardcode `value = null` and `currency = "USD"` for every Deal write.** Empirical schema check (2026-05-03) found `Contact.metadata` field doesn't exist — Contact has `externalIds Json` (CRM IDs, semantically wrong) and `microObjectiveProgress Json` (KAN-700 MO tracking, semantically wrong) but no generic metadata blob. Phase 1 success metric in §2 (non-zero Deal rows in prod) is met without value enrichment. Value-enrichment product decision deferred to **[KAN-790](https://axisone-team.atlassian.net/browse/KAN-790)** — options include adding typed `Contact.dealValue Decimal` + `Contact.dealCurrency Varchar(3)` columns, adding a `Contact.metadata Json` field, sourcing from `Decision.metadata`, or adding override inputs at decision-time. Per `feedback_prd_assumed_infrastructure_check_kan_786` (anchor #2): when an assumed field doesn't exist, defer to defaults + file enrichment follow-up — don't silently bind to a semantically-wrong existing field.
+Per `feedback_prd_assumed_infrastructure_check_kan_786` anchor #2 — defer to defaults + file enrichment follow-up; don't silently bind to a semantically-wrong existing field.
+
+### Q9.4 — Default Pipeline routing for Phase 1
+
+Phase 1 hardcodes Pipeline routing to `Tenant.defaultAssignmentPipelineId` (the existing column from KAN-705). Most prod tenants have exactly 1 Pipeline (per the 1-pipeline empirical anchor from yesterday's audit). For Phase 1 this is sufficient.
+
+**Edge cases for the implementer:**
+- Tenant has NO `defaultAssignmentPipelineId` set: fall back to "the only Pipeline this tenant has" if `Pipeline.findMany({ where: { tenantId } })` returns exactly 1; otherwise log warning + skip Deal creation (Engagement still writes; KAN-795 will resolve at-runtime).
+- Tenant has `defaultAssignmentPipelineId` but the referenced Pipeline has no `isInitial: true` Stage: log warning + skip Deal creation. KAN-791 schema requires every Pipeline to have an isInitial Stage; this should be unreachable post-migration but defensive logging is cheap.
+
+**KAN-795 (AI Pipeline Routing Logic, Phase 2) supersedes this hardcoded approach.**
+
+### Q9.5 — Engagement.dealId for inbound-before-Deal-exists edge
+
+`Engagement.dealId` is REQUIRED (FK NOT NULL). For Track A intake, the Normalizer creates the Deal first and then writes the inbound Engagement with `dealId = deal.id`. **Atomic invariant: there is no moment when an Engagement exists without a Deal.** The Normalizer's transaction (or sequential ordering with idempotent writes) must enforce this.
+
+If the Deal write fails: the inbound Engagement write must NOT proceed (would violate the FK; Prisma rejects). Recommend wrapping in `prisma.$transaction([...])` for atomicity. If an event-driven retry path exists later (e.g., a downstream consumer that needs to log an Engagement before the Deal is recreated), require an upstream lookup or skip — never fabricate a synthetic Deal to satisfy the FK.
+
+### Q9.6 — LLM model selection in the Normalizer (KAN-792)
+
+KAN-792 starts with **Anthropic Claude Sonnet** (matches the existing `llm-client.ts` defaults observed across `agentic-tools.ts` etc.). Cost optimization (Haiku for cheap pre-classification + Sonnet for full extraction, or fallback chain) deferred to **KAN-806** (LLM cost tier-mapping per `feedback_kan_745_cost_observability_shipped` discipline).
+
+Pre-flight discipline: confirm Anthropic SDK is wired in repo (`grep -rn "anthropic" packages/api/src/services/llm-client.ts`) before writing Normalizer code. If a different client is canonical, adapt. Per `feedback_prd_assumed_infrastructure_check_kan_786` — don't assume.
+
+### Q9.7 — Per-Stage cadence: stored not consumed in Phase 1
+
+`Stage.followUpCadence Json` ships in Phase 1's KAN-791 migration. The CONSUMER (a cron-driven advancement job that reads cadence + advances Deals through Stages based on signal patterns) is **Phase 2 KAN-796 (AI Stages Evolution Logic)**.
+
+For Phase 1: column exists, defaults to `{}`, no readers. Tenants can populate via direct DB access if they want to pre-load configuration; UI for editing the cadence is also Phase 2.
+
+### Q9.8 — Superseded follow-ups (close in PR review)
+
+The Phase 1 lifecycle pivot supersedes two prior tickets:
+
+- **[KAN-785](https://axisone-team.atlassian.net/browse/KAN-785)** (Phase 3 Lead/Contact split) — Lead lifecycle now lives on `Deal`; the 1-Contact-N-Leads pattern is naturally supported via 1-Contact-N-Deals. Close as obsolete in PR review.
+- **[KAN-789](https://axisone-team.atlassian.net/browse/KAN-789)** (transition_to_closed_won/_lost executors) — Stage transitions are now generic writes via `DealStageHistory`; specific action-type executors no longer needed. Close as obsolete in PR review.
+
+KAN-790 stays open (value enrichment is a real product decision, just deferred). KAN-787 + KAN-788 stay open (orthogonal infrastructure work).
 
 ---
 
