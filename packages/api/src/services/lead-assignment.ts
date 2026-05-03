@@ -1,18 +1,25 @@
 /**
- * Lead Assignment — KAN-705 (Sprint 1.6)
+ * Lead Assignment — KAN-705 (Sprint 1.6) + KAN-795 refactor (Phase 2 epic 2 of 5).
  *
  * Hybrid lead → pipeline routing: tenant-defined rules first (deterministic,
- * audit-trivial, <50ms), AI fallback on miss (Sonnet 4.6 reasoning tier per
- * KAN-699 — assignment is consequential, wrong routing breaks every
- * downstream stage/objective/message).
+ * audit-trivial, <50ms), AI fallback on miss (delegated to KAN-795
+ * pipeline-router which owns Sonnet reasoning-tier routing + 0/1-Pipeline
+ * short-circuits).
  *
  * Resolution order:
  *   1. Tenant rules (AssignmentRule, ordered by priority asc; first match wins)
- *   2. AI fallback (llm-client tier='reasoning', JSON-mode → { pipelineId, confidence, reasoning })
+ *   2. KAN-795 pipeline-router (LLM-driven for 2+ Pipelines, short-circuit
+ *      for 0/1 Pipelines, returns PipelineRoutingDecision)
  *   3. Below-threshold posture (Tenant.belowThresholdPosture):
  *        - stay_unassigned (default — safest cold-start posture)
  *        - default_pipeline (Tenant.defaultAssignmentPipelineId)
  *        - escalate_to_human (creates an Escalation row for manual triage)
+ *
+ * KAN-795 architectural change: AI routing logic moved from the in-file
+ * `aiAssignmentFallback` (deleted) to the canonical `pipeline-router.ts`
+ * module. Orchestrator + AssignmentResult shape unchanged; only the
+ * AI-tier internal call site changed. Upstream consumers (lead-received-push)
+ * see no shape change.
  *
  * Audit: every decision emits an AuditLog row with actionType='lead_assignment'
  * — KAN-712 will materialize a typed event stream when Sprint 5's learning
@@ -24,7 +31,7 @@
  */
 
 import type { PrismaClient } from '@prisma/client';
-import { complete as llmComplete } from './llm-client.js';
+import { routePipelineForNewLead } from './pipeline-router.js';
 
 // ─────────────────────────────────────────────
 // Types
@@ -50,19 +57,12 @@ export interface AssignmentRuleRow {
   isActive: boolean;
 }
 
-/** Per-pipeline summary passed to the AI fallback. */
-export interface PipelineSummary {
-  id: string;
-  name: string;
-  objectiveType: string;
-  objectiveDescription: string | null;
-}
-
-/** Knowledge hit passed to the AI fallback prompt. */
-export interface KnowledgeContext {
-  contentType: string;
-  contentText?: string;
-}
+/**
+ * KAN-795: PipelineSummary + KnowledgeContext interfaces (formerly here)
+ * moved into pipeline-router.ts as PipelineCandidate (Knowledge omitted from
+ * V1 since prior usage always passed []; KAN-698 RAG hook will re-introduce
+ * it as a RouteOptions field when needed).
+ */
 
 /** Below-threshold posture values — match the Prisma enum @@map. */
 export type BelowThresholdPosture = 'stay_unassigned' | 'default_pipeline' | 'escalate_to_human';
@@ -148,100 +148,14 @@ export function evaluateRules(
 }
 
 // ─────────────────────────────────────────────
-// AI fallback (Sonnet 4.6 reasoning tier)
+// AI fallback — KAN-795: moved to pipeline-router.ts (canonical home for
+// LLM-driven routing). The orchestrator below calls routePipelineForNewLead
+// after the rules tier misses, then maps PipelineRoutingDecision back to
+// AssignmentResult shape (no upstream-consumer change).
 // ─────────────────────────────────────────────
 
-const AI_FALLBACK_SYSTEM_PROMPT =
-  'You are a sales pipeline routing AI. Pick the best pipeline for a new lead from the available catalog. ' +
-  'Respond with ONLY valid JSON in the exact format specified. No markdown, no code fences, no extra text.';
-
-interface AIFallbackOutput {
-  pipelineId: string;
-  confidence: number;
-  reasoning: string;
-}
-
-export async function aiAssignmentFallback(
-  // KAN-745 PR A: tenantId required for per-tenant cost partition.
-  tenantId: string,
-  leadAttrs: LeadAttributes,
-  pipelines: PipelineSummary[],
-  knowledge: KnowledgeContext[] = [],
-): Promise<AIFallbackOutput | null> {
-  if (pipelines.length === 0) return null;
-
-  const pipelineCatalog = pipelines
-    .map(
-      (p, i) =>
-        `${i + 1}. id=${p.id} | name=${p.name} | objectiveType=${p.objectiveType}${
-          p.objectiveDescription ? ` — ${p.objectiveDescription}` : ''
-        }`,
-    )
-    .join('\n');
-
-  const knowledgeBlock =
-    knowledge.length > 0
-      ? `\nTenant Knowledge (use to inform routing; do not contradict):\n${knowledge
-          .map((k, i) => `${i + 1}. [${k.contentType}] ${(k.contentText ?? '').trim()}`)
-          .filter((l) => l.trim().length > 0)
-          .join('\n')}\n`
-      : '';
-
-  const userPrompt = `A new lead arrived. Tenant rules did not match. Pick the best pipeline.
-
-Lead attributes:
-- source: ${leadAttrs.source ?? 'unknown'}
-- segment: ${leadAttrs.segment ?? 'unknown'}
-- lifecycleStage: ${leadAttrs.lifecycleStage ?? 'unknown'}
-- dataQualityScore: ${leadAttrs.dataQualityScore ?? 'unknown'}
-- emailDomain: ${leadAttrs.emailDomain ?? 'unknown'}
-
-Available pipelines:
-${pipelineCatalog}
-${knowledgeBlock}
-Respond with ONLY this JSON object (no other text, no markdown):
-{
-  "pipelineId": "<one of the pipeline ids above>",
-  "confidence": <number from 0 to 1>,
-  "reasoning": "<one sentence explaining the choice>"
-}`;
-
-  const llm = await llmComplete({
-    tenantId,
-    tier: 'reasoning',
-    systemPrompt: AI_FALLBACK_SYSTEM_PROMPT,
-    userPrompt,
-    maxTokens: 256,
-    jsonMode: true,
-    callerTag: 'lead-assignment:ai-fallback',
-  });
-
-  let jsonStr = llm.text.trim();
-  if (jsonStr.startsWith('```')) {
-    jsonStr = jsonStr.replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '');
-  }
-  try {
-    const parsed = JSON.parse(jsonStr) as Partial<AIFallbackOutput>;
-    if (typeof parsed.pipelineId !== 'string') return null;
-    if (typeof parsed.confidence !== 'number') return null;
-    if (typeof parsed.reasoning !== 'string') return null;
-    // Verify the LLM picked a real pipeline ID from the catalog (defensive — Sonnet 4.6 is reliable but
-    // an unknown pipeline ID would write a bad assignment).
-    if (!pipelines.some((p) => p.id === parsed.pipelineId)) return null;
-    // Clamp confidence to [0, 1].
-    const confidence = Math.max(0, Math.min(1, parsed.confidence));
-    return {
-      pipelineId: parsed.pipelineId,
-      confidence,
-      reasoning: parsed.reasoning,
-    };
-  } catch {
-    return null;
-  }
-}
-
 // ─────────────────────────────────────────────
-// Orchestrator: rules → AI fallback → posture
+// Orchestrator: rules → KAN-795 pipeline-router → posture
 // ─────────────────────────────────────────────
 
 const DEFAULT_AI_CONFIDENCE_THRESHOLD = 0.5;
@@ -305,36 +219,68 @@ export async function assignLeadToPipeline(
     return { mode: 'rule', ruleId: matched.id, pipelineId: matched.pipelineId, stageId };
   }
 
-  // 2. AI fallback tier.
-  const pipelines = await loadTenantPipelines(prisma, tenantId);
-  const knowledge: KnowledgeContext[] = []; // KAN-698 RAG hook — caller can inject; left empty by default for V1
-  const ai = await aiAssignmentFallback(tenantId, leadAttrs, pipelines, knowledge);
+  // 2. KAN-795 pipeline-router tier (Sonnet reasoning by default; 0/1-Pipeline
+  //    short-circuits skip the LLM call entirely).
+  const routing = await routePipelineForNewLead(prisma, contactId);
   const threshold = options.aiConfidenceThresholdOverride ?? tenant.aiAssignmentConfidenceThreshold ?? DEFAULT_AI_CONFIDENCE_THRESHOLD;
 
-  if (ai && ai.confidence >= threshold) {
-    const stageId = await resolveInitialStageId(prisma, ai.pipelineId);
-    await persistAssignment(prisma, contactId, ai.pipelineId, stageId);
+  if (routing.decision.type === 'route' && routing.confidence >= threshold) {
+    const routedPipelineId = routing.decision.pipelineId;
+    const routedReasoning = routing.decision.reasoning;
+    const stageId = await resolveInitialStageId(prisma, routedPipelineId);
+    await persistAssignment(prisma, contactId, routedPipelineId, stageId);
     await emitAuditLog(prisma, {
       tenantId,
       contactId,
       mode: 'ai_fallback',
       payload: {
-        pipelineId: ai.pipelineId,
+        pipelineId: routedPipelineId,
         stageId,
-        aiConfidence: ai.confidence,
+        aiConfidence: routing.confidence,
         confidenceThreshold: threshold,
-        aiReasoning: ai.reasoning,
+        aiReasoning: routedReasoning,
       },
-      reasoning: `AI fallback assigned to pipeline ${ai.pipelineId} (confidence ${ai.confidence.toFixed(2)} ≥ threshold ${threshold}). ${ai.reasoning}`,
+      reasoning: `Pipeline router assigned to pipeline ${routedPipelineId} (confidence ${routing.confidence.toFixed(2)} ≥ threshold ${threshold}). ${routedReasoning}`,
     });
-    return { mode: 'ai_fallback', pipelineId: ai.pipelineId, stageId, confidence: ai.confidence, reasoning: ai.reasoning };
+    return {
+      mode: 'ai_fallback',
+      pipelineId: routedPipelineId,
+      stageId,
+      confidence: routing.confidence,
+      reasoning: routedReasoning,
+    };
   }
+
+  // KAN-795: defensive — no_candidates shouldn't happen post-bootstrap
+  // (ensureTenantHasDefaultPipeline runs upstream in lead-received-push), but
+  // log loudly if it ever surfaces. Falls through to posture dispatch below.
+  if (routing.decision.type === 'no_candidates') {
+    console.warn(
+      `[lead-assignment] pipeline-router returned no_candidates contactId=${contactId} tenantId=${tenantId} — bootstrap should have prevented this; falling through to posture`,
+    );
+  }
+
+  // routing.decision.type ∈ {'escalate', 'route' (below threshold), 'no_candidates'}
+  // → fall through to posture dispatch (same behavior as the previous "ai miss" path).
+  // Capture the routing context for the audit log.
+  const routingAuditContext =
+    routing.decision.type === 'route'
+      ? {
+          aiConfidence: routing.confidence,
+          confidenceThreshold: threshold,
+          aiReasoning: routing.decision.reasoning,
+        }
+      : {
+          aiConfidence: routing.confidence,
+          confidenceThreshold: threshold,
+          aiReasoning:
+            routing.decision.type === 'escalate'
+              ? `Pipeline router escalated: ${routing.decision.reasoning}`
+              : `Pipeline router returned no candidates: ${routing.decision.reasoning}`,
+        };
 
   // 3. Below-threshold posture dispatch.
   const posture = (tenant.belowThresholdPosture ?? 'stay_unassigned') as BelowThresholdPosture;
-  const aiContext = ai
-    ? { aiConfidence: ai.confidence, confidenceThreshold: threshold, aiReasoning: ai.reasoning }
-    : { aiConfidence: null, confidenceThreshold: threshold, aiReasoning: 'AI fallback returned no usable result' };
 
   if (posture === 'default_pipeline' && tenant.defaultAssignmentPipelineId) {
     const targetPipelineId = tenant.defaultAssignmentPipelineId;
@@ -344,19 +290,19 @@ export async function assignLeadToPipeline(
       tenantId,
       contactId,
       mode: 'default_pipeline',
-      payload: { pipelineId: targetPipelineId, stageId, ...aiContext },
+      payload: { pipelineId: targetPipelineId, stageId, ...routingAuditContext },
       reasoning: `Below threshold (posture=default_pipeline). Routed to tenant default pipeline ${targetPipelineId}.`,
     });
     return { mode: 'default_pipeline', pipelineId: targetPipelineId, stageId };
   }
 
   if (posture === 'escalate_to_human') {
-    const escalationId = await createAssignmentEscalation(prisma, tenantId, contactId, aiContext);
+    const escalationId = await createAssignmentEscalation(prisma, tenantId, contactId, routingAuditContext);
     await emitAuditLog(prisma, {
       tenantId,
       contactId,
       mode: 'escalated',
-      payload: { escalationId, ...aiContext },
+      payload: { escalationId, ...routingAuditContext },
       reasoning: `Below threshold (posture=escalate_to_human). Created Escalation ${escalationId} for manual triage.`,
     });
     return { mode: 'escalated', escalationId };
@@ -367,7 +313,7 @@ export async function assignLeadToPipeline(
     tenantId,
     contactId,
     mode: 'unassigned',
-    payload: aiContext,
+    payload: routingAuditContext,
     reasoning: `Below threshold (posture=stay_unassigned). Lead surfaces in tenant inbox for manual triage.`,
   });
   return { mode: 'unassigned', reason: 'below_threshold_no_assignment' };
@@ -445,21 +391,10 @@ async function loadActiveRulesForTenant(
   }));
 }
 
-async function loadTenantPipelines(
-  prisma: PrismaClient,
-  tenantId: string,
-): Promise<PipelineSummary[]> {
-  const rows: any[] = (await (prisma as any).pipeline?.findMany({
-    where: { tenantId, isActive: true },
-    select: { id: true, name: true, objectiveType: true, objectiveDescription: true },
-  })) ?? [];
-  return rows.map((p) => ({
-    id: p.id,
-    name: p.name,
-    objectiveType: p.objectiveType,
-    objectiveDescription: p.objectiveDescription ?? null,
-  }));
-}
+// KAN-795: loadTenantPipelines removed — pipeline-router.routePipelineForNewLead
+// loads its own candidate Pipelines internally. Removing this adapter
+// eliminates a duplicate Prisma call path between lead-assignment and
+// pipeline-router.
 
 async function resolveInitialStageId(
   prisma: PrismaClient,
