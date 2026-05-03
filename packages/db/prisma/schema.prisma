@@ -87,6 +87,8 @@ model Tenant {
   leadInboxEvents        LeadInboxEvent[]
   apiKeys                TenantApiKey[]
   llmCostRollups         LlmCostRollup[]
+  deals                  Deal[]
+  engagements            Engagement[]
 
   //   tenantSettings  TenantSettings[]  // commented out for smoke build (model missing on main)
   channelConnections ChannelConnection[]
@@ -188,6 +190,8 @@ model Contact {
   currentPipeline Pipeline?          @relation("ContactCurrentPipeline", fields: [currentPipelineId], references: [id], onDelete: SetNull)
   currentStage    Stage?             @relation("ContactCurrentStage", fields: [currentStageId], references: [id], onDelete: SetNull)
   stageHistory    LeadStageHistory[]
+  deals           Deal[]
+  engagements     Engagement[]
 
   @@index([tenantId])
   @@index([tenantId, email])
@@ -1102,4 +1106,68 @@ model LlmCostRollup {
   @@index([tenantId])
   @@index([tenantId, hourBucket])
   @@map("llm_cost_rollups")
+}
+
+// ─────────────────────────────────────────────
+// PHASE 1 — Deal + Engagement (Sprint 6)
+// See docs/prds/phase-1-deal-engagement.md (KAN-786)
+// ─────────────────────────────────────────────
+
+/// Phase 1 — see docs/prds/phase-1-deal-engagement.md
+model Deal {
+  id            String     @id @default(cuid())
+  tenantId      String     @map("tenant_id")
+  contactId     String     @map("contact_id")
+  correlationId String?    @unique @map("correlation_id")
+  value         Decimal?   @db.Decimal(12, 2)
+  currency      String     @default("USD") @db.VarChar(3)
+  status        DealStatus @default(open)
+  closedAt      DateTime?  @map("closed_at")
+  metadata      Json       @default("{}")
+  createdAt     DateTime   @default(now()) @map("created_at")
+  updatedAt     DateTime   @updatedAt @map("updated_at")
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, status])
+  @@index([tenantId, contactId])
+  @@map("deals")
+}
+
+enum DealStatus {
+  open
+  closed_won
+  closed_lost
+
+  @@map("deal_status")
+}
+
+/// Phase 1 — see docs/prds/phase-1-deal-engagement.md
+model Engagement {
+  id             String      @id @default(cuid())
+  tenantId       String      @map("tenant_id")
+  contactId      String      @map("contact_id")
+  correlationId  String?     @unique @map("correlation_id")
+  engagementType String      @map("engagement_type")
+  signalClass    SignalClass @map("signal_class")
+  channel        String?
+  metadata       Json        @default("{}")
+  occurredAt     DateTime    @map("occurred_at")
+  createdAt      DateTime    @default(now()) @map("created_at")
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, contactId, occurredAt])
+  @@index([tenantId, engagementType])
+  @@map("engagements")
+}
+
+enum SignalClass {
+  positive
+  negative
+  neutral
+
+  @@map("signal_class")
 }
