@@ -168,18 +168,19 @@ model Contact {
   segment                String?
   lifecycleStage         String    @default("new") @map("lifecycle_stage")
   source                 String?
-  // KAN-700: pipeline-aware lead state. Lead == Contact (product vocab vs
-  // schema vocab — see KAN-700 closure comment). Both pipeline + stage are
-  // nullable for V1 (existing contacts pre-assignment). microObjectiveProgress
-  // tracks per-MO completion: { microObjectiveId: { completed, completedAt, evidence } }.
+  // KAN-700 + KAN-791: pipeline-aware lead state.
+  // currentPipelineId + currentStageId DEPRECATED in Phase 1 (read-shim during
+  // transition); drop in Phase 2 cleanup once readers migrate to Deal-side
+  // (per PRD §5 reader-migration deferral list).
+  // microObjectiveProgress DROPPED by KAN-791 — moved to Deal.microObjectiveProgress
+  // (pre-flight #4 verified 0 prod contacts had non-default values).
   currentPipelineId      String?   @map("current_pipeline_id")
   currentStageId         String?   @map("current_stage_id")
-  microObjectiveProgress Json      @default("{}") @map("micro_objective_progress")
   enteredStageAt         DateTime? @map("entered_stage_at")
   createdAt              DateTime  @default(now()) @map("created_at")
   updatedAt              DateTime  @updatedAt @map("updated_at")
 
-  tenant          Tenant             @relation(fields: [tenantId], references: [id])
+  tenant          Tenant         @relation(fields: [tenantId], references: [id])
   contactStates   ContactState[]
   decisions       Decision[]
   outcomes        Outcome[]
@@ -187,9 +188,9 @@ model Contact {
   conversations   Conversation[]
   escalations     Escalation[]
   actions         Action[]
-  currentPipeline Pipeline?          @relation("ContactCurrentPipeline", fields: [currentPipelineId], references: [id], onDelete: SetNull)
-  currentStage    Stage?             @relation("ContactCurrentStage", fields: [currentStageId], references: [id], onDelete: SetNull)
-  stageHistory    LeadStageHistory[]
+  currentPipeline Pipeline?      @relation("ContactCurrentPipeline", fields: [currentPipelineId], references: [id], onDelete: SetNull)
+  currentStage    Stage?         @relation("ContactCurrentStage", fields: [currentStageId], references: [id], onDelete: SetNull)
+  // KAN-791 — LeadStageHistory dropped (replaced by DealStageHistory which is deal-scoped)
   deals           Deal[]
   engagements     Engagement[]
 
@@ -262,11 +263,12 @@ model Decision {
   metadata         Json     @default("{}")
   createdAt        DateTime @default(now()) @map("created_at")
 
-  tenant       Tenant             @relation(fields: [tenantId], references: [id])
-  contact      Contact            @relation(fields: [contactId], references: [id])
-  actions      Action[]
-  stageHistory LeadStageHistory[]
-  escalations  Escalation[]
+  tenant           Tenant             @relation(fields: [tenantId], references: [id])
+  contact          Contact            @relation(fields: [contactId], references: [id])
+  actions          Action[]
+  // KAN-791 — replaced LeadStageHistory[] with DealStageHistory[] (deal-scoped)
+  dealStageHistory DealStageHistory[]
+  escalations      Escalation[]
 
   @@index([tenantId])
   @@index([tenantId, contactId])
@@ -569,6 +571,8 @@ model Pipeline {
   knowledgeFilters KnowledgeFilter[]
   assignmentRules  AssignmentRule[]
   contacts         Contact[]                @relation("ContactCurrentPipeline")
+  // KAN-791 — Deal lifecycle relation
+  deals            Deal[]
 
   @@index([tenantId])
   @@index([tenantId, isActive])
@@ -577,25 +581,40 @@ model Pipeline {
 }
 
 model Stage {
-  id                String   @id @default(uuid())
-  pipelineId        String   @map("pipeline_id")
+  id                String           @id @default(uuid())
+  pipelineId        String           @map("pipeline_id")
   name              String
-  order             Int      @default(0)
-  isInitial         Boolean  @default(false) @map("is_initial")
-  isTerminal        Boolean  @default(false) @map("is_terminal")
-  entryActions      Json     @default("[]") @map("entry_actions")
-  transitionRules   Json     @default("[]") @map("transition_rules")
-  autoApproveMatrix Json     @default("{}") @map("auto_approve_matrix")
-  createdAt         DateTime @default(now()) @map("created_at")
-  updatedAt         DateTime @updatedAt @map("updated_at")
+  order             Int              @default(0)
+  isInitial         Boolean          @default(false) @map("is_initial")
+  isTerminal        Boolean          @default(false) @map("is_terminal")
+  // KAN-791 — outcomeType drives terminal-detection. Phase 2 KAN-796 (Stages
+  // Evolution Logic) reads this to know which Stages mark deal closure.
+  outcomeType       StageOutcomeType @default(open) @map("outcome_type")
+  // KAN-791 — per-Stage follow-up cadence config. Stored in Phase 1; consumer
+  // ships in Phase 2 KAN-796 (cron-driven Deal advancement based on signal
+  // patterns + cadence). Default platform cadence shipped via the lazy-bootstrap
+  // helper (KAN-793 ensureTenantHasDefaultPipeline).
+  followUpCadence   Json             @default("{}") @map("follow_up_cadence")
+  entryActions      Json             @default("[]") @map("entry_actions")
+  transitionRules   Json             @default("[]") @map("transition_rules")
+  autoApproveMatrix Json             @default("{}") @map("auto_approve_matrix")
+  createdAt         DateTime         @default(now()) @map("created_at")
+  updatedAt         DateTime         @updatedAt @map("updated_at")
 
-  pipeline         Pipeline           @relation(fields: [pipelineId], references: [id], onDelete: Cascade)
-  contacts         Contact[]          @relation("ContactCurrentStage")
-  fromStageHistory LeadStageHistory[] @relation("StageFromHistory")
-  toStageHistory   LeadStageHistory[] @relation("StageToHistory")
+  pipeline          Pipeline           @relation(fields: [pipelineId], references: [id], onDelete: Cascade)
+  contacts          Contact[]          @relation("ContactCurrentStage")
+  // KAN-791 — Deal lifecycle relations replace LeadStageHistory's stage-side relations
+  dealsCurrent      Deal[]             @relation("DealCurrentStage")
+  dealStageFromHist DealStageHistory[] @relation("DealStageFromHistory")
+  dealStageToHist   DealStageHistory[] @relation("DealStageToHistory")
 
   @@index([pipelineId])
   @@index([pipelineId, order])
+  // KAN-791 invariant: at most one isInitial Stage per Pipeline.
+  // Prisma's @@unique doesn't support partial indexes — appended as raw SQL
+  // in the migration:
+  //   CREATE UNIQUE INDEX stages_one_initial_per_pipeline_idx
+  //     ON stages (pipeline_id) WHERE is_initial = true;
   @@map("stages")
 }
 
@@ -723,26 +742,9 @@ enum LeadAssignmentPosture {
   @@map("lead_assignment_posture")
 }
 
-model LeadStageHistory {
-  id             String   @id @default(uuid())
-  // leadId == contactId per KAN-700 closure note (Lead == Contact in this schema).
-  leadId         String   @map("lead_id")
-  fromStageId    String?  @map("from_stage_id")
-  toStageId      String   @map("to_stage_id")
-  reason         String?
-  decisionId     String?  @map("decision_id")
-  transitionedAt DateTime @default(now()) @map("transitioned_at")
-
-  contact   Contact   @relation(fields: [leadId], references: [id], onDelete: Cascade)
-  fromStage Stage?    @relation("StageFromHistory", fields: [fromStageId], references: [id], onDelete: SetNull)
-  toStage   Stage     @relation("StageToHistory", fields: [toStageId], references: [id], onDelete: Restrict)
-  decision  Decision? @relation(fields: [decisionId], references: [id], onDelete: SetNull)
-
-  @@index([leadId])
-  @@index([leadId, transitionedAt])
-  @@index([toStageId])
-  @@map("lead_stage_history")
-}
+// KAN-791 — LeadStageHistory removed (replaced by DealStageHistory which is
+// deal-scoped, not contact-scoped). Empirically verified safe: 0 prod rows in
+// lead_stage_history per yesterday's audit. Migration drops the table cleanly.
 
 // ─────────────────────────────────────────────
 // EXTENDED: Customers, Conversations, Escalations
@@ -1109,44 +1111,93 @@ model LlmCostRollup {
 }
 
 // ─────────────────────────────────────────────
-// PHASE 1 — Deal + Engagement (Sprint 6)
-// See docs/prds/phase-1-deal-engagement.md (KAN-786)
+// PHASE 1 PIVOT (KAN-791) — Deal-as-Lifecycle
+// See docs/prds/phase-1-deal-engagement.md §3 (pivot 2026-05-03)
+// Sub-cohort (a) shipped Deal+Engagement base tables; KAN-791 EXTENDS:
+//   - Deal: add pipelineId/currentStageId/enteredStageAt/microObjectiveProgress;
+//           value → Decimal default 0; drop status/closedAt
+//   - Engagement: dealId becomes REQUIRED FK
+//   - Stage: outcomeType + followUpCadence (see model above; relations updated)
+//   - DealStageHistory: NEW (replaces lead_stage_history)
+//   - StageOutcomeType: NEW enum
+// Pre-flight #4 verified microObjectiveProgress = 0 prod contacts (2026-05-03);
+// Contact.microObjectiveProgress drop is safe (no backfill needed).
 // ─────────────────────────────────────────────
 
-/// Phase 1 — see docs/prds/phase-1-deal-engagement.md
+/// Phase 1 (KAN-791) — Deal as the lifecycle entity
 model Deal {
-  id            String     @id @default(cuid())
-  tenantId      String     @map("tenant_id")
-  contactId     String     @map("contact_id")
-  correlationId String?    @unique @map("correlation_id")
-  value         Decimal?   @db.Decimal(12, 2)
-  currency      String     @default("USD") @db.VarChar(3)
-  status        DealStatus @default(open)
-  closedAt      DateTime?  @map("closed_at")
-  metadata      Json       @default("{}")
-  createdAt     DateTime   @default(now()) @map("created_at")
-  updatedAt     DateTime   @updatedAt @map("updated_at")
+  id                     String   @id @default(cuid())
+  tenantId               String   @map("tenant_id")
+  contactId              String   @map("contact_id")
+  correlationId          String?  @unique @map("correlation_id")
+  // KAN-791 — pipeline + stage state (moved from Contact)
+  pipelineId             String   @map("pipeline_id")
+  currentStageId         String   @map("current_stage_id")
+  enteredStageAt         DateTime @default(now()) @map("entered_stage_at")
+  // KAN-791 — per-Deal MO progress (moved from Contact.microObjectiveProgress;
+  // pre-flight #4 verified 0 prod contacts had non-default values, no backfill)
+  microObjectiveProgress Json     @default("{}") @map("micro_objective_progress")
+  // KAN-791 — value defaults to 0 (was Decimal?). KAN-790 deferred enrichment.
+  value                  Decimal  @default(0) @db.Decimal(12, 2)
+  currency               String   @default("USD") @db.VarChar(3)
+  metadata               Json     @default("{}")
+  createdAt              DateTime @default(now()) @map("created_at")
+  updatedAt              DateTime @updatedAt @map("updated_at")
 
-  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  tenant       Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  contact      Contact            @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  pipeline     Pipeline           @relation(fields: [pipelineId], references: [id], onDelete: Restrict)
+  currentStage Stage              @relation("DealCurrentStage", fields: [currentStageId], references: [id], onDelete: Restrict)
+  engagements  Engagement[]
+  stageHistory DealStageHistory[]
 
-  @@index([tenantId, status])
+  @@index([tenantId, currentStageId])
+  @@index([tenantId, pipelineId])
   @@index([tenantId, contactId])
   @@map("deals")
 }
 
-enum DealStatus {
-  open
-  closed_won
-  closed_lost
+/// KAN-791 — DealStageHistory replaces lead_stage_history (deal-scoped, not contact-scoped)
+model DealStageHistory {
+  id             String   @id @default(cuid())
+  dealId         String   @map("deal_id")
+  fromStageId    String?  @map("from_stage_id")
+  toStageId      String   @map("to_stage_id")
+  transitionedAt DateTime @default(now()) @map("transitioned_at")
+  /// Semantic descriptor — bounded set: 'normalizer' | 'agent' | 'human' | 'system' | 'rule'
+  triggeredBy    String   @map("triggered_by")
+  /// Typed FK — populated only when transition came from a Decision firing.
+  /// Phase 2 KAN-796 (AI Stages Evolution Logic) emits these at scale.
+  decisionId     String?  @map("decision_id")
+  metadata       Json     @default("{}")
 
-  @@map("deal_status")
+  deal      Deal      @relation(fields: [dealId], references: [id], onDelete: Cascade)
+  fromStage Stage?    @relation("DealStageFromHistory", fields: [fromStageId], references: [id], onDelete: SetNull)
+  toStage   Stage     @relation("DealStageToHistory", fields: [toStageId], references: [id], onDelete: Restrict)
+  decision  Decision? @relation(fields: [decisionId], references: [id], onDelete: SetNull)
+
+  @@index([dealId, transitionedAt])
+  @@index([toStageId])
+  @@index([decisionId])
+  @@map("deal_stage_history")
 }
 
-/// Phase 1 — see docs/prds/phase-1-deal-engagement.md
+enum StageOutcomeType {
+  open
+  terminal_won
+  terminal_lost
+
+  @@map("stage_outcome_type")
+}
+
+/// Phase 1 (KAN-791) — Engagement attached to Deal (dealId REQUIRED).
+/// contactId stays as denormalized fast-query field.
 model Engagement {
   id             String      @id @default(cuid())
   tenantId       String      @map("tenant_id")
+  // KAN-791 — dealId REQUIRED (was implicit/missing). Engagement attaches to Deal;
+  // queryable to Contact via the FK chain.
+  dealId         String      @map("deal_id")
   contactId      String      @map("contact_id")
   correlationId  String?     @unique @map("correlation_id")
   engagementType String      @map("engagement_type")
@@ -1157,8 +1208,10 @@ model Engagement {
   createdAt      DateTime    @default(now()) @map("created_at")
 
   tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  deal    Deal    @relation(fields: [dealId], references: [id], onDelete: Restrict)
   contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
 
+  @@index([tenantId, dealId, occurredAt])
   @@index([tenantId, contactId, occurredAt])
   @@index([tenantId, engagementType])
   @@map("engagements")
