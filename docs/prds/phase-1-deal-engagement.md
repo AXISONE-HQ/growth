@@ -203,158 +203,113 @@ model Engagement {
 
 ## 4. Code changes
 
-### Files to edit
+Phase 1 splits across **three Sprint 6 epics**, each with its own implementation ticket. Sub-cohort (a) shipped foundation (Deal + Engagement base tables + enum-drift PAIRS for SignalClass) under the original KAN-786 scope; sub-cohort (b) shipped EngagementService at `packages/api/src/services/engagement-service.ts`. KAN-791/792/793 below extend that foundation, don't rebuild it.
+
+### KAN-791 — Deal-as-Lifecycle schema pivot
+
+**Branch convention:** `feat/kan-791-schema-pivot` (off main, after sub-cohorts (a)+(b) merge).
 
 | File | Change |
 |------|--------|
-| `packages/db/prisma/schema.prisma` | New models + enums + relations on Tenant/Contact (Section 3 above). New migration generated via `prisma migrate dev --name add_deal_engagement_kan_786` (KAN-786 is the Sprint 6 implementation ticket; matches the ticket-prefixed convention used by `apps/connectors/...kan_741_*` and `apps/api/...kan_774_*`). CI runs `prisma migrate deploy` per `reference_schema_pr_ci_migrate_step` discipline. |
-| `packages/api/src/services/run-decision-for-contact.ts` | **Hook into the orchestrator at the post-approval point**: when a decision is approved (auto via threshold gate or manually) AND `actionType` is `transition_to_closed_won` or `transition_to_closed_lost`, write a `Deal` row inline (status = `closed_won`/`closed_lost`, `closedAt = now()`, **`value = null`, `currency = "USD"`** — see [KAN-790](https://axisone-team.atlassian.net/browse/KAN-790) for value-enrichment deferral; `Contact.metadata` field doesn't exist on the schema). **Decoupled from Pipeline stage transition**: the `transition_to_closed_won` / `_lost` action types have **no executor in the current codebase** (catalog-only entries in `threshold-gate.ts:92-97`, no dispatcher case anywhere — see [KAN-789](https://axisone-team.atlassian.net/browse/KAN-789)). Deal write is the outcome record itself; Pipeline stage state will be reconciled when KAN-789's executor lands. **Idempotent via `correlationId = decision.id`** per Edit 2's idempotency contract — if a `Deal` already exists with this `correlationId`, the write is a no-op (returns existing). Same decision firing twice creates exactly one deal; different decisions on same contact create separate deals (multi-cycle closed-won works correctly). |
-| `packages/api/src/services/behavioral-learner.ts:9` | (Decision needed — see §9 Open questions) replace Pub/Sub subscription to `growth.engagement.logged` with direct Prisma reads from new `engagement` table, OR keep Pub/Sub and add Engagement persistence as a sibling subscriber. Recommend the latter for now (preserves existing decoupling) but PR author can swap. |
-| `packages/api/src/services/agentic-tools.ts` | Wire AI agent action emit path to call `engagementService.logEngagement()`. Every action dispatched becomes one `Engagement` row with `engagementType` derived from `actionType` (e.g., `email_send` → `engagementType="email_send"`, signalClass=`neutral`; opens/clicks/replies arrive later from webhooks). Use the 3-taxonomy guidance from `decision_kan_749_mvp_shape_rationale` — pass `actionType` AS-IS, defer vocab refactor. |
+| `packages/db/prisma/schema.prisma` | Apply §3 changes: extend `Deal` with `pipelineId`/`currentStageId`/`enteredStageAt`/`microObjectiveProgress` columns; switch `value` to `Decimal @default(0)`; drop `status DealStatus` + `closedAt`; add `outcomeType StageOutcomeType` + `followUpCadence Json` to `Stage`; create `DealStageHistory` model; make `Engagement.dealId` REQUIRED. New migration via `prisma migrate dev --name kan_791_deal_lifecycle_pivot`. **MUST strip the spurious `DROP INDEX "knowledge_chunks_embedding_hnsw_idx"` line from the generated SQL** before commit per KAN-787. CI runs `prisma migrate deploy`. |
+| `packages/db/prisma/schema.prisma` (cleanup) | Mark `Contact.currentStageId`, `Contact.currentPipelineId`, `Contact.microObjectiveProgress` for Phase 2 drop (keep columns in Phase 1 for read-shim during transition). Drop `lead_stage_history` table (0 prod rows). |
+| `packages/api/src/services/engagement-service.ts` | Add `dealId: string` REQUIRED field to `EngagementInput`; pass through to `prisma.engagement.create`. Update `engagement-service.test.ts` — every test fixture now provides `dealId`; tests that previously created Engagement without one must be revised (sub-cohort (b) pattern, just add `dealId`). |
+| `packages/api/src/services/run-decision-for-contact.ts` | **Remove `maybeWritePhase1Deal` helper + 2 call sites** (sub-cohort (c) work-in-progress on `feat/kan-786` branch — orchestrator hook approach is **cancelled** per pivot). Deal lifecycle now starts at Track A intake (KAN-793), not at decision approval. KAN-789 is also superseded — Stage transitions write `DealStageHistory` rows directly via simple writers (Phase 2's KAN-796 adds AI; Phase 1 ships the writer infrastructure only). |
+| Cross-codebase reader migration | Identify all read sites via `grep -rn "currentStageId\|currentPipelineId\|microObjectiveProgress" packages/api/src/ apps/`. For each: refactor to read from `Deal` if a Deal exists for the contact, else fall back to the deprecated Contact column (read-shim). If a site can't be cleanly migrated, document why in the PR description and defer to a per-site follow-up ticket. Hot consumers: `message-composer.ts:88-117` (live runtime), `agentic-tools.ts:105,149,367` (5 read sites), `context-assembler.ts:537,586` (2 read sites). |
+| `enum-drift.test.ts` PAIRS | Add `[StageOutcomeType, "stage_outcome_type"]` per `reference_enum_drift_pairs_discipline`. (DealStatus enum is REMOVED in this migration; remove its PAIRS entry too — the enum-drift test must reflect the new schema.) |
 
-> **Note on the orchestrator-hook row:** Original §4 text assumed `transition_to_closed_won` / `_lost` had an existing executor (and instructed to extend `threshold-gate.ts:36-37,92-97`). KAN-786 sub-cohort (c) pre-flight (2026-05-03) found no execution path — these action types appear ONLY as type literals + auto-approve catalog entries in `threshold-gate.ts`, with zero dispatcher cases anywhere in the repo. PRD updated to match empirical reality: write the `Deal` directly at the orchestrator (`run-decision-for-contact.ts`) on decision approval, decouple from the (non-existent) Pipeline stage transition, file [KAN-789](https://axisone-team.atlassian.net/browse/KAN-789) for the missing executor. See `docs/memories/feedback_prd_assumed_infrastructure_check_kan_786.md` for the canonical pattern + grep discipline.
+### KAN-792 — AI Lead Normalizer (MVP)
+
+**Branch convention:** `feat/kan-792-lead-normalizer` (off main, can branch in parallel with KAN-791 if schema is mergeable).
+
+| File | Change |
+|------|--------|
+| `packages/api/src/services/lead-normalizer.ts` | **NEW** module-scoped functions for parsing inbound and producing structured `{ contact: ContactInput, deal: DealInput, inboundEngagement: EngagementInput }`. Source-aware: V1 ships an email pre-parser (extracts `from_address`/`subject`/`body_preview` → structured fields like `companyName`, `role`, `intent`, `dealStageSignal`), then runs an Anthropic Claude Sonnet extraction pass for the unstructured-text portion. Module-scope per sibling-service convention (matches `engagement-service.ts` from sub-cohort (b), `agentic-tools.ts`, `threshold-gate.ts`). Exports: `normalizeInboundEmail(input)`, `normalizeInbound(source, input)` (extensible to non-email sources later). |
+| `packages/api/src/services/__tests__/lead-normalizer.test.ts` | **NEW** vitest tests with: (a) sample email fixtures (Formspree-style, hotmail real-email, plain text inquiry), (b) mocked Anthropic SDK responses, (c) source pre-parser tests independent of the AI step, (d) failure-isolation: AI extraction failure produces a degraded-but-valid normalized output (fallback to pre-parser fields only). Per `feedback_prd_assumed_infrastructure_check_kan_786`, pre-flight verifies the Anthropic SDK is wired in this repo before writing code (likely already in `packages/api/src/services/llm-client.ts`; adapt to its existing client pattern). |
+
+### KAN-793 — Track A Inbound → Deal integration
+
+**Branch convention:** `feat/kan-793-track-a-deal-integration` (off main, depends on KAN-791 merged + KAN-792 merged).
+
+| File | Change |
+|------|--------|
+| `apps/api/src/subscribers/lead-received-push.ts` (or the equivalent push-subscriber file from KAN-774) | After validating the `lead.received` event, call `normalizeInbound(...)` to produce `{ contact, deal, inboundEngagement }`. Replace the existing `assignLeadToPipeline` flow with: (1) upsert Contact, (2) resolve tenant's default Pipeline + its starting Stage (the Stage where `isInitial: true`), (3) create Deal with `pipelineId` + `currentStageId` set to the starting Stage + `correlationId = leadInboxEventId` (Resend message id; Pub/Sub redelivery safe), (4) create inbound `Engagement` with `dealId = deal.id`, `engagementType = 'lead_received'`, `signalClass = 'positive'`, `correlationId = leadInboxEventId + ":inbound"`, (5) write `DealStageHistory` entry with `fromStageId = null`, `toStageId = starting_stage.id`, `triggeredBy = 'normalizer'`. |
+| `apps/connectors/src/webhooks/resend-inbound.ts` | No code change required at the connector layer — the existing Resend webhook publishes `lead.received` to Pub/Sub; the consumer above does the normalize+write. Connector stays thin. |
+| `packages/api/src/services/lead-assignment.ts` (existing — `assignLeadToPipeline`) | Update or replace: assignment flow now operates on Deals (assigning a Deal to a pipeline), not on Contacts directly. Per the lifecycle pivot, "assignment" is "create Deal in starting Stage of routed Pipeline." The existing `mode=unassigned` posture (per `reference_lead_inbox.md` operator step 2 + `belowThresholdPosture` enum) maps to "Deal not yet routed to a Pipeline" — handle by either deferring Deal creation OR creating Deal with `pipelineId` of the tenant's `defaultAssignmentPipelineId` (Phase 1 picks the latter; Pipeline routing AI per KAN-795 supersedes in Phase 2). |
 
 ### Seeds posture
 
-**No seed data for `deals` or `engagements` in `packages/db/prisma/seed.ts`.** The success metric in §2 requires real ingestion to count, and seeded rows would either inflate the metric (if untagged) or require the `metadata->>'source' = 'seed'` exclusion to work perfectly across every query path. Cleaner to start empty and let real flows populate. If demo data is needed for design partner onboarding, write a separate `scripts/demo-seed-deal-engagement.ts` that runs on demand against a named demo tenant only — never via `prisma migrate seed`.
-
-### Files to create
-
-| File | Purpose |
-|------|---------|
-| `packages/api/src/services/engagement-service.ts` | **NEW** Prisma-backed Engagement service. Replaces dead `engagement-logger.ts`. Public API (3 methods, narrow surface): |
-
-**Idempotency contract:** All writes accept an optional `correlationId`; if provided and a row already exists with that value, the write is a no-op (return existing row). This makes Pub/Sub redelivery and handler retries safe by construction. Recommended `correlationId` sources: Resend message id for inbound-derived engagements, decision id for threshold-gate-derived deals, downstream agent action id for agent-emitted engagements.
-
-**Service expressed as module-scoped functions** to match sibling-service convention in `packages/api/src/services/` (e.g., `agentic-tools.ts`, `threshold-gate.ts`). The 3-method API contract + `correlationId` idempotency from prior PRD revisions is preserved verbatim — only the shape adapts. Prisma types are imported from `@prisma/client` directly (the canonical pattern across `apps/api/src/router.ts:4` and the rest of the repo; `@growth/db` alias is not wired — see CLAUDE.md gotcha #2).
-
-```ts
-// packages/api/src/services/engagement-service.ts (NEW)
-
-import type { Engagement, PrismaClient, SignalClass } from "@prisma/client";
-
-export interface EngagementInput {
-  tenantId: string;
-  contactId: string;
-  engagementType: string;
-  channel?: string | null;
-  occurredAt: Date;
-  metadata?: Record<string, unknown>;
-  /** Optional natural-key dedup token. If provided and a row with this
-   *  correlationId already exists, the write is a no-op (returns the
-   *  existing row). Pub/Sub redelivery + handler retries safe by
-   *  construction. */
-  correlationId?: string;
-}
-
-export async function logEngagement(
-  prisma: PrismaClient,
-  input: EngagementInput,
-): Promise<Engagement> {
-  if (input.correlationId) {
-    const existing = await prisma.engagement.findUnique({
-      where: { correlationId: input.correlationId },
-    });
-    if (existing) return existing;
-  }
-
-  return prisma.engagement.create({
-    data: {
-      tenantId: input.tenantId,
-      contactId: input.contactId,
-      engagementType: input.engagementType,
-      signalClass: classifySignal(input.engagementType),
-      channel: input.channel ?? null,
-      occurredAt: input.occurredAt,
-      metadata: (input.metadata ?? {}) as object,
-      ...(input.correlationId && { correlationId: input.correlationId }),
-    },
-  });
-}
-
-export async function listEngagementsForContact(
-  prisma: PrismaClient,
-  tenantId: string,
-  contactId: string,
-  opts?: { since?: Date; limit?: number },
-): Promise<Engagement[]> {
-  return prisma.engagement.findMany({
-    where: {
-      tenantId,
-      contactId,
-      ...(opts?.since && { occurredAt: { gte: opts.since } }),
-    },
-    orderBy: { occurredAt: "desc" },
-    take: opts?.limit ?? 100,
-  });
-}
-
-export async function listEngagementsSinceForLearning(
-  prisma: PrismaClient,
-  after: Date,
-  limit = 1000,
-): Promise<Engagement[]> {
-  return prisma.engagement.findMany({
-    where: { occurredAt: { gte: after } },
-    orderBy: { occurredAt: "asc" },
-    take: limit,
-  });
-}
-
-function classifySignal(engagementType: string): SignalClass {
-  const positive = new Set([
-    "email_open",
-    "email_click",
-    "email_reply",
-    "form_submit",
-  ]);
-  const negative = new Set([
-    "email_bounce",
-    "email_unsubscribe",
-    "contact_optout",
-  ]);
-  if (positive.has(engagementType)) return "positive" as SignalClass;
-  if (negative.has(engagementType)) return "negative" as SignalClass;
-  return "neutral" as SignalClass;
-}
-```
-
-### File to delete (sibling PR — recommended NOT bundled with Phase 1)
-
-- `packages/api/src/services/engagement-logger.ts` (~430 LoC)
-- Bundle with this PR: ❌ would expand Phase 1 scope; per `feedback_fix_exposes_next_error` the cohort-shrinking deletion is a **separate ticket**
+**No seed data for `deals`, `engagements`, or `deal_stage_history` in `packages/db/prisma/seed.ts`.** The success metric in §2 requires REAL Track A traffic to count — seeded rows would inflate or require `metadata->>'source' = 'seed'` exclusion to work everywhere. Cleaner to start empty. If demo data is needed for design partner onboarding, write a separate `scripts/demo-seed-deal-engagement.ts` that runs on demand against a named demo tenant only — never via `prisma migrate seed`.
 
 ---
 
 ## 5. Out of scope (explicit non-goals)
 
-- **Lead/Contact split** (Phase 3 territory) — KAN-700 documented "Lead == Contact" as a deliberate decision; reopening is a product call, not a schema-audit follow-up
-- **MicroObjective reparenting** (Pipeline → Objective) — Phase 2 scope; touches `PipelineMicroObjective` join table + `message-composer.ts:88-117` runtime consumer
-- **Vestigial JSON column drops** (`Objective.subObjectives`, `ContactState.subObjectives`, `Contact.microObjectiveProgress`) — empirically confirmed safe-to-drop in audit pass, but defer to Phase 2 schema cleanup migration
-- **`ContactState` table drop** (entire table is empty + unwritten) — Phase 2 cleanup
-- **18-decisions / 0-actions investigation** — Decision→Action emission path may be broken in production; separate audit ticket below
-- **AI normalization layer PRD** — depends on this PRD landing first; separate document
-- **Engagement vocabulary refactor** (3-taxonomy from KAN-749) — defer to KAN-763 Phase C, gated on KAN-768 typed telemetry per `decision_kan_749_mvp_shape_rationale`
-- **Dead-code deletions** (`engagement-logger.ts`, `onboarding-wizard.ts`) — sibling PR, KAN-INBOX-engagement-deadcode-deletion below
+**Phase 2+ epics deferred (KAN-794 onwards from the 5-phase / 20-epic roadmap — see §10):**
+
+- **KAN-794 Brain Service** — read-side consumer of normalized Contact + Deal + Engagement rows; produces BrainSnapshot. Phase 1 just produces the rows; Brain doesn't exist yet.
+- **KAN-795 AI Pipeline Routing Logic** — currently Phase 1 hardcodes "tenant's `defaultAssignmentPipelineId`" for routing every Deal. AI-based routing (which Pipeline best fits this Lead given the Deal/Contact/intent signals?) is Phase 2.
+- **KAN-796 AI Stages Evolution Logic** — currently Phase 1 ships the `followUpCadence` Json column on Stage but doesn't act on it. The cadence consumer (cron-driven advancement of Deals through Stages based on signal patterns + cadence config) is Phase 2.
+- **KAN-797 AI Communication Shaper** — picks tone/channel/timing for outbound based on Deal+Contact context. Phase 2.
+- **KAN-798 Send Policy** — tenant-level send rate limits + quiet hours + suppression list. Phase 2.
+- **KAN-799+ all Phase 3+ connectors** — multi-channel (SMS, WhatsApp, voice) inbound + outbound. Phase 3+.
+
+**Phase 1 explicit simplifications (consumed by the Phase 2+ tickets above):**
+
+- Stage transitions are written by **simple writer functions** (no AI yet) — the Normalizer writes the initial transition on intake; downstream stage moves come from human triggers or future automation
+- Pipeline routing is **hardcoded** to `Tenant.defaultAssignmentPipelineId` (most prod tenants have exactly 1 Pipeline; AI routing per KAN-795 supersedes)
+- `Stage.followUpCadence` is **stored, not consumed** — the column exists so the schema is forward-compatible with KAN-796; Phase 1 doesn't read it
+- `Deal.value` defaults to `0` — value enrichment from Contact metadata or upstream signals is **out of Phase 1 scope** (per KAN-790 deferral; revisit when first design partner needs value tracking)
+
+**Already-superseded in the pivot:**
+
+- The original sub-cohort (c) **orchestrator-hook approach** for closed_won/_lost Deal writes (was: write Deal at decision-approval) — replaced by lifecycle approach (Deal exists from intake; closed_won/_lost is a Stage transition). The work-in-progress on `feat/kan-786-phase-1-deal-engagement` (commits b51a48c + 93b6dee) is **cancelled** — preserved in branch history but not merged.
+- **KAN-789** (transition_to_closed_won/_lost executors) — superseded. Stage transitions are now generic writes via DealStageHistory; specific action-type executors no longer needed. Close KAN-789 as obsolete in PR review.
+- **KAN-785** (Phase 3 Lead/Contact split) — superseded by Deal-as-lifecycle. Lead lifecycle lives on Deal now; Contact stays as the person-record. Close as obsolete.
+
+**Held in queue for separate sessions (not blocking Phase 1):**
+
+- KAN-787 Prisma vector-index drift structural fix (recurring tax until shipped — workaround applies to KAN-791 migration)
+- KAN-788 dev-env refresh
+- KAN-783 decision/action chain audit
+- Vestigial JSON column drops + ContactState drop — Phase 2 cleanup pass
 
 ---
 
 ## 6. Acceptance criteria
 
-- [ ] `prisma migrate dev --name add_deal_engagement_kan_786` (KAN-786 = Sprint 6 impl ticket) generates migration; CI green; `prisma migrate deploy` lands cleanly in staging then prod via the deploy-api.yml path-gated step (per `reference_schema_pr_ci_migrate_step`)
-- [ ] `Deal` model exists with the exact schema in §3; `DealStatus` enum present
-- [ ] `Engagement` model exists with the exact schema in §3; `SignalClass` enum present
-- [ ] `Tenant` and `Contact` relations updated; Prisma client regenerated; `enum-drift.test.ts` PAIRS extended for the 2 new enums (per `reference_enum_drift_pairs_discipline`)
-- [ ] `packages/api/src/services/threshold-gate.ts` inserts a `Deal` row on `transition_to_closed_won` / `transition_to_closed_lost` (unit test in same PR, integration test on the threshold-gate flow)
-- [ ] `packages/api/src/services/engagement-service.ts` is created; `engagement-service.test.ts` covers the 3 methods
-- [ ] `packages/api/src/services/agentic-tools.ts` emits an `Engagement` row on action dispatch (unit test asserting Prisma engagement.create called; e2e: trigger one decision via existing decision-engine integration test, observe one `Engagement` row land)
-- [ ] `behavioral-learner.ts` either reads from the `engagement` table directly OR subscribes to `growth.engagement.logged` with a sibling Engagement-persistence subscriber — **decision documented in PR description with trade-off** (see §9 below)
-- [ ] **Empirical end-of-sprint smoke (load-bearing per `feedback_kan_745_cost_observability_shipped`):** at least 1 real `Deal` row and 1 real `Engagement` row exist in production; verification query from §2 returns `real_n >= 1` for both
-- [ ] **Track A regression check:** After Phase 1 deploy, re-run the 4-query verification matrix from yesterday's Track A close-out. All four must pass before Phase 1 is declared shipped — same matrix that closed Track A; reusing it ensures Phase 1's schema additions don't regress the producer→consumer chain.
-  1. **growth-api consumer log:** `gcloud run services logs read growth-api --region us-central1 --limit=50 | grep -E "lead-received-push|assigned"` — expect a fresh `assigned contactId=... tenantId=... mode=unassigned` line for the smoke email sent post-deploy
-  2. **Pub/Sub publish count:** `gcloud pubsub topics describe lead.received --format='value(name)'` plus a count check on the subscription metric — expect monotonic increment vs. pre-deploy baseline
-  3. **`lead_inbox_events` row:** `SELECT id, status, resend_email_id, created_at FROM lead_inbox_events ORDER BY created_at DESC LIMIT 1;` — expect new row with `status='accepted'` and the smoke email's Resend message id (note: success-class status string is `accepted`, verified empirically yesterday)
-  4. **Contact created:** `SELECT id, email, tenant_id, created_at FROM contacts WHERE created_at > NOW() - INTERVAL '5 minutes' ORDER BY created_at DESC;` — expect the smoke sender's email present (or dedup hit on existing contact, which is also valid)
+**KAN-791 (schema):**
+- [ ] `prisma migrate dev --name kan_791_deal_lifecycle_pivot` generates migration cleanly against local Postgres@15 + pgvector v0.8.2 (5-layer recipe per `feedback_local_postgres_pgvector_parity_gap_kan_706`); KAN-787 spurious-DROP workaround applied (`grep "DROP INDEX" migration.sql` returns zero before commit)
+- [ ] Generated SQL matches §3: Deal extended (pipelineId/currentStageId/enteredStageAt/microObjectiveProgress/value-default-0); Stage extended (outcomeType/followUpCadence); DealStageHistory created; Engagement.dealId required; DealStatus + Deal.closedAt + lead_stage_history dropped; Contact lifecycle columns marked deprecated (kept for Phase 1 read-shim)
+- [ ] Prisma client regenerated; `enum-drift.test.ts` PAIRS extended for `StageOutcomeType` + DealStatus PAIRS removed (enum no longer exists)
+- [ ] EngagementService updated — `dealId` REQUIRED in `EngagementInput`; existing tests revised to provide it; new test confirms create fails if `dealId` omitted
+- [ ] Reader migration audit complete — every `Contact.currentStageId` / `.currentPipelineId` / `.microObjectiveProgress` read site identified, migrated to Deal-side reader, OR documented + deferred with a follow-up ticket
+- [ ] `feat/kan-786-phase-1-deal-engagement` branch closed without merging the orchestrator-hook commits (b51a48c + 93b6dee — the maybeWritePhase1Deal helper is cancelled per pivot); sub-cohort (a)+(b) commits already merged via PR #91-related work
+- [ ] Full turbo test suite green (no regression vs current 56 files / 654 tests + new KAN-791 tests)
+
+**KAN-792 (Normalizer):**
+- [ ] `packages/api/src/services/lead-normalizer.ts` created with `normalizeInboundEmail` + `normalizeInbound(source, input)` exports
+- [ ] Test fixture: 3 sample inbound emails (Formspree-style, hotmail-style, plain text) parse cleanly into `{ contact, deal, inboundEngagement }`
+- [ ] Anthropic SDK call mocked in tests; pre-parser logic tested independently of the AI step
+- [ ] Failure-isolation test: AI extraction throws → degraded output with pre-parser fields only (does NOT abort)
+- [ ] Pre-flight discipline applied: confirmed Anthropic SDK is wired in repo (likely `llm-client.ts`); adapted to existing client pattern not invented from scratch
+
+**KAN-793 (Track A integration):**
+- [ ] `lead-received-push.ts` consumer (or equivalent) calls `normalizeInbound(...)` after event validation
+- [ ] Real-email Track A smoke at end of sprint: send fresh inbound email → all of:
+  - `contacts` row exists for the sender (or dedup hit)
+  - `deals` row exists with `pipelineId` = tenant's `defaultAssignmentPipelineId`, `currentStageId` = that Pipeline's `isInitial` Stage, `correlationId` = the inbound `lead_inbox_events.id`
+  - `engagements` row exists with `deal_id = deals.id`, `engagementType = 'lead_received'`, `signalClass = 'positive'`
+  - `deal_stage_history` row exists with `fromStageId = null`, `toStageId = starting_stage.id`, `triggeredBy = 'normalizer'`
+- [ ] §2 SQL queries return `>= 1` for both `deals` and `engagements` (real Track A traffic post-deploy)
+
+**Phase 1 close gate (cross-cutting, applies after all 3 epics ship):**
+- [ ] **Track A 4-query regression check** — same matrix from yesterday's KAN-741 close, all four pass post-deploy:
+  1. `growth-api` consumer log: `gcloud run services logs read growth-api --region us-central1 --limit=50 | grep -E "lead-received-push|assigned"` → fresh `[lead-received-push] assigned` line
+  2. Pub/Sub publish count: monotonic increment on `lead.received` topic
+  3. `SELECT id, status, resend_email_id, created_at FROM lead_inbox_events ORDER BY created_at DESC LIMIT 1;` → new row, `status='accepted'`
+  4. `SELECT id, email, tenant_id, created_at FROM contacts WHERE created_at > NOW() - INTERVAL '5 minutes';` → smoke sender present (or dedup-hit existing)
+- [ ] **Empirical end-of-sprint smoke is load-bearing** per `feedback_kan_745_cost_observability_shipped` — Jira→Done only after deploy + smoke green, NOT at merge time
 
 ---
 
