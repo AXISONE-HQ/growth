@@ -1,14 +1,17 @@
 /**
  * Tests for KAN-705 — hybrid lead → pipeline assignment.
+ * KAN-795 refactor (Phase 2 epic 2 of 5) — Layer 3 (AI fallback) moved to
+ * pipeline-router.test.ts; this file mocks `routePipelineForNewLead` at the
+ * orchestrator boundary to test the rule → router → posture dispatch.
  *
  * Three layers of coverage:
  *
  *   1. Pure predicate language (matchesConditions): scalar / array-IN / operators (eq, ne, gte, lte, gt, lt, in)
  *   2. Pure rule walker (evaluateRules): priority order, isActive filter, first-match wins, empty-conditions catch-all
- *   3. AI fallback (aiAssignmentFallback): catalog rendering, JSON parse, unknown-pipeline-id rejection, confidence clamp
- *   4. Orchestrator (assignLeadToPipeline): rule branch + ai_fallback branch + each of 3 below-threshold postures
- *      (stay_unassigned, default_pipeline, escalate_to_human) + audit log shape + multi-tenant rule isolation
- *      + skipIfAssigned idempotency
+ *   3. Orchestrator (assignLeadToPipeline): rule branch + ai_fallback branch (via mocked pipeline-router)
+ *      + each of 3 below-threshold postures (stay_unassigned, default_pipeline, escalate_to_human)
+ *      + audit log shape + multi-tenant rule isolation + skipIfAssigned idempotency
+ *      + KAN-795 router integration: route → ai_fallback, escalate → posture, no_candidates → posture+warn
  *
  * Note: tests against the orchestrator mock the Prisma client at the delegate
  * level. Real DB integration runs in a separate test runner once the
@@ -16,17 +19,20 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { PrismaClient } from '@prisma/client';
-import type Anthropic from '@anthropic-ai/sdk';
+
+// KAN-795: mock pipeline-router BEFORE importing the module under test.
+const routePipelineForNewLeadMock = vi.fn();
+vi.mock('../pipeline-router.js', () => ({
+  routePipelineForNewLead: (...args: unknown[]) => routePipelineForNewLeadMock(...args),
+}));
+
 import {
   matchesConditions,
   evaluateRules,
-  aiAssignmentFallback,
   assignLeadToPipeline,
   type AssignmentRuleRow,
   type LeadAttributes,
-  type PipelineSummary,
 } from '../lead-assignment.js';
-import { __setLLMClientsForTest } from '../llm-client.js';
 
 const TENANT_A = '11111111-1111-1111-1111-111111111111';
 const TENANT_B = '22222222-2222-2222-2222-222222222222';
@@ -38,7 +44,7 @@ const STAGE_INITIAL_HUBSPOT = 'stage-initial-hubspot';
 
 beforeEach(() => {
   vi.restoreAllMocks();
-  __setLLMClientsForTest({ anthropic: null, openai: null, pubsub: null });
+  routePipelineForNewLeadMock.mockReset();
 });
 
 // ─────────────────────────────────────────────
@@ -162,85 +168,8 @@ describe('evaluateRules priority + isActive', () => {
 });
 
 // ─────────────────────────────────────────────
-// Layer 3 — AI fallback
-// ─────────────────────────────────────────────
-
-function makeAnthropicMock(create: ReturnType<typeof vi.fn>) {
-  return { messages: { create } } as unknown as Anthropic;
-}
-
-function anthropicJsonResponse(payload: Record<string, unknown>) {
-  return {
-    content: [{ type: 'text' as const, text: JSON.stringify(payload) }],
-    usage: { input_tokens: 10, output_tokens: 20 },
-  };
-}
-
-describe('aiAssignmentFallback', () => {
-  const pipelines: PipelineSummary[] = [
-    { id: PIPELINE_HUBSPOT, name: 'HubSpot Sales', objectiveType: 'send_quote', objectiveDescription: 'Move qualified leads to a signed quote' },
-    { id: PIPELINE_META, name: 'Meta Lead Ads', objectiveType: 'warm_up_lead', objectiveDescription: 'Warm cold inbound' },
-  ];
-
-  it('calls Sonnet (reasoning tier) and returns structured output', async () => {
-    const create = vi.fn(async () =>
-      anthropicJsonResponse({
-        pipelineId: PIPELINE_HUBSPOT,
-        confidence: 0.78,
-        reasoning: 'Lead has enterprise segment + qualified stage — matches HubSpot Sales objective.',
-      }),
-    );
-    __setLLMClientsForTest({ anthropic: makeAnthropicMock(create), pubsub: null });
-
-    const out = await aiAssignmentFallback(
-      'tenant-test',
-      { source: 'manual', segment: 'enterprise', lifecycleStage: 'qualified' },
-      pipelines,
-    );
-    expect(out?.pipelineId).toBe(PIPELINE_HUBSPOT);
-    expect(out?.confidence).toBe(0.78);
-    expect(create.mock.calls[0][0]).toMatchObject({ model: 'claude-sonnet-4-6' });
-  });
-
-  it('rejects LLM-returned pipelineId not in the catalog (defensive)', async () => {
-    const create = vi.fn(async () =>
-      anthropicJsonResponse({ pipelineId: 'hallucinated-pipe-id', confidence: 0.9, reasoning: '...' }),
-    );
-    __setLLMClientsForTest({ anthropic: makeAnthropicMock(create), pubsub: null });
-
-    const out = await aiAssignmentFallback('tenant-test', { source: 'manual' }, pipelines);
-    expect(out).toBeNull();
-  });
-
-  it('clamps confidence to [0, 1]', async () => {
-    const create = vi.fn(async () =>
-      anthropicJsonResponse({ pipelineId: PIPELINE_HUBSPOT, confidence: 1.5, reasoning: '...' }),
-    );
-    __setLLMClientsForTest({ anthropic: makeAnthropicMock(create), pubsub: null });
-
-    const out = await aiAssignmentFallback('tenant-test', { source: 'manual' }, pipelines);
-    expect(out?.confidence).toBe(1);
-  });
-
-  it('returns null on malformed LLM JSON', async () => {
-    const create = vi.fn(async () => ({
-      content: [{ type: 'text' as const, text: 'not even json' }],
-      usage: { input_tokens: 5, output_tokens: 5 },
-    }));
-    __setLLMClientsForTest({ anthropic: makeAnthropicMock(create), pubsub: null });
-
-    const out = await aiAssignmentFallback('tenant-test', { source: 'manual' }, pipelines);
-    expect(out).toBeNull();
-  });
-
-  it('returns null when pipeline catalog is empty (no-op)', async () => {
-    const out = await aiAssignmentFallback('tenant-test', { source: 'manual' }, []);
-    expect(out).toBeNull();
-  });
-});
-
-// ─────────────────────────────────────────────
-// Layer 4 — orchestrator
+// Layer 3 — orchestrator
+// (KAN-795: pipeline-router unit tests live in pipeline-router.test.ts)
 // ─────────────────────────────────────────────
 
 interface PrismaMockState {
@@ -251,7 +180,6 @@ interface PrismaMockState {
     aiAssignmentConfidenceThreshold: number | null;
   }>;
   rules: AssignmentRuleRow[];
-  pipelines: PipelineSummary[];
   initialStageId: string | null;
 }
 
@@ -261,12 +189,13 @@ function makePrismaMock(state: PrismaMockState) {
   const createEscalation = vi.fn(async () => ({ id: 'esc-1' }));
   const findFirstStage = vi.fn(async () => (state.initialStageId ? { id: state.initialStageId } : null));
   const findAssignmentRules = vi.fn(async () => state.rules);
-  const findPipelines = vi.fn(async () => state.pipelines);
 
   // KAN-793: stage-transition audit moved to DealStageHistory (deal-scoped per
   // KAN-791). Written by lead-received-push when it creates the wrapping Deal,
   // not by lead-assignment. This mock no longer carries leadStageHistory; the
   // DealStageHistory write is covered by the KAN-793 lead-received-push tests.
+  // KAN-795: pipeline.findMany no longer called from lead-assignment;
+  // pipeline-router loads its own candidates internally.
   const prisma: any = {
     contact: {
       findUnique: vi.fn(async () => state.contact),
@@ -278,11 +207,10 @@ function makePrismaMock(state: PrismaMockState) {
     auditLog: { create: createAuditLog },
     escalation: { create: createEscalation },
     assignmentRule: { findMany: findAssignmentRules },
-    pipeline: { findMany: findPipelines },
     stage: { findFirst: findFirstStage },
   };
 
-  return { prisma: prisma as PrismaClient, mocks: { updateContact, createAuditLog, createEscalation, findAssignmentRules, findPipelines } };
+  return { prisma: prisma as PrismaClient, mocks: { updateContact, createAuditLog, createEscalation, findAssignmentRules } };
 }
 
 function defaultContact(overrides: Partial<PrismaMockState['contact']> = {}) {
@@ -305,13 +233,44 @@ function rule(id: string, priority: number, conditions: Record<string, unknown>,
   return { id, pipelineId, priority, conditions, isActive: true };
 }
 
+/**
+ * Build a PipelineRoutingDecision-shaped mock return for routePipelineForNewLead.
+ */
+function routerResponse(overrides: {
+  type: 'route' | 'escalate' | 'no_candidates';
+  pipelineId?: string;
+  reasoning?: string;
+  confidence?: number;
+}) {
+  const baseReasoning =
+    overrides.type === 'route'
+      ? 'AI router chose this Pipeline.'
+      : overrides.type === 'escalate'
+        ? 'AI router could not pick a single best fit.'
+        : 'Tenant has no active Pipelines.';
+  return {
+    contactId: CONTACT_ID,
+    evaluatedAt: new Date(),
+    candidatePipelines: [],
+    decision:
+      overrides.type === 'route'
+        ? { type: 'route', pipelineId: overrides.pipelineId ?? PIPELINE_META, reasoning: overrides.reasoning ?? baseReasoning }
+        : overrides.type === 'escalate'
+          ? { type: 'escalate', reasoning: overrides.reasoning ?? baseReasoning }
+          : { type: 'no_candidates', reasoning: overrides.reasoning ?? baseReasoning },
+    confidence: overrides.confidence ?? (overrides.type === 'route' ? 0.82 : 0.0),
+    modelTier: 'reasoning' as const,
+    llmInputTokens: overrides.type === 'route' ? 350 : 0,
+    llmOutputTokens: overrides.type === 'route' ? 90 : 0,
+  };
+}
+
 describe('assignLeadToPipeline orchestrator — rule branch', () => {
   it('rule match → updates Contact + emits audit log with mode=rule (KAN-793: stage-history write moved to lead-received-push)', async () => {
     const { prisma, mocks } = makePrismaMock({
       contact: defaultContact(),
       tenant: { aiAssignmentConfidenceThreshold: 0.5 },
       rules: [rule('rule-hubspot', 1, { source: 'hubspot' })],
-      pipelines: [],
       initialStageId: STAGE_INITIAL_HUBSPOT,
     });
 
@@ -333,6 +292,8 @@ describe('assignLeadToPipeline orchestrator — rule branch', () => {
     expect(auditPayload.actionType).toBe('lead_assignment');
     expect(auditPayload.payload.assignmentMode).toBe('rule');
     expect(auditPayload.payload.ruleId).toBe('rule-hubspot');
+    // KAN-795: rule branch should NOT invoke the router.
+    expect(routePipelineForNewLeadMock).not.toHaveBeenCalled();
   });
 
   it('multi-tenant isolation — assignmentRule.findMany filters by tenantId', async () => {
@@ -340,13 +301,11 @@ describe('assignLeadToPipeline orchestrator — rule branch', () => {
       contact: defaultContact({ tenantId: TENANT_B }),
       tenant: { aiAssignmentConfidenceThreshold: 0.5 },
       rules: [],
-      pipelines: [{ id: PIPELINE_DEFAULT, name: 'Default', objectiveType: 'warm_up_lead', objectiveDescription: null }],
       initialStageId: null,
     });
-    __setLLMClientsForTest({
-      anthropic: makeAnthropicMock(vi.fn(async () => anthropicJsonResponse({ pipelineId: PIPELINE_DEFAULT, confidence: 0.0, reasoning: 'low' }))),
-      pubsub: null,
-    });
+    routePipelineForNewLeadMock.mockResolvedValueOnce(
+      routerResponse({ type: 'route', pipelineId: PIPELINE_DEFAULT, confidence: 0.0 }),
+    );
 
     await assignLeadToPipeline(prisma, CONTACT_ID);
 
@@ -355,12 +314,11 @@ describe('assignLeadToPipeline orchestrator — rule branch', () => {
     expect(findManyArgs.orderBy).toEqual({ priority: 'asc' });
   });
 
-  it('skipIfAssigned: true → no rule eval, no AI call, returns pre-existing assignment', async () => {
+  it('skipIfAssigned: true → no rule eval, no router call, returns pre-existing assignment', async () => {
     const { prisma, mocks } = makePrismaMock({
       contact: defaultContact({ currentPipelineId: PIPELINE_META, currentStageId: 'stage-x' }),
       tenant: {},
       rules: [rule('would-match', 1, { source: 'hubspot' })],
-      pipelines: [],
       initialStageId: null,
     });
 
@@ -370,33 +328,91 @@ describe('assignLeadToPipeline orchestrator — rule branch', () => {
     expect((out as any).pipelineId).toBe(PIPELINE_META);
     expect(mocks.findAssignmentRules).not.toHaveBeenCalled();
     expect(mocks.updateContact).not.toHaveBeenCalled();
+    expect(routePipelineForNewLeadMock).not.toHaveBeenCalled();
   });
 });
 
-describe('assignLeadToPipeline orchestrator — ai_fallback branch', () => {
-  it('rules miss + AI confidence ≥ threshold → mode=ai_fallback, persists assignment', async () => {
+describe('assignLeadToPipeline orchestrator — KAN-795 router integration', () => {
+  it('router decision=route AND confidence ≥ threshold → mode=ai_fallback, persists assignment', async () => {
     const { prisma, mocks } = makePrismaMock({
       contact: defaultContact({ source: 'manual' }),
       tenant: { aiAssignmentConfidenceThreshold: 0.5 },
-      rules: [rule('hubspot-only', 1, { source: 'hubspot' })], // miss
-      pipelines: [{ id: PIPELINE_META, name: 'Meta Ads', objectiveType: 'warm_up_lead', objectiveDescription: null }],
+      rules: [rule('hubspot-only', 1, { source: 'hubspot' })], // miss → router
       initialStageId: STAGE_INITIAL_HUBSPOT,
     });
-    __setLLMClientsForTest({
-      anthropic: makeAnthropicMock(vi.fn(async () => anthropicJsonResponse({ pipelineId: PIPELINE_META, confidence: 0.82, reasoning: 'manual lead → warm-up' }))),
-      pubsub: null,
-    });
+    routePipelineForNewLeadMock.mockResolvedValueOnce(
+      routerResponse({
+        type: 'route',
+        pipelineId: PIPELINE_META,
+        reasoning: 'manual lead → warm-up',
+        confidence: 0.82,
+      }),
+    );
 
     const out = await assignLeadToPipeline(prisma, CONTACT_ID);
 
     expect(out.mode).toBe('ai_fallback');
     expect((out as any).pipelineId).toBe(PIPELINE_META);
     expect((out as any).confidence).toBe(0.82);
+    expect((out as any).reasoning).toBe('manual lead → warm-up');
     expect(mocks.updateContact).toHaveBeenCalledTimes(1);
     const auditPayload = (mocks.createAuditLog.mock.calls[0][0] as any).data.payload;
     expect(auditPayload.assignmentMode).toBe('ai_fallback');
     expect(auditPayload.aiConfidence).toBe(0.82);
     expect(auditPayload.confidenceThreshold).toBe(0.5);
+    // Router invoked exactly once with the contactId.
+    expect(routePipelineForNewLeadMock).toHaveBeenCalledTimes(1);
+    expect(routePipelineForNewLeadMock.mock.calls[0][1]).toBe(CONTACT_ID);
+  });
+
+  it('router decision=escalate → falls through to posture (escalate_to_human → mode=escalated)', async () => {
+    const { prisma, mocks } = makePrismaMock({
+      contact: defaultContact({ source: 'manual' }),
+      tenant: {
+        belowThresholdPosture: 'escalate_to_human',
+        aiAssignmentConfidenceThreshold: 0.5,
+      },
+      rules: [],
+      initialStageId: STAGE_INITIAL_HUBSPOT,
+    });
+    routePipelineForNewLeadMock.mockResolvedValueOnce(
+      routerResponse({ type: 'escalate', confidence: 0.0, reasoning: 'ambiguous fit' }),
+    );
+
+    const out = await assignLeadToPipeline(prisma, CONTACT_ID);
+
+    expect(out.mode).toBe('escalated');
+    expect(mocks.createEscalation).toHaveBeenCalledTimes(1);
+    expect(mocks.updateContact).not.toHaveBeenCalled();
+    // Audit log captures the router's escalate reasoning.
+    const audit = (mocks.createAuditLog.mock.calls[0][0] as any).data.payload;
+    expect(audit.assignmentMode).toBe('escalated');
+    expect(audit.aiReasoning).toContain('Pipeline router escalated');
+    expect(audit.aiReasoning).toContain('ambiguous fit');
+  });
+
+  it('router decision=no_candidates → falls through to posture + warning logged (defensive)', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { prisma } = makePrismaMock({
+      contact: defaultContact({ source: 'manual' }),
+      tenant: {
+        belowThresholdPosture: 'stay_unassigned',
+        aiAssignmentConfidenceThreshold: 0.5,
+      },
+      rules: [],
+      initialStageId: null,
+    });
+    routePipelineForNewLeadMock.mockResolvedValueOnce(
+      routerResponse({ type: 'no_candidates', confidence: 1.0, reasoning: 'tenant has zero Pipelines' }),
+    );
+
+    const out = await assignLeadToPipeline(prisma, CONTACT_ID);
+
+    expect(out.mode).toBe('unassigned');
+    // Warning fires because no_candidates shouldn't happen post-bootstrap.
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0]![0] as string).toContain('pipeline-router returned no_candidates');
+    warnSpy.mockRestore();
   });
 });
 
@@ -410,14 +426,12 @@ describe('assignLeadToPipeline orchestrator — below-threshold posture branches
         aiAssignmentConfidenceThreshold: 0.5,
       },
       rules: [],
-      pipelines: [{ id: PIPELINE_META, name: 'Meta', objectiveType: 'warm_up_lead', objectiveDescription: null }],
       initialStageId: STAGE_INITIAL_HUBSPOT,
     });
-    // AI returns low confidence — below threshold.
-    __setLLMClientsForTest({
-      anthropic: makeAnthropicMock(vi.fn(async () => anthropicJsonResponse({ pipelineId: PIPELINE_META, confidence: 0.2, reasoning: 'unsure' }))),
-      pubsub: null,
-    });
+    // Router returns route with low confidence — below threshold → posture dispatch.
+    routePipelineForNewLeadMock.mockResolvedValueOnce(
+      routerResponse({ type: 'route', pipelineId: PIPELINE_META, confidence: 0.2, reasoning: 'unsure' }),
+    );
     return { prisma, mocks };
   }
 
