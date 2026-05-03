@@ -262,8 +262,11 @@ function makePrismaMock(state: PrismaMockState) {
   const findFirstStage = vi.fn(async () => (state.initialStageId ? { id: state.initialStageId } : null));
   const findAssignmentRules = vi.fn(async () => state.rules);
   const findPipelines = vi.fn(async () => state.pipelines);
-  const createLeadStageHistory = vi.fn(async () => ({ id: 'lsh-1' }));
 
+  // KAN-793: stage-transition audit moved to DealStageHistory (deal-scoped per
+  // KAN-791). Written by lead-received-push when it creates the wrapping Deal,
+  // not by lead-assignment. This mock no longer carries leadStageHistory; the
+  // DealStageHistory write is covered by the KAN-793 lead-received-push tests.
   const prisma: any = {
     contact: {
       findUnique: vi.fn(async () => state.contact),
@@ -277,10 +280,9 @@ function makePrismaMock(state: PrismaMockState) {
     assignmentRule: { findMany: findAssignmentRules },
     pipeline: { findMany: findPipelines },
     stage: { findFirst: findFirstStage },
-    leadStageHistory: { create: createLeadStageHistory },
   };
 
-  return { prisma: prisma as PrismaClient, mocks: { updateContact, createAuditLog, createEscalation, findAssignmentRules, findPipelines, createLeadStageHistory } };
+  return { prisma: prisma as PrismaClient, mocks: { updateContact, createAuditLog, createEscalation, findAssignmentRules, findPipelines } };
 }
 
 function defaultContact(overrides: Partial<PrismaMockState['contact']> = {}) {
@@ -304,7 +306,7 @@ function rule(id: string, priority: number, conditions: Record<string, unknown>,
 }
 
 describe('assignLeadToPipeline orchestrator — rule branch', () => {
-  it('rule match → updates Contact + writes LeadStageHistory + emits audit log with mode=rule', async () => {
+  it('rule match → updates Contact + emits audit log with mode=rule (KAN-793: stage-history write moved to lead-received-push)', async () => {
     const { prisma, mocks } = makePrismaMock({
       contact: defaultContact(),
       tenant: { aiAssignmentConfidenceThreshold: 0.5 },
@@ -326,7 +328,6 @@ describe('assignLeadToPipeline orchestrator — rule branch', () => {
       currentPipelineId: PIPELINE_HUBSPOT,
       currentStageId: STAGE_INITIAL_HUBSPOT,
     });
-    expect(mocks.createLeadStageHistory).toHaveBeenCalledTimes(1);
     expect(mocks.createAuditLog).toHaveBeenCalledTimes(1);
     const auditPayload = (mocks.createAuditLog.mock.calls[0][0] as any).data;
     expect(auditPayload.actionType).toBe('lead_assignment');

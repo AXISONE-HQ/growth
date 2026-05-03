@@ -2919,8 +2919,11 @@ const pipelinesRouter = router({
       if (!pipeline) {
         throw new TRPCError({ code: "NOT_FOUND", message: "Pipeline not found in this tenant" });
       }
+      // KAN-793: stage-transition audit moved to DealStageHistory (deal-scoped
+      // per KAN-791). Same semantic — count audit-trail transitions whose
+      // destination Stage belongs to this Pipeline.
       const stageHistoryCount: number =
-        (await (ctx.prisma as any).leadStageHistory?.count({
+        (await (ctx.prisma as any).dealStageHistory?.count({
           where: { toStage: { pipelineId: input.id } },
         })) ?? 0;
       const decision = canDeletePipeline({
