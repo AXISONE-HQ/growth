@@ -46,6 +46,7 @@ const shapeMessageMock = vi.fn();
 const evaluateSendPolicyMock = vi.fn();
 const publishActionSendMock = vi.fn();
 const resolveEmailConnectionIdMock = vi.fn();
+const resolveReplyToForTenantMock = vi.fn();
 const getPubSubClientMock = vi.fn();
 const dealFindUniqueMock = vi.fn();
 const decisionCreateMock = vi.fn();
@@ -100,6 +101,10 @@ vi.mock("../../../../packages/api/src/services/send-policy.js", () => ({
 vi.mock("../../../../packages/api/src/services/message-composer.js", () => ({
   publishActionSend: publishActionSendMock,
   resolveEmailConnectionId: resolveEmailConnectionIdMock,
+  // KAN-816: Reply-To lookup helper. Default returns the canonical
+  // Toronto-tenant Reply-To address; per-test overrides via the
+  // resolveReplyToForTenantMock declared below.
+  resolveReplyToForTenant: resolveReplyToForTenantMock,
 }));
 
 vi.mock("../../../../packages/api/src/lib/pubsub-client.js", () => ({
@@ -225,6 +230,11 @@ beforeEach(() => {
   evaluateSendPolicyMock.mockReset();
   publishActionSendMock.mockReset();
   resolveEmailConnectionIdMock.mockReset();
+  resolveReplyToForTenantMock.mockReset();
+  // KAN-816: default Reply-To resolution returns the canonical tenant
+  // Reply-To. Tests that need to exercise the null/missing-slug case
+  // override per-case.
+  resolveReplyToForTenantMock.mockResolvedValue("c03065f6@leads.axisone.ca");
   getPubSubClientMock.mockReset();
   dealFindUniqueMock.mockReset();
   decisionCreateMock.mockReset();
@@ -625,6 +635,40 @@ describe("KAN-815 — Phase 2 wiring (Brain trigger framework + consumer dispatc
     expect(publishInput.composed.unsubscribeUrl).toContain("/unsubscribe/");
     expect(publishInput.composed.unsubscribeUrl).toContain(CONTACT_A);
     expect(publishInput.connectionId).toBe("conn_email_active");
+  });
+
+  // ── KAN-816: Reply-To wiring regression — KAN-815c dispatch passes
+  //    resolved Reply-To address through to publishActionSend. Confirms the
+  //    customer-reply loop is architecturally wired (recipient replies route
+  //    to <inboxSlug>@leads.<LEAD_INBOX_DOMAIN> instead of the From address).
+  it("KAN-816: send_follow_up dispatch resolves tenant Reply-To + passes through to publishActionSend", async () => {
+    setupHappyPathMocks();
+    evaluateDealStateMock.mockReset();
+    setupPhase2DispatchMocks();
+
+    await postEnvelope(buildPushEnvelope());
+
+    expect(resolveReplyToForTenantMock).toHaveBeenCalledOnce();
+    expect(resolveReplyToForTenantMock.mock.calls[0]![1]).toBe(TENANT_A);
+
+    const publishInput = publishActionSendMock.mock.calls[0]![1] as { replyTo?: string };
+    expect(publishInput.replyTo).toBe("c03065f6@leads.axisone.ca");
+  });
+
+  // ── KAN-816: Reply-To omitted when tenant has no inboxSlug (graceful)
+  it("KAN-816: send_follow_up dispatch omits Reply-To when tenant has no inboxSlug (warn-and-continue)", async () => {
+    setupHappyPathMocks();
+    evaluateDealStateMock.mockReset();
+    setupPhase2DispatchMocks();
+    resolveReplyToForTenantMock.mockReset();
+    resolveReplyToForTenantMock.mockResolvedValueOnce(null); // no inboxSlug
+
+    await postEnvelope(buildPushEnvelope());
+
+    const publishInput = publishActionSendMock.mock.calls[0]![1] as { replyTo?: string };
+    expect(publishInput.replyTo).toBeUndefined();
+    // dispatch still proceeds — Reply-To omission is graceful
+    expect(publishActionSendMock).toHaveBeenCalledOnce();
   });
 
   // ── Test 5 — send_follow_up + shape returns no_shape → publishActionSend NOT called
