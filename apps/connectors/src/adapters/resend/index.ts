@@ -146,7 +146,13 @@ export class ResendAdapter implements ChannelAdapter {
     const metadata = (connection.metadata ?? {}) as Record<string, unknown>;
     const fromEmail = (metadata.fromEmail as string | undefined) ?? 'hello@growth.axisone.ca';
     const fromName = (metadata.fromName as string | undefined) ?? 'growth';
-    const replyTo = metadata.replyTo as string | undefined;
+    // KAN-816: per-message Reply-To override takes precedence over the
+    // ChannelConnection-level default. Enables customer-reply routing
+    // (e.g. <inboxSlug>@leads.<LEAD_INBOX_DOMAIN>) without per-tenant
+    // ChannelConnection metadata mutation. Falls back to connection's
+    // metadata.replyTo if the message doesn't carry one (legacy behavior).
+    const messageReplyTo = (msg as { replyTo?: string }).replyTo;
+    const replyTo = messageReplyTo ?? (metadata.replyTo as string | undefined);
 
     const html = msg.content.html ?? wrapPlainTextAsHtml(msg.content.body);
     const text = htmlToText(html, { wordwrap: 130 });
@@ -192,12 +198,19 @@ export class ResendAdapter implements ChannelAdapter {
           'Idempotency-Key': msg.actionId,
         },
         // Resend tags map analogously to SendGrid customArgs/categories — used
-        // for filtering in the Resend dashboard; KAN-684 webhook handler can
-        // also key off them for correlation.
+        // for filtering in the Resend dashboard; KAN-684 webhook handler keys
+        // off them for correlation. KAN-816: contact_id + decision_id added
+        // so the webhook handler's publishExecuted has all 5 required
+        // correlation fields (tenantId, actionId, decisionId, contactId,
+        // connectionId) — closes the [resend-webhook] missing correlation
+        // tags warning that was blocking action.executed publishes (and
+        // therefore the entire outbound Engagement write path).
         tags: [
           { name: 'tenant_id', value: msg.tenantId },
           { name: 'action_id', value: msg.actionId },
           { name: 'connection_id', value: connection.id },
+          { name: 'contact_id', value: msg.contactId },
+          { name: 'decision_id', value: msg.decisionId },
           { name: 'mode', value: 'simple' },
           ...(msg.traceId ? [{ name: 'trace_id', value: msg.traceId }] : []),
         ],

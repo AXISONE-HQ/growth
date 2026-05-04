@@ -201,6 +201,45 @@ export interface PublishActionSendInput {
   toEmail: string;
   composed: ComposedMessage;
   connectionId: string;
+  /**
+   * KAN-816: optional per-message Reply-To override. Populated by callers
+   * via `resolveReplyToForTenant(prisma, tenantId)` to route recipient
+   * replies back to the tenant inbound address (`<inboxSlug>@leads.
+   * <LEAD_INBOX_DOMAIN>`). Enables the customer-reply → AI auto-response
+   * loop. Optional + additive: callers that omit it preserve legacy
+   * behavior (no Reply-To header on outbound; recipient replies go to
+   * the From address).
+   */
+  replyTo?: string;
+}
+
+/**
+ * KAN-816: Construct a tenant's customer-reply Reply-To address by reading
+ * `Tenant.inboxSlug` and combining with `LEAD_INBOX_DOMAIN`. Returns null
+ * when the tenant hasn't been assigned an inbox slug yet (legacy tenants
+ * pre-KAN-741 + tenants whose admin hasn't called regenerateSlug).
+ *
+ * Callers (KAN-815c dispatchPhase2Send + legacy gateAndPublishComposed)
+ * invoke this BEFORE publishActionSend and pass the result via
+ * `PublishActionSendInput.replyTo`. The Resend adapter reads the
+ * per-message `replyTo` first, falls back to ChannelConnection metadata.
+ */
+export async function resolveReplyToForTenant(
+  prisma: PrismaClient,
+  tenantId: string,
+): Promise<string | null> {
+  const tenant = await prisma.tenant.findUnique({
+    where: { id: tenantId },
+    select: { inboxSlug: true },
+  });
+  if (!tenant?.inboxSlug) {
+    console.warn(
+      `[message-composer] resolveReplyToForTenant: tenantId=${tenantId} has no inboxSlug — Reply-To omitted`,
+    );
+    return null;
+  }
+  const domain = process.env.LEAD_INBOX_DOMAIN ?? 'leads.axisone.app';
+  return `${tenant.inboxSlug}@${domain}`;
 }
 
 // KAN-661 fix: topic `action.send` exists in GCP; the previous `growth.` prefix
@@ -227,6 +266,10 @@ export async function publishActionSend(
         body: input.composed.body,
       },
       categories: ['wedge', 'kan-660'],
+      // KAN-816: per-message Reply-To override propagated to the Resend
+      // adapter. Read by adapters/resend/index.ts:148-149 (`messageReplyTo`)
+      // with fallback to ChannelConnection.metadata.replyTo.
+      ...(input.replyTo ? { replyTo: input.replyTo } : {}),
     },
   };
 

@@ -62,6 +62,14 @@ export const OutboundMessageSchema = z.object({
       .optional(),
   }),
   categories: z.array(z.string()).optional(),
+  // KAN-816: per-message Reply-To override. When set, the connector adapter
+  // (e.g. Resend) populates the Reply-To header so recipient replies route
+  // back to the supplied address (typically <tenantInboxSlug>@leads.
+  // <LEAD_INBOX_DOMAIN>) instead of the From address. Required for the
+  // customer-reply → AI auto-response loop. Optional + additive: callers
+  // that don't set it preserve the legacy behavior (Reply-To omitted, OR
+  // ChannelConnection.metadata.replyTo fallback in the adapter).
+  replyTo: z.string().email().optional(),
 });
 export type OutboundMessage = z.infer<typeof OutboundMessageSchema>;
 
