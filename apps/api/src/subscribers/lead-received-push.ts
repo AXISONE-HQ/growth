@@ -303,9 +303,16 @@ interface MessageComposerModule {
       toEmail: string;
       composed: { subject: string; body: string; unsubscribeUrl: string };
       connectionId: string;
+      // KAN-816: optional per-message Reply-To override for customer-reply
+      // routing (`<inboxSlug>@leads.<LEAD_INBOX_DOMAIN>`).
+      replyTo?: string;
     },
   ) => Promise<string>;
   resolveEmailConnectionId: (prisma: unknown, tenantId: string) => Promise<string | null>;
+  // KAN-816: lookup helper that constructs the tenant's customer-reply
+  // address from `Tenant.inboxSlug` + `LEAD_INBOX_DOMAIN`. Returns null
+  // when the tenant has no inboxSlug; caller should warn-log + omit Reply-To.
+  resolveReplyToForTenant: (prisma: unknown, tenantId: string) => Promise<string | null>;
 }
 let _messageComposerModule: MessageComposerModule | null = null;
 async function loadMessageComposerModule(): Promise<MessageComposerModule> {
@@ -757,7 +764,15 @@ async function dispatchPhase2Send(
     unsubscribeUrl: `${publicWebhookBaseUrl}/unsubscribe/${deal.contactId}`,
   };
 
-  // 8. Publish to action.send for Resend connector to actually send.
+  // 8. KAN-816: resolve tenant Reply-To for customer-reply routing.
+  //    Recipient replies route to <inboxSlug>@leads.<LEAD_INBOX_DOMAIN>
+  //    which lands at the Track A inbound chain — enables multi-turn
+  //    AI conversation. Helper warn-logs + returns null when tenant has
+  //    no inboxSlug; we omit Reply-To rather than fail the dispatch.
+  const { resolveReplyToForTenant } = await loadMessageComposerModule();
+  const replyTo = await resolveReplyToForTenant(prisma, deal.tenantId);
+
+  // 9. Publish to action.send for Resend connector to actually send.
   const { getPubSubClient } = await loadPubSubClientModule();
   const messageId = await publishActionSend(getPubSubClient(), {
     tenantId: deal.tenantId,
@@ -766,6 +781,7 @@ async function dispatchPhase2Send(
     toEmail: deal.contact.email,
     composed,
     connectionId,
+    ...(replyTo ? { replyTo } : {}),
   });
 
   console.log(
