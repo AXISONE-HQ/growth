@@ -238,7 +238,18 @@ export async function resolveReplyToForTenant(
     );
     return null;
   }
-  const domain = process.env.LEAD_INBOX_DOMAIN ?? 'leads.axisone.app';
+  // KAN-818 fix: required at runtime. The previous `?? 'leads.axisone.app'`
+  // fallback silently produced wrong-TLD Reply-To addresses whenever
+  // LEAD_INBOX_DOMAIN was unset on growth-api — discovered Sprint 9 close.
+  // Throw at use-site so a missing env var fails loud (per
+  // feedback_env_var_default_fall_through_silent_typo).
+  const domain = process.env.LEAD_INBOX_DOMAIN;
+  if (!domain) {
+    throw new Error(
+      'LEAD_INBOX_DOMAIN env var is required for resolveReplyToForTenant. ' +
+        'Set it on the growth-api Cloud Run service (typically leads.axisone.ca for production).',
+    );
+  }
   return `${tenant.inboxSlug}@${domain}`;
 }
 

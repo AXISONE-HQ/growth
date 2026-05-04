@@ -331,15 +331,26 @@ describe('KAN-816 — resolveReplyToForTenant helper', () => {
     warnSpy.mockRestore();
   });
 
-  // ── Test 14 — LEAD_INBOX_DOMAIN env-var fallback
-  it('LEAD_INBOX_DOMAIN unset → falls back to leads.axisone.app default', async () => {
+  // ── Test 14 — KAN-818: LEAD_INBOX_DOMAIN unset → THROW (no silent fallback)
+  // Replaces the previous fallback test. The .default('leads.axisone.app')
+  // was a load-bearing typo that silently produced wrong-TLD Reply-To values
+  // in production whenever the env var was missed during deploy (Sprint 9
+  // close discovery). Per feedback_env_var_default_fall_through_silent_typo,
+  // production-required values fail-loud at use-site instead.
+  it('KAN-818 — LEAD_INBOX_DOMAIN unset → throws (no silent fallback)', async () => {
+    const original = process.env.LEAD_INBOX_DOMAIN;
     delete process.env.LEAD_INBOX_DOMAIN;
-    const fakePrisma = {
-      tenant: {
-        findUnique: vi.fn(async () => ({ inboxSlug: 'c03065f6' })),
-      },
-    };
-    const result = await resolveReplyToForTenant(fakePrisma as never, TENANT_ID);
-    expect(result).toBe('c03065f6@leads.axisone.app');
+    try {
+      const fakePrisma = {
+        tenant: {
+          findUnique: vi.fn(async () => ({ inboxSlug: 'c03065f6' })),
+        },
+      };
+      await expect(
+        resolveReplyToForTenant(fakePrisma as never, TENANT_ID),
+      ).rejects.toThrow(/LEAD_INBOX_DOMAIN env var is required/);
+    } finally {
+      if (original !== undefined) process.env.LEAD_INBOX_DOMAIN = original;
+    }
   });
 });
