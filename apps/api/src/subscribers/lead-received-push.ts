@@ -424,32 +424,74 @@ leadReceivedPushApp.post('/lead-received', async (c) => {
   }
 
   try {
-    // KAN-793 sequencing: ensure-then-assign-then-write.
-    const { ensureTenantHasDefaultPipeline } = await loadBootstrapModule();
-    await ensureTenantHasDefaultPipeline(prisma, contact.tenantId);
-
-    const { assignLeadToPipeline } = await loadAssignmentModule();
-    const assignment = await assignLeadToPipeline(prisma, event.contactId, {
-      skipIfAssigned: true,
+    // KAN-819: Deal continuity for multi-turn AI conversations. Per Sprint 6
+    // pivot constraint, a Contact may have AT MOST one open Deal per Pipeline
+    // — so an existing open Deal means this inbound is a follow-up turn in an
+    // ongoing conversation, not a new lead. Reuse the existing Deal so the
+    // Brain reads the full conversation history. Only create a fresh Deal
+    // when the Contact has no open Deals (first contact OR all prior closed).
+    //
+    // Multi-open-Deal anomaly (against constraint): pick most recent + warn.
+    // Pre-Sprint-10 smoke iterations already produced multiple open Deals
+    // for the dogfood Contact; the warn path is exercised on every smoke
+    // until manual cleanup. KAN-820 follow-up will deduplicate on read.
+    const existingOpenDeals = await prisma.deal.findMany({
+      where: {
+        contactId: contact.id,
+        currentStage: { outcomeType: 'open' },
+      },
+      orderBy: { createdAt: 'desc' },
+      include: { currentStage: { select: { id: true, name: true, outcomeType: true } } },
     });
 
-    console.log(
-      `[lead-received-push] assigned contactId=${event.contactId} tenantId=${event.tenantId} mode=${assignment.mode}`,
-    );
-
     let dealId: string | null = null;
-    if (
-      assignment.mode === 'rule' ||
-      assignment.mode === 'ai_fallback' ||
-      assignment.mode === 'default_pipeline'
-    ) {
-      dealId = await writePhase1Deal(event, contact.tenantId, assignment);
+
+    if (existingOpenDeals.length > 0) {
+      // ── Multi-turn case: reuse existing open Deal ──
+      const reusedDeal = existingOpenDeals[0]!;
+      dealId = reusedDeal.id;
+
+      if (existingOpenDeals.length > 1) {
+        console.warn(
+          `[lead-received-push] kan-819-multiple-open-deals-violates-constraint-using-most-recent contactId=${contact.id} openDealCount=${existingOpenDeals.length} reusingDealId=${reusedDeal.id} otherOpenDealIds=${existingOpenDeals.slice(1).map((d) => d.id).join(',')}`,
+        );
+      } else {
+        console.log(
+          `[lead-received-push] kan-819-reusing-existing-open-deal-multi-turn contactId=${contact.id} reusingDealId=${reusedDeal.id} stageName=${reusedDeal.currentStage.name}`,
+        );
+      }
+
+      // Write the inbound Engagement attached to the reused Deal. Skips
+      // bootstrap + assign + Deal.create + DealStageHistory.create entirely
+      // (none are appropriate when Pipeline+Stage state is already set).
+      await writeInboundEngagementForExistingDeal(event, contact.tenantId, reusedDeal.id);
     } else {
-      // Phase 1 posture: ambiguous routing produces Contact-only state.
-      // Phase 2 KAN-794/795 resolves via Customer Decision meta-pipeline.
-      console.warn(
-        `[lead-received-push] phase-1-ambiguous-assignment-deal-skipped contactId=${event.contactId} tenantId=${event.tenantId} mode=${assignment.mode}`,
+      // ── First-turn case: existing KAN-793 path (bootstrap → assign → write) ──
+      const { ensureTenantHasDefaultPipeline } = await loadBootstrapModule();
+      await ensureTenantHasDefaultPipeline(prisma, contact.tenantId);
+
+      const { assignLeadToPipeline } = await loadAssignmentModule();
+      const assignment = await assignLeadToPipeline(prisma, event.contactId, {
+        skipIfAssigned: true,
+      });
+
+      console.log(
+        `[lead-received-push] assigned contactId=${event.contactId} tenantId=${event.tenantId} mode=${assignment.mode}`,
       );
+
+      if (
+        assignment.mode === 'rule' ||
+        assignment.mode === 'ai_fallback' ||
+        assignment.mode === 'default_pipeline'
+      ) {
+        dealId = await writePhase1Deal(event, contact.tenantId, assignment);
+      } else {
+        // Phase 1 posture: ambiguous routing produces Contact-only state.
+        // Phase 2 KAN-794/795 resolves via Customer Decision meta-pipeline.
+        console.warn(
+          `[lead-received-push] phase-1-ambiguous-assignment-deal-skipped contactId=${event.contactId} tenantId=${event.tenantId} mode=${assignment.mode}`,
+        );
+      }
     }
 
     // KAN-815a Phase 2 wiring trigger. Runs AFTER the engagement-write
@@ -483,6 +525,59 @@ leadReceivedPushApp.post('/lead-received', async (c) => {
     return c.text('retry', 500);
   }
 });
+
+// ─────────────────────────────────────────────
+// KAN-819 — Multi-turn Engagement-only write (no Deal/DealStageHistory)
+// ─────────────────────────────────────────────
+
+/**
+ * Write only the inbound Engagement, attached to an existing open Deal. Used
+ * when KAN-819 detects a multi-turn case (Contact already has an open Deal on
+ * a Pipeline). Mirrors writePhase1Deal's normalize+log shape so the Engagement
+ * metadata stays consistent across first-turn and follow-up rows; the Deal +
+ * DealStageHistory writes are skipped (the existing Deal already carries that
+ * state and the inbound is not a stage transition — Brain re-eval downstream
+ * decides what to do next).
+ *
+ * logEngagement is idempotent on correlationId, so Pub/Sub redelivery of the
+ * same eventId is a no-op. No transaction needed (single write).
+ */
+async function writeInboundEngagementForExistingDeal(
+  event: z.infer<typeof LeadReceivedEventSchema>,
+  tenantId: string,
+  dealId: string,
+): Promise<void> {
+  const { normalizeInbound } = await loadNormalizerModule();
+  const normalized = await normalizeInbound({
+    source: 'email',
+    tenantId,
+    payload: {
+      fromAddress: event.metadata.fromAddress ?? '',
+      subject: event.metadata.subject ?? null,
+      bodyPreview: event.metadata.bodyPreview ?? null,
+      attachmentCount: event.metadata.attachmentCount,
+    },
+  });
+
+  const { logEngagement } = await loadEngagementModule();
+  await logEngagement(prisma, {
+    tenantId,
+    dealId,
+    contactId: event.contactId,
+    engagementType: 'email_received',
+    channel: 'email',
+    occurredAt: new Date(event.receivedAt),
+    correlationId: `engagement:lead-received:${event.eventId}`,
+    metadata: {
+      senderEmail: normalized.preParsed.senderEmail,
+      subject: normalized.preParsed.subject,
+      extractionConfidence: normalized.extractionConfidence,
+      // KAN-819 marker — distinguishes follow-up Engagement rows from the
+      // first-turn write that's attached to the originating Deal create.
+      kan819Reused: true,
+    },
+  });
+}
 
 // ─────────────────────────────────────────────
 // Deal + DealStageHistory + Engagement write — KAN-793

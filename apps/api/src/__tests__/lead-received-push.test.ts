@@ -38,6 +38,8 @@ const stageFindFirstMock = vi.fn();
 const dealCreateMock = vi.fn();
 const dealStageHistoryCreateMock = vi.fn();
 const transactionMock = vi.fn();
+// KAN-819 — deal-continuity findMany lookup (existing open Deals for Contact)
+const dealFindManyMock = vi.fn();
 
 // KAN-815 — Phase 2 substrate mocks
 const evaluateDealStateMock = vi.fn();
@@ -59,8 +61,9 @@ vi.mock("../prisma.js", () => ({
   prisma: {
     contact: { findUnique: contactFindUniqueMock },
     stage: { findFirst: stageFindFirstMock },
-    deal: { findUnique: dealFindUniqueMock },
+    deal: { findUnique: dealFindUniqueMock, findMany: dealFindManyMock },
     decision: { create: decisionCreateMock },
+    engagement: { findUnique: vi.fn(), create: vi.fn() }, // KAN-819 — only invoked indirectly via mocked logEngagement
     $transaction: transactionMock,
   },
 }));
@@ -238,6 +241,11 @@ beforeEach(() => {
   getPubSubClientMock.mockReset();
   dealFindUniqueMock.mockReset();
   decisionCreateMock.mockReset();
+  // KAN-819 — default to first-turn (no existing open Deals) so the entire
+  // pre-Sprint-10 test corpus continues to exercise the bootstrap+assign+
+  // create path. Tests that need multi-turn override this per-case.
+  dealFindManyMock.mockReset();
+  dealFindManyMock.mockResolvedValue([]);
 });
 
 // KAN-815 fixture builders
@@ -877,5 +885,193 @@ describe("KAN-815 — Phase 2 wiring (Brain trigger framework + consumer dispatc
     expect(resolveEmailConnectionIdMock).toHaveBeenCalledOnce();
     expect(decisionCreateMock).not.toHaveBeenCalled(); // Decision row not written when dispatch can't happen
     expect(publishActionSendMock).not.toHaveBeenCalled();
+  });
+});
+
+// ─────────────────────────────────────────────
+// KAN-819 — Deal continuity for multi-turn AI conversations
+// ─────────────────────────────────────────────
+
+describe("KAN-819 — Deal continuity for multi-turn AI conversations", () => {
+  const REUSED_DEAL_ID = "cmoreused0001m7wb000000000";
+  const STAGE_NEW = "stage_new_open";
+
+  function buildOpenDeal(overrides: Partial<{ id: string; createdAt: Date; stageName: string }> = {}) {
+    return {
+      id: overrides.id ?? REUSED_DEAL_ID,
+      contactId: CONTACT_A,
+      tenantId: TENANT_A,
+      pipelineId: PIPELINE_A,
+      currentStageId: STAGE_NEW,
+      createdAt: overrides.createdAt ?? new Date("2026-05-04T19:21:12.275Z"),
+      currentStage: {
+        id: STAGE_NEW,
+        name: overrides.stageName ?? "New",
+        outcomeType: "open" as const,
+      },
+    };
+  }
+
+  // ── Test 1 — First-turn (regression): no existing open Deals → existing
+  //    bootstrap+assign+create path. Confirms KAN-819 doesn't break the
+  //    pre-Sprint-10 happy path.
+  it("first-turn (no existing open Deal) → bootstrap+assign+create path runs unchanged", async () => {
+    setupHappyPathMocks();
+    dealFindManyMock.mockResolvedValueOnce([]); // explicit override for clarity
+
+    const res = await postEnvelope(buildPushEnvelope());
+
+    expect(res.status).toBe(200);
+    // Continuity check fired
+    expect(dealFindManyMock).toHaveBeenCalledOnce();
+    expect(dealFindManyMock.mock.calls[0]![0]).toMatchObject({
+      where: {
+        contactId: CONTACT_A,
+        currentStage: { outcomeType: "open" },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+    // First-turn path: bootstrap + assign + create all ran
+    expect(ensureTenantHasDefaultPipelineMock).toHaveBeenCalledOnce();
+    expect(assignLeadToPipelineMock).toHaveBeenCalledOnce();
+    expect(dealCreateMock).toHaveBeenCalledOnce();
+    expect(dealStageHistoryCreateMock).toHaveBeenCalledOnce();
+    expect(logEngagementMock).toHaveBeenCalledOnce();
+  });
+
+  // ── Test 2 — Multi-turn (one existing open Deal): reuse + skip bootstrap/
+  //    assign/create + still write Engagement attached to existing Deal.
+  it("multi-turn (one existing open Deal) → reuse, skip bootstrap+assign+create, write Engagement to existing Deal", async () => {
+    setupHappyPathMocks();
+    dealFindManyMock.mockReset();
+    dealFindManyMock.mockResolvedValueOnce([buildOpenDeal()]);
+    const infoSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    const res = await postEnvelope(buildPushEnvelope());
+
+    expect(res.status).toBe(200);
+    // Skipped bootstrap/assign/create
+    expect(ensureTenantHasDefaultPipelineMock).not.toHaveBeenCalled();
+    expect(assignLeadToPipelineMock).not.toHaveBeenCalled();
+    expect(dealCreateMock).not.toHaveBeenCalled();
+    expect(dealStageHistoryCreateMock).not.toHaveBeenCalled();
+    expect(transactionMock).not.toHaveBeenCalled();
+    // Still wrote Engagement attached to REUSED Deal
+    expect(normalizeInboundMock).toHaveBeenCalledOnce();
+    expect(logEngagementMock).toHaveBeenCalledOnce();
+    const engArgs = logEngagementMock.mock.calls[0]![1] as {
+      dealId: string;
+      contactId: string;
+      tenantId: string;
+      metadata: Record<string, unknown>;
+    };
+    expect(engArgs.dealId).toBe(REUSED_DEAL_ID);
+    expect(engArgs.contactId).toBe(CONTACT_A);
+    expect(engArgs.tenantId).toBe(TENANT_A);
+    expect(engArgs.metadata.kan819Reused).toBe(true);
+    // info log emitted with the reuse marker
+    expect(
+      infoSpy.mock.calls.some((args) =>
+        String(args[0] ?? "").includes("kan-819-reusing-existing-open-deal-multi-turn"),
+      ),
+    ).toBe(true);
+    infoSpy.mockRestore();
+  });
+
+  // ── Test 3 — Multi-turn anomaly: 2+ open Deals → reuse most recent +
+  //    emit constraint-violation warn log with all deal ids.
+  it("multi-turn anomaly (multiple open Deals) → reuse most recent + warn with all deal ids", async () => {
+    setupHappyPathMocks();
+    const olderDeal = buildOpenDeal({
+      id: "cmorolder0001m7wb000000000",
+      createdAt: new Date("2026-05-04T18:00:00.000Z"),
+    });
+    const newestDeal = buildOpenDeal({
+      id: "cmornewest0001m7wb000000000",
+      createdAt: new Date("2026-05-04T19:30:00.000Z"),
+    });
+    dealFindManyMock.mockReset();
+    // The handler relies on orderBy:createdAt-desc — emulate that here.
+    dealFindManyMock.mockResolvedValueOnce([newestDeal, olderDeal]);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const res = await postEnvelope(buildPushEnvelope());
+
+    expect(res.status).toBe(200);
+    // Reuse picked the most recent (first in desc-ordered findMany)
+    const engArgs = logEngagementMock.mock.calls[0]![1] as { dealId: string };
+    expect(engArgs.dealId).toBe(newestDeal.id);
+    // Warn log emitted with all deal ids (most-recent + the rest)
+    const warnLine = warnSpy.mock.calls
+      .map((args) => String(args[0] ?? ""))
+      .find((s) => s.includes("kan-819-multiple-open-deals-violates-constraint-using-most-recent"));
+    expect(warnLine).toBeDefined();
+    expect(warnLine).toContain(`reusingDealId=${newestDeal.id}`);
+    expect(warnLine).toContain(`openDealCount=2`);
+    expect(warnLine).toContain(olderDeal.id);
+    warnSpy.mockRestore();
+  });
+
+  // ── Test 4 — Multi-cycle: only CLOSED Deals exist → first-turn path (new
+  //    Deal). The findMany filter currentStage.outcomeType='open' excludes
+  //    closed Deals server-side, so this test mirrors that contract by
+  //    returning [] from the mock.
+  it("multi-cycle (existing closed Deals only) → first-turn path runs (closed Deals excluded by query)", async () => {
+    setupHappyPathMocks();
+    // currentStage.outcomeType='open' filter at the DB level excludes any
+    // terminal_won / terminal_lost / etc. — so the mock returns [] even
+    // though a closed Deal exists for this Contact in real data.
+    dealFindManyMock.mockReset();
+    dealFindManyMock.mockResolvedValueOnce([]);
+
+    const res = await postEnvelope(buildPushEnvelope());
+
+    expect(res.status).toBe(200);
+    expect(ensureTenantHasDefaultPipelineMock).toHaveBeenCalledOnce();
+    expect(assignLeadToPipelineMock).toHaveBeenCalledOnce();
+    expect(dealCreateMock).toHaveBeenCalledOnce(); // new Deal for the new turn
+  });
+
+  // ── Test 5 — Idempotency: same eventId fires twice on multi-turn path →
+  //    correlationId UNIQUE on Engagement makes the second a no-op (logEngagement
+  //    has internal dedup; here we verify the handler still returns 200 + the
+  //    correlationId is set so the dedup works).
+  it("multi-turn idempotency — same eventId fires twice → 200 both times, correlationId set on Engagement for dedup", async () => {
+    setupHappyPathMocks();
+    dealFindManyMock.mockReset();
+    dealFindManyMock.mockResolvedValue([buildOpenDeal()]); // persistent: returns same deal for both calls
+    const eventId = "550e8400-e29b-41d4-a716-446655440042";
+
+    const res1 = await postEnvelope(buildPushEnvelope({ eventId }));
+    const res2 = await postEnvelope(buildPushEnvelope({ eventId }));
+
+    expect(res1.status).toBe(200);
+    expect(res2.status).toBe(200);
+    // Both calls hit logEngagement; the helper's own correlationId-dedup
+    // makes the second a no-op against the DB. Here we just confirm the
+    // handler computed and passed the correlationId so dedup is possible.
+    expect(logEngagementMock).toHaveBeenCalledTimes(2);
+    const corrId1 = (logEngagementMock.mock.calls[0]![1] as { correlationId: string }).correlationId;
+    const corrId2 = (logEngagementMock.mock.calls[1]![1] as { correlationId: string }).correlationId;
+    expect(corrId1).toBe(`engagement:lead-received:${eventId}`);
+    expect(corrId2).toBe(corrId1);
+  });
+
+  // ── Test 6 — Brain re-eval reads the REUSED Deal (not a wrong Deal). On
+  //    multi-turn, evaluateDealState must be invoked with the existing
+  //    dealId so it sees the full prior conversation history.
+  it("multi-turn → evaluateDealState invoked with reused Deal id (not new one)", async () => {
+    setupHappyPathMocks();
+    dealFindManyMock.mockReset();
+    dealFindManyMock.mockResolvedValueOnce([buildOpenDeal()]);
+
+    await postEnvelope(buildPushEnvelope());
+
+    expect(evaluateDealStateMock).toHaveBeenCalledOnce();
+    // Brain receives the REUSED dealId, not DEAL_A (which would only be
+    // produced by the first-turn writePhase1Deal path that was skipped).
+    expect(evaluateDealStateMock.mock.calls[0]![1]).toBe(REUSED_DEAL_ID);
+    // Sanity: dealCreateMock NOT called (proving the reused id wasn't a fresh write)
+    expect(dealCreateMock).not.toHaveBeenCalled();
   });
 });
