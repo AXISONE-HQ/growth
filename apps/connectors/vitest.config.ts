@@ -28,6 +28,10 @@ export default defineConfig({
       GCP_PROJECT_ID: 'test-project',
       DATABASE_URL: 'postgresql://test:test@localhost:5432/test',
       INTERNAL_TRPC_AUTH_TOKEN: 'test-token-at-least-32-characters-long',
+      // KAN-818: required at boot post-Sprint-9 (the previous .default('leads.axisone.app')
+      // was removed because it silently fell through in production when the env var
+      // was missed during deploy). Tests use a recognizable test-only TLD.
+      LEAD_INBOX_DOMAIN: 'leads.test.invalid',
     },
     coverage: {
       provider: 'v8',

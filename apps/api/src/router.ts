@@ -3562,6 +3562,24 @@ const tenantApiKeysRouter = router({
 // types out of the apps/api TS6059 graph (KAN-689 cohort discipline).
 // ============================================================================
 
+/**
+ * KAN-818 fix: read LEAD_INBOX_DOMAIN at use-site, throw if unset. Replaces
+ * the previous `?? "leads.axisone.app"` fallback that silently displayed
+ * wrong-TLD inbox addresses to admins (Sprint 9 close discovery). Per
+ * feedback_env_var_default_fall_through_silent_typo, production-required
+ * values fail-loud at boot/use rather than fall through to dev placeholders.
+ */
+function requireLeadInboxDomain(): string {
+  const domain = process.env.LEAD_INBOX_DOMAIN;
+  if (!domain) {
+    throw new Error(
+      'LEAD_INBOX_DOMAIN env var is required for inbox-address construction. ' +
+        'Set it on the growth-api Cloud Run service (typically leads.axisone.ca for production).',
+    );
+  }
+  return domain;
+}
+
 const inboxRouter = router({
   // Read the active tenant's inbox slug + computed full address. Returns null
   // slug when the tenant hasn't regenerated yet (legacy rows pre-KAN-741).
@@ -3573,11 +3591,12 @@ const inboxRouter = router({
     if (!tenant) {
       throw new TRPCError({ code: "NOT_FOUND", message: "Tenant not found" });
     }
-    // LEAD_INBOX_DOMAIN is read by the connectors service; the apps/api
-    // surface returns the slug + a hint domain. Frontend composes the
-    // displayed address; if the env var differs across services the
-    // frontend value lags but the receive-side address is still authoritative.
-    const domain = process.env.LEAD_INBOX_DOMAIN ?? "leads.axisone.app";
+    // KAN-818 fix: LEAD_INBOX_DOMAIN required at runtime — the previous
+    // `?? "leads.axisone.app"` fallback silently displayed wrong-TLD inbox
+    // addresses to admins whenever the env var was missing on growth-api.
+    // Throw at use-site so the missing-env-var case is visible (per
+    // feedback_env_var_default_fall_through_silent_typo).
+    const domain = requireLeadInboxDomain();
     const address = tenant.inboxSlug ? `${tenant.inboxSlug}@${domain}` : null;
     return {
       slug: tenant.inboxSlug as string | null,
@@ -3619,7 +3638,8 @@ const inboxRouter = router({
       where: { id: ctx.tenantId },
       data: { inboxSlug: slug },
     });
-    const domain = process.env.LEAD_INBOX_DOMAIN ?? "leads.axisone.app";
+    // KAN-818 fix: see requireLeadInboxDomain() — fails loud on missing env.
+    const domain = requireLeadInboxDomain();
     return { slug, address: `${slug}@${domain}`, domain };
   }),
 

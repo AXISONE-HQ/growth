@@ -60,7 +60,14 @@ const EnvSchema = z.object({
   // KAN-741. Domain that forms per-tenant inbox addresses as
   // <tenant.inboxSlug>@<LEAD_INBOX_DOMAIN>. Apps/web also reads this for
   // address display; both services should resolve to the same value.
-  LEAD_INBOX_DOMAIN: z.string().default('leads.axisone.app'),
+  //
+  // KAN-818 fix: required at boot. The previous `.default('leads.axisone.app')`
+  // was a load-bearing typo (wrong TLD) that silently fell through whenever
+  // the env var was missing — discovered on Sprint 9 close when growth-api's
+  // env was unset and KAN-816 Reply-To built `<slug>@leads.axisone.app`
+  // (.app instead of .ca). Per `feedback_env_var_default_fall_through_silent_typo`,
+  // production-required values fail-loud at boot via required env vars.
+  LEAD_INBOX_DOMAIN: z.string(),
 
   // KAN-741. Audience the lead.received push subscriber uses to verify
   // OIDC tokens on incoming Pub/Sub deliveries. Per KAN-731 lesson —
