@@ -23,11 +23,64 @@
  */
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { convert as htmlToText } from 'html-to-text';
 import { ActionSendEventSchema, type ActionExecutedEvent } from '@growth/connector-contracts';
 import { ResendAdapter } from '../adapters/resend/index.js';
 import { prisma } from '../repository/connection-repository.js';
 import { publishEvent } from '../pubsub/index.js';
 import { logger } from '../logger.js';
+
+// KAN-817 — content visibility for cross-turn anti-repetition. Hard caps
+// applied here at the publish site so the schema's `.max()` is enforced
+// before zod sees the payload. Any cap drift between this file and
+// `packages/connector-contracts/src/events.ts` will fail loud at publish.
+const SUBJECT_CAP = 200;
+const BODY_PREVIEW_CAP = 500;
+
+/**
+ * Derive a plain-text preview from the OutboundMessage content. Used to
+ * populate `bodyPreview` on the action.executed event.
+ *
+ *   - Prefer `content.body` (already plain) when present
+ *   - Fall back to `htmlToText(content.html)` — drops links + images,
+ *     collapses whitespace (KAN-817 defaults; sibling configuration to the
+ *     ResendAdapter's existing htmlToText call site)
+ *   - Returns `undefined` (NOT empty string) when neither is present, so
+ *     the Shaper's anti-repetition block skips the entry entirely instead
+ *     of rendering a blank `body:` line
+ */
+function deriveBodyPreview(content: {
+  body?: string;
+  html?: string;
+}): string | undefined {
+  // Plain-body path — trim + post-trim length check. A whitespace-only body
+  // (e.g. "   \n\n   ") should fall through to the html fallback or return
+  // undefined, NOT take precedence and ship noise to Brain's prompt.
+  if (content.body) {
+    const trimmed = content.body.trim();
+    if (trimmed.length > 0) {
+      return trimmed.slice(0, BODY_PREVIEW_CAP);
+    }
+  }
+  if (content.html && content.html.length > 0) {
+    const plain = htmlToText(content.html, {
+      wordwrap: false,
+      selectors: [
+        // Drop links — we want the prose, not "click here ▸ https://…".
+        { selector: 'a', options: { ignoreHref: true } },
+        // Drop images.
+        { selector: 'img', format: 'skip' },
+      ],
+    })
+      // Collapse whitespace into single spaces — multi-newline runs in
+      // converted HTML hurt the prompt's signal-to-noise.
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (plain.length === 0) return undefined;
+    return plain.slice(0, BODY_PREVIEW_CAP);
+  }
+  return undefined;
+}
 
 export const actionSendPushApp = new Hono();
 
@@ -110,6 +163,25 @@ actionSendPushApp.post('/action-send', async (c) => {
           ? 'suppressed'
           : 'failed';
 
+    // KAN-817 — content visibility. Capture rendered subject + bodyPreview
+    // from the OutboundMessage about to be sent, so the consumer can persist
+    // them in Engagement.metadata and the next-turn Shaper can read them
+    // for cross-turn anti-repetition. Caps applied here (NOT at the schema
+    // level alone) so that runaway content never reaches zod.
+    //
+    // Webhook-side asymmetry: the Resend webhook handler's `publishExecuted`
+    // (apps/connectors/src/webhooks/resend.ts) leaves these undefined — it
+    // doesn't have the full body in scope. Acceptable because the consumer
+    // is idempotent on actionId; this send-time event fires first and wins.
+    //
+    // In the rare case this 'sent' publish fails but Resend's 'delivered'
+    // webhook succeeds, the Engagement will be created from the webhook
+    // event with subject but no bodyPreview. Acceptable degradation for v1;
+    // Brain will have less anti-repetition signal on that one engagement.
+    const rawSubject = event.message.content.subject;
+    const subjectField = rawSubject ? rawSubject.slice(0, SUBJECT_CAP) : undefined;
+    const bodyPreviewField = deriveBodyPreview(event.message.content);
+
     await publishEvent({
       topic: 'action.executed',
       timestamp: new Date().toISOString(),
@@ -127,6 +199,8 @@ actionSendPushApp.post('/action-send', async (c) => {
       ...(result.errorClass ? { errorClass: result.errorClass } : {}),
       ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
       attemptNumber: 1,
+      ...(subjectField ? { subject: subjectField } : {}),
+      ...(bodyPreviewField ? { bodyPreview: bodyPreviewField } : {}),
     });
 
     logger.info(

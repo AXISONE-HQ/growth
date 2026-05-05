@@ -38,6 +38,11 @@ const ActionExecutedEventSchema = z.object({
   errorClass: z.enum(['transient', 'permanent']).optional(),
   errorMessage: z.string().optional(),
   attemptNumber: z.number().int().min(1).default(1),
+  // KAN-817 — content visibility for cross-turn anti-repetition. Caps must
+  // mirror packages/connector-contracts/src/events.ts (200 / 500). If the
+  // canonical schema's caps drift, this inline copy must drift with it.
+  subject: z.string().max(200).optional(),
+  bodyPreview: z.string().max(500).optional(),
 });
 import { prisma } from '../prisma.js';
 
@@ -163,6 +168,14 @@ actionExecutedPushApp.post('/action-executed', async (c) => {
               channel: event.channel,
               provider: event.provider,
               ...(event.providerMessageId ? { providerMessageId: event.providerMessageId } : {}),
+              // KAN-817 — content visibility for cross-turn anti-repetition.
+              // Populated by the send-side publisher (`action-send-push.ts`);
+              // webhook-side `publishExecuted` leaves these undefined and
+              // never wins the race (idempotent on actionId). Read by
+              // `buildShapePrompt` in `packages/api/src/services/message-shaper.ts`
+              // — field names MUST stay `subject` / `bodyPreview` (no rename).
+              ...(event.subject ? { subject: event.subject } : {}),
+              ...(event.bodyPreview ? { bodyPreview: event.bodyPreview } : {}),
             },
           },
         });
