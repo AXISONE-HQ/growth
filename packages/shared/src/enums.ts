@@ -38,22 +38,11 @@ export const LeadAssignmentPostureEnum = z.enum([
 ]);
 export type LeadAssignmentPosture = z.infer<typeof LeadAssignmentPostureEnum>;
 
-export const KnowledgeSourceTypeEnum = z.enum([
-  "url",
-  "document",
-  "qa_pair",
-  "structured_field",
-]);
-export type KnowledgeSourceType = z.infer<typeof KnowledgeSourceTypeEnum>;
-
-export const KnowledgeSourceStatusEnum = z.enum([
-  "pending",
-  "processing",
-  "indexed",
-  "failed",
-  "stale",
-]);
-export type KnowledgeSourceStatus = z.infer<typeof KnowledgeSourceStatusEnum>;
+// KAN-826 — KnowledgeSourceTypeEnum + KnowledgeSourceStatusEnum REMOVED.
+// Sprint 11a Architect Spec uses string columns (sourceType, status) on
+// the new KnowledgeSource model rather than Prisma enums. Legacy KAN-706
+// enum drift PAIRS removed from packages/shared/src/__tests__/enum-drift.test.ts
+// in the same PR per `reference_enum_drift_pairs_discipline` memory.
 
 // KAN-791 Phase 1 PIVOT — DealStatus enum REMOVED. Deal lifecycle state is
 // now derived from Deal.currentStageId → Stage.outcomeType. Closed_won/_lost
