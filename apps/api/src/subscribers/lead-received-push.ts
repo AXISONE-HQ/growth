@@ -583,6 +583,12 @@ async function writeInboundEngagementForExistingDeal(
     metadata: {
       senderEmail: normalized.preParsed.senderEmail,
       subject: normalized.preParsed.subject,
+      // KAN-839 — persist inbound body so Shaper's `## Recent inbound from
+      // contact` section can render the customer's verbatim words. Cap
+      // matches Shaper's render cap (2000 chars) so DB and prompt see the
+      // same binding constraint. Mirrors KAN-817's outbound bodyPreview
+      // field naming for producer-consumer contract symmetry.
+      bodyPreview: normalized.preParsed.bodyText?.slice(0, 2000) ?? null,
       extractionConfidence: normalized.extractionConfidence,
       // KAN-819 marker — distinguishes follow-up Engagement rows from the
       // first-turn write that's attached to the originating Deal create.
@@ -696,6 +702,11 @@ async function writePhase1Deal(
       metadata: {
         senderEmail: normalized.preParsed.senderEmail,
         subject: normalized.preParsed.subject,
+        // KAN-839 — see writeInboundEngagementForExistingDeal for full
+        // rationale. Same producer-consumer contract on both inbound write
+        // paths so first-turn and multi-turn Engagement rows render
+        // identically into the Shaper prompt.
+        bodyPreview: normalized.preParsed.bodyText?.slice(0, 2000) ?? null,
         extractionConfidence: normalized.extractionConfidence,
       },
     });

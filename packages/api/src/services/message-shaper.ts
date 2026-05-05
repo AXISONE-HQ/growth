@@ -170,6 +170,27 @@ export async function shapeMessage(
     throw new MessageShaperDealNotFoundError(`Deal not found: ${dealId}`);
   }
 
+  // KAN-839 — load most recent inbound Engagement for this Deal so the
+  // Shaper prompt can render the customer's verbatim words. Single row
+  // (the most recent); load is universal across all dispatch paths
+  // (initial inbound, KAN-825 chain, KAN-835 chain, KAN-814 cron
+  // re-dispatch) because the Engagement IS the source-of-truth — the
+  // in-memory `event` payload is not in scope for cron-deferred sends.
+  // Producer (lead-received-push) writes metadata.{subject, bodyPreview}
+  // capped at 2000 chars; this consumer reads them as-is.
+  const recentInbound = await prisma.engagement.findFirst({
+    where: {
+      dealId,
+      OR: [
+        { engagementType: { startsWith: 'email_received' } },
+        { engagementType: { startsWith: 'sms_received' } },
+        { engagementType: { startsWith: 'meta_messenger_received' } },
+      ],
+    },
+    orderBy: { occurredAt: 'desc' },
+    select: { occurredAt: true, metadata: true },
+  });
+
   // 4. Resolve channel: forceChannel override > Brain suggestion > 'email' default.
   const suggestedChannel = brainDecision.nextBestAction.suggestedChannel;
   const channel: ShapedMessageChannel =
@@ -194,6 +215,9 @@ export async function shapeMessage(
     channel,
     tone,
     recentOutbound: deal.engagements,
+    recentInbound: recentInbound
+      ? { occurredAt: recentInbound.occurredAt, metadata: recentInbound.metadata }
+      : null,
   });
 
   // KAN-817 — gated smoke log. Enables capturing the rendered Shaper user
@@ -313,6 +337,19 @@ interface PromptOutbound {
   metadata: unknown;
 }
 
+// KAN-839 — most recent inbound from the contact, surfaced into the Shaper
+// prompt so outbound replies are responsive to the customer's literal words
+// rather than templating against Brain's strategic intent alone.
+interface PromptInbound {
+  occurredAt: Date;
+  metadata: unknown;
+}
+
+// KAN-839 — render cap for the inbound body inside the prompt. Matches the
+// producer-side cap at lead-received-push.ts (DB stores ≤ 2000 chars).
+// Single source of truth: the persisted value IS the render value.
+const INBOUND_BODY_RENDER_MAX_CHARS = 2000;
+
 export function buildShapePrompt(input: {
   contact: PromptContact;
   pipeline: PromptPipeline;
@@ -321,8 +358,9 @@ export function buildShapePrompt(input: {
   channel: ShapedMessageChannel;
   tone: ShapedMessageTone;
   recentOutbound: PromptOutbound[];
+  recentInbound: PromptInbound | null;
 }): string {
-  const { contact, pipeline, currentStage, brainReasoning, channel, tone, recentOutbound } = input;
+  const { contact, pipeline, currentStage, brainReasoning, channel, tone, recentOutbound, recentInbound } = input;
 
   const contactName =
     [contact.firstName, contact.lastName].filter((p) => !!p && p.trim().length > 0).join(' ') ||
@@ -347,6 +385,31 @@ export function buildShapePrompt(input: {
           })
           .join('\n');
 
+  // KAN-839 — render the most recent inbound from the contact. Three states:
+  //   1. No inbound row at all → first-outbound-on-Deal posture; the AI
+  //      isn't responding to anything specific.
+  //   2. Subject-only (body absent or empty after trim) → e.g., reply with
+  //      empty body but a subject line. Render the subject so the AI sees
+  //      the topic even without prose.
+  //   3. Subject + body → the canonical case. Verbatim text is what makes
+  //      KAN-839 work end-to-end.
+  let recentInboundBlock: string;
+  if (!recentInbound) {
+    recentInboundBlock = '(no inbound from this contact yet)';
+  } else {
+    const meta = (recentInbound.metadata ?? {}) as Record<string, unknown>;
+    const subject = typeof meta.subject === 'string' ? meta.subject : null;
+    const bodyRaw = typeof meta.bodyPreview === 'string' ? meta.bodyPreview : null;
+    const body = bodyRaw && bodyRaw.trim().length > 0
+      ? bodyRaw.slice(0, INBOUND_BODY_RENDER_MAX_CHARS)
+      : null;
+    if (body) {
+      recentInboundBlock = `Subject: ${subject ?? '(no subject)'}\n\n${body}`;
+    } else {
+      recentInboundBlock = `(subject only — body empty)\nSubject: ${subject ?? '(no subject)'}`;
+    }
+  }
+
   return `## Contact
 ${contactName} @ ${company}
 
@@ -356,6 +419,9 @@ Current Stage: ${currentStage.name} (${currentStage.outcomeType})
 
 ## Brain-suggested intent
 ${brainReasoning}
+
+## Recent inbound from contact
+${recentInboundBlock}
 
 ## Channel + tone
 Channel: ${channel}

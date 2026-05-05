@@ -112,12 +112,20 @@ function buildBrainDecision(overrides: {
   };
 }
 
-function makePrismaMock(deal: unknown | null) {
+function makePrismaMock(
+  deal: unknown | null,
+  // KAN-839 — optional most-recent inbound Engagement row. Defaults to null
+  // so legacy tests keep working without changes (they hit the "no inbound
+  // yet" placeholder rendering, which is correct for first-outbound posture).
+  recentInbound: { occurredAt: Date; metadata: Record<string, unknown> } | null = null,
+) {
   const findUnique = vi.fn(async () => deal);
+  const findFirst = vi.fn(async () => recentInbound);
   const prisma = {
     deal: { findUnique },
+    engagement: { findFirst },
   } as unknown as PrismaClient;
-  return { prisma, findUnique };
+  return { prisma, findUnique, findFirst };
 }
 
 function mockLLMOk(payload: Record<string, unknown>, tokens = { input: 480, output: 140 }): void {
@@ -483,6 +491,151 @@ describe('shapeMessage — KAN-817 anti-repetition field-name contract', () => {
     // No throw on empty metadata; placeholders rendered.
     expect(callArgs.userPrompt).toContain('(no subject)');
     expect(callArgs.userPrompt).toContain('(no body preview)');
+  });
+});
+
+// ─────────────────────────────────────────────
+// 14c. KAN-839 — conversation content visibility (inbound body in prompt)
+// 6 tests pinning the producer-consumer contract for inbound metadata,
+// rendering format, truncation, and empty-state placeholders.
+// ─────────────────────────────────────────────
+
+describe('shapeMessage — KAN-839 inbound content visibility', () => {
+  it('Inbound body present → section populated with verbatim text (wire-through works)', async () => {
+    const { prisma } = makePrismaMock(buildDealFixture({ recentOutbound: [] }), {
+      occurredAt: new Date('2026-05-05T19:00:00Z'),
+      metadata: {
+        senderEmail: 'alice@acme.com',
+        subject: 'Quick question about pricing',
+        bodyPreview: 'Do you offer volume discounts for orders above 100 units?',
+      },
+    });
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecision({ type: 'send_follow_up', suggestedChannel: 'email' }),
+    );
+    mockLLMOk({ subject: 'Re: pricing', body: 'Yes.', rationale: 'r.' });
+
+    await shapeMessage(prisma, DEAL_A);
+
+    const callArgs = llmCompleteMock.mock.calls[0]![0] as { userPrompt: string };
+    expect(callArgs.userPrompt).toContain('## Recent inbound from contact');
+    expect(callArgs.userPrompt).toContain('Subject: Quick question about pricing');
+    expect(callArgs.userPrompt).toContain(
+      'Do you offer volume discounts for orders above 100 units?',
+    );
+  });
+
+  it('Inbound body 2500 chars → truncated to 2000 chars (render cap enforced)', async () => {
+    const longBody = 'A'.repeat(2500);
+    const { prisma } = makePrismaMock(buildDealFixture({ recentOutbound: [] }), {
+      occurredAt: new Date('2026-05-05T19:00:00Z'),
+      metadata: {
+        senderEmail: 'alice@acme.com',
+        subject: 'Long message',
+        bodyPreview: longBody,
+      },
+    });
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecision({ type: 'send_follow_up', suggestedChannel: 'email' }),
+    );
+    mockLLMOk({ subject: 'Reply', body: 'Body.', rationale: 'r.' });
+
+    await shapeMessage(prisma, DEAL_A);
+
+    const callArgs = llmCompleteMock.mock.calls[0]![0] as { userPrompt: string };
+    // The 2000-char A-run must be present.
+    expect(callArgs.userPrompt).toContain('A'.repeat(2000));
+    // The 2001st A must NOT be present (truncation boundary). Confirm by
+    // ensuring no 2001-char A-run exists in the rendered prompt.
+    expect(callArgs.userPrompt).not.toContain('A'.repeat(2001));
+  });
+
+  it('Empty body, subject-only → "(subject only — body empty)" fallback rendering', async () => {
+    const { prisma } = makePrismaMock(buildDealFixture({ recentOutbound: [] }), {
+      occurredAt: new Date('2026-05-05T19:00:00Z'),
+      metadata: {
+        senderEmail: 'alice@acme.com',
+        subject: 'Subject only — no body sent',
+        bodyPreview: '', // empty
+      },
+    });
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecision({ type: 'send_follow_up', suggestedChannel: 'email' }),
+    );
+    mockLLMOk({ subject: 'Reply', body: 'Body.', rationale: 'r.' });
+
+    await shapeMessage(prisma, DEAL_A);
+
+    const callArgs = llmCompleteMock.mock.calls[0]![0] as { userPrompt: string };
+    expect(callArgs.userPrompt).toContain('(subject only — body empty)');
+    expect(callArgs.userPrompt).toContain('Subject: Subject only — no body sent');
+  });
+
+  it('Subject + body both present → "Subject: ...\\n\\n{body}" shape (format correctness)', async () => {
+    const { prisma } = makePrismaMock(buildDealFixture({ recentOutbound: [] }), {
+      occurredAt: new Date('2026-05-05T19:00:00Z'),
+      metadata: {
+        senderEmail: 'alice@acme.com',
+        subject: 'Hello',
+        bodyPreview: 'World.',
+      },
+    });
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecision({ type: 'send_follow_up', suggestedChannel: 'email' }),
+    );
+    mockLLMOk({ subject: 'Reply', body: 'Body.', rationale: 'r.' });
+
+    await shapeMessage(prisma, DEAL_A);
+
+    const callArgs = llmCompleteMock.mock.calls[0]![0] as { userPrompt: string };
+    // Pin the literal Subject: ... \n\n {body} shape on the rendered section.
+    expect(callArgs.userPrompt).toContain('Subject: Hello\n\nWorld.');
+  });
+
+  it('Sentinel-token field-name pin: sentinel string from inbound bodyPreview appears verbatim in rendered prompt', async () => {
+    const sentinelSubject = 'KAN-839-pin-subject-token-qrs456';
+    const sentinelBody =
+      'KAN-839-pin-body-token-tuv789 — this proves the inbound bodyPreview field flowed verbatim into the Shaper prompt.';
+    const { prisma } = makePrismaMock(buildDealFixture({ recentOutbound: [] }), {
+      occurredAt: new Date('2026-05-05T19:00:00Z'),
+      metadata: {
+        senderEmail: 'alice@acme.com',
+        subject: sentinelSubject,
+        bodyPreview: sentinelBody,
+      },
+    });
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecision({ type: 'send_follow_up', suggestedChannel: 'email' }),
+    );
+    mockLLMOk({ subject: 'Reply', body: 'Body.', rationale: 'r.' });
+
+    await shapeMessage(prisma, DEAL_A);
+
+    const callArgs = llmCompleteMock.mock.calls[0]![0] as { userPrompt: string };
+    // Both sentinel tokens must appear verbatim — pins the contract that
+    // buildShapePrompt reads exactly `subject` and `bodyPreview` (NOT `body`,
+    // NOT `body_text`, NOT `headline`). If anyone renames either field on the
+    // producer (lead-received-push) or the reader (buildShapePrompt), this
+    // test breaks loudly.
+    expect(callArgs.userPrompt).toContain(sentinelSubject);
+    expect(callArgs.userPrompt).toContain(sentinelBody);
+  });
+
+  it('No inbound row on Deal → "(no inbound from this contact yet)" placeholder', async () => {
+    const { prisma } = makePrismaMock(
+      buildDealFixture({ recentOutbound: [] }),
+      null, // no inbound row
+    );
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecision({ type: 'send_follow_up', suggestedChannel: 'email' }),
+    );
+    mockLLMOk({ subject: 'Reply', body: 'Body.', rationale: 'r.' });
+
+    await shapeMessage(prisma, DEAL_A);
+
+    const callArgs = llmCompleteMock.mock.calls[0]![0] as { userPrompt: string };
+    expect(callArgs.userPrompt).toContain('## Recent inbound from contact');
+    expect(callArgs.userPrompt).toContain('(no inbound from this contact yet)');
   });
 });
 
