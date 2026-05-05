@@ -196,6 +196,19 @@ export async function shapeMessage(
     recentOutbound: deal.engagements,
   });
 
+  // KAN-817 — gated smoke log. Enables capturing the rendered Shaper user
+  // prompt during a 3-turn smoke so we can eyeball that the new
+  // `metadata.subject` + `metadata.bodyPreview` fields actually flow into
+  // the prompt's "Recent outbound to avoid repeating" section. Off by
+  // default — flip on with `KAN_817_SMOKE_LOG=true` only for the smoke,
+  // then unset (or remove this block once KAN-797a content visibility is
+  // proven end-to-end).
+  if (process.env.KAN_817_SMOKE_LOG === 'true') {
+    console.log(
+      `[message-shaper] kan-817-smoke-prompt dealId=${dealId} channel=${channel} tone=${tone} antiRepetitionContextCount=${deal.engagements.length}\n--- BEGIN USER PROMPT ---\n${userPrompt}\n--- END USER PROMPT ---`,
+    );
+  }
+
   // 7. Call LLM. tenantId derived from Deal (KAN-745 per-tenant cost partition).
   let llmText: string;
   let llmInputTokens = 0;

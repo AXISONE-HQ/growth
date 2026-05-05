@@ -398,6 +398,95 @@ describe('shapeMessage — anti-repetition context', () => {
 });
 
 // ─────────────────────────────────────────────
+// 14b. KAN-817 — field-name contract pin
+// Both `subject` AND `bodyPreview` flow verbatim into the rendered prompt.
+// If anyone renames either field on the Engagement.metadata side OR in the
+// buildShapePrompt reader, this test breaks loudly.
+// ─────────────────────────────────────────────
+
+describe('shapeMessage — KAN-817 anti-repetition field-name contract', () => {
+  it('Engagement metadata.subject + metadata.bodyPreview render verbatim into the prompt', async () => {
+    const sentinelSubject = 'KAN-817-pin-subject-token-abc123';
+    const sentinelBody = 'KAN-817-pin-body-token-xyz789 — this preview proves the field name flowed through.';
+    const fixture = buildDealFixture({
+      recentOutbound: [
+        {
+          occurredAt: new Date('2026-04-25T12:00:00Z'),
+          engagementType: 'email_send',
+          channel: 'email',
+          metadata: { subject: sentinelSubject, bodyPreview: sentinelBody },
+        },
+      ],
+    });
+    const { prisma } = makePrismaMock(fixture);
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecision({ type: 'send_follow_up', suggestedChannel: 'email' }),
+    );
+    mockLLMOk({ subject: 'Fresh', body: 'Different angle.', rationale: 'r.' });
+
+    await shapeMessage(prisma, DEAL_A);
+
+    const callArgs = llmCompleteMock.mock.calls[0]![0] as { userPrompt: string };
+    // Both sentinel tokens must appear verbatim in the rendered prompt — this
+    // pins the contract that buildShapePrompt reads exactly `subject` and
+    // `bodyPreview` (NOT `body`, NOT `body_preview`, NOT `headline`).
+    expect(callArgs.userPrompt).toContain(sentinelSubject);
+    expect(callArgs.userPrompt).toContain(sentinelBody.slice(0, 120));
+  });
+
+  it('Engagement metadata WITHOUT bodyPreview falls back to metadata.body (legacy compat)', async () => {
+    const fixture = buildDealFixture({
+      recentOutbound: [
+        {
+          occurredAt: new Date('2026-04-25T12:00:00Z'),
+          engagementType: 'email_send',
+          channel: 'email',
+          // Legacy shape — only `body`, no `bodyPreview`. buildShapePrompt
+          // already supports this fallback (pre-flight #5 confirmed).
+          metadata: { subject: 'Legacy subject', body: 'Legacy body content for fallback' },
+        },
+      ],
+    });
+    const { prisma } = makePrismaMock(fixture);
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecision({ type: 'send_follow_up', suggestedChannel: 'email' }),
+    );
+    mockLLMOk({ subject: 'Fresh', body: 'Body.', rationale: 'r.' });
+
+    await shapeMessage(prisma, DEAL_A);
+
+    const callArgs = llmCompleteMock.mock.calls[0]![0] as { userPrompt: string };
+    expect(callArgs.userPrompt).toContain('Legacy subject');
+    expect(callArgs.userPrompt).toContain('Legacy body content');
+  });
+
+  it('Engagement metadata WITHOUT subject + WITHOUT body* → prompt renders graceful placeholders', async () => {
+    const fixture = buildDealFixture({
+      recentOutbound: [
+        {
+          occurredAt: new Date('2026-04-25T12:00:00Z'),
+          engagementType: 'email_send',
+          channel: 'email',
+          metadata: {}, // both fields absent — KAN-817 "neither populated" case
+        },
+      ],
+    });
+    const { prisma } = makePrismaMock(fixture);
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecision({ type: 'send_follow_up', suggestedChannel: 'email' }),
+    );
+    mockLLMOk({ subject: 'Fresh', body: 'Body.', rationale: 'r.' });
+
+    await shapeMessage(prisma, DEAL_A);
+
+    const callArgs = llmCompleteMock.mock.calls[0]![0] as { userPrompt: string };
+    // No throw on empty metadata; placeholders rendered.
+    expect(callArgs.userPrompt).toContain('(no subject)');
+    expect(callArgs.userPrompt).toContain('(no body preview)');
+  });
+});
+
+// ─────────────────────────────────────────────
 // 15. Anti-repetition context limit — recentOutboundLimit=5 caps to 5
 // ─────────────────────────────────────────────
 
