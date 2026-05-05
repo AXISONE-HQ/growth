@@ -618,6 +618,16 @@ describe("KAN-815 — Phase 2 wiring (Brain trigger framework + consumer dispatc
     expect(res.status).toBe(200);
     expect(evaluateStageTransitionMock).toHaveBeenCalledOnce();
     expect(evaluateStageTransitionMock.mock.calls[0]![1]).toBe(DEAL_A);
+    // KAN-834: engine call site MUST receive the dispatcher's first Brain
+    // decision so the engine doesn't re-evaluate. This pin breaks loud if
+    // the wire-through ever drops — the LLM-non-determinism class bug
+    // from Sprint 11-pre Gmail smoke would silently re-emerge otherwise.
+    const stageTransitionOpts = evaluateStageTransitionMock.mock.calls[0]![2] as {
+      brainDecision?: { nextBestAction?: { type?: string } };
+    };
+    expect(stageTransitionOpts).toBeDefined();
+    expect(stageTransitionOpts.brainDecision).toBeDefined();
+    expect(stageTransitionOpts.brainDecision?.nextBestAction?.type).toBe("advance_stage");
     expect(shapeMessageMock).not.toHaveBeenCalled();
     expect(publishActionSendMock).not.toHaveBeenCalled();
   });
