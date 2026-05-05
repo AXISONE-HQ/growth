@@ -51,6 +51,21 @@ export const ActionExecutedEventSchema = z.object({
   errorClass: z.enum(['transient', 'permanent']).optional(),
   errorMessage: z.string().optional(),
   attemptNumber: z.number().int().min(1).default(1),
+  // KAN-817 — content visibility for cross-turn anti-repetition. Both fields
+  // are populated authoritatively by the send-side publisher
+  // (`apps/connectors/src/subscribers/action-send-push.ts`), where the
+  // rendered OutboundMessage is in scope. The webhook-side publisher
+  // (`apps/connectors/src/webhooks/resend.ts`) leaves them undefined — the
+  // consumer is idempotent on actionId so the send-side event wins the race
+  // for Engagement metadata, and the webhook payload doesn't carry body
+  // anyway.
+  //
+  // Hard caps applied at the publish site (NOT here): subject ≤ 200 chars,
+  // bodyPreview ≤ 500 chars. The schema's `.max()` enforces the contract;
+  // truncation is the publisher's responsibility so consumers never see an
+  // over-cap value.
+  subject: z.string().max(200).optional(),
+  bodyPreview: z.string().max(500).optional(),
 });
 export type ActionExecutedEvent = z.infer<typeof ActionExecutedEventSchema>;
 
