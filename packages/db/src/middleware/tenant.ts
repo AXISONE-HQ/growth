@@ -33,7 +33,24 @@ const TENANT_SCOPED_MODELS = [
   'Escalation',
   'KnowledgeBase',
   'AiAgentConfig',
+  // KAN-826: Sprint 11a Knowledge Layer (replaces KAN-706 legacy schema).
+  // ChunkEffectiveness deliberately NOT listed — no tenant_id column on the
+  // model (architect spec §2 loose-FK semantics; tenant context flows via
+  // JOIN to KnowledgeChunk at read-time).
+  'KnowledgeSource',
+  'KnowledgeChunk',
+  'KnowledgeGapSummary',
 ] as const;
+
+// KAN-826 — defensive guardrail (architect spec §6.1). Knowledge Layer queries
+// MUST be tenant-scoped because $queryRaw is the canonical retrieval path
+// (pgvector cosine search via raw SQL) and the auto-inject middleware above
+// only runs against the typed Prisma client. This guardrail catches any
+// non-$queryRaw query on the 3 KB tables that lacks a tenantId filter and
+// THROWS — defense-in-depth against accidental cross-tenant leakage. Apply
+// to system-level Prisma clients (worker, cron) where withTenantContext is
+// not in scope. Sibling to the auto-inject pattern; the two run together.
+const KNOWLEDGE_GUARD_MODELS = ['KnowledgeSource', 'KnowledgeChunk', 'KnowledgeGapSummary'] as const;
 
 // Models that are global (not tenant-scoped)
 const GLOBAL_MODELS = ['Blueprint'] as const;
@@ -219,9 +236,94 @@ export function tenantContextMiddleware(prisma: PrismaClient) {
   };
 }
 
+/**
+ * KAN-826 — Knowledge Layer tenant-isolation guardrail middleware.
+ *
+ * Throws on any read/write/delete/upsert query against KnowledgeSource,
+ * KnowledgeChunk, or KnowledgeGapSummary that does NOT include a `tenantId`
+ * (or `tenant_id`) filter in the where clause. Catches accidental
+ * cross-tenant queries from system-level code paths (worker, cron) where
+ * the auto-inject `tenantMiddleware` is not active.
+ *
+ * Defense-in-depth pattern: pairs with auto-inject `tenantMiddleware` for
+ * request-scoped clients; this guardrail covers the gaps where tenant
+ * context isn't available and a developer must pass tenantId explicitly.
+ *
+ * Compound `where` clauses (`AND` / `OR`) are accepted at this layer —
+ * deeper inspection is too brittle (the architect spec §6 also requires
+ * visual review of every $queryRaw to enforce `tenant_id = $1` literally).
+ *
+ * Usage:
+ *   prisma.$use(knowledgeTenantGuardMiddleware());
+ *
+ * @example
+ * ```typescript
+ * await prisma.knowledgeChunk.findMany({}); // throws — no tenantId
+ * await prisma.knowledgeChunk.findMany({ where: { tenantId: 'x' } }); // ok
+ * ```
+ */
+export function knowledgeTenantGuardMiddleware(): Prisma.Middleware {
+  const guarded = new Set<string>(KNOWLEDGE_GUARD_MODELS);
+  return async (params, next) => {
+    if (!params.model || !guarded.has(params.model)) {
+      return next(params);
+    }
+    // Write paths: create/createMany must include tenantId in data; the
+    // auto-inject middleware injects it for tenant-context clients, but
+    // for system-level callers we require an explicit value.
+    if (params.action === 'create' || params.action === 'upsert') {
+      const data = params.action === 'create' ? params.args?.data : params.args?.create;
+      if (!data || (typeof data === 'object' && !('tenantId' in data) && !('tenant_id' in data))) {
+        throw new Error(
+          `[knowledge-tenant-guard] Tenant isolation violation: ${params.action} on ${params.model} without tenantId in data`,
+        );
+      }
+    }
+    if (params.action === 'createMany') {
+      const data = params.args?.data;
+      const items = Array.isArray(data) ? data : [data];
+      for (const item of items) {
+        if (!item || (typeof item === 'object' && !('tenantId' in item) && !('tenant_id' in item))) {
+          throw new Error(
+            `[knowledge-tenant-guard] Tenant isolation violation: createMany on ${params.model} with row missing tenantId`,
+          );
+        }
+      }
+    }
+    // Read/update/delete paths: where clause must include a tenantId filter
+    // (or AND/OR for compound queries — accepted at this layer; visual
+    // review of $queryRaw covers the deeper cases per architect spec §6).
+    if (
+      params.action === 'findUnique' ||
+      params.action === 'findFirst' ||
+      params.action === 'findMany' ||
+      params.action === 'count' ||
+      params.action === 'aggregate' ||
+      params.action === 'groupBy' ||
+      params.action === 'update' ||
+      params.action === 'updateMany' ||
+      params.action === 'delete' ||
+      params.action === 'deleteMany'
+    ) {
+      const where = params.args?.where;
+      const hasTenantFilter =
+        where &&
+        typeof where === 'object' &&
+        ('tenantId' in where || 'tenant_id' in where || 'AND' in where || 'OR' in where);
+      if (!hasTenantFilter) {
+        throw new Error(
+          `[knowledge-tenant-guard] Tenant isolation violation: ${params.action} on ${params.model} without tenantId filter in where`,
+        );
+      }
+    }
+    return next(params);
+  };
+}
+
 export default {
   tenantMiddleware,
   withTenantContext,
   extractTenantId,
   tenantContextMiddleware,
+  knowledgeTenantGuardMiddleware,
 };

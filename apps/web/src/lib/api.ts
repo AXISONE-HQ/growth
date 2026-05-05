@@ -383,9 +383,11 @@ import type {
   TargetMetric,
   TargetPeriod,
   KnowledgeCategory,
-  IngestRequest,
-  IngestStatus,
 } from "@growth/shared";
+// KAN-826: IngestRequest + IngestStatus removed — legacy KAN-707 ingestion API
+// (knowledgeIngestApi) deleted along with the dead /settings/knowledge admin
+// route. Sprint 11a KAN-827 will introduce a new ingestion contract; types
+// will be re-introduced from @growth/shared at that time.
 
 export interface PipelineStage {
   id?: string;
@@ -531,47 +533,12 @@ export const pipelineMicroObjectivesApi = {
     ),
 };
 
-/* ── Knowledge Ingestion API (KAN-707 PR A) ────────────────────────
- * Canonical contract types in @growth/shared (KAN-737). Consumer files import
- * IngestionPath / IngestRequest / IngestStatus directly from @growth/shared.
- */
-
-export interface KnowledgeSourceListItem {
-  id: string;
-  type: 'url' | 'document' | 'qa_pair' | 'structured_field';
-  status: 'pending' | 'processing' | 'indexed' | 'failed' | 'stale';
-  sourceUrl: string | null;
-  originalFileName: string | null;
-  contentHash: string;
-  lastIndexedAt: string | null;
-  errorMessage: string | null;
-  chunkCount: number;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface KnowledgeChunkPreview {
-  id: string;
-  chunkIndex: number;
-  totalChunks: number;
-  content: string;
-  tokenCount: number;
-  embeddingModel: string;
-  createdAt: string;
-}
-
-export interface KnowledgeSourceDetail extends KnowledgeSourceListItem {
-  uploadedFileRef: string | null;
-  totalChunks: number;
-  chunks: KnowledgeChunkPreview[];
-  recentIngestions: Array<{
-    ingestionId: string;
-    status: string;
-    startedAt: string | null;
-    completedAt: string | null;
-    createdAt: string;
-  }>;
-}
+// KAN-826: legacy Knowledge Ingestion API (KAN-707 PR A) types REMOVED.
+// `KnowledgeSourceListItem`, `KnowledgeChunkPreview`, `KnowledgeSourceDetail`
+// were tied to the dropped KAN-786 schema (chunkIndex/totalChunks/
+// embeddingModel etc). KAN-829 will introduce a new admin UI consuming the
+// Sprint 11a `knowledge_source` / `knowledge_chunk` schema; types will be
+// reshaped at that time.
 
 /* ── Lead Inbox API (KAN-741) ──────────────────────────
  * Per-tenant inbox address management + DKIM strict-mode toggle + recent
@@ -636,25 +603,9 @@ export const inboxApi = {
     trpcQuery<LeadInboxEventRow[]>('inbox.listRecentEvents', input ?? {}),
 };
 
-export const knowledgeIngestApi = {
-  request: (input: IngestRequest) =>
-    trpcMutation<{ ingestionId: string; sourceId: string; status: 'pending' }>(
-      'knowledgeIngest.request',
-      input as Record<string, unknown>,
-    ),
-  status: (ingestionId: string) =>
-    trpcQuery<IngestStatus>('knowledgeIngest.status', { ingestionId }),
-  listSources: (filter?: { type?: string; status?: string }) =>
-    trpcQuery<KnowledgeSourceListItem[]>('knowledgeIngest.listSources', filter ?? {}),
-  getSourceById: (sourceId: string, opts?: { chunkLimit?: number; chunkOffset?: number }) =>
-    trpcQuery<KnowledgeSourceDetail>('knowledgeIngest.getSourceById', {
-      sourceId,
-      chunkLimit: opts?.chunkLimit ?? 20,
-      chunkOffset: opts?.chunkOffset ?? 0,
-    }),
-  deleteSource: (sourceId: string) =>
-    trpcMutation<{ sourceId: string }>('knowledgeIngest.deleteSource', { sourceId }),
-};
+// KAN-826: `knowledgeIngestApi` REMOVED. Legacy KAN-707 admin endpoints in
+// router.ts deleted as part of the same PR (Option B dead admin UI cleanup).
+// KAN-827 will introduce a new ingestion API surface.
 
 /* ── Recommendations API (KAN-754) ──────────────────────────────────
  * Backend: apps/api/src/router.ts → recommendationsRouter, delegates to

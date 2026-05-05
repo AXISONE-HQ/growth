@@ -81,6 +81,7 @@ model Tenant {
   escalations            Escalation[]
   knowledgeBase          KnowledgeBase[]
   knowledgeSources       KnowledgeSource[]
+  knowledgeGapSummaries  KnowledgeGapSummary[]
   aiAgentConfigs         AiAgentConfig[]
   contactStates          ContactState[]
   agenticShadowDecisions AgenticShadowDecision[]
@@ -158,28 +159,28 @@ model BrainSnapshot {
 // ─────────────────────────────────────────────
 
 model Contact {
-  id                     String    @id @default(uuid())
-  tenantId               String    @map("tenant_id")
-  email                  String?
-  phone                  String?
-  firstName              String?   @map("first_name")
-  lastName               String?   @map("last_name")
-  externalIds            Json      @default("{}") @map("external_ids")
-  dataQualityScore       Float     @default(0) @map("data_quality_score")
-  segment                String?
-  lifecycleStage         String    @default("new") @map("lifecycle_stage")
-  source                 String?
+  id                String    @id @default(uuid())
+  tenantId          String    @map("tenant_id")
+  email             String?
+  phone             String?
+  firstName         String?   @map("first_name")
+  lastName          String?   @map("last_name")
+  externalIds       Json      @default("{}") @map("external_ids")
+  dataQualityScore  Float     @default(0) @map("data_quality_score")
+  segment           String?
+  lifecycleStage    String    @default("new") @map("lifecycle_stage")
+  source            String?
   // KAN-700 + KAN-791: pipeline-aware lead state.
   // currentPipelineId + currentStageId DEPRECATED in Phase 1 (read-shim during
   // transition); drop in Phase 2 cleanup once readers migrate to Deal-side
   // (per PRD §5 reader-migration deferral list).
   // microObjectiveProgress DROPPED by KAN-791 — moved to Deal.microObjectiveProgress
   // (pre-flight #4 verified 0 prod contacts had non-default values).
-  currentPipelineId      String?   @map("current_pipeline_id")
-  currentStageId         String?   @map("current_stage_id")
-  enteredStageAt         DateTime? @map("entered_stage_at")
-  createdAt              DateTime  @default(now()) @map("created_at")
-  updatedAt              DateTime  @updatedAt @map("updated_at")
+  currentPipelineId String?   @map("current_pipeline_id")
+  currentStageId    String?   @map("current_stage_id")
+  enteredStageAt    DateTime? @map("entered_stage_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
 
   tenant          Tenant         @relation(fields: [tenantId], references: [id])
   contactStates   ContactState[]
@@ -964,116 +965,138 @@ model NotificationPreference {
 // (Insert alongside the other tenant relations like `users`, `contacts`, etc.)
 
 // ─────────────────────────────────────────────
-// KAN-706 — Knowledge ingestion schemas (Sprint 2.1)
+// KAN-826 — Knowledge Layer schema (Sprint 11a)
 // ─────────────────────────────────────────────
 //
-// Three new models:
-//   - KnowledgeSource: provenance + lifecycle for each ingest unit
-//     (URL crawl, document upload, Q&A pair, structured field)
-//   - KnowledgeChunk:  chunked content + pgvector embedding (1536 dim,
-//     OpenAI text-embedding-3-small). HNSW index added via raw SQL in
-//     the migration since Prisma doesn't emit vector indexes.
-//   - KnowledgeIngestion: per-job status log (status transitions,
-//     URLs discovered/indexed for crawls, error capture)
+// REPLACES KAN-706 legacy (KnowledgeSource/KnowledgeChunk/KnowledgeIngestion +
+// KnowledgeSourceType/Status enums). All legacy tables were 0-row at the
+// time of KAN-826 cutover (KAN-786 a+b shipped, sub-cohort c reverted in
+// KAN-791 first commit; tables never populated).
 //
-// Cross-tenant idempotency: KnowledgeSource has @@unique([tenantId,
-// contentHash]) — same URL/file content from two tenants stays distinct.
+// Four new models per Sprint 11a Architect Spec §2:
+//   - KnowledgeSource: provenance + lifecycle (string-typed sourceType
+//     + status, simpler than KAN-706 enum approach)
+//   - KnowledgeChunk:  chunked content + pgvector embedding(1536) +
+//     denormalized tenantId + category for retrieval-perf partial index
+//   - KnowledgeGapSummary: aggregated query gaps for tenant Knowledge
+//     dashboard signal (KAN-830)
+//   - ChunkEffectiveness: post-decision outcome lookups (KAN-830 audit)
 //
-// KnowledgeFilter sourceType extensions deferred to KAN-723; KnowledgeBase
-// row migration to KnowledgeChunk is a separate question (KAN-724 if needed).
-
-enum KnowledgeSourceType {
-  url
-  document
-  qa_pair
-  structured_field
-
-  @@map("knowledge_source_type")
-}
-
-enum KnowledgeSourceStatus {
-  pending
-  processing
-  indexed
-  failed
-  stale
-
-  @@map("knowledge_source_status")
-}
+// Embedding column declared as `Unsupported("vector(1536)")` so Prisma
+// generates the column natively. HNSW index + partial retrieval index
+// added via hand-edited raw SQL in the migration since Prisma cannot
+// emit those.
+//
+// Tenant-isolation: KnowledgeChunk.tenantId is DENORMALIZED (sibling to
+// the row's KnowledgeSource.tenantId) for retrieval-perf — drives the
+// partial index `WHERE tenant_id, status='ready'` per spec §1.6 hot-path
+// query. Prisma middleware in §6.1 enforces tenant filter on all reads.
+//
+// KnowledgeFilter (KAN-705 routing) and KnowledgeBase (Sprint 5) are
+// SEPARATE concerns — preserved unchanged.
 
 model KnowledgeSource {
-  id               String                @id @default(uuid())
-  tenantId         String                @map("tenant_id")
-  type             KnowledgeSourceType
-  /// Required for type=url. Null for document/qa_pair/structured_field.
-  sourceUrl        String?               @map("source_url")
-  /// GCS object reference for type=document. Null for others.
-  uploadedFileRef  String?               @map("uploaded_file_ref")
-  /// Original filename for type=document. Null for others.
-  originalFileName String?               @map("original_file_name")
-  status           KnowledgeSourceStatus @default(pending)
-  lastIndexedAt    DateTime?             @map("last_indexed_at")
-  /// SHA-256 of the source's canonical content. Combined with tenantId for
-  /// cross-tenant idempotency (same URL/file from two tenants stays distinct).
-  contentHash      String                @map("content_hash")
-  errorMessage     String?               @map("error_message")
-  /// Firebase UID of the user who created the source. Nullable for
-  /// system-generated rows (e.g., the synthetic-source backfill).
-  createdBy        String?               @map("created_by")
-  createdAt        DateTime              @default(now()) @map("created_at")
-  updatedAt        DateTime              @updatedAt @map("updated_at")
+  id            String    @id @default(uuid())
+  tenantId      String    @map("tenant_id")
+  /// 'pdf' | 'paste_text' | 'faq' (string per spec §2; not a Prisma enum).
+  sourceType    String    @map("source_type")
+  /// 'faq' | 'inventory' | 'warranty' | 'pricing' | 'other'. Denormalized
+  /// onto chunks for retrieval pre-filter.
+  category      String
+  title         String?
+  /// 'queued' | 'embedding' | 'ready' | 'error' | 'deleted'. Default 'queued'
+  /// at insert; transitions through embedding → ready as ingestion runs.
+  status        String    @default("queued")
+  fileName      String?   @map("file_name")
+  fileSizeBytes Int?      @map("file_size_bytes")
+  /// SHA-256 hex; per-tenant idempotency key (same file from two tenants stays distinct).
+  fileChecksum  String?   @map("file_checksum")
+  /// Raw original content (paste_text / faq Q&A body). Null for PDFs (rendered to chunks only).
+  rawContent    String?   @map("raw_content") @db.Text
+  metadata      Json      @default("{}")
+  errorDetail   String?   @map("error_detail")
+  /// Set by soft-delete. Hourly cron hard-deletes after 30 days per spec §1.4.
+  deletedAt     DateTime? @map("deleted_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
 
-  tenant     Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  chunks     KnowledgeChunk[]
-  ingestions KnowledgeIngestion[]
+  tenant Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  chunks KnowledgeChunk[]
 
-  @@unique([tenantId, contentHash])
-  @@index([tenantId])
   @@index([tenantId, status])
-  @@map("knowledge_sources")
+  @@index([tenantId, category])
+  @@index([fileChecksum])
+  @@map("knowledge_source")
 }
 
 model KnowledgeChunk {
-  id               String                      @id @default(uuid())
-  sourceId         String                      @map("source_id")
-  /// 0-based index of this chunk within the source.
-  chunkIndex       Int                         @map("chunk_index")
-  /// Total chunks the source was split into. Stored on every chunk for
-  /// quick "X of N" UI rendering without a count() round-trip.
-  totalChunks      Int                         @map("total_chunks")
+  id           String                      @id @default(uuid())
+  /// DENORMALIZED from KnowledgeSource for retrieval performance. Drives
+  /// the partial index (tenant_id, category) WHERE status='ready' which
+  /// is the hot-path pre-filter on every Brain/Shaper retrieval call.
+  tenantId     String                      @map("tenant_id")
+  sourceId     String                      @map("source_id")
   /// Plain-text chunk content fed to retrieval ranking + LLM context.
-  content          String                      @db.Text
+  chunkText    String                      @map("chunk_text") @db.Text
+  /// 0-based ordinal within the source. Used for "X of N" UI + ordering.
+  position     Int
+  /// DENORMALIZED from source.category for the partial-index pre-filter.
+  category     String
+  /// 'ready' | 'deleted'. Soft-delete pattern: chunks marked 'deleted'
+  /// disappear from retrieval but remain for audit trail until 30-day cron.
+  status       String                      @default("ready")
+  /// For Q&A sources only: the original question text (chunkText holds
+  /// the answer). Null for PDFs and paste_text sources.
+  questionText String?                     @map("question_text") @db.Text
   /// pgvector(1536) — matches OpenAI text-embedding-3-small. Hardcoded
   /// dimension forces deliberation if the model ever changes.
-  embedding        Unsupported("vector(1536)")
-  embeddingModel   String                      @map("embedding_model")
-  embeddingVersion String                      @map("embedding_version")
-  tokenCount       Int                         @map("token_count")
-  createdAt        DateTime                    @default(now()) @map("created_at")
+  embedding    Unsupported("vector(1536)")
+  metadata     Json                        @default("{}")
+  createdAt    DateTime                    @default(now()) @map("created_at")
 
   source KnowledgeSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
 
   @@index([sourceId])
-  @@map("knowledge_chunks")
+  @@index([tenantId, status, category])
+  @@map("knowledge_chunk")
 }
 
-model KnowledgeIngestion {
-  id                String                @id @default(uuid())
-  knowledgeSourceId String                @map("knowledge_source_id")
-  status            KnowledgeSourceStatus
-  startedAt         DateTime?             @map("started_at")
-  completedAt       DateTime?             @map("completed_at")
-  /// For type=url crawls — URLs the crawler discovered. 0 for non-crawl jobs.
-  urlsDiscovered    Int                   @default(0) @map("urls_discovered")
-  urlsIndexed       Int                   @default(0) @map("urls_indexed")
-  errorCount        Int                   @default(0) @map("error_count")
-  errors            Json?
-  createdAt         DateTime              @default(now()) @map("created_at")
+model KnowledgeGapSummary {
+  id              String   @id @default(uuid())
+  tenantId        String   @map("tenant_id")
+  /// Normalized form of the customer query that failed retrieval (e.g.,
+  /// trimmed + lowercased). Used as dedup key per tenant. KAN-830 cron
+  /// aggregates `knowledge.gap_detected` events into rows on this table.
+  normalizedQuery String   @map("normalized_query") @db.VarChar(500)
+  countLast7d     Int      @default(0) @map("count_last_7d")
+  countLast30d    Int      @default(0) @map("count_last_30d")
+  lastSeen        DateTime @map("last_seen")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
 
-  source KnowledgeSource @relation(fields: [knowledgeSourceId], references: [id], onDelete: Cascade)
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
-  @@index([knowledgeSourceId])
-  @@map("knowledge_ingestions")
+  @@unique([tenantId, normalizedQuery])
+  @@index([tenantId, countLast7d])
+  @@map("knowledge_gap_summary")
+}
+
+model ChunkEffectiveness {
+  id            String    @id @default(uuid())
+  /// References KnowledgeChunk.id. NOT a foreign-key constraint here so a
+  /// chunk soft-delete doesn't cascade away historical effectiveness rows;
+  /// reads filter to live chunks via JOIN to KnowledgeChunk.
+  chunkId       String    @map("chunk_id")
+  /// References Decision.id. Loose-FK semantics (no constraint).
+  decisionId    String    @map("decision_id")
+  /// 'replied_positive' | 'replied_negative' | 'no_reply' | 'other'.
+  outcomeStatus String    @map("outcome_status")
+  outcomeAt     DateTime? @map("outcome_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  @@index([chunkId])
+  @@index([decisionId])
+  @@map("chunk_effectiveness")
 }
 
 // ─────────────────────────────────────────────

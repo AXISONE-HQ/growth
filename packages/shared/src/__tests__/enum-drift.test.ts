@@ -30,8 +30,6 @@ import {
   TargetPeriod,
   KnowledgeCategory,
   LeadAssignmentPosture,
-  KnowledgeSourceType,
-  KnowledgeSourceStatus,
   SignalClass,
   StageOutcomeType,
 } from "@prisma/client";
@@ -41,11 +39,14 @@ import {
   TargetPeriodEnum,
   KnowledgeCategoryEnum,
   LeadAssignmentPostureEnum,
-  KnowledgeSourceTypeEnum,
-  KnowledgeSourceStatusEnum,
   SignalClassEnum,
   StageOutcomeTypeEnum,
 } from "../enums.js";
+// KAN-826 — KnowledgeSourceType + KnowledgeSourceStatus PAIRS removed.
+// Sprint 11a Architect Spec replaced KAN-706 enum models with string columns
+// on the new KnowledgeSource model (sourceType + status are unconstrained
+// strings per spec §2; rationale §1.4 + §1.5 admit broader value sets without
+// schema migration as ingestion sources expand).
 
 interface EnumPair {
   name: string;
@@ -78,16 +79,6 @@ const PAIRS: EnumPair[] = [
     name: "LeadAssignmentPosture",
     prismaValues: Object.values(LeadAssignmentPosture),
     zodValues: LeadAssignmentPostureEnum.options,
-  },
-  {
-    name: "KnowledgeSourceType",
-    prismaValues: Object.values(KnowledgeSourceType),
-    zodValues: KnowledgeSourceTypeEnum.options,
-  },
-  {
-    name: "KnowledgeSourceStatus",
-    prismaValues: Object.values(KnowledgeSourceStatus),
-    zodValues: KnowledgeSourceStatusEnum.options,
   },
   {
     name: "SignalClass",

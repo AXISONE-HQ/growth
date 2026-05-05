@@ -5,19 +5,18 @@ import type { Prisma, ChannelConnection } from "@prisma/client";
 import { SecretManagerServiceClient } from "@google-cloud/secret-manager";
 import { router, publicProcedure, protectedProcedure, adminProcedure } from "./trpc.js";
 import {
-  IngestRequestSchema,
   ObjectiveTypeEnum,
   TargetMetricEnum,
   TargetPeriodEnum,
   KnowledgeCategoryEnum,
   LeadAssignmentPostureEnum,
-  KnowledgeSourceTypeEnum,
-  KnowledgeSourceStatusEnum,
-  PER_TENANT_INGEST_QUEUE_DEPTH_LIMIT,
-  type IngestRequestedEvent,
-  type IngestStatus,
 } from "@growth/shared";
-import { publishIngestRequested } from "./services/knowledge-ingest-publisher.js";
+// KAN-826: legacy KAN-707 ingest imports REMOVED — KnowledgeSourceTypeEnum,
+// KnowledgeSourceStatusEnum, PER_TENANT_INGEST_QUEUE_DEPTH_LIMIT,
+// IngestRequestedEvent, IngestStatus, IngestRequestSchema, and the
+// publishIngestRequested service. All consumers in this file deleted along
+// with the legacy admin endpoints. Sprint 11a KAN-827 will reintroduce a
+// new ingestion contract for the new knowledge_source/_chunk schema.
 
 // ============================================================================
 // KAN-702 PR A — pipeline form validation helpers (inlined here for net-zero
@@ -3213,261 +3212,6 @@ const pipelineMicroObjectivesRouter = router({
     }),
 });
 
-// KAN-707 PR A — Knowledge ingestion service (typed contract + queue depth +
-// publisher + tenant-scoped polling). PR B replaces the publisher's
-// fire-and-forget shape with the actual URL crawl / doc upload / Q&A logic
-// invoked from the push subscriber. PR A only stubs the worker.
-const knowledgeIngestRouter = router({
-  // Tenant submits an ingest request. Cross-tenant idempotency is enforced
-  // at the schema level via KnowledgeSource.@@unique([tenantId, contentHash])
-  // (KAN-706). Per-tenant queue depth (max 100 in-flight) is enforced here
-  // before the KnowledgeSource row is created. The request publishes to
-  // `knowledge.ingest.requested` for the worker (PR B) to pick up.
-  request: protectedProcedure
-    .input(IngestRequestSchema)
-    .mutation(async ({ ctx, input }) => {
-      // Per-tenant queue depth — count rows where source.tenantId = ctx.tenantId
-      // AND status IN ('pending', 'processing'). >= limit → 429.
-      const inFlight: number =
-        (await (ctx.prisma as any).knowledgeIngestion?.count({
-          where: {
-            source: { tenantId: ctx.tenantId },
-            status: { in: ["pending", "processing"] },
-          },
-        })) ?? 0;
-      if (inFlight >= PER_TENANT_INGEST_QUEUE_DEPTH_LIMIT) {
-        throw new TRPCError({
-          code: "TOO_MANY_REQUESTS",
-          message: `Per-tenant ingest queue depth limit (${PER_TENANT_INGEST_QUEUE_DEPTH_LIMIT} in-flight) exceeded; retry once jobs complete`,
-        });
-      }
-
-      // contentHash derivation per path. Cross-tenant uniqueness is the
-      // (tenantId, contentHash) composite — same URL/file from two tenants
-      // produces two distinct rows.
-      let contentHash: string;
-      let sourceUrl: string | null = null;
-      let uploadedFileRef: string | null = null;
-      let originalFileName: string | null = null;
-      let sourceType: "url" | "document" | "qa_pair";
-      switch (input.path) {
-        case "url":
-          contentHash = createHash("sha256").update(`url:${input.sourceUrl}:${input.crawlScope}`).digest("hex");
-          sourceUrl = input.sourceUrl;
-          sourceType = "url";
-          break;
-        case "document":
-          contentHash = createHash("sha256").update(`doc:${input.uploadedFileRef}`).digest("hex");
-          uploadedFileRef = input.uploadedFileRef;
-          originalFileName = input.originalFileName;
-          sourceType = "document";
-          break;
-        case "qa_pair":
-          contentHash = createHash("sha256").update(`qa:${input.question}:${input.answer}`).digest("hex");
-          sourceType = "qa_pair";
-          break;
-      }
-
-      // Upsert the source by (tenantId, contentHash). Re-submitting the same
-      // payload returns the existing row + creates a new ingestion job
-      // (re-crawl semantics).
-      const source: any = await (ctx.prisma as any).knowledgeSource?.upsert({
-        where: { tenantId_contentHash: { tenantId: ctx.tenantId, contentHash } },
-        create: {
-          tenantId: ctx.tenantId,
-          type: sourceType,
-          status: "pending",
-          contentHash,
-          sourceUrl,
-          uploadedFileRef,
-          originalFileName,
-          createdBy: ctx.firebaseUser?.uid ?? null,
-        },
-        update: {
-          status: "pending",
-          updatedAt: new Date(),
-        },
-      });
-
-      const ingestion: any = await (ctx.prisma as any).knowledgeIngestion?.create({
-        data: {
-          knowledgeSourceId: source.id,
-          status: "pending",
-        },
-      });
-
-      // Publish to the worker. PR A's stub subscriber currently logs + 200s.
-      const event: IngestRequestedEvent = {
-        eventId: ingestion.id,
-        eventType: "knowledge.ingest.requested",
-        version: "1.0",
-        tenantId: ctx.tenantId,
-        ingestionId: ingestion.id,
-        sourceId: source.id,
-        path: input.path,
-        payload: input,
-        enqueuedAt: new Date().toISOString(),
-      };
-      await publishIngestRequested(event);
-
-      return { ingestionId: ingestion.id, sourceId: source.id, status: "pending" as const };
-    }),
-
-  // Tenant-scoped polling. The endpoint MUST verify the polled ingestionId
-  // belongs to the requesting tenant (cross-tenant poll → NOT_FOUND, never
-  // the other tenant's status). Achieved by joining through KnowledgeSource
-  // with tenantId filter.
-  status: protectedProcedure
-    .input(z.object({ ingestionId: z.string().uuid() }))
-    .query(async ({ ctx, input }): Promise<IngestStatus> => {
-      const row: any = await (ctx.prisma as any).knowledgeIngestion?.findFirst({
-        where: {
-          id: input.ingestionId,
-          source: { tenantId: ctx.tenantId },
-        },
-        include: { source: { select: { id: true, errorMessage: true } } },
-      });
-      if (!row) {
-        throw new TRPCError({
-          code: "NOT_FOUND",
-          message: "Ingestion job not found in this tenant",
-        });
-      }
-      return {
-        ingestionId: row.id,
-        sourceId: row.knowledgeSourceId,
-        status: row.status,
-        startedAt: row.startedAt?.toISOString() ?? null,
-        completedAt: row.completedAt?.toISOString() ?? null,
-        errorMessage: row.source?.errorMessage ?? null,
-        urlsDiscovered: row.urlsDiscovered ?? 0,
-        urlsIndexed: row.urlsIndexed ?? 0,
-      };
-    }),
-
-  // KAN-708 — list sources for the tenant, with each source's latest
-  // ingestion status and chunk count. Sorted by creation date desc by default.
-  // Filter by source type (optional) and status (optional) for the UI list view.
-  listSources: protectedProcedure
-    .input(
-      z
-        .object({
-          type: z.enum(["url", "document", "qa_pair", "structured_field"]).optional(),
-          status: z.enum(["pending", "processing", "indexed", "failed", "stale"]).optional(),
-        })
-        .optional(),
-    )
-    .query(async ({ ctx, input }) => {
-      const where: any = { tenantId: ctx.tenantId };
-      if (input?.type) where.type = input.type;
-      if (input?.status) where.status = input.status;
-      const sources: any[] =
-        (await (ctx.prisma as any).knowledgeSource?.findMany({
-          where,
-          orderBy: { createdAt: "desc" },
-          include: { _count: { select: { chunks: true } } },
-        })) ?? [];
-      return sources.map((s) => ({
-        id: s.id,
-        type: s.type,
-        status: s.status,
-        sourceUrl: s.sourceUrl,
-        originalFileName: s.originalFileName,
-        contentHash: s.contentHash,
-        lastIndexedAt: s.lastIndexedAt?.toISOString() ?? null,
-        errorMessage: s.errorMessage,
-        chunkCount: s._count.chunks,
-        createdAt: s.createdAt.toISOString(),
-        updatedAt: s.updatedAt.toISOString(),
-      }));
-    }),
-
-  // KAN-708 — source detail with chunks (paginated). Tenant-scoped.
-  getSourceById: protectedProcedure
-    .input(
-      z.object({
-        sourceId: z.string().uuid(),
-        chunkLimit: z.number().int().min(1).max(100).default(20),
-        chunkOffset: z.number().int().min(0).default(0),
-      }),
-    )
-    .query(async ({ ctx, input }) => {
-      const source: any = await (ctx.prisma as any).knowledgeSource?.findFirst({
-        where: { id: input.sourceId, tenantId: ctx.tenantId },
-        include: {
-          ingestions: { orderBy: { createdAt: "desc" }, take: 5 },
-          _count: { select: { chunks: true } },
-        },
-      });
-      if (!source) {
-        throw new TRPCError({ code: "NOT_FOUND", message: "Source not found in this tenant" });
-      }
-      // Chunks separately so we can paginate without loading the full set.
-      const chunks: any[] =
-        (await (ctx.prisma as any).knowledgeChunk?.findMany({
-          where: { sourceId: input.sourceId },
-          orderBy: { chunkIndex: "asc" },
-          skip: input.chunkOffset,
-          take: input.chunkLimit,
-          select: {
-            id: true,
-            chunkIndex: true,
-            totalChunks: true,
-            content: true,
-            tokenCount: true,
-            embeddingModel: true,
-            createdAt: true,
-          },
-        })) ?? [];
-      return {
-        id: source.id,
-        type: source.type,
-        status: source.status,
-        sourceUrl: source.sourceUrl,
-        uploadedFileRef: source.uploadedFileRef,
-        originalFileName: source.originalFileName,
-        lastIndexedAt: source.lastIndexedAt?.toISOString() ?? null,
-        errorMessage: source.errorMessage,
-        createdAt: source.createdAt.toISOString(),
-        updatedAt: source.updatedAt.toISOString(),
-        totalChunks: source._count.chunks,
-        chunks: chunks.map((c) => ({
-          id: c.id,
-          chunkIndex: c.chunkIndex,
-          totalChunks: c.totalChunks,
-          content: c.content,
-          tokenCount: c.tokenCount,
-          embeddingModel: c.embeddingModel,
-          createdAt: c.createdAt.toISOString(),
-        })),
-        recentIngestions: source.ingestions.map((i: any) => ({
-          ingestionId: i.id,
-          status: i.status,
-          startedAt: i.startedAt?.toISOString() ?? null,
-          completedAt: i.completedAt?.toISOString() ?? null,
-          createdAt: i.createdAt.toISOString(),
-        })),
-      };
-    }),
-
-  // KAN-708 — delete a source + cascade chunks + ingestions. Tenant-scoped.
-  deleteSource: protectedProcedure
-    .input(z.object({ sourceId: z.string().uuid() }))
-    .mutation(async ({ ctx, input }) => {
-      const source: any = await (ctx.prisma as any).knowledgeSource?.findFirst({
-        where: { id: input.sourceId, tenantId: ctx.tenantId },
-        select: { id: true },
-      });
-      if (!source) {
-        throw new TRPCError({ code: "NOT_FOUND", message: "Source not found in this tenant" });
-      }
-      // ON DELETE CASCADE on the FKs (KAN-706 schema) handles chunks +
-      // ingestions automatically.
-      await (ctx.prisma as any).knowledgeSource?.delete({ where: { id: input.sourceId } });
-      return { sourceId: input.sourceId };
-    }),
-});
-
 // ============================================================================
 // KAN-742 — Sprint 3 / S3.8 Lead API tRPC surface.
 //
@@ -3719,7 +3463,9 @@ export const appRouter = router({
   stages: stagesRouter,
   targets: targetsRouter,
   knowledgeFilters: knowledgeFiltersRouter,
-  knowledgeIngest: knowledgeIngestRouter,
+  // KAN-826: knowledgeIngest router REMOVED. Legacy KAN-707 admin endpoints
+  // were tied to the dropped KAN-786 schema. KAN-827 will introduce a new
+  // ingestion API surface against the Sprint 11a knowledge_source/_chunk schema.
   pipelineMicroObjectives: pipelineMicroObjectivesRouter,
   decisions: decisionsRouter,
   actions: actionsRouter,

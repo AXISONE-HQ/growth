@@ -66,14 +66,19 @@ export function checkQaPair(opts: { question: string; answer: string }): QaPairC
 
 export type StatusVariant = "info" | "neutral" | "success" | "destructive" | "warning";
 
+// KAN-826 — status values updated per Sprint 11a Architect Spec §2.
+// Legacy KAN-706 statuses (pending/processing/indexed/failed/stale) replaced
+// by Sprint 11a's lifecycle (queued → embedding → ready; error terminal;
+// deleted = soft-deleted). The Knowledge Sources admin UI (KAN-829) will
+// consume these mappings directly.
 export const STATUS_VARIANT: Record<string, StatusVariant> = {
-  pending: "info",
-  processing: "info",
-  indexed: "success",
-  failed: "destructive",
-  stale: "warning",
+  queued: "info",
+  embedding: "info",
+  ready: "success",
+  error: "destructive",
+  deleted: "neutral",
 };
 
 export function isInProgress(status: string): boolean {
-  return status === "pending" || status === "processing";
+  return status === "queued" || status === "embedding";
 }

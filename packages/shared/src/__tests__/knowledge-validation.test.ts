@@ -69,23 +69,24 @@ describe("checkQaPair", () => {
 });
 
 describe("isInProgress", () => {
-  it("returns true for pending and processing", () => {
-    expect(isInProgress("pending")).toBe(true);
-    expect(isInProgress("processing")).toBe(true);
+  // KAN-826: status values updated per Sprint 11a Architect Spec §2.
+  it("returns true for queued and embedding (in-flight states)", () => {
+    expect(isInProgress("queued")).toBe(true);
+    expect(isInProgress("embedding")).toBe(true);
   });
-  it("returns false for terminal statuses", () => {
-    expect(isInProgress("indexed")).toBe(false);
-    expect(isInProgress("failed")).toBe(false);
-    expect(isInProgress("stale")).toBe(false);
+  it("returns false for terminal statuses (ready, error, deleted)", () => {
+    expect(isInProgress("ready")).toBe(false);
+    expect(isInProgress("error")).toBe(false);
+    expect(isInProgress("deleted")).toBe(false);
   });
 });
 
 describe("STATUS_VARIANT", () => {
-  it("maps every KnowledgeSourceStatus to a UI variant", () => {
-    expect(STATUS_VARIANT.pending).toBe("info");
-    expect(STATUS_VARIANT.processing).toBe("info");
-    expect(STATUS_VARIANT.indexed).toBe("success");
-    expect(STATUS_VARIANT.failed).toBe("destructive");
-    expect(STATUS_VARIANT.stale).toBe("warning");
+  it("maps every Sprint 11a knowledge_source.status value to a UI variant", () => {
+    expect(STATUS_VARIANT.queued).toBe("info");
+    expect(STATUS_VARIANT.embedding).toBe("info");
+    expect(STATUS_VARIANT.ready).toBe("success");
+    expect(STATUS_VARIANT.error).toBe("destructive");
+    expect(STATUS_VARIANT.deleted).toBe("neutral");
   });
 });
