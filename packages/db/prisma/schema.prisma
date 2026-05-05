@@ -89,6 +89,7 @@ model Tenant {
   llmCostRollups         LlmCostRollup[]
   deals                  Deal[]
   engagements            Engagement[]
+  deferredSends          DeferredSend[]
 
   //   tenantSettings  TenantSettings[]  // commented out for smoke build (model missing on main)
   channelConnections ChannelConnection[]
@@ -193,6 +194,7 @@ model Contact {
   // KAN-791 — LeadStageHistory dropped (replaced by DealStageHistory which is deal-scoped)
   deals           Deal[]
   engagements     Engagement[]
+  deferredSends   DeferredSend[]
 
   @@index([tenantId])
   @@index([tenantId, email])
@@ -1144,17 +1146,69 @@ model Deal {
   createdAt              DateTime @default(now()) @map("created_at")
   updatedAt              DateTime @updatedAt @map("updated_at")
 
-  tenant       Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  contact      Contact            @relation(fields: [contactId], references: [id], onDelete: Cascade)
-  pipeline     Pipeline           @relation(fields: [pipelineId], references: [id], onDelete: Restrict)
-  currentStage Stage              @relation("DealCurrentStage", fields: [currentStageId], references: [id], onDelete: Restrict)
-  engagements  Engagement[]
-  stageHistory DealStageHistory[]
+  tenant        Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  contact       Contact            @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  pipeline      Pipeline           @relation(fields: [pipelineId], references: [id], onDelete: Restrict)
+  currentStage  Stage              @relation("DealCurrentStage", fields: [currentStageId], references: [id], onDelete: Restrict)
+  engagements   Engagement[]
+  stageHistory  DealStageHistory[]
+  deferredSends DeferredSend[]
 
   @@index([tenantId, currentStageId])
   @@index([tenantId, pipelineId])
   @@index([tenantId, contactId])
   @@map("deals")
+}
+
+/// KAN-814 — Deferred outbound queue.
+///
+/// When Send Policy returns `defer` (e.g., outside tenant send window) the
+/// dispatcher persists the would-be send here instead of the previous
+/// log+drop behavior. A 5-min cron worker (Cloud Scheduler → growth-api
+/// `/internal/cron/deferred-send-evaluator`) re-evaluates Send Policy on
+/// pending rows whose `defer_until` has elapsed. On `allow` → dispatch +
+/// mark `dispatched`. On still-defer → increment attempts + push
+/// `defer_until` forward. After 12 attempts (~24h) → `expired`.
+///
+/// **Supersession invariant**: a fresh inbound on the same (deal_id,
+/// contact_id) marks pending rows `cancelled` with
+/// `cancelReason='superseded_by_fresh_inbound'` BEFORE Brain re-evaluates,
+/// so a stale defer doesn't double-send after the new inbound's outbound
+/// already fires.
+model DeferredSend {
+  id            String    @id @default(uuid())
+  tenantId      String    @map("tenant_id")
+  dealId        String    @map("deal_id")
+  contactId     String    @map("contact_id")
+  /// Full payload to re-dispatch — brainDecision blob + composedMessage +
+  /// connectionId + replyTo + tone/token metadata. Captured at defer-time
+  /// to honor Brain's T1 intent (don't re-shape on re-dispatch — see
+  /// feedback note in deferred-send-evaluator.ts).
+  payload       Json
+  deferUntil    DateTime  @map("defer_until")
+  deferReason   String    @map("defer_reason")
+  /// pending | dispatched | expired | cancelled
+  status        String    @default("pending")
+  attempts      Int       @default(0)
+  lastAttemptAt DateTime? @map("last_attempt_at")
+  /// Set when status='cancelled'. Known values:
+  ///   - 'superseded_by_fresh_inbound' (KAN-814 supersession path)
+  ///   - 'policy_now_denies' (Send Policy returned deny on re-eval)
+  cancelReason  String?   @map("cancel_reason")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  deal    Deal    @relation(fields: [dealId], references: [id], onDelete: Cascade)
+  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  // Cron worker scan: pending rows whose defer_until has elapsed
+  @@index([status, deferUntil])
+  // Supersession lookup: pending rows for a (tenant, deal, contact) tuple
+  @@index([tenantId, dealId, contactId, status])
+  // Tenant-bounded recency queries (audit dashboards, expired-row cleanup)
+  @@index([tenantId, createdAt])
+  @@map("deferred_sends")
 }
 
 /// KAN-791 — DealStageHistory replaces lead_stage_history (deal-scoped, not contact-scoped)
