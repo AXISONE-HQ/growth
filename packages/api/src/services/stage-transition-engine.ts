@@ -106,6 +106,26 @@ export interface EvaluateTransitionOptions {
    * manual override (post-MVP per KAN-810).
    */
   triggeredBy?: 'normalizer' | 'agent' | 'human' | 'system' | 'rule';
+  /**
+   * KAN-834 — pre-computed Brain decision from the dispatcher. When
+   * provided, the engine SKIPS its internal `evaluateDealState` call and
+   * uses the passed decision verbatim.
+   *
+   * Cures the LLM-non-determinism double-eval disagreement class
+   * (Sprint 11-pre Gmail smoke 2026-05-05 16:10:54-16:11:01 UTC: dispatcher
+   * Brain returned `advance_stage`, engine's internal Brain re-eval
+   * returned `send_follow_up`, engine emitted `no_transition`, KAN-825
+   * chain skipped, customer silence). Single Brain call per inbound;
+   * downstream consumers see exactly one decision.
+   *
+   * Terminal-stage short-circuit still runs first (pre-Brain, unchanged) —
+   * the pre-computed decision doesn't bypass closure-state safety.
+   *
+   * Backwards-compat: when absent, the engine falls back to its existing
+   * internal Brain call. Future cron/operator callers without a
+   * dispatcher-side Brain call still work unchanged.
+   */
+  brainDecision?: BrainDecision;
 }
 
 export class StageTransitionDealNotFoundError extends Error {
@@ -200,6 +220,8 @@ export async function evaluateStageTransition(
   };
 
   // ── Short-circuit: already terminal. No transitions out of terminal Stages.
+  // Runs BEFORE Brain regardless of whether a pre-computed decision is
+  // supplied — closure-state safety is structural, not Brain-judged.
   if (deal.currentStage.outcomeType !== 'open') {
     return {
       type: 'skipped',
@@ -208,8 +230,15 @@ export async function evaluateStageTransition(
     };
   }
 
-  // 2. Call Brain Service.
-  const brainDecision = await evaluateDealState(prisma, dealId, { tier: options.tier });
+  // 2. Brain decision: KAN-834 — use the dispatcher's pre-computed decision
+  //    when supplied; otherwise fall back to the internal call (backwards-
+  //    compat for cron / operator callers that don't have a prior decision).
+  //    Single-source-of-truth eliminates the LLM-non-determinism class
+  //    bug surfaced 2026-05-05 (dispatcher → advance_stage; engine →
+  //    send_follow_up; chain silently skipped on no_transition).
+  const brainDecision =
+    options.brainDecision ??
+    (await evaluateDealState(prisma, dealId, { tier: options.tier }));
 
   // 3. Confidence gate.
   const minConfidence = options.minConfidenceForTransition ?? 0.5;

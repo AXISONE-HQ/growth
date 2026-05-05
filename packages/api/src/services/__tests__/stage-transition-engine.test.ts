@@ -549,3 +549,115 @@ describe('resolveAdvanceTargetStage', () => {
     expect(target).toBeNull();
   });
 });
+
+// ─────────────────────────────────────────────
+// KAN-834 — engine accepts pre-computed brainDecision (cure double-eval)
+//
+// Sprint 11-pre Gmail smoke 2026-05-05 16:10:54-16:11:01 UTC: dispatcher
+// Brain returned advance_stage; engine's internal Brain re-eval returned
+// send_follow_up; engine emitted no_transition; KAN-825 chain skipped;
+// customer silence. KAN-834 cures by single-source-of-truthing the call.
+// ─────────────────────────────────────────────
+
+describe('evaluateStageTransition — KAN-834 pre-computed brainDecision', () => {
+  // ── Test 1 — wire-through: pre-computed decision → engine skips internal Brain call
+  it('options.brainDecision provided → engine SKIPS internal evaluateDealState call (single Brain call per inbound)', async () => {
+    const { prisma } = makePrismaMock({ deal: buildDealFixture() });
+    const preComputed = buildBrainDecision({ type: 'advance_stage', confidence: 0.82 });
+
+    await evaluateStageTransition(prisma, DEAL_A, { brainDecision: preComputed });
+
+    // Critical: zero internal Brain calls when pre-computed decision supplied
+    expect(evaluateDealStateMock).not.toHaveBeenCalled();
+  });
+
+  // ── Test 2 — backwards compat: no brainDecision → falls back to internal call
+  it('no options.brainDecision → engine falls back to internal evaluateDealState (cron / operator caller compat)', async () => {
+    const { prisma } = makePrismaMock({ deal: buildDealFixture() });
+    evaluateDealStateMock.mockResolvedValueOnce(buildBrainDecision({ type: 'wait_for_response' }));
+
+    await evaluateStageTransition(prisma, DEAL_A);
+
+    expect(evaluateDealStateMock).toHaveBeenCalledOnce();
+  });
+
+  // ── Test 3 — cure verification: pre-computed advance_stage transitions successfully
+  it('pre-computed advance_stage → engine transitions stage successfully (no second-Brain disagreement)', async () => {
+    const { prisma, mocks } = makePrismaMock({ deal: buildDealFixture() });
+    const preComputed = buildBrainDecision({ type: 'advance_stage', confidence: 0.82 });
+
+    const result = await evaluateStageTransition(prisma, DEAL_A, {
+      brainDecision: preComputed,
+    });
+
+    expect(result.type).toBe('transitioned');
+    if (result.type === 'transitioned') {
+      expect(result.toStageId).toBe(STAGE_QUALIFIED); // default-by-order from STAGE_NEW
+      expect(result.brainDecision).toBe(preComputed); // verbatim
+    }
+    // Stage transition write happened
+    expect(mocks.updateDeal).toHaveBeenCalledOnce();
+    expect(mocks.createHistory).toHaveBeenCalledOnce();
+    // Brain only called once (the dispatcher's call, which produced preComputed)
+    expect(evaluateDealStateMock).not.toHaveBeenCalled();
+  });
+
+  // ── Test 4 — terminal-stage short-circuit fires BEFORE Brain regardless
+  it('terminal-stage short-circuit fires BEFORE Brain even when pre-computed decision supplied (closure-state safety)', async () => {
+    const { prisma } = makePrismaMock({ deal: buildDealFixture({ currentStageId: STAGE_WON }) });
+    const preComputed = buildBrainDecision({ type: 'advance_stage' });
+
+    const result = await evaluateStageTransition(prisma, DEAL_A, {
+      brainDecision: preComputed,
+    });
+
+    expect(result.type).toBe('skipped');
+    if (result.type === 'skipped') {
+      expect(result.reason).toBe('already_terminal');
+    }
+    // Pre-computed decision irrelevant — terminal short-circuit wins
+    expect(evaluateDealStateMock).not.toHaveBeenCalled();
+  });
+
+  // ── Test 5 — sentinel-token field-name pin: brainDecision flows verbatim into transition write metadata
+  it('sentinel-token pin: pre-computed brainDecision flows verbatim into transition write metadata', async () => {
+    const { prisma, mocks } = makePrismaMock({ deal: buildDealFixture() });
+    const sentinelReasoning = 'KAN-834-sentinel-token-pin-reasoning-abc123';
+    const preComputed = buildBrainDecision({
+      type: 'advance_stage',
+      confidence: 0.82,
+      reasoning: sentinelReasoning,
+    });
+
+    await evaluateStageTransition(prisma, DEAL_A, { brainDecision: preComputed });
+
+    const dshArgs = mocks.createHistory.mock.calls[0]![0] as {
+      data: { metadata: { brainReasoning: string; brainConfidence: number } };
+    };
+    expect(dshArgs.data.metadata.brainReasoning).toBe(sentinelReasoning);
+    expect(dshArgs.data.metadata.brainConfidence).toBe(0.82);
+  });
+
+  // ── Test 6 — determinism guarantee: pre-computed path doesn't get bitten by LLM non-determinism
+  it('determinism guarantee: even if internal-call mock would return a DIFFERENT decision, pre-computed path is honored', async () => {
+    // Setup: queue a HYPOTHETICAL second-call response that DISAGREES with
+    // the pre-computed decision (simulates the LLM-non-determinism class
+    // bug from 2026-05-05 Gmail smoke). The engine MUST NOT reach this
+    // mock — pre-computed wins.
+    const { prisma } = makePrismaMock({ deal: buildDealFixture() });
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecision({ type: 'send_follow_up', confidence: 0.85 }),
+    );
+    const preComputed = buildBrainDecision({ type: 'advance_stage', confidence: 0.82 });
+
+    const result = await evaluateStageTransition(prisma, DEAL_A, {
+      brainDecision: preComputed,
+    });
+
+    // Pre-computed decision honored; engine transitions per advance_stage
+    expect(result.type).toBe('transitioned');
+    // The load-bearing assertion: engine did NOT consult the disagreeing
+    // internal-call mock. This is the structural cure.
+    expect(evaluateDealStateMock).not.toHaveBeenCalled();
+  });
+});

@@ -349,14 +349,12 @@ interface StageTransitionEngineModule {
       tier?: 'cheap' | 'reasoning';
       minConfidenceForTransition?: number;
       triggeredBy?: 'normalizer' | 'agent' | 'human' | 'system' | 'rule';
-      // KAN-815b: forwards a pre-computed BrainDecision to avoid double Brain
-      // eval. Note: stage-transition-engine's KAN-796a public API doesn't
-      // currently accept a brainDecision pre-pass — it always re-evaluates.
-      // KAN-815b accepts the cost of one extra Brain call OR future KAN-815b+
-      // can extend the engine API to accept brainDecision. For MVP we accept
-      // the double-eval; the extra Brain call is the same cost as one
-      // additional consumer-side call and the engine's terminal-Stage
-      // short-circuit handles already-closed Deals without LLM.
+      // KAN-834: pre-computed Brain decision from the dispatcher. When
+      // supplied, the engine SKIPS its internal evaluateDealState call.
+      // Cures the LLM-non-determinism double-eval disagreement class
+      // (the prior "MVP accepts the double-eval" comment described what
+      // closes here). Single Brain call per inbound now.
+      brainDecision?: Phase2BrainDecision;
     },
   ) => Promise<{
     type: 'transitioned' | 'no_transition' | 'skipped';
@@ -782,7 +780,13 @@ async function wirePhase2Consumers(
     brainDecision.nextBestAction.type === 'close_deal_lost'
   ) {
     const { evaluateStageTransition } = await loadStageTransitionEngineModule();
-    const transitionResult = await evaluateStageTransition(prisma, dealId);
+    // KAN-834 — thread the dispatcher's first Brain decision into the
+    // engine so it doesn't re-evaluate. Single Brain call per inbound;
+    // engine's terminal-stage short-circuit still runs first; KAN-825
+    // chain logic downstream sees the same decision the dispatcher saw.
+    const transitionResult = await evaluateStageTransition(prisma, dealId, {
+      brainDecision,
+    });
     console.log(
       `[lead-received-push] phase-2-stage-transition dealId=${dealId} eventId=${eventId} brainAction=${brainDecision.nextBestAction.type} resultType=${transitionResult.type}${transitionResult.reason ? ` reason=${transitionResult.reason}` : ''}${transitionResult.toStageId ? ` toStageId=${transitionResult.toStageId}` : ''}`,
     );
