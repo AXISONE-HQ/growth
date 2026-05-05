@@ -94,12 +94,12 @@ export interface BrainDecision {
 }
 
 /**
- * KAN-825 — origin-aware Brain evaluation context.
+ * KAN-825 / KAN-835 — origin-aware Brain evaluation context.
  *
  *   - 'inbound' (default): the Brain call is reacting to a fresh customer
  *     inbound. No assumed prior chain; Brain decides freely across all six
  *     action types.
- *   - 'post_stage_advance': this is a chained Brain call fired AFTER a
+ *   - 'post_stage_advance' (KAN-825): chained Brain call fired AFTER a
  *     previous Brain call returned `advance_stage` and the Stage Transition
  *     Engine successfully transitioned the Deal. Brain receives a directive
  *     `## Trigger` block that frames the choice as "what to communicate
@@ -107,12 +107,24 @@ export interface BrainDecision {
  *     `send_follow_up` (the conservative-default `wait_for_response` produces
  *     a customer-perceived UX dead-end at this point — see Sprint 10 evening
  *     diagnosis).
+ *   - 'post_wait_acknowledgment' (KAN-835): chained Brain call fired AFTER
+ *     a previous Brain call returned `wait_for_response`. Empirical anchor
+ *     (Sprint 10 + 11-pre): 4 observed wait_for_response inbounds produced
+ *     0 customer-visible outbounds. Customer perception was "I asked, AI
+ *     ignored me" — even when Brain's reasoning was sound (e.g., "wait for
+ *     the human to deliver the quote"). Directive Trigger block biases
+ *     toward `send_follow_up` with a brief acknowledgment ("got your
+ *     message, will follow up shortly") so the customer hears something
+ *     while we wait for human action.
  *
  * Loop guard lives at the call site (lead-received-push.ts), NOT in this
  * module — the chain depth max=1 invariant is enforced by the orchestrator
  * via a local boolean parameter, not via persisted state.
  */
-export type BrainTriggerContext = 'inbound' | 'post_stage_advance';
+export type BrainTriggerContext =
+  | 'inbound'
+  | 'post_stage_advance'
+  | 'post_wait_acknowledgment';
 
 export interface EvaluateOptions {
   /** Default 'reasoning' (Sonnet). Caller can downshift to 'cheap' (Haiku) for batch eval. */
@@ -416,28 +428,59 @@ export function buildEvaluationPrompt(input: {
           )
           .join('\n');
 
-  // KAN-825 — directive Trigger block for post-stage-advance chained calls.
-  // Empirical anchor (Sprint 10 evening): without this directive framing,
-  // chained Brain reasoning often returns wait_for_response — the
-  // conservative-default produces a customer-perceived UX dead-end after
-  // a stage advance the contact wasn't notified about. The "Strong
-  // preference: send_follow_up" phrase plus the explicit "silence at
-  // this point produces a UX dead-end" framing is the load-bearing nudge.
-  // Sentinel-token test (`packages/api/src/services/__tests__/brain-service.test.ts`)
-  // pins both `post_stage_advance` and `## Trigger` literals.
+  // KAN-825 / KAN-835 — directive Trigger block for chained Brain calls.
+  // Two flavors today; structure scales as new chain triggers ship.
+  //
+  //   post_stage_advance (KAN-825): chained call after a successful Stage
+  //     Transition. Empirical anchor (Sprint 10 evening): without this
+  //     directive framing, chained Brain reasoning often returns
+  //     wait_for_response — the conservative-default produces a customer-
+  //     perceived UX dead-end after a stage advance the contact wasn't
+  //     notified about. The "Strong preference: send_follow_up" phrase plus
+  //     the explicit "silence at this point produces a UX dead-end"
+  //     framing is the load-bearing nudge.
+  //
+  //   post_wait_acknowledgment (KAN-835): chained call after Brain returned
+  //     wait_for_response on the original inbound. Empirical anchor (4
+  //     observed silences across Sprint 10 + Sprint 11-pre Deal Y at Quote
+  //     Sent): customer perception was "I asked, AI ignored me," even when
+  //     Brain's reasoning was sound (e.g., wait for human to deliver the
+  //     quote). Directive biases toward send_follow_up with a brief
+  //     acknowledgment so the customer hears SOMETHING while we wait for
+  //     human action. Loop guard at call site (lead-received-push.ts):
+  //     chained wait_for_response → log + skip; chained advance_stage →
+  //     log + skip (state didn't change); chained close_deal_lost /
+  //     no_action → log + skip (legitimate but silent — chain doesn't
+  //     override).
+  //
+  // Sentinel-token test pins both `post_stage_advance` AND
+  // `post_wait_acknowledgment` AND the load-bearing directive phrases.
   const fromStageName = postStageAdvance?.fromStageName ?? '(prior stage)';
   const toStageName = postStageAdvance?.toStageName ?? snapshot.currentStageName;
-  const triggerBlock =
-    triggerContext === 'post_stage_advance'
-      ? `## Trigger
+  let triggerBlock = '';
+  if (triggerContext === 'post_stage_advance') {
+    triggerBlock = `## Trigger
 This evaluation is the second call in a chain (triggerContext=post_stage_advance). Brain just transitioned this Deal from ${fromStageName} to ${toStageName} based on the inbound. The contact has NOT yet been notified of this progression.
 
 Your task on this call: decide what to communicate to the contact about this stage advancement.
 
 Strong preference: send_follow_up. The contact engaged, Brain advanced the pipeline, and silence at this point produces a UX dead-end. Choose wait_for_response or escalate_to_human ONLY if there's an explicit content reason (e.g., the new stage is terminal closed_won/closed_lost, or the contact's message contained explicit instructions to wait).
 
-`
-      : '';
+`;
+  } else if (triggerContext === 'post_wait_acknowledgment') {
+    triggerBlock = `## Trigger
+This evaluation is the second call in a chain (triggerContext=post_wait_acknowledgment). Brain just decided to wait_for_response on the contact's inbound. The contact has NOT been notified that their message was received.
+
+Your task on this call: decide what acknowledgment or human-handoff action to take.
+
+Strong preference: send_follow_up with a brief acknowledgment that we received their message and what to expect next. Acknowledgments do not need to deliver substantive content — a simple "got your message, looking into it, will follow up shortly" is appropriate when human action is genuinely required.
+
+If the contact's message specifically requests human action that we cannot fulfill autonomously (e.g., requesting a price quote that requires human approval, requesting cancellation that requires legal review), choose escalate_to_human — this triggers the Sprint 11b escalation flow and the contact still receives an acknowledgment.
+
+DO NOT return wait_for_response on this chained call — silence after the customer engaged produces a UX dead-end. DO NOT return advance_stage — the Deal state didn't change, only the contact's expectation needs setting.
+
+`;
+  }
 
   return `${triggerBlock}## Deal context
 Pipeline: ${snapshot.pipelineName} (objective: ${snapshot.pipelineObjectiveType})

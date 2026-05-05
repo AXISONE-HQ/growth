@@ -627,4 +627,41 @@ describe('buildEvaluationPrompt — KAN-825 directive Trigger block', () => {
     expect(prompt).toContain('(prior stage)');
     expect(prompt).toContain('to Qualified'); // snapshot.currentStageName fallback
   });
+
+  // KAN-835 — sentinel-token pin for post_wait_acknowledgment directive.
+  // Three load-bearing literals enforce the directive strength (mirrors
+  // KAN-825's evidence that exact phrasing produced chained Brain
+  // confidence 0.92).
+  it('KAN-835 — triggerContext=post_wait_acknowledgment renders directive Trigger block with all sentinel literals', () => {
+    const prompt = buildEvaluationPrompt({
+      ...baseInput,
+      triggerContext: 'post_wait_acknowledgment',
+    });
+    expect(prompt.startsWith('## Trigger')).toBe(true);
+    // Three load-bearing sentinels — any rename breaks loudly.
+    expect(prompt).toContain('triggerContext=post_wait_acknowledgment');
+    expect(prompt).toContain(
+      'Strong preference: send_follow_up with a brief acknowledgment',
+    );
+    expect(prompt).toContain('silence after the customer engaged produces a UX dead-end');
+    // DO NOT-style instructions explicitly bias against wait/advance loops
+    expect(prompt).toContain('DO NOT return wait_for_response');
+    expect(prompt).toContain('DO NOT return advance_stage');
+    // Escalation carve-out present (Sprint 11b handoff)
+    expect(prompt).toContain('escalate_to_human');
+  });
+
+  it('KAN-835 — post_wait_acknowledgment block does NOT render fromStageName/toStageName (those are post_stage_advance only)', () => {
+    const prompt = buildEvaluationPrompt({
+      ...baseInput,
+      triggerContext: 'post_wait_acknowledgment',
+      // postStageAdvance present but irrelevant to this trigger context
+      postStageAdvance: { fromStageName: 'New', toStageName: 'Qualified' },
+    });
+    // Stage names only render in the post_stage_advance block.
+    expect(prompt).not.toContain('from New to Qualified');
+    expect(prompt).not.toContain('post_stage_advance');
+    // But IS the post_wait_acknowledgment shape
+    expect(prompt).toContain('triggerContext=post_wait_acknowledgment');
+  });
 });

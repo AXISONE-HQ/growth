@@ -583,14 +583,18 @@ function setupPhase2DispatchMocks() {
 }
 
 describe("KAN-815 — Phase 2 wiring (Brain trigger framework + consumer dispatch)", () => {
-  // ── Test 1 — Brain wait_for_response → no transition, no shape, no dispatch (existing-behavior regression)
-  it("Brain returns wait_for_response → no consumers fire (production unchanged)", async () => {
-    setupHappyPathMocks(); // Brain default = wait_for_response
+  // ── Test 1 — Brain wait_for_response → KAN-835 chain fires; chained call also returns
+  //    wait_for_response → loop guard skip; no transition, no shape, no dispatch
+  it("Brain returns wait_for_response → KAN-835 chain fires once; chained wait_for_response → loop-guard skip; no consumers", async () => {
+    setupHappyPathMocks(); // Brain default = wait_for_response (persistent mock)
 
     const res = await postEnvelope(buildPushEnvelope());
 
     expect(res.status).toBe(200);
-    expect(evaluateDealStateMock).toHaveBeenCalledOnce();
+    // KAN-835: initial Brain call returns wait_for_response → chain fires →
+    // chained Brain call also returns wait_for_response (default persistent
+    // mock) → loop-guard kan-835-chained-brain-not-acknowledgment branch.
+    expect(evaluateDealStateMock).toHaveBeenCalledTimes(2);
     expect(evaluateStageTransitionMock).not.toHaveBeenCalled();
     expect(shapeMessageMock).not.toHaveBeenCalled();
     expect(evaluateSendPolicyMock).not.toHaveBeenCalled();
@@ -1110,7 +1114,10 @@ describe("KAN-819 — Deal continuity for multi-turn AI conversations", () => {
 
     await postEnvelope(buildPushEnvelope());
 
-    expect(evaluateDealStateMock).toHaveBeenCalledOnce();
+    // KAN-835: default mock returns wait_for_response on both calls →
+    // initial + chained loop-guard skip → 2 calls. The reused-id pin is on
+    // the FIRST (initial) call, where the dispatcher invokes Brain.
+    expect(evaluateDealStateMock).toHaveBeenCalledTimes(2);
     // Brain receives the REUSED dealId, not DEAL_A (which would only be
     // produced by the first-turn writePhase1Deal path that was skipped).
     expect(evaluateDealStateMock.mock.calls[0]![1]).toBe(REUSED_DEAL_ID);
@@ -1556,5 +1563,210 @@ describe("KAN-814 — supersession + persistence-on-defer", () => {
       .find((s) => s.includes("phase-2-send-policy-deferred-persist-failed"));
     expect(errorLine).toBeDefined();
     errorSpy.mockRestore();
+  });
+});
+
+// ─────────────────────────────────────────────
+// KAN-835 — wait_for_response chain (Sprint 11-pre extension)
+// Mirror of KAN-825's architecture for the third silence-producing
+// decision class. Empirical anchor: 4 wait_for_response inbounds across
+// Sprint 10 + Sprint 11-pre Deal Y → 0 customer-visible outbounds.
+// ─────────────────────────────────────────────
+
+describe("KAN-835 — wait_for_response chain", () => {
+  // ── Test 1 — full chain: wait_for_response → chained Brain → send_follow_up → dispatch
+  it("Brain wait_for_response → chained Brain → send_follow_up → dispatch fires (full chain end-to-end)", async () => {
+    setupHappyPathMocks();
+    evaluateDealStateMock.mockReset();
+    // First Brain call: wait_for_response
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecisionFixture({ type: "wait_for_response", confidence: 0.85 }),
+    );
+    // Chained Brain call: send_follow_up acknowledgment
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecisionFixture({
+        type: "send_follow_up",
+        suggestedChannel: "email",
+        suggestedTone: "professional",
+        confidence: 0.88,
+        reasoning: "Brief acknowledgment per KAN-835 directive.",
+      }),
+    );
+    // Dispatch path mocks
+    shapeMessageMock.mockResolvedValueOnce(buildShapedMessageFixture({ channel: "email" }));
+    evaluateSendPolicyMock.mockResolvedValueOnce({ type: "allow", reason: "ok" });
+    dealFindUniqueMock.mockResolvedValueOnce({
+      id: DEAL_A,
+      tenantId: TENANT_A,
+      contactId: CONTACT_A,
+      contact: { id: CONTACT_A, email: "alice@acme.com" },
+    });
+    resolveEmailConnectionIdMock.mockResolvedValueOnce("conn_email_active");
+    decisionCreateMock.mockResolvedValueOnce({ id: "decision_kan835_chained" });
+    getPubSubClientMock.mockReturnValueOnce({ publish: vi.fn() });
+    publishActionSendMock.mockResolvedValueOnce("pubsub_msg_kan835");
+
+    const res = await postEnvelope(buildPushEnvelope());
+
+    expect(res.status).toBe(200);
+    // Brain called TWICE (initial wait_for_response + chained)
+    expect(evaluateDealStateMock).toHaveBeenCalledTimes(2);
+    // Chained call carried the post_wait_acknowledgment trigger context
+    const chainedOpts = evaluateDealStateMock.mock.calls[1]![2] as {
+      triggerContext?: string;
+    };
+    expect(chainedOpts.triggerContext).toBe("post_wait_acknowledgment");
+    // Stage Transition NOT fired (wait_for_response doesn't trigger transition)
+    expect(evaluateStageTransitionMock).not.toHaveBeenCalled();
+    // Dispatch fired with the CHAINED decision's id
+    expect(publishActionSendMock).toHaveBeenCalledOnce();
+    expect(decisionCreateMock).toHaveBeenCalledOnce();
+  });
+
+  // ── Test 2 — loop guard: chained Brain returns wait_for_response AGAIN → no recursion + warn
+  it("chained Brain returns wait_for_response → kan-835-chained-brain-not-acknowledgment warn, no recursion, no outbound", async () => {
+    setupHappyPathMocks();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    evaluateDealStateMock.mockReset();
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecisionFixture({ type: "wait_for_response" }),
+    );
+    // Chained Brain returns wait_for_response AGAIN — must NOT recurse (Option a strict)
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecisionFixture({
+        type: "wait_for_response",
+        confidence: 0.7,
+        reasoning: "Directive failure — chained call still wants to wait.",
+      }),
+    );
+
+    const res = await postEnvelope(buildPushEnvelope());
+
+    expect(res.status).toBe(200);
+    expect(evaluateDealStateMock).toHaveBeenCalledTimes(2);
+    expect(publishActionSendMock).not.toHaveBeenCalled();
+    expect(decisionCreateMock).not.toHaveBeenCalled();
+    const warnLine = warnSpy.mock.calls
+      .map((args) => String(args[0] ?? ""))
+      .find((s) => s.includes("kan-835-chained-brain-not-acknowledgment"));
+    expect(warnLine).toBeDefined();
+    expect(warnLine).toContain("chainedAction=wait_for_response");
+    expect(warnLine).toContain("Directive failure");
+    warnSpy.mockRestore();
+  });
+
+  // ── Test 3 — chained Brain returns advance_stage → no recursion + warn (wrong context)
+  it("chained Brain returns advance_stage → warn (wrong context — Deal state didn't change), no outbound", async () => {
+    setupHappyPathMocks();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    evaluateDealStateMock.mockReset();
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecisionFixture({ type: "wait_for_response" }),
+    );
+    // Chained Brain returns advance_stage — wrong on this chain context
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecisionFixture({
+        type: "advance_stage",
+        confidence: 0.6,
+        reasoning: "Stage didn't change — directive failure.",
+      }),
+    );
+
+    await postEnvelope(buildPushEnvelope());
+
+    expect(evaluateDealStateMock).toHaveBeenCalledTimes(2);
+    // Stage Transition NOT fired from the chained advance_stage (the chain's
+    // log+skip path doesn't route to engine).
+    expect(evaluateStageTransitionMock).not.toHaveBeenCalled();
+    expect(publishActionSendMock).not.toHaveBeenCalled();
+    const warnLine = warnSpy.mock.calls
+      .map((args) => String(args[0] ?? ""))
+      .find((s) => s.includes("kan-835-chained-brain-not-acknowledgment"));
+    expect(warnLine).toBeDefined();
+    expect(warnLine).toContain("chainedAction=advance_stage");
+    warnSpy.mockRestore();
+  });
+
+  // ── Test 4 — chained Brain returns escalate_to_human → log-only stub (Sprint 11b will wire full flow)
+  it("chained Brain returns escalate_to_human → kan-835-chained-brain-escalate log (Sprint 11b stub)", async () => {
+    setupHappyPathMocks();
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    evaluateDealStateMock.mockReset();
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecisionFixture({ type: "wait_for_response" }),
+    );
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecisionFixture({
+        type: "escalate_to_human",
+        confidence: 0.91,
+        reasoning: "Quote requires human approval per directive carve-out.",
+      }),
+    );
+
+    await postEnvelope(buildPushEnvelope());
+
+    expect(evaluateDealStateMock).toHaveBeenCalledTimes(2);
+    expect(publishActionSendMock).not.toHaveBeenCalled();
+    const escalateLine = logSpy.mock.calls
+      .map((args) => String(args[0] ?? ""))
+      .find((s) => s.includes("kan-835-chained-brain-escalate"));
+    expect(escalateLine).toBeDefined();
+    expect(escalateLine).toContain("chainedAction=escalate_to_human");
+    expect(escalateLine).toContain("Sprint 11b");
+    logSpy.mockRestore();
+  });
+
+  // ── Test 5 — sentinel-token pin: chained call's options carry literal post_wait_acknowledgment
+  it("sentinel-token pin: chained Brain call options carry literal post_wait_acknowledgment", async () => {
+    setupHappyPathMocks();
+    evaluateDealStateMock.mockReset();
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecisionFixture({ type: "wait_for_response" }),
+    );
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecisionFixture({ type: "wait_for_response" }), // doesn't matter for this test
+    );
+
+    await postEnvelope(buildPushEnvelope());
+
+    expect(evaluateDealStateMock).toHaveBeenCalledTimes(2);
+    const chainedOpts = evaluateDealStateMock.mock.calls[1]![2] as Record<string, unknown>;
+    // The literal string — no camelCase drift to 'postWaitAcknowledgment'
+    expect(chainedOpts.triggerContext).toBe("post_wait_acknowledgment");
+  });
+
+  // ── Test 6 — Decision row count caveat (KAN-832 sibling): chained send_follow_up writes ONE Decision row
+  it("KAN-832 caveat: only the chained send_follow_up writes a Decision row (one row total)", async () => {
+    setupHappyPathMocks();
+    evaluateDealStateMock.mockReset();
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecisionFixture({ type: "wait_for_response" }),
+    );
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecisionFixture({ type: "send_follow_up", suggestedChannel: "email" }),
+    );
+    shapeMessageMock.mockResolvedValueOnce(buildShapedMessageFixture({ channel: "email" }));
+    evaluateSendPolicyMock.mockResolvedValueOnce({ type: "allow", reason: "ok" });
+    dealFindUniqueMock.mockResolvedValueOnce({
+      id: DEAL_A,
+      tenantId: TENANT_A,
+      contactId: CONTACT_A,
+      contact: { id: CONTACT_A, email: "alice@acme.com" },
+    });
+    resolveEmailConnectionIdMock.mockResolvedValueOnce("conn_email_active");
+    decisionCreateMock.mockResolvedValueOnce({ id: "decision_kan835_v1" });
+    getPubSubClientMock.mockReturnValueOnce({ publish: vi.fn() });
+    publishActionSendMock.mockResolvedValueOnce("pubsub_msg_kan835_b");
+
+    await postEnvelope(buildPushEnvelope());
+
+    // Today's audit posture (KAN-832 future fix): only one Decision row.
+    // The original wait_for_response writes no row; the chained send_follow_up
+    // writes via the KAN-815c shim during dispatch.
+    expect(decisionCreateMock).toHaveBeenCalledOnce();
+    const decisionArgs = decisionCreateMock.mock.calls[0]![0] as {
+      data: { actionType: string };
+    };
+    expect(decisionArgs.data.actionType).toBe("send_follow_up");
   });
 });
