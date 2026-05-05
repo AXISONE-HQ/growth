@@ -22,10 +22,12 @@
  *      Tenant.settings.sendPolicy.maxSendsPerDayPerContact deferred to
  *      KAN-815 sub-cohort b.
  *   3. TIME-OF-DAY — outside tenant send window → defer with deferUntil
- *      set to next window opening. MVP default: 9am-9pm tenant-local.
- *      Tenant.timezone field doesn't exist (per pre-flight); MVP falls
- *      back to UTC. Per-tenant override via Tenant.settings.sendPolicy.
- *      {startHour, endHour, timezone} deferred.
+ *      set to next window opening. Default: 9am-9pm tenant-local.
+ *      Per-tenant override via `Tenant.settings.sendWindow.{start,end}` as
+ *      "HH:MM" strings (KAN-814 sub-cohort 0). Malformed/missing fields
+ *      fall back to the 9/21 defaults with a `send-policy-window-fallback`
+ *      log line for monitoring. Timezone read from `Tenant.settings.timezone`
+ *      (KAN-741 era), UTC fallback.
  *
  * Caller (KAN-815 dispatch wrapper, which also wires sub-cohort b of this
  * epic) decides:
@@ -275,25 +277,100 @@ async function checkTimeOfDay(
 
   // Tenant.timezone field doesn't exist (per pre-flight). Read from
   // Tenant.settings.timezone JSON path defensively; fall back to UTC.
+  const settingsObj =
+    tenant.settings && typeof tenant.settings === 'object' && !Array.isArray(tenant.settings)
+      ? (tenant.settings as Record<string, unknown>)
+      : {};
   const settingsTz =
-    tenant.settings &&
-    typeof tenant.settings === 'object' &&
-    !Array.isArray(tenant.settings) &&
-    typeof (tenant.settings as Record<string, unknown>).timezone === 'string'
-      ? ((tenant.settings as Record<string, unknown>).timezone as string)
-      : 'UTC';
+    typeof settingsObj.timezone === 'string' ? (settingsObj.timezone as string) : 'UTC';
 
   const now = new Date();
   const tenantLocalHour = getTenantLocalHour(now, settingsTz);
 
-  const startHour = SEND_WINDOW_START_HOUR_DEFAULT;
-  const endHour = SEND_WINDOW_END_HOUR_DEFAULT;
+  // KAN-814 sub-cohort 0 — per-tenant send-window override. Reads
+  // `Tenant.settings.sendWindow.{start, end}` as "HH:MM" strings and parses
+  // the integer hour. Malformed/missing values fall back to the 9/21
+  // defaults with a `send-policy-window-fallback` log line so we can
+  // monitor whether tenants are configuring this correctly.
+  const { startHour, endHour } = resolveSendWindowHours(settingsObj, tenantId);
   const windowDescription = `${startHour}:00-${endHour}:00 ${settingsTz}`;
 
   const inWindow = tenantLocalHour >= startHour && tenantLocalHour < endHour;
   const nextWindowOpenAt = computeNextWindowOpen(now, tenantLocalHour, startHour, endHour, settingsTz);
 
   return { inWindow, windowDescription, nextWindowOpenAt };
+}
+
+/**
+ * KAN-814 sub-cohort 0 — resolve per-tenant send-window start/end hours.
+ *
+ * Reads `Tenant.settings.sendWindow.{start, end}` as "HH:MM" strings and
+ * parses the integer hour. Malformed/missing values fall back to the 9/21
+ * defaults with a `send-policy-window-fallback` log line so we can monitor
+ * whether tenants are configuring this correctly.
+ *
+ * Exported for test introspection — same posture as `getTenantLocalHour`.
+ */
+export function resolveSendWindowHours(
+  settingsObj: Record<string, unknown>,
+  tenantId: string,
+): { startHour: number; endHour: number } {
+  const sendWindow = settingsObj.sendWindow;
+  if (
+    !sendWindow ||
+    typeof sendWindow !== 'object' ||
+    Array.isArray(sendWindow)
+  ) {
+    // No override configured — silent default; only the malformed-but-present
+    // case logs (so we don't spam logs for every default-tenant request).
+    return {
+      startHour: SEND_WINDOW_START_HOUR_DEFAULT,
+      endHour: SEND_WINDOW_END_HOUR_DEFAULT,
+    };
+  }
+  const sw = sendWindow as Record<string, unknown>;
+  // Start hour rounds DOWN — "09:30" means "window starts during hour 9"
+  // (slightly permissive). End hour rounds UP — "23:59" means "window
+  // stays open all day" → endHour=24 → inWindow check `hour < 24` always
+  // true. Both choices favor the tenant's expressed intent (open the
+  // window) over hour-bucket exclusion.
+  const startHour = parseHourFromHHMM(sw.start, 'down');
+  const endHour = parseHourFromHHMM(sw.end, 'up');
+  if (startHour === null || endHour === null) {
+    console.warn(
+      `[send-policy] send-policy-window-fallback tenantId=${tenantId} reason=malformed_sendWindow start=${JSON.stringify(sw.start)} end=${JSON.stringify(sw.end)} — falling back to ${SEND_WINDOW_START_HOUR_DEFAULT}/${SEND_WINDOW_END_HOUR_DEFAULT}`,
+    );
+    return {
+      startHour: SEND_WINDOW_START_HOUR_DEFAULT,
+      endHour: SEND_WINDOW_END_HOUR_DEFAULT,
+    };
+  }
+  return { startHour, endHour };
+}
+
+/**
+ * Parse "HH:MM" into integer hour. Returns null on any parse failure
+ * (non-string, wrong shape, out-of-range). The HH:MM grammar matches what
+ * tenant settings UI emits and what onboarding wizards typically write.
+ *
+ *   - mode='down' (start): drop the minute portion; "09:30" → 9
+ *   - mode='up' (end): if minute > 0 round to the next hour; "21:30" → 22,
+ *     "23:59" → 24 (sentinel for "all day" — `inWindow` check `hour < 24`
+ *     always true).
+ *
+ * Hour range accepted: 0-23 input. Output range: 0-24 (mode='up' may emit
+ * 24 as the "no upper bound" sentinel).
+ */
+function parseHourFromHHMM(raw: unknown, mode: 'up' | 'down'): number | null {
+  if (typeof raw !== 'string') return null;
+  const match = raw.match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return null;
+  const hour = parseInt(match[1]!, 10);
+  const minute = parseInt(match[2]!, 10);
+  if (isNaN(hour) || hour < 0 || hour > 23) return null;
+  if (isNaN(minute) || minute < 0 || minute > 59) return null;
+  if (mode === 'up' && minute > 0) return hour + 1;
+  return hour;
 }
 
 /**

@@ -19,6 +19,7 @@ import {
   evaluateSendPolicy,
   getTenantLocalHour,
   computeNextWindowOpen,
+  resolveSendWindowHours,
   SendPolicyTenantNotFoundError,
 } from '../send-policy.js';
 
@@ -333,5 +334,109 @@ describe('computeNextWindowOpen', () => {
     const now = new Date('2026-05-04T06:00:00Z'); // 2am EDT
     const next = computeNextWindowOpen(now, 2, 9, 21, 'America/New_York');
     expect(next.toISOString()).toBe('2026-05-04T13:00:00.000Z');
+  });
+});
+
+// ─────────────────────────────────────────────
+// KAN-814 sub-cohort 0 — per-tenant send-window override
+// ─────────────────────────────────────────────
+
+describe('resolveSendWindowHours — KAN-814 sub-cohort 0', () => {
+  // Test 1 — happy path: settings.sendWindow.{start,end} populated → reads those values
+  it('settings.sendWindow populated → reads start (round-down) + end (round-up)', () => {
+    const result = resolveSendWindowHours(
+      { sendWindow: { start: '08:00', end: '23:59', timezone: 'America/Toronto' } },
+      TENANT_A,
+    );
+    expect(result.startHour).toBe(8);
+    // "23:59" rounds UP to 24 — sentinel for "all day"; inWindow check
+    // `hour < 24` always true → window stays open through hour 23.
+    expect(result.endHour).toBe(24);
+  });
+
+  // Test 1b — start "00:00" + end "23:59" → 0 / 24 (the dev-tenant widening case)
+  it('settings.sendWindow start=00:00 end=23:59 → 0 / 24 (always-in-window dev posture)', () => {
+    const result = resolveSendWindowHours(
+      { sendWindow: { start: '00:00', end: '23:59', timezone: 'America/Toronto' } },
+      TENANT_A,
+    );
+    expect(result.startHour).toBe(0);
+    expect(result.endHour).toBe(24);
+  });
+
+  // Test 1c — minute-rounding semantics: end with minute>0 rounds up; start drops minutes
+  it('end="21:30" rounds up to 22 (more permissive); start="09:30" rounds down to 9', () => {
+    const result = resolveSendWindowHours(
+      { sendWindow: { start: '09:30', end: '21:30' } },
+      TENANT_A,
+    );
+    expect(result.startHour).toBe(9);
+    expect(result.endHour).toBe(22);
+  });
+
+  // Test 2 — backwards compat: no sendWindow → falls back to 9/21 silently (no log)
+  it('no sendWindow on settings → 9/21 fallback (no log spam — silent default path)', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const result = resolveSendWindowHours({}, TENANT_A);
+    expect(result.startHour).toBe(9);
+    expect(result.endHour).toBe(21);
+    // Silent default — no log line for tenants that simply haven't configured.
+    expect(warnSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  // Test 3 — malformed sendWindow → falls back + logs send-policy-window-fallback
+  it('malformed sendWindow.start="abc" → 9/21 fallback + warn log with send-policy-window-fallback marker', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const result = resolveSendWindowHours(
+      { sendWindow: { start: 'abc', end: '21:00' } },
+      TENANT_A,
+    );
+    expect(result.startHour).toBe(9);
+    expect(result.endHour).toBe(21);
+    expect(warnSpy).toHaveBeenCalledOnce();
+    const logLine = warnSpy.mock.calls[0]![0] as string;
+    expect(logLine).toContain('send-policy-window-fallback');
+    expect(logLine).toContain(`tenantId=${TENANT_A}`);
+    expect(logLine).toContain('reason=malformed_sendWindow');
+    warnSpy.mockRestore();
+  });
+
+  // Test 3b — additional malformed shapes (out-of-range hour, non-string, missing field)
+  it.each([
+    ['out-of-range hour', { start: '25:00', end: '21:00' }],
+    ['non-string start', { start: 1300, end: '21:00' }],
+    ['missing end field', { start: '09:00' }],
+    ['sendWindow as array', { sendWindow: [] } as never],
+  ])('malformed shape (%s) → falls back to 9/21', (_label, badShape) => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const settingsObj =
+      'sendWindow' in (badShape as object)
+        ? (badShape as Record<string, unknown>)
+        : { sendWindow: badShape };
+    const result = resolveSendWindowHours(settingsObj, TENANT_A);
+    expect(result.startHour).toBe(9);
+    expect(result.endHour).toBe(21);
+    warnSpy.mockRestore();
+  });
+
+  // Test 4 — end-to-end: tenant with custom window → evaluateSendPolicy honors it
+  // (regression guard for the wire-through; pre-KAN-814-sub-0 the constants were hardcoded)
+  it('end-to-end: tenant with sendWindow=00:00-23:59 → evaluateSendPolicy returns allow at any hour', async () => {
+    // 22:00 UTC — would defer with default 9/21 window — should ALLOW with 00:00-23:59
+    vi.setSystemTime(new Date('2026-05-04T22:00:00Z'));
+    const { prisma } = makePrismaMock({
+      suppressionEngagement: null,
+      rateLimitCount: 0,
+      tenant: {
+        id: TENANT_A,
+        settings: {
+          timezone: 'UTC',
+          sendWindow: { start: '00:00', end: '23:59' },
+        },
+      },
+    });
+    const result = await evaluateSendPolicy(prisma, TENANT_A, CONTACT_A, { channel: 'email' });
+    expect(result.type).toBe('allow');
   });
 });
