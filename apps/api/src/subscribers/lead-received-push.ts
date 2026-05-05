@@ -727,6 +727,42 @@ async function wirePhase2Consumers(
   // depth=1.
   isChainedInvocation: boolean = false,
 ): Promise<void> {
+  // KAN-814 — supersession path. A fresh inbound on this (dealId, contactId)
+  // means any prior pending deferred_send for the same conversation is now
+  // stale (Brain about to re-evaluate with the new context anyway). Cancel
+  // pending rows BEFORE Brain so a stale defer doesn't double-send if the
+  // cron worker happens to fire the old row between now and the new
+  // outbound landing.
+  //
+  // Skip supersession on chained invocations — the inbound that triggered
+  // the chain already cleared pending rows on the first call; the chained
+  // call shouldn't re-cancel anything (no new inbound has arrived).
+  //
+  // We need contactId for the supersession query. Re-load the Deal's
+  // contactId here (cheap; one indexed lookup). updateMany on a no-match
+  // is a no-op (zero rows updated) so the common case (no pending row)
+  // costs only the query.
+  if (!isChainedInvocation) {
+    const dealForSupersession = await prisma.deal.findUnique({
+      where: { id: dealId },
+      select: { contactId: true },
+    });
+    if (dealForSupersession) {
+      const cancelled = await (
+        prisma as unknown as { deferredSend: { updateMany: (args: unknown) => Promise<{ count: number }> } }
+      ).deferredSend.updateMany({
+        where: { dealId, contactId: dealForSupersession.contactId, status: 'pending' },
+        data: { status: 'cancelled', cancelReason: 'superseded_by_fresh_inbound' },
+      });
+      if (cancelled.count > 0) {
+        console.log(
+          `[lead-received-push] kan-814-deferred-send-superseded dealId=${dealId} contactId=${dealForSupersession.contactId} cancelledRows=${cancelled.count} reason=superseded_by_fresh_inbound`,
+        );
+      }
+    }
+  }
+
+
   // Step 1: Brain evaluation — single LLM call per inbound; same decision
   // is passed through to all consumers (no double-eval per Phase 2 design).
   const { evaluateDealState } = await loadBrainServiceModule();
@@ -860,11 +896,70 @@ async function dispatchPhase2Send(
     return;
   }
   if (policyResult.type === 'defer') {
-    // Phase 2 MVP: log + skip. KAN-814 cron evaluator (sub-cohort c of
-    // KAN-796) will pick up deferred sends in future.
-    console.log(
-      `[lead-received-push] phase-2-send-policy-deferred dealId=${dealId} eventId=${eventId} deferUntil=${policyResult.deferUntil.toISOString()} reason=${policyResult.reason}`,
-    );
+    // KAN-814 — persist the deferred send so the cron worker can re-evaluate
+    // and dispatch when the window opens. Replaces the prior log+ack+drop
+    // behavior (which permanently lost the message — see Sprint 10 evening
+    // diagnosis: 1 of 4 inbounds went send_follow_up, hit defer, never
+    // re-dispatched).
+    //
+    // Payload captures Brain's T1 intent (composed message + brainDecision +
+    // contactEmail + replyTo). The cron worker re-resolves connectionId at
+    // re-dispatch time so a tenant that revoked + re-added an EMAIL
+    // ChannelConnection between T1 and T2 dispatches via the LATEST one
+    // (Brain's intent for the message body stays fixed; the transport
+    // resolves to current state).
+    //
+    // Decision row is NOT written here — it's written at re-dispatch time
+    // by the cron evaluator, matching the existing KAN-815c shim pattern
+    // (Decision created during dispatch, not before). Temporal lineage
+    // recoverable via deferred_send.created_at.
+    try {
+      await (
+        prisma as unknown as {
+          deferredSend: { create: (args: { data: Record<string, unknown> }) => Promise<{ id: string }> };
+        }
+      ).deferredSend.create({
+        data: {
+          tenantId: deal.tenantId,
+          dealId: deal.id,
+          contactId: deal.contactId,
+          deferUntil: policyResult.deferUntil,
+          deferReason: policyResult.reason,
+          status: 'pending',
+          attempts: 0,
+          payload: {
+            // Brain's T1 intent — full decision blob for Decision row write
+            // at re-dispatch.
+            brainDecision: brainDecision as unknown as Record<string, unknown>,
+            // Composed message — DO NOT re-shape at re-dispatch.
+            composed: {
+              subject: shaped.subject ?? '(no subject)',
+              body: shaped.body,
+              tone: shaped.tone,
+            },
+            // Recipient — captured at T1 so a contact email change between
+            // defer and re-dispatch doesn't change destination.
+            contactEmail: deal.contact.email,
+            // Shaper telemetry for the eventual Decision row metadata.
+            shaperTier: shaped.modelTier,
+            shaperInputTokens: shaped.llmInputTokens,
+            shaperOutputTokens: shaped.llmOutputTokens,
+            // Trace anchor for log-correlation across defer → re-dispatch.
+            originalEventId: eventId,
+          },
+        },
+      });
+      console.log(
+        `[lead-received-push] phase-2-send-policy-deferred dealId=${dealId} eventId=${eventId} deferUntil=${policyResult.deferUntil.toISOString()} reason=${policyResult.reason} persisted=true`,
+      );
+    } catch (err) {
+      // Persistence failure is observable but non-fatal — without the
+      // queued row the message is lost the same as pre-KAN-814, but at
+      // least the failure is audited.
+      console.error(
+        `[lead-received-push] phase-2-send-policy-deferred-persist-failed dealId=${dealId} eventId=${eventId} err=${(err as Error)?.message ?? String(err)}`,
+      );
+    }
     return;
   }
 

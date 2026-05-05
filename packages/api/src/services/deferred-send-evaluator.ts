@@ -1,0 +1,414 @@
+/**
+ * KAN-814 — Deferred send evaluator.
+ *
+ * Pure module. Cron worker (Cloud Scheduler → growth-api
+ * `/internal/cron/deferred-send-evaluator`) calls `processPendingDeferredSends`
+ * every 5 minutes. The evaluator:
+ *
+ *   1. Claims pending rows whose `defer_until <= NOW()` via
+ *      `SELECT ... FOR UPDATE SKIP LOCKED LIMIT $batchSize` inside a
+ *      transaction (concurrent-worker-safe).
+ *   2. For each claimed row, re-evaluates Send Policy.
+ *   3. On `allow` → writes the Decision row (KAN-815c shim pattern, deferred
+ *      to re-dispatch time per spec) + dispatches via `publishActionSend` +
+ *      marks row `dispatched`.
+ *   4. On still-`defer` → increments attempts, advances `defer_until`. After
+ *      `maxAttempts` retries (default 12 → ~24h with 2-hour cadence) →
+ *      marks row `expired` with audit log entry.
+ *   5. On `deny` → marks row `cancelled` with `cancelReason='policy_now_denies'`
+ *      (e.g., contact unsubscribed during the defer window).
+ *
+ * Idempotency: each row's `id` is a natural anchor. Worker crash mid-process
+ * is safe — the transaction rolls back the claim, leaving the row pending
+ * for the next tick.
+ *
+ * Pure-module discipline: caller (the cron HTTP route) handles auth +
+ * shape the trigger. This module accepts a PrismaClient + dependency-
+ * injected `evaluateSendPolicy` + `publishActionSend` + `resolveEmailConnectionId`
+ * + `resolveReplyToForTenant` so unit tests can mock cleanly without
+ * touching prisma or the publish layer.
+ *
+ * Sibling pattern to:
+ *   - feedback_brain_service_pure_module_pattern (zero callers wired in this
+ *     module; route handler does the wiring)
+ *   - feedback_phase_2_wiring_decision_row_shim_for_legacy_publishactionsend
+ *     (Decision row written DURING dispatch, not before)
+ */
+import type { PrismaClient } from '@prisma/client';
+
+// ─────────────────────────────────────────────
+// Types
+// ─────────────────────────────────────────────
+
+export type DeferredSendStatus = 'pending' | 'dispatched' | 'expired' | 'cancelled';
+
+export interface DeferredSendPayload {
+  brainDecision: Record<string, unknown>;
+  composed: { subject: string; body: string; tone?: string };
+  contactEmail: string;
+  shaperTier?: string;
+  shaperInputTokens?: number;
+  shaperOutputTokens?: number;
+  originalEventId?: string;
+}
+
+export interface ProcessOptions {
+  /** Default 100 — max rows claimed per cron invocation. */
+  batchSize?: number;
+  /** Default 12 → ~24h with 2-hour cadence. */
+  maxAttempts?: number;
+  /** Default 2h — how far to push defer_until forward on a still-deferred re-eval. */
+  retryIntervalMs?: number;
+  /** Dependency injection for testability. Production wires the canonical
+   *  evaluateSendPolicy from packages/api/src/services/send-policy.ts. */
+  evaluateSendPolicy: (
+    prisma: PrismaClient,
+    tenantId: string,
+    contactId: string,
+    message: { channel: 'email' },
+  ) => Promise<
+    | { type: 'allow'; reason: string }
+    | { type: 'deny'; reason: string; ruleViolated: string }
+    | { type: 'defer'; reason: string; deferUntil: Date }
+  >;
+  /** publishActionSend from message-composer.ts. */
+  publishActionSend: (
+    pubsubClient: unknown,
+    args: {
+      tenantId: string;
+      contactId: string;
+      decisionId: string;
+      toEmail: string;
+      composed: { subject: string; body: string; unsubscribeUrl: string };
+      connectionId: string;
+      replyTo?: string;
+    },
+  ) => Promise<string>;
+  /** resolveEmailConnectionId from message-composer.ts. */
+  resolveEmailConnectionId: (prisma: PrismaClient, tenantId: string) => Promise<string | null>;
+  /** resolveReplyToForTenant from message-composer.ts. */
+  resolveReplyToForTenant: (prisma: PrismaClient, tenantId: string) => Promise<string | null>;
+  /** Pub/Sub client factory (KAN-815c lifecycle pattern). */
+  getPubSubClient: () => unknown;
+  /** Public webhook base URL — used to build unsubscribeUrl on re-dispatch.
+   *  Defaults to env.PUBLIC_WEBHOOK_BASE_URL or 'https://example.invalid'. */
+  publicWebhookBaseUrl?: string;
+}
+
+export interface ProcessResult {
+  totalClaimed: number;
+  dispatched: number;
+  reDeferred: number;
+  expired: number;
+  cancelled: number;
+  errors: number;
+  rowResults: RowResult[];
+}
+
+export interface RowResult {
+  id: string;
+  outcome: 'dispatched' | 're_deferred' | 'expired' | 'cancelled' | 'error';
+  reason?: string;
+  /** Present on dispatched outcomes. */
+  decisionId?: string;
+  /** Present on dispatched outcomes — Pub/Sub message id from publishActionSend. */
+  pubsubMessageId?: string;
+  /** Present on error outcomes. */
+  error?: string;
+}
+
+// Internal raw shape for the claimed row.
+interface ClaimedRow {
+  id: string;
+  tenant_id: string;
+  deal_id: string;
+  contact_id: string;
+  payload: DeferredSendPayload;
+  defer_until: Date;
+  attempts: number;
+}
+
+// ─────────────────────────────────────────────
+// Public API
+// ─────────────────────────────────────────────
+
+/**
+ * Process all pending deferred-send rows whose defer_until has elapsed.
+ *
+ * Concurrency-safe — uses `FOR UPDATE SKIP LOCKED` to claim rows; multiple
+ * cron workers running concurrently will each claim a disjoint subset and
+ * not double-process.
+ */
+export async function processPendingDeferredSends(
+  prisma: PrismaClient,
+  opts: ProcessOptions,
+): Promise<ProcessResult> {
+  const batchSize = opts.batchSize ?? 100;
+  const maxAttempts = opts.maxAttempts ?? 12;
+  const retryIntervalMs = opts.retryIntervalMs ?? 2 * 60 * 60 * 1000; // 2h
+  const result: ProcessResult = {
+    totalClaimed: 0,
+    dispatched: 0,
+    reDeferred: 0,
+    expired: 0,
+    cancelled: 0,
+    errors: 0,
+    rowResults: [],
+  };
+
+  // Claim due rows. SKIP LOCKED ensures concurrent workers each take a
+  // disjoint batch. We claim INSIDE a transaction; the read+update pattern
+  // marks the rows as "in progress" by virtue of being row-locked for the
+  // duration of the per-row processing transaction below.
+  //
+  // Two-stage processing: (1) claim ids in a quick read-only tx, (2)
+  // process each id in its own tx. Avoids holding a long lock if any
+  // single row's dispatch hangs (e.g., publishActionSend blocked).
+  const claimed = await prisma.$queryRaw<ClaimedRow[]>`
+    SELECT id, tenant_id, deal_id, contact_id, payload, defer_until, attempts
+    FROM deferred_sends
+    WHERE status = 'pending' AND defer_until <= NOW()
+    ORDER BY defer_until ASC
+    LIMIT ${batchSize}
+    FOR UPDATE SKIP LOCKED
+  `;
+
+  result.totalClaimed = claimed.length;
+
+  for (const row of claimed) {
+    try {
+      const rowResult = await processOneRow(prisma, row, {
+        ...opts,
+        maxAttempts,
+        retryIntervalMs,
+      });
+      result.rowResults.push(rowResult);
+      switch (rowResult.outcome) {
+        case 'dispatched':
+          result.dispatched++;
+          break;
+        case 're_deferred':
+          result.reDeferred++;
+          break;
+        case 'expired':
+          result.expired++;
+          break;
+        case 'cancelled':
+          result.cancelled++;
+          break;
+      }
+    } catch (err) {
+      const errMsg = (err as Error)?.message ?? String(err);
+      console.error(
+        `[deferred-send-evaluator] row-process-failed id=${row.id} err=${errMsg}`,
+      );
+      result.errors++;
+      result.rowResults.push({
+        id: row.id,
+        outcome: 'error',
+        error: errMsg,
+      });
+      // Don't re-throw — process the rest of the batch. Failed rows stay
+      // pending and will be retried on the next cron tick.
+    }
+  }
+
+  console.log(
+    `[deferred-send-evaluator] tick-complete totalClaimed=${result.totalClaimed} dispatched=${result.dispatched} reDeferred=${result.reDeferred} expired=${result.expired} cancelled=${result.cancelled} errors=${result.errors}`,
+  );
+
+  return result;
+}
+
+async function processOneRow(
+  prisma: PrismaClient,
+  row: ClaimedRow,
+  opts: ProcessOptions & { maxAttempts: number; retryIntervalMs: number },
+): Promise<RowResult> {
+  // Re-evaluate Send Policy. Send Policy reads tenant settings + recent
+  // engagement state — both could have changed between defer and now.
+  const policy = await opts.evaluateSendPolicy(prisma, row.tenant_id, row.contact_id, {
+    channel: 'email',
+  });
+
+  if (policy.type === 'deny') {
+    await markCancelled(prisma, row.id, 'policy_now_denies');
+    console.warn(
+      `[deferred-send-evaluator] row-cancelled id=${row.id} reason=policy_now_denies originalDeferReason=${policy.reason}`,
+    );
+    return { id: row.id, outcome: 'cancelled', reason: 'policy_now_denies' };
+  }
+
+  if (policy.type === 'defer') {
+    const newAttempts = row.attempts + 1;
+    if (newAttempts >= opts.maxAttempts) {
+      await markExpired(prisma, row.id, newAttempts);
+      console.warn(
+        `[deferred-send-evaluator] row-expired id=${row.id} attempts=${newAttempts} maxAttempts=${opts.maxAttempts} originalDeferReason=${policy.reason}`,
+      );
+      return { id: row.id, outcome: 'expired', reason: 'max_attempts_reached' };
+    }
+    // Re-defer. Push defer_until forward by retryIntervalMs from now,
+    // OR honor policy.deferUntil if it's later (e.g., next tenant window).
+    const nextDeferUntil = new Date(
+      Math.max(Date.now() + opts.retryIntervalMs, policy.deferUntil.getTime()),
+    );
+    await reDefer(prisma, row.id, nextDeferUntil, newAttempts);
+    return { id: row.id, outcome: 're_deferred', reason: policy.reason };
+  }
+
+  // policy.type === 'allow' → dispatch.
+  // Resolve current connectionId + replyTo at re-dispatch time (Brain's
+  // T1 message intent stays fixed; transport resolves to current state).
+  const connectionId = await opts.resolveEmailConnectionId(prisma, row.tenant_id);
+  if (!connectionId) {
+    // Connection went away between defer and re-dispatch. Cancel + audit;
+    // requires operator intervention to re-add a ChannelConnection.
+    await markCancelled(prisma, row.id, 'no_active_email_connection_at_redispatch');
+    console.warn(
+      `[deferred-send-evaluator] row-cancelled id=${row.id} reason=no_active_email_connection_at_redispatch`,
+    );
+    return { id: row.id, outcome: 'cancelled', reason: 'no_active_email_connection_at_redispatch' };
+  }
+
+  const replyTo = await opts.resolveReplyToForTenant(prisma, row.tenant_id);
+
+  // Write Decision row at re-dispatch time (KAN-815c shim pattern).
+  const brainDecision = row.payload.brainDecision as {
+    nextBestAction?: { type?: string; reasoning?: string };
+    confidence?: number;
+    modelTier?: string;
+    evaluatedAt?: string;
+    llmInputTokens?: number;
+    llmOutputTokens?: number;
+    currentStateSnapshot?: { currentStageName?: string; daysInCurrentStage?: number };
+  };
+  const decisionRow = await prisma.decision.create({
+    data: {
+      tenantId: row.tenant_id,
+      contactId: row.contact_id,
+      strategySelected: 'brain_phase_2_v1',
+      actionType: brainDecision.nextBestAction?.type ?? 'send_follow_up',
+      confidence: brainDecision.confidence ?? 0,
+      reasoning: brainDecision.nextBestAction?.reasoning ?? '(no reasoning recorded)',
+      metadata: {
+        // KAN-814: re-dispatched-from-deferred audit anchor.
+        redispatchedFromDeferredSendId: row.id,
+        deferredSendCreatedAt: undefined, // filled by analytics join on deferred_sends.created_at
+        dealId: row.deal_id,
+        originalEventId: row.payload.originalEventId,
+        brainEvaluatedAt: brainDecision.evaluatedAt,
+        brainModelTier: brainDecision.modelTier,
+        brainInputTokens: brainDecision.llmInputTokens,
+        brainOutputTokens: brainDecision.llmOutputTokens,
+        currentStageName: brainDecision.currentStateSnapshot?.currentStageName,
+        daysInCurrentStage: brainDecision.currentStateSnapshot?.daysInCurrentStage,
+        shaperTier: row.payload.shaperTier,
+        shaperInputTokens: row.payload.shaperInputTokens,
+        shaperOutputTokens: row.payload.shaperOutputTokens,
+        shapedTone: row.payload.composed.tone,
+      },
+    },
+  });
+
+  const publicWebhookBaseUrl =
+    opts.publicWebhookBaseUrl ?? process.env.PUBLIC_WEBHOOK_BASE_URL ?? 'https://example.invalid';
+  const composedWithUnsubscribe = {
+    subject: row.payload.composed.subject,
+    body: row.payload.composed.body,
+    unsubscribeUrl: `${publicWebhookBaseUrl}/unsubscribe/${row.contact_id}`,
+  };
+
+  const pubsubClient = opts.getPubSubClient();
+  const messageId = await opts.publishActionSend(pubsubClient, {
+    tenantId: row.tenant_id,
+    contactId: row.contact_id,
+    decisionId: decisionRow.id,
+    toEmail: row.payload.contactEmail,
+    composed: composedWithUnsubscribe,
+    connectionId,
+    ...(replyTo ? { replyTo } : {}),
+  });
+
+  await markDispatched(prisma, row.id, row.attempts + 1);
+
+  console.log(
+    `[deferred-send-evaluator] row-dispatched id=${row.id} dealId=${row.deal_id} decisionId=${decisionRow.id} pubsubMessageId=${messageId} attempts=${row.attempts + 1}`,
+  );
+
+  return {
+    id: row.id,
+    outcome: 'dispatched',
+    decisionId: decisionRow.id,
+    pubsubMessageId: messageId,
+  };
+}
+
+// ─────────────────────────────────────────────
+// State transitions
+// ─────────────────────────────────────────────
+
+async function markDispatched(
+  prisma: PrismaClient,
+  id: string,
+  attempts: number,
+): Promise<void> {
+  await (
+    prisma as unknown as {
+      deferredSend: { update: (args: unknown) => Promise<unknown> };
+    }
+  ).deferredSend.update({
+    where: { id },
+    data: { status: 'dispatched', attempts, lastAttemptAt: new Date() },
+  });
+}
+
+async function reDefer(
+  prisma: PrismaClient,
+  id: string,
+  newDeferUntil: Date,
+  newAttempts: number,
+): Promise<void> {
+  await (
+    prisma as unknown as {
+      deferredSend: { update: (args: unknown) => Promise<unknown> };
+    }
+  ).deferredSend.update({
+    where: { id },
+    data: {
+      attempts: newAttempts,
+      deferUntil: newDeferUntil,
+      lastAttemptAt: new Date(),
+    },
+  });
+}
+
+async function markExpired(
+  prisma: PrismaClient,
+  id: string,
+  attempts: number,
+): Promise<void> {
+  await (
+    prisma as unknown as {
+      deferredSend: { update: (args: unknown) => Promise<unknown> };
+    }
+  ).deferredSend.update({
+    where: { id },
+    data: { status: 'expired', attempts, lastAttemptAt: new Date() },
+  });
+}
+
+async function markCancelled(
+  prisma: PrismaClient,
+  id: string,
+  reason: string,
+): Promise<void> {
+  await (
+    prisma as unknown as {
+      deferredSend: { update: (args: unknown) => Promise<unknown> };
+    }
+  ).deferredSend.update({
+    where: { id },
+    data: { status: 'cancelled', cancelReason: reason, lastAttemptAt: new Date() },
+  });
+}

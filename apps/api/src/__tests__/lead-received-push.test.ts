@@ -40,6 +40,9 @@ const dealStageHistoryCreateMock = vi.fn();
 const transactionMock = vi.fn();
 // KAN-819 — deal-continuity findMany lookup (existing open Deals for Contact)
 const dealFindManyMock = vi.fn();
+// KAN-814 — deferredSend mocks for supersession path + persistence on defer
+const deferredSendUpdateManyMock = vi.fn();
+const deferredSendCreateMock = vi.fn();
 
 // KAN-815 — Phase 2 substrate mocks
 const evaluateDealStateMock = vi.fn();
@@ -64,6 +67,10 @@ vi.mock("../prisma.js", () => ({
     deal: { findUnique: dealFindUniqueMock, findMany: dealFindManyMock },
     decision: { create: decisionCreateMock },
     engagement: { findUnique: vi.fn(), create: vi.fn() }, // KAN-819 — only invoked indirectly via mocked logEngagement
+    deferredSend: {
+      updateMany: deferredSendUpdateManyMock,
+      create: deferredSendCreateMock,
+    },
     $transaction: transactionMock,
   },
 }));
@@ -246,6 +253,25 @@ beforeEach(() => {
   // create path. Tests that need multi-turn override this per-case.
   dealFindManyMock.mockReset();
   dealFindManyMock.mockResolvedValue([]);
+  // KAN-814 — supersession + persistence defaults. updateMany returns no
+  // pending rows by default (no supersession noise in pre-Sprint-11-pre tests).
+  // create resolves to a stub row id.
+  deferredSendUpdateManyMock.mockReset();
+  deferredSendUpdateManyMock.mockResolvedValue({ count: 0 });
+  deferredSendCreateMock.mockReset();
+  deferredSendCreateMock.mockResolvedValue({ id: "deferred_send_test_id" });
+  // KAN-814 — `dealFindUnique` is now invoked TWICE per dispatched inbound:
+  // (1) supersession lookup at top of wirePhase2Consumers (reads contactId
+  //     only), (2) dispatch lookup inside dispatchPhase2Send (reads full
+  //     shape). A default that satisfies BOTH lets existing tests' `mockResolvedValueOnce`
+  //     queue the dispatch shape for either call without breaking the
+  //     supersession's first-call read.
+  dealFindUniqueMock.mockResolvedValue({
+    id: DEAL_A,
+    tenantId: TENANT_A,
+    contactId: CONTACT_A,
+    contact: { id: CONTACT_A, email: "alice@acme.com" },
+  });
 });
 
 // KAN-815 fixture builders
@@ -857,7 +883,14 @@ describe("KAN-815 — Phase 2 wiring (Brain trigger framework + consumer dispatc
     expect(shapeMessageMock).toHaveBeenCalledOnce();
     // Channel skip happens BEFORE policy / connection lookup / publish.
     expect(evaluateSendPolicyMock).not.toHaveBeenCalled();
-    expect(dealFindUniqueMock).not.toHaveBeenCalled();
+    // KAN-814: supersession lookup at top of wirePhase2Consumers calls
+    // dealFindUnique ONCE (just for contactId). The DISPATCH lookup
+    // (full shape) doesn't happen because SMS short-circuits before
+    // dispatchPhase2Send's deal-load. So exactly 1 call, not 0.
+    expect(dealFindUniqueMock).toHaveBeenCalledOnce();
+    expect(dealFindUniqueMock.mock.calls[0]![0]).toMatchObject({
+      select: { contactId: true },
+    });
     expect(publishActionSendMock).not.toHaveBeenCalled();
     expect(decisionCreateMock).not.toHaveBeenCalled();
   });
@@ -1373,5 +1406,145 @@ describe("KAN-825 — post-stage-advance auto-follow-up chain", () => {
     // Only 1 Brain call (the initial); chain never fires when transition skips
     expect(evaluateDealStateMock).toHaveBeenCalledOnce();
     expect(publishActionSendMock).not.toHaveBeenCalled();
+  });
+});
+
+// ─────────────────────────────────────────────
+// KAN-814 — supersession + persistence-on-defer
+// (sub-cohort 1 of the Sprint 11-pre deferred_send queue work)
+// ─────────────────────────────────────────────
+
+describe("KAN-814 — supersession + persistence-on-defer", () => {
+  // ── Test 1 — supersession on fresh inbound: pending deferred_send → cancelled
+  it("fresh inbound on (deal, contact) with pending deferred_send → updateMany marks pending → cancelled with cancelReason=superseded_by_fresh_inbound", async () => {
+    setupHappyPathMocks();
+    deferredSendUpdateManyMock.mockResolvedValueOnce({ count: 1 });
+    dealFindUniqueMock.mockResolvedValueOnce({ contactId: CONTACT_A });
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    await postEnvelope(buildPushEnvelope());
+
+    expect(deferredSendUpdateManyMock).toHaveBeenCalledOnce();
+    const updateArgs = deferredSendUpdateManyMock.mock.calls[0]![0] as {
+      where: { dealId: string; contactId: string; status: string };
+      data: { status: string; cancelReason: string };
+    };
+    expect(updateArgs.where.contactId).toBe(CONTACT_A);
+    expect(updateArgs.where.status).toBe("pending");
+    expect(updateArgs.data.status).toBe("cancelled");
+    expect(updateArgs.data.cancelReason).toBe("superseded_by_fresh_inbound");
+    const supersededLine = logSpy.mock.calls
+      .map((args) => String(args[0] ?? ""))
+      .find((s) => s.includes("kan-814-deferred-send-superseded"));
+    expect(supersededLine).toBeDefined();
+    expect(supersededLine).toContain("cancelledRows=1");
+    logSpy.mockRestore();
+  });
+
+  // ── Test 2 — supersession with no pending rows: silent (no log spam)
+  it("fresh inbound with no pending deferred_send → updateMany returns count=0 → no superseded log", async () => {
+    setupHappyPathMocks();
+    deferredSendUpdateManyMock.mockResolvedValueOnce({ count: 0 });
+    dealFindUniqueMock.mockResolvedValueOnce({ contactId: CONTACT_A });
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    await postEnvelope(buildPushEnvelope());
+
+    expect(deferredSendUpdateManyMock).toHaveBeenCalledOnce();
+    const supersededLine = logSpy.mock.calls
+      .map((args) => String(args[0] ?? ""))
+      .find((s) => s.includes("kan-814-deferred-send-superseded"));
+    expect(supersededLine).toBeUndefined();
+    logSpy.mockRestore();
+  });
+
+  // ── Test 3 — persistence on defer: deferredSend.create with full payload
+  it("Send Policy defer → deferredSend.create with brainDecision + composed + contactEmail in payload", async () => {
+    setupHappyPathMocks();
+    evaluateDealStateMock.mockReset();
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecisionFixture({ type: "send_follow_up", suggestedChannel: "email" }),
+    );
+    shapeMessageMock.mockResolvedValueOnce(buildShapedMessageFixture({ channel: "email" }));
+    dealFindUniqueMock.mockResolvedValueOnce({ contactId: CONTACT_A });
+    dealFindUniqueMock.mockResolvedValueOnce({
+      id: DEAL_A,
+      tenantId: TENANT_A,
+      contactId: CONTACT_A,
+      contact: { id: CONTACT_A, email: "alice@acme.com" },
+    });
+    const deferUntil = new Date("2026-05-05T13:00:00.000Z");
+    evaluateSendPolicyMock.mockResolvedValueOnce({
+      type: "defer",
+      reason: "Outside tenant send window",
+      deferUntil,
+    });
+
+    const res = await postEnvelope(buildPushEnvelope());
+
+    expect(res.status).toBe(200);
+    expect(publishActionSendMock).not.toHaveBeenCalled();
+    expect(decisionCreateMock).not.toHaveBeenCalled();
+    expect(deferredSendCreateMock).toHaveBeenCalledOnce();
+    const createArgs = deferredSendCreateMock.mock.calls[0]![0] as {
+      data: {
+        tenantId: string;
+        dealId: string;
+        contactId: string;
+        deferUntil: Date;
+        deferReason: string;
+        status: string;
+        attempts: number;
+        payload: {
+          brainDecision: unknown;
+          composed: { subject: string; body: string };
+          contactEmail: string;
+        };
+      };
+    };
+    expect(createArgs.data.tenantId).toBe(TENANT_A);
+    expect(createArgs.data.dealId).toBe(DEAL_A);
+    expect(createArgs.data.contactId).toBe(CONTACT_A);
+    expect(createArgs.data.status).toBe("pending");
+    expect(createArgs.data.attempts).toBe(0);
+    expect(createArgs.data.deferUntil).toEqual(deferUntil);
+    expect(createArgs.data.deferReason).toContain("Outside tenant send window");
+    expect(createArgs.data.payload.contactEmail).toBe("alice@acme.com");
+    expect(createArgs.data.payload.composed.body).toContain("Alice");
+    expect(createArgs.data.payload.brainDecision).toBeDefined();
+  });
+
+  // ── Test 4 — persistence-on-defer is non-fatal: create throws → 200 + error log, no propagation
+  it("deferredSend.create throws → handler logs error but returns 200 (non-fatal degradation)", async () => {
+    setupHappyPathMocks();
+    evaluateDealStateMock.mockReset();
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecisionFixture({ type: "send_follow_up", suggestedChannel: "email" }),
+    );
+    shapeMessageMock.mockResolvedValueOnce(buildShapedMessageFixture({ channel: "email" }));
+    dealFindUniqueMock.mockResolvedValueOnce({ contactId: CONTACT_A });
+    dealFindUniqueMock.mockResolvedValueOnce({
+      id: DEAL_A,
+      tenantId: TENANT_A,
+      contactId: CONTACT_A,
+      contact: { id: CONTACT_A, email: "alice@acme.com" },
+    });
+    evaluateSendPolicyMock.mockResolvedValueOnce({
+      type: "defer",
+      reason: "outside window",
+      deferUntil: new Date("2026-05-05T13:00:00.000Z"),
+    });
+    deferredSendCreateMock.mockReset();
+    deferredSendCreateMock.mockRejectedValueOnce(new Error("DB write failed"));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const res = await postEnvelope(buildPushEnvelope());
+
+    expect(res.status).toBe(200);
+    const errorLine = errorSpy.mock.calls
+      .map((args) => String(args[0] ?? ""))
+      .find((s) => s.includes("phase-2-send-policy-deferred-persist-failed"));
+    expect(errorLine).toBeDefined();
+    errorSpy.mockRestore();
   });
 });
