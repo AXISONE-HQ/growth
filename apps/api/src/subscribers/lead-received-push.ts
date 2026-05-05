@@ -185,7 +185,8 @@ interface BrainServiceModule {
       // KAN-825 — origin-aware chained Brain calls. Inline mirror of the
       // canonical `EvaluateOptions` in brain-service.ts; both must move
       // together (sibling discipline to KAN-817 schema mirror).
-      triggerContext?: 'inbound' | 'post_stage_advance';
+      // KAN-835 extends with `post_wait_acknowledgment`.
+      triggerContext?: 'inbound' | 'post_stage_advance' | 'post_wait_acknowledgment';
       postStageAdvance?: { fromStageName: string; toStageName: string };
     },
   ) => Promise<{
@@ -828,6 +829,60 @@ async function wirePhase2Consumers(
           `[lead-received-push] kan-825-chained-brain-not-follow-up dealId=${dealId} eventId=${eventId} chainedAction=${chainedDecision.nextBestAction.type} confidence=${chainedDecision.confidence.toFixed(2)} reasoning=${chainedDecision.nextBestAction.reasoning}`,
         );
       }
+    }
+  }
+
+  // KAN-835 — post-wait-acknowledgment chain. After Brain returns
+  // `wait_for_response` on a fresh inbound, fire a chained Brain call
+  // with directive Trigger block biasing toward `send_follow_up` (a
+  // brief acknowledgment so the customer hears something instead of
+  // silence). Empirical anchor: 4 wait_for_response inbounds across
+  // Sprint 10 + Sprint 11-pre Deal Y → 0 customer-visible outbounds.
+  // Customer perception was "I asked, AI ignored me," even when Brain's
+  // reasoning was sound. This chain closes the third silence-producing
+  // decision class (after KAN-825 closed advance_stage).
+  //
+  // Loop guard mirrors KAN-825: only chain if NOT already a chained
+  // invocation. Strict-loop-guard Option (a): a chained Brain that
+  // returns `wait_for_response` AGAIN gets logged + skipped (NO recursion,
+  // NO outbound). Telemetry: kan-835-chained-brain-not-acknowledgment
+  // warn log lets us monitor production frequency. >5% threshold triggers
+  // directive revisit per KAN-835 close-out memory.
+  if (
+    brainDecision.nextBestAction.type === 'wait_for_response' &&
+    !isChainedInvocation
+  ) {
+    const chainedDecision: Phase2BrainDecision = await evaluateDealState(
+      prisma,
+      dealId,
+      { triggerContext: 'post_wait_acknowledgment' },
+    );
+    console.log(
+      `[lead-received-push] phase-2-brain-evaluated dealId=${dealId} eventId=${eventId} actionType=${chainedDecision.nextBestAction.type} confidence=${chainedDecision.confidence.toFixed(2)} tokens=${chainedDecision.llmInputTokens}/${chainedDecision.llmOutputTokens} chained=true triggerContext=post_wait_acknowledgment`,
+    );
+
+    if (chainedDecision.nextBestAction.type === 'send_follow_up') {
+      // Chained acknowledgment dispatch — normal path (Shaper → Send Policy
+      // → Decision row shim → publishActionSend).
+      await dispatchPhase2Send(dealId, eventId, chainedDecision);
+    } else if (chainedDecision.nextBestAction.type === 'escalate_to_human') {
+      // Sprint 11b will wire escalation_queue + email notification + admin
+      // dashboard. v1: log-only stub so production telemetry captures
+      // chain decisions that route to escalation; the customer-acknowledgment
+      // half of that flow is Sprint 11b's job.
+      console.log(
+        `[lead-received-push] kan-835-chained-brain-escalate dealId=${dealId} eventId=${eventId} chainedAction=escalate_to_human confidence=${chainedDecision.confidence.toFixed(2)} reasoning=${chainedDecision.nextBestAction.reasoning} — Sprint 11b will wire escalation_queue + acknowledgment`,
+      );
+    } else {
+      // Strict-loop-guard Option (a): chained wait_for_response /
+      // advance_stage / close_deal_lost / no_action all log+skip.
+      // wait_for_response + advance_stage are directive failures (chain
+      // told Brain explicitly NOT to return these); close_deal_lost +
+      // no_action are legitimate but silent (chain doesn't override).
+      // The warn log gives us telemetry for monitoring KAN-835 effectiveness.
+      console.warn(
+        `[lead-received-push] kan-835-chained-brain-not-acknowledgment dealId=${dealId} eventId=${eventId} chainedAction=${chainedDecision.nextBestAction.type} confidence=${chainedDecision.confidence.toFixed(2)} reasoning=${chainedDecision.nextBestAction.reasoning}`,
+      );
     }
   }
 
