@@ -23,6 +23,7 @@ import {
   evaluateDealState,
   computeMoProgressPercent,
   parseLlmResponse,
+  buildEvaluationPrompt,
   BrainServiceNotFoundError,
   type BrainDecision,
 } from '../brain-service.js';
@@ -545,5 +546,85 @@ describe('parseLlmResponse', () => {
       '{"nextBestAction":{"type":"no_action","reasoning":""},"confidence":0.5}',
     );
     expect(result.ok).toBe(false);
+  });
+});
+
+// ─────────────────────────────────────────────
+// KAN-825 — buildEvaluationPrompt directive Trigger block
+// Sentinel-token contract pin: any rename/removal/conditional drift on
+// the literal `## Trigger` block or the `post_stage_advance` enum value
+// breaks these tests immediately.
+// ─────────────────────────────────────────────
+
+describe('buildEvaluationPrompt — KAN-825 directive Trigger block', () => {
+  const baseInput = {
+    snapshot: {
+      dealStatus: 'open',
+      currentStageName: 'Qualified',
+      currentStageOutcomeType: 'open',
+      daysInCurrentStage: 0,
+      engagementCount: 2,
+      lastEngagementType: 'email_received',
+      lastEngagementClass: 'positive',
+      daysSinceLastEngagement: 0,
+      moProgressPercent: null,
+      pipelineName: 'Default Sales Pipeline',
+      pipelineObjectiveType: 'book_appointment',
+    },
+    contact: {
+      id: 'c',
+      tenantId: 't',
+      email: 'fred@example.com',
+      firstName: 'Fred',
+      lastName: null,
+      company: null,
+      phone: null,
+      currentStageId: null,
+      microObjectiveProgress: {},
+      metadata: {},
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    } as never,
+    recentEngagements: [],
+    recentTransitions: [],
+  };
+
+  it('triggerContext=inbound (default) → NO ## Trigger block in prompt (legacy unchanged)', () => {
+    const prompt = buildEvaluationPrompt(baseInput);
+    expect(prompt).not.toContain('## Trigger');
+    expect(prompt).not.toContain('post_stage_advance');
+    expect(prompt).not.toContain('Strong preference');
+    // Legacy ## Deal context still leads
+    expect(prompt.startsWith('## Deal context')).toBe(true);
+  });
+
+  it('triggerContext=post_stage_advance → ## Trigger block precedes ## Deal context with directive phrasing', () => {
+    const prompt = buildEvaluationPrompt({
+      ...baseInput,
+      triggerContext: 'post_stage_advance',
+      postStageAdvance: { fromStageName: 'New', toStageName: 'Qualified' },
+    });
+    // Block leads
+    expect(prompt.startsWith('## Trigger')).toBe(true);
+    // Sentinel tokens — these are the contract pins. Any rename breaks here.
+    expect(prompt).toContain('## Trigger');
+    expect(prompt).toContain('triggerContext=post_stage_advance');
+    expect(prompt).toContain('Strong preference: send_follow_up');
+    expect(prompt).toContain('silence at this point produces a UX dead-end');
+    // Stage names rendered into the directive
+    expect(prompt).toContain('from New to Qualified');
+    expect(prompt).toContain('NOT yet been notified');
+  });
+
+  it('triggerContext=post_stage_advance with missing postStageAdvance → fallback labels rendered (not crash)', () => {
+    const prompt = buildEvaluationPrompt({
+      ...baseInput,
+      triggerContext: 'post_stage_advance',
+      // No postStageAdvance — render fallbacks
+    });
+    expect(prompt).toContain('## Trigger');
+    // Fallback: '(prior stage)' for from + snapshot's currentStageName for to
+    expect(prompt).toContain('(prior stage)');
+    expect(prompt).toContain('to Qualified'); // snapshot.currentStageName fallback
   });
 });

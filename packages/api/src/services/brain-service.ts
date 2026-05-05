@@ -93,11 +93,40 @@ export interface BrainDecision {
   llmOutputTokens: number;
 }
 
+/**
+ * KAN-825 — origin-aware Brain evaluation context.
+ *
+ *   - 'inbound' (default): the Brain call is reacting to a fresh customer
+ *     inbound. No assumed prior chain; Brain decides freely across all six
+ *     action types.
+ *   - 'post_stage_advance': this is a chained Brain call fired AFTER a
+ *     previous Brain call returned `advance_stage` and the Stage Transition
+ *     Engine successfully transitioned the Deal. Brain receives a directive
+ *     `## Trigger` block that frames the choice as "what to communicate
+ *     about the just-completed advancement" and explicitly biases toward
+ *     `send_follow_up` (the conservative-default `wait_for_response` produces
+ *     a customer-perceived UX dead-end at this point — see Sprint 10 evening
+ *     diagnosis).
+ *
+ * Loop guard lives at the call site (lead-received-push.ts), NOT in this
+ * module — the chain depth max=1 invariant is enforced by the orchestrator
+ * via a local boolean parameter, not via persisted state.
+ */
+export type BrainTriggerContext = 'inbound' | 'post_stage_advance';
+
 export interface EvaluateOptions {
   /** Default 'reasoning' (Sonnet). Caller can downshift to 'cheap' (Haiku) for batch eval. */
   tier?: 'cheap' | 'reasoning';
   /** Default 5. Caps how many recent Engagements feed into the prompt. */
   recentEngagementLimit?: number;
+  /** KAN-825 — origin context for the prompt. Default 'inbound'. */
+  triggerContext?: BrainTriggerContext;
+  /** KAN-825 — when triggerContext='post_stage_advance', the human-readable
+   *  from/to stage names from the just-completed transition. Threaded into
+   *  the directive prompt block so Brain's reasoning has the concrete
+   *  pipeline state. Optional even with the post-advance context (the prompt
+   *  renders "the new stage" as a fallback) but recommended. */
+  postStageAdvance?: { fromStageName: string; toStageName: string };
 }
 
 export class BrainServiceNotFoundError extends Error {
@@ -174,12 +203,17 @@ export async function evaluateDealState(
     };
   }
 
-  // 4. Build prompt.
+  // 4. Build prompt. KAN-825 threads the triggerContext through so chained
+  // post-stage-advance calls render a directive prompt block that biases
+  // Brain toward send_follow_up (default 'inbound' renders the legacy
+  // prompt unchanged).
   const userPrompt = buildEvaluationPrompt({
     snapshot,
     contact: deal.contact,
     recentEngagements: deal.engagements,
     recentTransitions: deal.stageHistory,
+    triggerContext: options.triggerContext ?? 'inbound',
+    postStageAdvance: options.postStageAdvance,
   });
 
   // 5. Call LLM. tenantId derived from the loaded Deal (KAN-745 per-tenant
@@ -331,13 +365,29 @@ Respond ONLY with valid JSON in this exact shape:
 
 Be conservative: if unsure, recommend escalate_to_human or wait_for_response with low confidence.`;
 
-function buildEvaluationPrompt(input: {
+/**
+ * Render the user prompt for the Brain evaluation LLM call.
+ *
+ * Exported for KAN-825 sentinel-token tests — the `## Trigger` block's
+ * literal phrasing is part of the contract pin (any rename / removal /
+ * conditional drift breaks the test loudly).
+ */
+export function buildEvaluationPrompt(input: {
   snapshot: BrainStateSnapshot;
   contact: Contact;
   recentEngagements: Engagement[];
   recentTransitions: DealStageHistory[];
+  triggerContext?: BrainTriggerContext;
+  postStageAdvance?: { fromStageName: string; toStageName: string };
 }): string {
-  const { snapshot, contact, recentEngagements, recentTransitions } = input;
+  const {
+    snapshot,
+    contact,
+    recentEngagements,
+    recentTransitions,
+    triggerContext = 'inbound',
+    postStageAdvance,
+  } = input;
 
   const contactName =
     [contact.firstName, contact.lastName].filter((p) => !!p && p.trim().length > 0).join(' ') ||
@@ -366,7 +416,30 @@ function buildEvaluationPrompt(input: {
           )
           .join('\n');
 
-  return `## Deal context
+  // KAN-825 — directive Trigger block for post-stage-advance chained calls.
+  // Empirical anchor (Sprint 10 evening): without this directive framing,
+  // chained Brain reasoning often returns wait_for_response — the
+  // conservative-default produces a customer-perceived UX dead-end after
+  // a stage advance the contact wasn't notified about. The "Strong
+  // preference: send_follow_up" phrase plus the explicit "silence at
+  // this point produces a UX dead-end" framing is the load-bearing nudge.
+  // Sentinel-token test (`packages/api/src/services/__tests__/brain-service.test.ts`)
+  // pins both `post_stage_advance` and `## Trigger` literals.
+  const fromStageName = postStageAdvance?.fromStageName ?? '(prior stage)';
+  const toStageName = postStageAdvance?.toStageName ?? snapshot.currentStageName;
+  const triggerBlock =
+    triggerContext === 'post_stage_advance'
+      ? `## Trigger
+This evaluation is the second call in a chain (triggerContext=post_stage_advance). Brain just transitioned this Deal from ${fromStageName} to ${toStageName} based on the inbound. The contact has NOT yet been notified of this progression.
+
+Your task on this call: decide what to communicate to the contact about this stage advancement.
+
+Strong preference: send_follow_up. The contact engaged, Brain advanced the pipeline, and silence at this point produces a UX dead-end. Choose wait_for_response or escalate_to_human ONLY if there's an explicit content reason (e.g., the new stage is terminal closed_won/closed_lost, or the contact's message contained explicit instructions to wait).
+
+`
+      : '';
+
+  return `${triggerBlock}## Deal context
 Pipeline: ${snapshot.pipelineName} (objective: ${snapshot.pipelineObjectiveType})
 Contact: ${contactName} @ ${company}
 

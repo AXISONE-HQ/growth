@@ -62,6 +62,12 @@ export type StageTransitionResult =
       dealId: string;
       fromStageId: string;
       toStageId: string;
+      // KAN-825 — human-readable stage names for chained Brain prompts.
+      // Already in scope inside the engine (DealStageHistory metadata
+      // captures them too). Surfacing on the result so callers don't have
+      // to re-query the Stage rows just to render a follow-up prompt.
+      fromStageName: string;
+      toStageName: string;
       brainDecision: BrainDecision;
       /** DealStageHistory row id of the transition write. */
       transitionRowId: string;
@@ -350,6 +356,10 @@ async function writeTransition(
       dealId: deal.id,
       fromStageId: deal.currentStageId,
       toStageId: targetStage.id,
+      // KAN-825 — surface human-readable stage names for chained Brain
+      // prompts (avoids the caller re-querying Stage rows).
+      fromStageName: deal.currentStage.name,
+      toStageName: targetStage.name,
       brainDecision,
       transitionRowId: historyRow.id,
     };

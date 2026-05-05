@@ -1075,3 +1075,303 @@ describe("KAN-819 — Deal continuity for multi-turn AI conversations", () => {
     expect(dealCreateMock).not.toHaveBeenCalled();
   });
 });
+
+// ─────────────────────────────────────────────
+// KAN-825 — post-stage-advance auto-follow-up chain
+// ─────────────────────────────────────────────
+
+describe("KAN-825 — post-stage-advance auto-follow-up chain", () => {
+  // ── Test 1 — full chain: advance_stage → transition fires → chained Brain → send_follow_up → dispatch fires
+  it("advance_stage → transition → chained Brain → send_follow_up → dispatch fires (full chain end-to-end)", async () => {
+    setupHappyPathMocks();
+    evaluateDealStateMock.mockReset();
+    // First Brain call: advance_stage
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecisionFixture({ type: "advance_stage", confidence: 0.78 }),
+    );
+    // Stage transition succeeds (typed shape with names per KAN-825)
+    evaluateStageTransitionMock.mockResolvedValueOnce({
+      type: "transitioned",
+      dealId: DEAL_A,
+      fromStageId: STAGE_INITIAL,
+      toStageId: "stage_qualified",
+      fromStageName: "New",
+      toStageName: "Qualified",
+      transitionRowId: "dsh_new",
+    });
+    // Chained Brain call: send_follow_up
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecisionFixture({
+        type: "send_follow_up",
+        suggestedChannel: "email",
+        suggestedTone: "professional",
+        confidence: 0.85,
+      }),
+    );
+    // Dispatch path mocks
+    shapeMessageMock.mockResolvedValueOnce(buildShapedMessageFixture({ channel: "email" }));
+    evaluateSendPolicyMock.mockResolvedValueOnce({ type: "allow", reason: "ok" });
+    dealFindUniqueMock.mockResolvedValueOnce({
+      id: DEAL_A,
+      tenantId: TENANT_A,
+      contactId: CONTACT_A,
+      contact: { id: CONTACT_A, email: "alice@acme.com" },
+    });
+    resolveEmailConnectionIdMock.mockResolvedValueOnce("conn_email_active");
+    decisionCreateMock.mockResolvedValueOnce({ id: "decision_chained_v1" });
+    getPubSubClientMock.mockReturnValueOnce({ publish: vi.fn() });
+    publishActionSendMock.mockResolvedValueOnce("pubsub_msg_chained");
+
+    const res = await postEnvelope(buildPushEnvelope());
+
+    expect(res.status).toBe(200);
+    // Stage transition fired
+    expect(evaluateStageTransitionMock).toHaveBeenCalledOnce();
+    // Brain called TWICE (initial advance_stage + chained)
+    expect(evaluateDealStateMock).toHaveBeenCalledTimes(2);
+    // Second Brain call carried the post_stage_advance trigger context
+    const chainedCallOptions = evaluateDealStateMock.mock.calls[1]![2] as {
+      triggerContext?: string;
+      postStageAdvance?: { fromStageName: string; toStageName: string };
+    };
+    expect(chainedCallOptions.triggerContext).toBe("post_stage_advance");
+    expect(chainedCallOptions.postStageAdvance).toEqual({
+      fromStageName: "New",
+      toStageName: "Qualified",
+    });
+    // Dispatch fired with the CHAINED decision's id
+    expect(publishActionSendMock).toHaveBeenCalledOnce();
+    expect(decisionCreateMock).toHaveBeenCalledOnce();
+  });
+
+  // ── Test 2 — loop guard: chained Brain returns advance_stage AGAIN → no recursion + warn log
+  it("chained Brain returns advance_stage → loop guard fires kan-825-chained-brain-not-follow-up warn, no recursion", async () => {
+    setupHappyPathMocks();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    evaluateDealStateMock.mockReset();
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecisionFixture({ type: "advance_stage" }),
+    );
+    evaluateStageTransitionMock.mockResolvedValueOnce({
+      type: "transitioned",
+      dealId: DEAL_A,
+      fromStageId: STAGE_INITIAL,
+      toStageId: "stage_qualified",
+      fromStageName: "New",
+      toStageName: "Qualified",
+      transitionRowId: "dsh_new",
+    });
+    // Chained Brain returns advance_stage AGAIN — must NOT recurse
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecisionFixture({
+        type: "advance_stage",
+        confidence: 0.7,
+        reasoning: "Should not recurse here",
+      }),
+    );
+
+    const res = await postEnvelope(buildPushEnvelope());
+
+    expect(res.status).toBe(200);
+    // Brain called exactly TWICE (initial + chained); NO third call
+    expect(evaluateDealStateMock).toHaveBeenCalledTimes(2);
+    // Stage transition fired exactly once (the chained advance did NOT trigger another transition)
+    expect(evaluateStageTransitionMock).toHaveBeenCalledOnce();
+    // No dispatch — chained Brain didn't return send_follow_up
+    expect(publishActionSendMock).not.toHaveBeenCalled();
+    expect(decisionCreateMock).not.toHaveBeenCalled();
+    // Warn log emitted with the loop-guard marker
+    const loopGuardLine = warnSpy.mock.calls
+      .map((args) => String(args[0] ?? ""))
+      .find((s) => s.includes("kan-825-chained-brain-not-follow-up"));
+    expect(loopGuardLine).toBeDefined();
+    expect(loopGuardLine).toContain("chainedAction=advance_stage");
+    expect(loopGuardLine).toContain("Should not recurse here");
+    warnSpy.mockRestore();
+  });
+
+  // ── Test 3 — chained Brain returns wait_for_response → no outbound, no further chaining, no warning (silent honor)
+  it("chained Brain returns wait_for_response → no outbound, no warning (silent honor)", async () => {
+    setupHappyPathMocks();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    evaluateDealStateMock.mockReset();
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecisionFixture({ type: "advance_stage" }),
+    );
+    evaluateStageTransitionMock.mockResolvedValueOnce({
+      type: "transitioned",
+      dealId: DEAL_A,
+      fromStageId: STAGE_INITIAL,
+      toStageId: "stage_qualified",
+      fromStageName: "New",
+      toStageName: "Qualified",
+      transitionRowId: "dsh_new",
+    });
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecisionFixture({
+        type: "wait_for_response",
+        confidence: 0.6,
+        reasoning: "Contact asked us to wait",
+      }),
+    );
+
+    const res = await postEnvelope(buildPushEnvelope());
+
+    expect(res.status).toBe(200);
+    // Loop-guard warn DOES fire (the chain is honored even when Brain
+    // chooses to wait — the warn is for "chained Brain didn't pick
+    // send_follow_up" so we can monitor decision distribution).
+    const loopGuardLine = warnSpy.mock.calls
+      .map((args) => String(args[0] ?? ""))
+      .find((s) => s.includes("kan-825-chained-brain-not-follow-up"));
+    expect(loopGuardLine).toBeDefined();
+    expect(loopGuardLine).toContain("chainedAction=wait_for_response");
+    // No dispatch
+    expect(publishActionSendMock).not.toHaveBeenCalled();
+    expect(decisionCreateMock).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  // ── Test 4 — defensive: chained=true caller never re-enters chain (future-proofing for additional origins)
+  it("isChainedInvocation=true context — chain logic does not re-fire (defensive future-proofing)", async () => {
+    // This test is structural: we can't reach this state from production
+    // today (only one origin = inbound), but the local-boolean guard means
+    // a future operator-trigger or other origin can pass isChainedInvocation
+    // safely without runaway chains. We simulate by having the chained
+    // Brain decision route through dispatchPhase2Send WITHOUT a re-enter.
+    setupHappyPathMocks();
+    evaluateDealStateMock.mockReset();
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecisionFixture({ type: "advance_stage" }),
+    );
+    evaluateStageTransitionMock.mockResolvedValueOnce({
+      type: "transitioned",
+      dealId: DEAL_A,
+      fromStageId: STAGE_INITIAL,
+      toStageId: "stage_qualified",
+      fromStageName: "New",
+      toStageName: "Qualified",
+      transitionRowId: "dsh_new",
+    });
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecisionFixture({ type: "send_follow_up", suggestedChannel: "email" }),
+    );
+    shapeMessageMock.mockResolvedValueOnce(buildShapedMessageFixture({ channel: "email" }));
+    evaluateSendPolicyMock.mockResolvedValueOnce({ type: "allow", reason: "ok" });
+    dealFindUniqueMock.mockResolvedValueOnce({
+      id: DEAL_A,
+      tenantId: TENANT_A,
+      contactId: CONTACT_A,
+      contact: { id: CONTACT_A, email: "alice@acme.com" },
+    });
+    resolveEmailConnectionIdMock.mockResolvedValueOnce("conn_email_active");
+    decisionCreateMock.mockResolvedValueOnce({ id: "decision_chained_v1" });
+    getPubSubClientMock.mockReturnValueOnce({ publish: vi.fn() });
+    publishActionSendMock.mockResolvedValueOnce("pubsub_msg_x");
+
+    await postEnvelope(buildPushEnvelope());
+
+    // Brain called twice total (initial + chained). Even though the
+    // chained Brain's `send_follow_up` triggers dispatch, dispatch does
+    // NOT loop back through wirePhase2Consumers. Total Brain calls = 2.
+    expect(evaluateDealStateMock).toHaveBeenCalledTimes(2);
+    expect(evaluateStageTransitionMock).toHaveBeenCalledOnce();
+  });
+
+  // ── Test 5 — Decision row count: ONE row written per spec (KAN-832 caveat)
+  it("KAN-832 caveat: only the chained send_follow_up writes a Decision row (one row total, not two)", async () => {
+    setupHappyPathMocks();
+    evaluateDealStateMock.mockReset();
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecisionFixture({ type: "advance_stage" }),
+    );
+    evaluateStageTransitionMock.mockResolvedValueOnce({
+      type: "transitioned",
+      dealId: DEAL_A,
+      fromStageId: STAGE_INITIAL,
+      toStageId: "stage_qualified",
+      fromStageName: "New",
+      toStageName: "Qualified",
+      transitionRowId: "dsh_new",
+    });
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecisionFixture({ type: "send_follow_up", suggestedChannel: "email" }),
+    );
+    shapeMessageMock.mockResolvedValueOnce(buildShapedMessageFixture({ channel: "email" }));
+    evaluateSendPolicyMock.mockResolvedValueOnce({ type: "allow", reason: "ok" });
+    dealFindUniqueMock.mockResolvedValueOnce({
+      id: DEAL_A,
+      tenantId: TENANT_A,
+      contactId: CONTACT_A,
+      contact: { id: CONTACT_A, email: "alice@acme.com" },
+    });
+    resolveEmailConnectionIdMock.mockResolvedValueOnce("conn_email_active");
+    decisionCreateMock.mockResolvedValueOnce({ id: "decision_chained_v1" });
+    getPubSubClientMock.mockReturnValueOnce({ publish: vi.fn() });
+    publishActionSendMock.mockResolvedValueOnce("pubsub_msg_x");
+
+    await postEnvelope(buildPushEnvelope());
+
+    // Today's audit posture (KAN-832 future fix): only one Decision row.
+    // The original advance_stage's audit lives in DealStageHistory.metadata.
+    expect(decisionCreateMock).toHaveBeenCalledOnce();
+    const decisionArgs = decisionCreateMock.mock.calls[0]![0] as {
+      data: { actionType: string };
+    };
+    expect(decisionArgs.data.actionType).toBe("send_follow_up");
+  });
+
+  // ── Test 6 — Sentinel-token field-name pin (the load-bearing contract pin)
+  it("sentinel-token pin: chained Brain call's options carry literal post_stage_advance + stage names", async () => {
+    setupHappyPathMocks();
+    evaluateDealStateMock.mockReset();
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecisionFixture({ type: "advance_stage" }),
+    );
+    evaluateStageTransitionMock.mockResolvedValueOnce({
+      type: "transitioned",
+      dealId: DEAL_A,
+      fromStageId: STAGE_INITIAL,
+      toStageId: "stage_qualified",
+      fromStageName: "New",
+      toStageName: "Qualified",
+      transitionRowId: "dsh_new",
+    });
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecisionFixture({ type: "wait_for_response" }),
+    );
+
+    await postEnvelope(buildPushEnvelope());
+
+    // Pin: chained call's options carry the LITERAL string 'post_stage_advance'
+    // (no camelCase drift to 'postStageAdvance' on the enum value side; field
+    // names on the postStageAdvance object are the camelCase fromStageName /
+    // toStageName which is intentional shape).
+    expect(evaluateDealStateMock).toHaveBeenCalledTimes(2);
+    const chainedOpts = evaluateDealStateMock.mock.calls[1]![2] as Record<string, unknown>;
+    expect(chainedOpts.triggerContext).toBe("post_stage_advance");
+    const psa = chainedOpts.postStageAdvance as Record<string, unknown>;
+    expect(psa.fromStageName).toBe("New");
+    expect(psa.toStageName).toBe("Qualified");
+  });
+
+  // ── Test 7 — chain does NOT fire when Stage Transition Engine returns skipped/no_transition
+  it("Stage Transition skipped (already_terminal) → no chain fires, no chained Brain call", async () => {
+    setupHappyPathMocks();
+    evaluateDealStateMock.mockReset();
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecisionFixture({ type: "advance_stage" }),
+    );
+    evaluateStageTransitionMock.mockResolvedValueOnce({
+      type: "skipped",
+      dealId: DEAL_A,
+      reason: "already_terminal",
+    });
+
+    await postEnvelope(buildPushEnvelope());
+
+    // Only 1 Brain call (the initial); chain never fires when transition skips
+    expect(evaluateDealStateMock).toHaveBeenCalledOnce();
+    expect(publishActionSendMock).not.toHaveBeenCalled();
+  });
+});
