@@ -179,7 +179,15 @@ interface BrainServiceModule {
   evaluateDealState: (
     prisma: unknown,
     dealId: string,
-    options?: { tier?: 'cheap' | 'reasoning'; recentEngagementLimit?: number },
+    options?: {
+      tier?: 'cheap' | 'reasoning';
+      recentEngagementLimit?: number;
+      // KAN-825 — origin-aware chained Brain calls. Inline mirror of the
+      // canonical `EvaluateOptions` in brain-service.ts; both must move
+      // together (sibling discipline to KAN-817 schema mirror).
+      triggerContext?: 'inbound' | 'post_stage_advance';
+      postStageAdvance?: { fromStageName: string; toStageName: string };
+    },
   ) => Promise<{
     dealId: string;
     evaluatedAt: Date;
@@ -355,6 +363,11 @@ interface StageTransitionEngineModule {
     dealId: string;
     fromStageId?: string;
     toStageId?: string;
+    // KAN-825 — only present on type='transitioned'. Used by the chained
+    // Brain call's prompt to render fromStageName/toStageName in the
+    // directive Trigger block.
+    fromStageName?: string;
+    toStageName?: string;
     reason?: string;
     transitionRowId?: string;
   }>;
@@ -703,14 +716,24 @@ async function writePhase1Deal(
 // errors must not propagate (inbound Engagement is already committed).
 // ─────────────────────────────────────────────
 
-async function wirePhase2Consumers(dealId: string, eventId: string): Promise<void> {
+async function wirePhase2Consumers(
+  dealId: string,
+  eventId: string,
+  // KAN-825 — chain-depth guard. Default `false` (initial inbound-driven
+  // Brain call). Set `true` only when this function is called recursively
+  // from the post-stage-advance chain. Max chain depth = 1 — if a chained
+  // Brain call returns `advance_stage` again, do NOT re-enter the chain;
+  // log a warning and stop. Local boolean (no DB column) is sufficient at
+  // depth=1.
+  isChainedInvocation: boolean = false,
+): Promise<void> {
   // Step 1: Brain evaluation — single LLM call per inbound; same decision
   // is passed through to all consumers (no double-eval per Phase 2 design).
   const { evaluateDealState } = await loadBrainServiceModule();
   const brainDecision: Phase2BrainDecision = await evaluateDealState(prisma, dealId);
 
   console.log(
-    `[lead-received-push] phase-2-brain-evaluated dealId=${dealId} eventId=${eventId} actionType=${brainDecision.nextBestAction.type} confidence=${brainDecision.confidence.toFixed(2)} tokens=${brainDecision.llmInputTokens}/${brainDecision.llmOutputTokens}`,
+    `[lead-received-push] phase-2-brain-evaluated dealId=${dealId} eventId=${eventId} actionType=${brainDecision.nextBestAction.type} confidence=${brainDecision.confidence.toFixed(2)} tokens=${brainDecision.llmInputTokens}/${brainDecision.llmOutputTokens}${isChainedInvocation ? ' chained=true' : ''}`,
   );
 
   // KAN-815b stage-transition consumer. Brain decisions to advance or close
@@ -727,6 +750,45 @@ async function wirePhase2Consumers(dealId: string, eventId: string): Promise<voi
     console.log(
       `[lead-received-push] phase-2-stage-transition dealId=${dealId} eventId=${eventId} brainAction=${brainDecision.nextBestAction.type} resultType=${transitionResult.type}${transitionResult.reason ? ` reason=${transitionResult.reason}` : ''}${transitionResult.toStageId ? ` toStageId=${transitionResult.toStageId}` : ''}`,
     );
+
+    // KAN-825 — post-stage-advance auto-follow-up chain. After a successful
+    // Stage Transition, fire a chained Brain call with `triggerContext=
+    // post_stage_advance` so Brain decides what to communicate to the
+    // contact about the just-completed advancement. Without this chain,
+    // the original `advance_stage` produces a customer-perceived UX
+    // dead-end (4-of-4 Sprint 10 evening smokes confirmed: stage advanced
+    // but no outbound, contact got silence).
+    //
+    // Loop guard: only chain if this is the FIRST Brain call (not already
+    // a chained invocation). If a chained Brain returns advance_stage
+    // AGAIN, do NOT recurse — log warning, stop. close_deal_lost on a
+    // chained call also stops (terminal stage; KAN-832 audit-symmetry
+    // ticket may revisit closing-comm UX).
+    if (
+      transitionResult.type === 'transitioned' &&
+      !isChainedInvocation &&
+      brainDecision.nextBestAction.type === 'advance_stage'
+    ) {
+      const fromStageName = transitionResult.fromStageName ?? '(prior stage)';
+      const toStageName = transitionResult.toStageName ?? '(new stage)';
+      const chainedDecision: Phase2BrainDecision = await evaluateDealState(prisma, dealId, {
+        triggerContext: 'post_stage_advance',
+        postStageAdvance: { fromStageName, toStageName },
+      });
+      console.log(
+        `[lead-received-push] phase-2-brain-evaluated dealId=${dealId} eventId=${eventId} actionType=${chainedDecision.nextBestAction.type} confidence=${chainedDecision.confidence.toFixed(2)} tokens=${chainedDecision.llmInputTokens}/${chainedDecision.llmOutputTokens} chained=true triggerContext=post_stage_advance`,
+      );
+
+      if (chainedDecision.nextBestAction.type === 'send_follow_up') {
+        // Chained dispatch. Pass isChainedInvocation=true so dispatch's
+        // own internal Brain interactions don't re-enter the chain.
+        await dispatchPhase2Send(dealId, eventId, chainedDecision);
+      } else {
+        console.warn(
+          `[lead-received-push] kan-825-chained-brain-not-follow-up dealId=${dealId} eventId=${eventId} chainedAction=${chainedDecision.nextBestAction.type} confidence=${chainedDecision.confidence.toFixed(2)} reasoning=${chainedDecision.nextBestAction.reasoning}`,
+        );
+      }
+    }
   }
 
   // KAN-815c message-dispatch consumer. Brain decision to send_follow_up
