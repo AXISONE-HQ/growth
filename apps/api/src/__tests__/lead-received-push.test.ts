@@ -434,6 +434,40 @@ describe("KAN-793 — happy path (rule mode)", () => {
     expect(engArgs.correlationId).toContain("engagement:lead-received:");
   });
 
+  // ── KAN-839 — first-turn write persists inbound bodyPreview into Engagement
+  //    metadata so the Shaper's `## Recent inbound from contact` section can
+  //    render the customer's verbatim words. Producer-consumer contract pin.
+  it("KAN-839 — first-turn write persists bodyPreview to Engagement metadata", async () => {
+    setupHappyPathMocks();
+    normalizeInboundMock.mockResolvedValueOnce({
+      source: "email",
+      preParsed: {
+        senderEmail: "alice@acme.com",
+        senderNameGuess: null,
+        subject: "Specific question about feature X",
+        bodyText: "Do you support feature X for our use case?",
+      },
+      extracted: {
+        firstName: null,
+        lastName: null,
+        company: null,
+        phone: null,
+        intentSummary: "Asking about feature X",
+        qualificationSignals: ["feature_inquiry"],
+      },
+      extractionConfidence: "medium",
+      extractionError: null,
+    });
+
+    await postEnvelope(buildPushEnvelope());
+
+    const engArgs = logEngagementMock.mock.calls[0]![1] as {
+      metadata: Record<string, unknown>;
+    };
+    expect(engArgs.metadata.bodyPreview).toBe("Do you support feature X for our use case?");
+    expect(engArgs.metadata.subject).toBe("Specific question about feature X");
+  });
+
   it("Deal write uses pipelineId + stageId from assignment.result (not bootstrap return)", async () => {
     setupHappyPathMocks();
     // Bootstrap returns one Pipeline, assignLeadToPipeline picks a different
@@ -1016,6 +1050,9 @@ describe("KAN-819 — Deal continuity for multi-turn AI conversations", () => {
     expect(engArgs.contactId).toBe(CONTACT_A);
     expect(engArgs.tenantId).toBe(TENANT_A);
     expect(engArgs.metadata.kan819Reused).toBe(true);
+    // KAN-839 — multi-turn write also persists bodyPreview so first-turn and
+    // follow-up Engagement rows render identically into the Shaper prompt.
+    expect(engArgs.metadata.bodyPreview).toBe("Hi, can you send pricing?");
     // info log emitted with the reuse marker
     expect(
       infoSpy.mock.calls.some((args) =>
