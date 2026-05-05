@@ -177,6 +177,52 @@ describe('KAN-816 — outbound Engagement write co-located with ActionOutcome', 
     warnSpy.mockRestore();
   });
 
+  // ── KAN-817: subject + bodyPreview round-trip into Engagement.metadata
+  it('KAN-817 — event.subject + event.bodyPreview → Engagement.metadata.subject + .bodyPreview', async () => {
+    decisionFindFirstMock.mockResolvedValueOnce({ id: DECISION_ID, metadata: { dealId: DEAL_ID } });
+    const subject = 'Quick question about pricing';
+    const bodyPreview = 'Hi Alice — saw your reply yesterday. Curious what caught your eye?';
+
+    await postEnvelope(buildPushEnvelope({ subject, bodyPreview }));
+
+    const args = (engagementCreateMock.mock.calls[0]![0] as { data: { metadata: Record<string, unknown> } }).data;
+    expect(args.metadata.subject).toBe(subject);
+    expect(args.metadata.bodyPreview).toBe(bodyPreview);
+    // Existing keys MUST still be present — merge, not replace.
+    expect(args.metadata).toMatchObject({
+      actionId: ACTION_ID,
+      decisionId: DECISION_ID,
+      status: 'sent',
+      channel: 'EMAIL',
+      provider: 'resend',
+      providerMessageId: 'resend_msg_id_xyz',
+    });
+  });
+
+  // ── KAN-817: when event omits subject/bodyPreview, Engagement.metadata also omits
+  it('KAN-817 — event without subject/bodyPreview → Engagement.metadata has neither key (no empty-string clobber)', async () => {
+    decisionFindFirstMock.mockResolvedValueOnce({ id: DECISION_ID, metadata: { dealId: DEAL_ID } });
+
+    await postEnvelope(buildPushEnvelope()); // base event has no subject/bodyPreview
+
+    const args = (engagementCreateMock.mock.calls[0]![0] as { data: { metadata: Record<string, unknown> } }).data;
+    expect('subject' in args.metadata).toBe(false);
+    expect('bodyPreview' in args.metadata).toBe(false);
+    // Still has the canonical KAN-816 keys
+    expect(args.metadata).toMatchObject({ actionId: ACTION_ID, decisionId: DECISION_ID });
+  });
+
+  // ── KAN-817: only one of the two populated → only that one persisted
+  it('KAN-817 — event with subject only (webhook-side fallback case) → metadata.subject set, no bodyPreview', async () => {
+    decisionFindFirstMock.mockResolvedValueOnce({ id: DECISION_ID, metadata: { dealId: DEAL_ID } });
+
+    await postEnvelope(buildPushEnvelope({ subject: 'Subject only' }));
+
+    const args = (engagementCreateMock.mock.calls[0]![0] as { data: { metadata: Record<string, unknown> } }).data;
+    expect(args.metadata.subject).toBe('Subject only');
+    expect('bodyPreview' in args.metadata).toBe(false);
+  });
+
   // ── Test 6 — status=failed → no Engagement (anti-repetition excludes failures)
   it('status=failed → ActionOutcome writes; Engagement NOT written (anti-repetition skips non-delivered)', async () => {
     decisionFindFirstMock.mockResolvedValueOnce({ id: DECISION_ID, metadata: { dealId: DEAL_ID } });
