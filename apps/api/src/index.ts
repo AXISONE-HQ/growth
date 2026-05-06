@@ -30,7 +30,9 @@ import { actionExecutedPushApp } from "./subscribers/action-executed-push.js";
 import { knowledgeIngestPushApp } from "./subscribers/knowledge-ingest-push.js";
 import { llmCallPushApp } from "./subscribers/llm-call-push.js";
 import { leadReceivedPushApp } from "./subscribers/lead-received-push.js";
+import { knowledgeSourceIngestedPushApp } from "./subscribers/knowledge-source-ingested-push.js";
 import { leadApiApp } from "./routes/lead-api.js";
+import { knowledgeSourcesApp } from "./routes/knowledge-sources.js";
 import { cronDeferredSendApp } from "./internal/cron-deferred-send.js";
 import { getPubSubClient } from "../../../packages/api/src/lib/pubsub-client.js";
 import { setLLMCostPublisher } from "../../../packages/api/src/services/llm-client.js";
@@ -93,6 +95,7 @@ app.route("/pubsub", knowledgeIngestPushApp);
 app.route("/pubsub", llmCallPushApp);
 // KAN-774 — lead.received → assignLeadToPipeline (closes Lead Inbox consumer gap)
 app.route("/pubsub", leadReceivedPushApp);
+app.route("/pubsub", knowledgeSourceIngestedPushApp);
 
 // KAN-814 — Cloud Scheduler cron HTTP target. Mounted at
 // /internal/cron/deferred-send-evaluator. OIDC-protected (reuses
@@ -104,6 +107,12 @@ app.route("/internal", cronDeferredSendApp);
 // ============================================================================
 
 app.route("/api/v1/leads", leadApiApp);
+
+// ============================================================================
+// KNOWLEDGE INGESTION INTAKE (KAN-827) — Firebase JWT + tenant scope
+// ============================================================================
+
+app.route("/api/knowledge", knowledgeSourcesApp);
 
 // ============================================================================
 // tRPC SERVER
