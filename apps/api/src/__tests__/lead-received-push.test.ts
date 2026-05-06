@@ -1807,3 +1807,107 @@ describe("KAN-835 — wait_for_response chain", () => {
     expect(decisionArgs.data.actionType).toBe("send_follow_up");
   });
 });
+
+// ─────────────────────────────────────────────
+// KAN-828 fix-forward — caller-side wire-up tests
+// Verify lead-received-push passes redis + openai args to all 3
+// evaluateDealState call sites + the shapeMessage call site. Without
+// this wire-up, Brain Service + Message Shaper treat the args as
+// "retrieval disabled" and silently skip the ## Company knowledge
+// section — which is the production gap surfaced by the post-deploy
+// smoke (515-token Brain prompt matched pre-feature baseline exactly).
+//
+// Tests assert the call args contain `redis` + `openai` keys (truthy
+// or null — both are accepted by Brain/Shaper). In test env without
+// OPENAI_API_KEY, openai resolves to null; we accept that as the
+// wire-up shape proof.
+// ─────────────────────────────────────────────
+
+describe("KAN-828 fix-forward — caller-side wire-up", () => {
+  it("Test 1 — initial evaluateDealState call passes redis + openai in options", async () => {
+    setupHappyPathMocks();
+    setupPhase2DispatchMocks();
+
+    await postEnvelope(buildPushEnvelope());
+
+    expect(evaluateDealStateMock).toHaveBeenCalled();
+    const opts = evaluateDealStateMock.mock.calls[0]![2] as Record<string, unknown>;
+    // Both keys present (values may be null in test env where OPENAI_API_KEY
+    // is unset; the wire-up contract is "the keys exist on the options").
+    expect(opts).toHaveProperty("redis");
+    expect(opts).toHaveProperty("openai");
+  });
+
+  it("Test 2 — KAN-825 chained evaluateDealState (post_stage_advance) passes redis + openai", async () => {
+    setupHappyPathMocks();
+    evaluateDealStateMock.mockReset();
+    // First Brain call: advance_stage → triggers KAN-825 chain
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecisionFixture({ type: "advance_stage", confidence: 0.78 }),
+    );
+    // Stage transition success enables the chain
+    evaluateStageTransitionMock.mockResolvedValueOnce({
+      type: "transitioned",
+      dealId: DEAL_A,
+      fromStageId: STAGE_INITIAL,
+      toStageId: "stage_qualified",
+      transitionRowId: "dsh_new",
+      fromStageName: "New",
+      toStageName: "Qualified",
+    });
+    // Chained Brain: send_follow_up → dispatch fires
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecisionFixture({ type: "send_follow_up", suggestedChannel: "email" }),
+    );
+    shapeMessageMock.mockResolvedValueOnce(buildShapedMessageFixture({ channel: "email" }));
+    evaluateSendPolicyMock.mockResolvedValueOnce({ type: "allow", reason: "ok" });
+    dealFindUniqueMock.mockResolvedValueOnce({
+      id: DEAL_A,
+      tenantId: TENANT_A,
+      contactId: CONTACT_A,
+      contact: { id: CONTACT_A, email: "alice@acme.com" },
+    });
+    resolveEmailConnectionIdMock.mockResolvedValueOnce("conn_email_active");
+    decisionCreateMock.mockResolvedValueOnce({ id: "decision_chained_v1" });
+    getPubSubClientMock.mockReturnValueOnce({ publish: vi.fn() });
+    publishActionSendMock.mockResolvedValueOnce("pubsub_msg_chained");
+
+    await postEnvelope(buildPushEnvelope());
+
+    expect(evaluateDealStateMock).toHaveBeenCalledTimes(2);
+    // Chained call's options (call index 1) — verify wire-up
+    const chainedOpts = evaluateDealStateMock.mock.calls[1]![2] as Record<string, unknown>;
+    expect(chainedOpts.triggerContext).toBe("post_stage_advance");
+    expect(chainedOpts).toHaveProperty("redis");
+    expect(chainedOpts).toHaveProperty("openai");
+  });
+
+  it("Test 3 — KAN-835 chained evaluateDealState (post_wait_acknowledgment) passes redis + openai", async () => {
+    setupHappyPathMocks(); // default: wait_for_response on first Brain call
+    // Default mock returns wait_for_response → KAN-835 chain fires →
+    // chained call also returns wait_for_response (mock persistent) →
+    // loop guard fires. 2 Brain calls total.
+
+    await postEnvelope(buildPushEnvelope());
+
+    expect(evaluateDealStateMock).toHaveBeenCalledTimes(2);
+    const chainedOpts = evaluateDealStateMock.mock.calls[1]![2] as Record<string, unknown>;
+    expect(chainedOpts.triggerContext).toBe("post_wait_acknowledgment");
+    expect(chainedOpts).toHaveProperty("redis");
+    expect(chainedOpts).toHaveProperty("openai");
+  });
+
+  it("Test 4 — shapeMessage call passes redis + openai in options", async () => {
+    setupHappyPathMocks();
+    setupPhase2DispatchMocks();
+
+    await postEnvelope(buildPushEnvelope());
+
+    expect(shapeMessageMock).toHaveBeenCalled();
+    const shapeOpts = shapeMessageMock.mock.calls[0]![2] as Record<string, unknown>;
+    // Existing brainDecision pre-pass arg + the new redis/openai wire-up
+    expect(shapeOpts).toHaveProperty("brainDecision");
+    expect(shapeOpts).toHaveProperty("redis");
+    expect(shapeOpts).toHaveProperty("openai");
+  });
+});
