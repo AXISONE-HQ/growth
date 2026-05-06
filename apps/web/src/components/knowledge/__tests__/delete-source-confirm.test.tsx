@@ -12,6 +12,17 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+
+// KAN-829 sub-cohort 7 — mock firebase so buildHeaders() can attach a
+// Bearer token without spinning up the real Firebase Auth SDK in jsdom.
+vi.mock("@/lib/firebase", () => ({
+  app: {},
+  auth: {
+    currentUser: { getIdToken: vi.fn(async () => "test-id-token") },
+  },
+  googleProvider: {},
+}));
+
 import { DeleteSourceConfirm } from "../delete-source-confirm";
 
 const toastSuccess = vi.fn();
@@ -95,10 +106,19 @@ describe("DeleteSourceConfirm — KAN-829 sub-cohort 5", () => {
     await user.click(screen.getByRole("button", { name: /Confirm delete source/i }));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/knowledge/sources/src-42",
-      expect.objectContaining({ method: "DELETE", credentials: "include" }),
-    );
+    // Sub-cohort 7 wire-up — URL prefixed with API_BASE; auth headers
+    // (Authorization Bearer + x-tenant-id) attached via buildHeaders;
+    // credentials:"include" no longer used (apps/api ignores cookies).
+    const [calledUrl, calledInit] = fetchMock.mock.calls[0]!;
+    expect(typeof calledUrl).toBe("string");
+    expect(calledUrl as string).toMatch(/\/api\/knowledge\/sources\/src-42$/);
+    expect(calledInit as RequestInit).toMatchObject({ method: "DELETE" });
+    const headers = (calledInit as RequestInit).headers as Record<string, string>;
+    expect(headers).toMatchObject({
+      Authorization: "Bearer test-id-token",
+      "x-tenant-id": expect.any(String),
+    });
+    expect((calledInit as RequestInit & { credentials?: string }).credentials).toBeUndefined();
     await waitFor(() => expect(toastSuccess).toHaveBeenCalledWith("Source deleted."));
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["knowledge", "sources"] });
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["knowledge", "tier-limits"] });

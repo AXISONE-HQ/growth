@@ -43,6 +43,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { StatusPill, type StatusPillStatus } from "@/components/ui/knowledge/status-pill";
 import { CategoryBadge, type Category } from "@/components/ui/knowledge/category-badge";
+import { API_BASE, buildHeaders } from "@/lib/api";
 
 interface SourceDetail {
   id: string;
@@ -80,8 +81,8 @@ export function SourceDetailDialog({
     queryKey: ["knowledge", "source-detail", sourceId],
     enabled: open && Boolean(sourceId),
     queryFn: async () => {
-      const res = await fetch(`/api/knowledge/sources/${sourceId}`, {
-        credentials: "include",
+      const res = await fetch(`${API_BASE}/api/knowledge/sources/${sourceId}`, {
+        headers: await buildHeaders(),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return (await res.json()) as { source: SourceDetail };

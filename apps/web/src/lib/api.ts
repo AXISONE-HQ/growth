@@ -12,7 +12,7 @@
  */
 import { auth } from './firebase';
 
-const API_BASE =
+export const API_BASE =
   process.env.NEXT_PUBLIC_API_URL ||
   'https://growth-api-1086551891973.us-central1.run.app';
 
@@ -24,11 +24,23 @@ export function getTenantId(): string {
   return AXISONE_GROWTH_TENANT_ID;
 }
 
-async function buildHeaders(): Promise<Record<string, string>> {
+/**
+ * Build the auth + tenant headers shared by tRPC and REST callers.
+ *
+ * @param opts.omitContentType — set true for FormData uploads (the browser
+ *   sets `Content-Type: multipart/form-data; boundary=...` automatically;
+ *   passing an explicit Content-Type breaks the boundary). Default false
+ *   preserves the existing tRPC-JSON behavior.
+ */
+export async function buildHeaders(
+  opts?: { omitContentType?: boolean },
+): Promise<Record<string, string>> {
   const h: Record<string, string> = {
-    'Content-Type': 'application/json',
     'x-tenant-id': getTenantId(),
   };
+  if (!opts?.omitContentType) {
+    h['Content-Type'] = 'application/json';
+  }
   // Attach Firebase ID token if the user is signed in. Anonymous calls
   // (no current user) hit only public/protected endpoints; admin-gated
   // mutations require a signed-in user whose email matches ADMIN_EMAILS.

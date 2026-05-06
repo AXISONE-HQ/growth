@@ -44,6 +44,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { API_BASE, buildHeaders } from "@/lib/api";
 
 interface DeleteSourceConfirmProps {
   sourceId: string | null;
@@ -68,9 +69,9 @@ export function DeleteSourceConfirm({
 
   const mutation = useMutation({
     mutationFn: async (id: string): Promise<{ id: string; status: "deleted" }> => {
-      const res = await fetch(`/api/knowledge/sources/${id}`, {
+      const res = await fetch(`${API_BASE}/api/knowledge/sources/${id}`, {
         method: "DELETE",
-        credentials: "include",
+        headers: await buildHeaders(),
       });
       if (!res.ok) {
         const fallback = (await res.text()) || `HTTP ${res.status}`;

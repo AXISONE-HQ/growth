@@ -47,6 +47,7 @@ import { Progress } from "@/components/ui/progress";
 import { FileText, Upload, MessageSquare, Globe, Table as TableIcon, Share2 } from "lucide-react";
 import { SourceTypeCard } from "./source-type-card";
 import { FAQEditor, type FAQEntry } from "./faq-editor";
+import { API_BASE, buildHeaders } from "@/lib/api";
 
 interface TierLimitsResponse {
   planTier: string;
@@ -118,7 +119,9 @@ export function AddSourceDialog({
   const tierQuery = useQuery<TierLimitsResponse>({
     queryKey: ["knowledge", "tier-limits"],
     queryFn: async () => {
-      const res = await fetch("/api/knowledge/tier-limits", { credentials: "include" });
+      const res = await fetch(`${API_BASE}/api/knowledge/tier-limits`, {
+        headers: await buildHeaders(),
+      });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return (await res.json()) as TierLimitsResponse;
     },
@@ -165,14 +168,17 @@ export function AddSourceDialog({
       | { kind: "pdf"; body: FormData }
       | { kind: "json"; body: Record<string, unknown> }
     ): Promise<{ sourceId: string }> => {
-      const init: RequestInit = { method: "POST", credentials: "include" };
-      if (input.kind === "pdf") {
-        init.body = input.body;
-      } else {
-        init.headers = { "content-type": "application/json" };
-        init.body = JSON.stringify(input.body);
-      }
-      const res = await fetch("/api/knowledge/sources", init);
+      // FormData: omit Content-Type so the browser sets the multipart
+      // boundary itself. JSON: buildHeaders sets application/json by default.
+      const headers = await buildHeaders(
+        input.kind === "pdf" ? { omitContentType: true } : undefined,
+      );
+      const init: RequestInit = {
+        method: "POST",
+        headers,
+        body: input.kind === "pdf" ? input.body : JSON.stringify(input.body),
+      };
+      const res = await fetch(`${API_BASE}/api/knowledge/sources`, init);
       if (!res.ok) {
         // Map server status → user-friendly message
         const fallback = (await res.text()) || `HTTP ${res.status}`;

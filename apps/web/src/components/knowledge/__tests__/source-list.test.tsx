@@ -17,6 +17,17 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, act, fireEvent } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+
+// KAN-829 sub-cohort 7 — mock firebase so buildHeaders() can attach a
+// Bearer token without spinning up the real Firebase Auth SDK in jsdom.
+vi.mock("@/lib/firebase", () => ({
+  app: {},
+  auth: {
+    currentUser: { getIdToken: vi.fn(async () => "test-id-token") },
+  },
+  googleProvider: {},
+}));
+
 import { SourceList } from "../source-list";
 
 // ─────────────────────────────────────────────

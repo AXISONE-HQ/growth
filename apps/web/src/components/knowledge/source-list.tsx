@@ -45,6 +45,7 @@ import {
   type LockedFeature,
 } from "./upgrade-prompt-dialog";
 import { isKnownTier, type Tier } from "@/lib/tier-labels";
+import { API_BASE, buildHeaders } from "@/lib/api";
 
 interface KnowledgeSource {
   id: string;
@@ -99,10 +100,10 @@ export function SourceList(): React.ReactElement {
   const sourcesQuery = useQuery<{ sources: KnowledgeSource[] }>({
     queryKey: ["knowledge", "sources", { category: categoryFilter }],
     queryFn: async () => {
-      const url = categoryFilter
+      const path = categoryFilter
         ? `/api/knowledge/sources?category=${categoryFilter}`
         : "/api/knowledge/sources";
-      const res = await fetch(url, { credentials: "include" });
+      const res = await fetch(`${API_BASE}${path}`, { headers: await buildHeaders() });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return (await res.json()) as { sources: KnowledgeSource[] };
     },
@@ -120,7 +121,9 @@ export function SourceList(): React.ReactElement {
   const tierQuery = useQuery<TierLimitsResponse>({
     queryKey: ["knowledge", "tier-limits"],
     queryFn: async () => {
-      const res = await fetch("/api/knowledge/tier-limits", { credentials: "include" });
+      const res = await fetch(`${API_BASE}/api/knowledge/tier-limits`, {
+        headers: await buildHeaders(),
+      });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return (await res.json()) as TierLimitsResponse;
     },
