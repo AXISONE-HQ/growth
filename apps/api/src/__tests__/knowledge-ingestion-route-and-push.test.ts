@@ -42,18 +42,18 @@ vi.mock("../prisma.js", () => ({
   prisma: { knowledgeSource: { create: knowledgeSourceCreateMock } },
 }));
 vi.mock("../lib/oidc-pubsub-verify.js", () => ({
-  verifyPubsubOidc: (...args: unknown[]) => verifyPubsubOidcMock(...args),
+  verifyPubsubOidc: (...args: unknown[]) => (verifyPubsubOidcMock as (...a: unknown[]) => unknown)(...args),
 }));
 vi.mock(
   "../../../../packages/api/src/services/knowledge-source-ingest-publisher.js",
   () => ({
-    publishKnowledgeSourceIngested: (...args: unknown[]) => publishKnowledgeSourceIngestedMock(...args),
+    publishKnowledgeSourceIngested: (...args: unknown[]) => (publishKnowledgeSourceIngestedMock as (...a: unknown[]) => unknown)(...args),
   }),
 );
 vi.mock(
   "../../../../packages/api/src/services/knowledge-ingestion-service.js",
   () => ({
-    ingestSource: (...args: unknown[]) => ingestSourceMock(...args),
+    ingestSource: (...args: unknown[]) => (ingestSourceMock as (...a: unknown[]) => unknown)(...args),
   }),
 );
 
@@ -133,7 +133,7 @@ describe("KAN-827 — POST /api/knowledge/sources auth + validation", () => {
     });
 
     expect(res.status).toBe(202);
-    const body = await res.json();
+    const body = (await res.json()) as { status: string; sourceId: string };
     expect(body).toMatchObject({ status: "queued" });
     expect(body.sourceId).toMatch(/[0-9a-f-]{36}/);
     expect(knowledgeSourceCreateMock).toHaveBeenCalledOnce();
