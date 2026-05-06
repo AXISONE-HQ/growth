@@ -20,7 +20,7 @@ const API_BASE =
 // KAN-714 will resolve tenant from authenticated user via TeamMember.
 const AXISONE_GROWTH_TENANT_ID = '9ca85088-f65b-4bac-b098-fff742281ede';
 
-function getTenantId(): string {
+export function getTenantId(): string {
   return AXISONE_GROWTH_TENANT_ID;
 }
 

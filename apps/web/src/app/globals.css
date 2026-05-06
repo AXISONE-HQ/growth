@@ -39,6 +39,36 @@
   --amber-500: #F59E0B;
   --amber-400: #FBBF24;
 
+  /* Growth Design System v1 — Sprint 11a additive tokens (KAN-829 sub-cohort 2).
+   * Non-breaking additive layer — existing UI continues to use the shadcn
+   * tokens below. New Sprint 11a components reference --ds-* tokens.
+   * KAN-847 will consolidate (rename --ds-violet-500 → --violet-500, etc.)
+   * after the full DS v1 palette + AI-aware Product Layer components ship.
+   *
+   * Spec source: Confluence page 4456463 (Growth Design System v1).
+   * The "spec ≠ implementation" gap surfaced by KAN-829 sub-cohort 2
+   * pre-flight: tokens were documented but never landed in CSS.
+   */
+  --ds-violet-100: #EEEAFC;
+  --ds-violet-500: #5C3FE5;
+  --ds-violet-700: #3B249E;
+  --ds-emerald-100: #DCF4EB;
+  --ds-emerald-500: #0EA882;
+  --ds-emerald-700: #0A6B52;
+  --ds-surface-base: #FBF9F4;
+  --ds-surface-sunken: #F4F0E6;
+  --ds-ink-secondary: #4A3F5C;
+  --ds-ink-tertiary: #8A7F9C;
+  --ds-border-subtle: #ECE6D9;
+  --ds-border-default: #DDD3C0;
+  --ds-danger-soft: #F8E1E1;
+  --ds-danger-text: #8E2424;
+  --ds-danger: #C73E3E;
+  /* Warning palette — used by category-badge `pricing` + tier-limit warn state */
+  --ds-warning-soft: #FCEFD9;
+  --ds-warning-text: #92590E;
+  --ds-warning: #D97706;
+
   /* shadcn-ui design tokens (HSL components, no `hsl()` wrapper — Tailwind composes them) */
   --background: 0 0% 100%;
   --foreground: 222.2 84% 4.9%;

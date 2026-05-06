@@ -22,6 +22,9 @@ import {
 } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
 import { AuthProvider, useAuth } from '@/lib/AuthContext';
+import { QueryClientProvider } from '@tanstack/react-query';
+import { Toaster } from 'sonner';
+import { queryClient } from '@/lib/query-client';
 import { isDemoMode } from '@/lib/demo-mode';
 import { DemoModeBanner } from '@/components/demo-mode-banner';
 
@@ -250,9 +253,20 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en">
       <body>
-        <AuthProvider>
-          <AppShell>{children}</AppShell>
-        </AuthProvider>
+        {/* KAN-829 sub-cohort 2 — TanStack Query provider above AuthProvider so
+         * authenticated queries can use it. layout.tsx is already 'use client'
+         * (line 1) so the provider can wrap directly without a separate
+         * Client Component. */}
+        <QueryClientProvider client={queryClient}>
+          <AuthProvider>
+            <AppShell>{children}</AppShell>
+          </AuthProvider>
+          {/* KAN-829 sub-cohort 5 — sonner Toaster for mutation success
+           * notifications. richColors=false keeps the surface monochrome so
+           * DS v1 tokens own the visual treatment; position bottom-right
+           * stays out of the way of dialogs that may be open. */}
+          <Toaster richColors={false} position="bottom-right" />
+        </QueryClientProvider>
       </body>
     </html>
   );

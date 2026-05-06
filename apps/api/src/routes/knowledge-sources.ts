@@ -256,3 +256,257 @@ knowledgeSourcesApp.post("/sources", async (c) => {
 
   return c.json({ error: "Unsupported Content-Type — expected multipart/form-data or application/json" }, 415);
 });
+
+// ─────────────────────────────────────────────
+// KAN-829 sub-cohort 1 — list / detail / delete / tier-limits
+// ─────────────────────────────────────────────
+
+/**
+ * Cast-loose Prisma access (KAN-826 cohort discipline). The
+ * knowledgeSource + knowledgeChunk + auditLog + tenant delegates exist
+ * post-KAN-826 / KAN-797a but the typed client across rootDir adds noise.
+ * The cast is purely about the apps/api → packages/db boundary.
+ */
+interface KnowledgeAdminPrisma {
+  knowledgeSource: {
+    findMany: (args: {
+      where: Record<string, unknown>;
+      orderBy: Record<string, unknown>;
+      select: Record<string, unknown>;
+    }) => Promise<Array<Record<string, unknown>>>;
+    findFirst: (args: {
+      where: Record<string, unknown>;
+      select?: Record<string, unknown>;
+    }) => Promise<Record<string, unknown> | null>;
+    update: (args: {
+      where: Record<string, unknown>;
+      data: Record<string, unknown>;
+    }) => Promise<{ id: string }>;
+    count: (args: { where: Record<string, unknown> }) => Promise<number>;
+  };
+  knowledgeChunk: {
+    count: (args: { where: Record<string, unknown> }) => Promise<number>;
+  };
+  tenant: {
+    findUnique: (args: {
+      where: { id: string };
+      select: Record<string, true>;
+    }) => Promise<{ planTier?: string } | null>;
+  };
+  auditLog: {
+    create: (args: { data: Record<string, unknown> }) => Promise<{ id: string }>;
+  };
+}
+
+function asAdminPrisma(): KnowledgeAdminPrisma {
+  return prisma as unknown as KnowledgeAdminPrisma;
+}
+
+// ─────────────────────────────────────────────
+// GET /api/knowledge/sources?category=...
+// ─────────────────────────────────────────────
+
+const KNOWLEDGE_CATEGORIES = ['general', 'faq', 'inventory', 'warranty', 'pricing', 'other'] as const;
+
+knowledgeSourcesApp.get("/sources", async (c) => {
+  const auth = await authenticate(c.req.header("authorization"), c.req.header("x-tenant-id"));
+  if ("error" in auth) {
+    return c.json({ error: auth.error }, auth.status);
+  }
+  const { tenantId } = auth;
+
+  const categoryFilter = c.req.query("category");
+  if (categoryFilter && !KNOWLEDGE_CATEGORIES.includes(categoryFilter as (typeof KNOWLEDGE_CATEGORIES)[number])) {
+    return c.json({ error: `Invalid category '${categoryFilter}' — must be one of ${KNOWLEDGE_CATEGORIES.join(", ")}` }, 400);
+  }
+
+  const where: Record<string, unknown> = {
+    tenantId,
+    // Soft-delete aware: status='deleted' rows hidden from list per
+    // architect spec §1.4 (30-day soft-delete + audit log preservation).
+    NOT: { status: 'deleted' },
+  };
+  if (categoryFilter) where.category = categoryFilter;
+
+  const sources = await asAdminPrisma().knowledgeSource.findMany({
+    where,
+    orderBy: { createdAt: 'desc' },
+    select: {
+      id: true,
+      sourceType: true,
+      category: true,
+      title: true,
+      status: true,
+      fileName: true,
+      fileSizeBytes: true,
+      errorDetail: true,
+      createdAt: true,
+      updatedAt: true,
+    },
+  });
+
+  // chunk_count per source via separate count query (avoids Prisma _count
+  // include cost on every list page; one extra round-trip is fine for the
+  // admin list view at MVP scale).
+  const sourceIds = sources.map((s) => s.id as string);
+  const chunkCounts: Record<string, number> = {};
+  for (const sid of sourceIds) {
+    chunkCounts[sid] = await asAdminPrisma().knowledgeChunk.count({
+      where: { sourceId: sid, status: 'ready' },
+    });
+  }
+
+  return c.json({
+    sources: sources.map((s) => ({
+      ...s,
+      chunkCount: chunkCounts[s.id as string] ?? 0,
+    })),
+  });
+});
+
+// ─────────────────────────────────────────────
+// GET /api/knowledge/sources/:id
+// ─────────────────────────────────────────────
+
+knowledgeSourcesApp.get("/sources/:id", async (c) => {
+  const auth = await authenticate(c.req.header("authorization"), c.req.header("x-tenant-id"));
+  if ("error" in auth) {
+    return c.json({ error: auth.error }, auth.status);
+  }
+  const { tenantId } = auth;
+
+  const id = c.req.param("id");
+  const source = await asAdminPrisma().knowledgeSource.findFirst({
+    where: {
+      id,
+      tenantId, // tenant-scoped lookup (cross-tenant probe returns 404)
+      NOT: { status: 'deleted' },
+    },
+    select: {
+      id: true,
+      sourceType: true,
+      category: true,
+      title: true,
+      status: true,
+      fileName: true,
+      fileSizeBytes: true,
+      fileChecksum: true,
+      rawContent: true,
+      metadata: true,
+      errorDetail: true,
+      createdAt: true,
+      updatedAt: true,
+    },
+  });
+  if (!source) {
+    return c.json({ error: "Source not found" }, 404);
+  }
+
+  const chunkCount = await asAdminPrisma().knowledgeChunk.count({
+    where: { sourceId: id, status: 'ready' },
+  });
+
+  return c.json({ source: { ...source, chunkCount } });
+});
+
+// ─────────────────────────────────────────────
+// DELETE /api/knowledge/sources/:id (soft-delete)
+// ─────────────────────────────────────────────
+
+knowledgeSourcesApp.delete("/sources/:id", async (c) => {
+  const auth = await authenticate(c.req.header("authorization"), c.req.header("x-tenant-id"));
+  if ("error" in auth) {
+    return c.json({ error: auth.error }, auth.status);
+  }
+  const { tenantId, uid } = auth;
+
+  const id = c.req.param("id");
+  // Verify source belongs to tenant + isn't already deleted.
+  const existing = await asAdminPrisma().knowledgeSource.findFirst({
+    where: { id, tenantId, NOT: { status: 'deleted' } },
+    select: { id: true, sourceType: true, category: true, title: true },
+  });
+  if (!existing) {
+    return c.json({ error: "Source not found" }, 404);
+  }
+
+  // chunk count BEFORE soft-delete — captured for the audit emit.
+  const chunkCount = await asAdminPrisma().knowledgeChunk.count({
+    where: { sourceId: id, status: 'ready' },
+  });
+
+  // Soft-delete per architect spec §1.4 — status='deleted' + deleted_at=NOW().
+  // Hourly cron hard-deletes after 30 days. Chunks stay ready=false implicitly
+  // because retrieval filters by status='ready'.
+  await asAdminPrisma().knowledgeSource.update({
+    where: { id },
+    data: { status: 'deleted', deletedAt: new Date() },
+  });
+
+  // Audit log emit (best-effort) — KAN-830 will aggregate; for now it's a row.
+  void asAdminPrisma().auditLog.create({
+    data: {
+      tenantId,
+      actor: 'human_operator',
+      actionType: 'knowledge.source_deleted',
+      payload: {
+        sourceId: id,
+        sourceType: existing.sourceType,
+        category: existing.category,
+        title: existing.title,
+        chunkCountAtDelete: chunkCount,
+        deletedByUid: uid,
+      },
+    },
+  }).catch((err: unknown) => {
+    console.warn(
+      `[knowledge-sources] audit-emit-source-deleted-failed sourceId=${id} err=${(err as Error)?.message ?? String(err)}`,
+    );
+  });
+
+  return c.json({ id, status: 'deleted' as const });
+});
+
+// ─────────────────────────────────────────────
+// GET /api/knowledge/tier-limits
+// ─────────────────────────────────────────────
+
+knowledgeSourcesApp.get("/tier-limits", async (c) => {
+  const auth = await authenticate(c.req.header("authorization"), c.req.header("x-tenant-id"));
+  if ("error" in auth) {
+    return c.json({ error: auth.error }, auth.status);
+  }
+  const { tenantId } = auth;
+
+  const tenant = await asAdminPrisma().tenant.findUnique({
+    where: { id: tenantId },
+    select: { planTier: true },
+  });
+  const planTier = tenant?.planTier ?? 'free';
+
+  // Variable-specifier dynamic import per `reference_variable_specifier_dynamic_import`
+  // — keeps cross-rootDir module out of the apps/api TS6059 cohort.
+  const tierLimitsSpec = "../../../../packages/api/src/services/knowledge-tier-limits.js";
+  const { tierLimits } = (await import(tierLimitsSpec)) as {
+    tierLimits: (planTier: string) => {
+      maxSources: number;
+      maxPdfMB: number;
+      allowsPdf: boolean;
+      allowsFaq: boolean;
+      allowedCategories: string[];
+    };
+  };
+  const limits = tierLimits(planTier);
+
+  // currentSourceCount — tenant-scoped, soft-delete aware.
+  const currentSourceCount = await asAdminPrisma().knowledgeSource.count({
+    where: { tenantId, NOT: { status: 'deleted' } },
+  });
+
+  return c.json({
+    planTier,
+    limits,
+    currentSourceCount,
+    remaining: Math.max(0, limits.maxSources - currentSourceCount),
+  });
+});
