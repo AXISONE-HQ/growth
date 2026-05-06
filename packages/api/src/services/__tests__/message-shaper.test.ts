@@ -24,7 +24,9 @@ vi.mock('../llm-client.js', () => ({
 import {
   shapeMessage,
   parseShapeResponse,
+  buildShapePrompt,
   MessageShaperDealNotFoundError,
+  type ShaperKnowledgeResult,
 } from '../message-shaper.js';
 
 const TENANT_A = '11111111-1111-1111-1111-111111111111';
@@ -925,5 +927,136 @@ describe('parseShapeResponse', () => {
       'meta_messenger',
     );
     expect(result.ok).toBe(true);
+  });
+});
+
+// ─────────────────────────────────────────────
+// KAN-828 — `## Company knowledge` section in Shaper prompt
+// Sentinel-token pins on chunk_text + source_title + section ordering
+// pin (Recent inbound BEFORE Company knowledge BEFORE Channel + tone)
+// per architect spec §3.4 + Fred's KAN-839 + KAN-828 coexistence contract.
+// ─────────────────────────────────────────────
+
+describe('buildShapePrompt — KAN-828 Company knowledge section', () => {
+  const baseInput = {
+    contact: {
+      email: 'fred@example.com',
+      firstName: 'Fred',
+      lastName: null,
+      company: null,
+    },
+    pipeline: { name: 'Default Pipeline', objectiveType: 'book_appointment', objectiveDescription: null },
+    currentStage: { name: 'New', outcomeType: 'open' },
+    brainReasoning: 'Test reasoning',
+    channel: 'email' as const,
+    tone: 'professional' as const,
+    recentOutbound: [],
+    recentInbound: {
+      occurredAt: new Date('2026-05-06T01:00:00Z'),
+      metadata: { subject: 'Question', bodyPreview: 'How does X work?' },
+    },
+  };
+
+  it('Test 1 — KB-tenant + chunks → ## Company knowledge populated with text + title', () => {
+    const knowledge: ShaperKnowledgeResult = {
+      chunks: [
+        {
+          chunk_id: 'c1',
+          source_id: 's1',
+          source_title: 'Knowledge Doc',
+          category: 'faq',
+          chunk_text: 'Sprint 11a uses 500-token chunks with 50-token overlap.',
+          score: 0.91,
+        },
+      ],
+      tenantHasAnyKnowledge: true,
+    };
+    const prompt = buildShapePrompt({ ...baseInput, knowledge });
+    expect(prompt).toContain('## Company knowledge (relevant to this conversation)');
+    expect(prompt).toContain('1. [Knowledge Doc] (faq) — score 0.91');
+    expect(prompt).toContain('Sprint 11a uses 500-token chunks with 50-token overlap.');
+  });
+
+  it('Test 2 — no-KB tenant → "(none — no company knowledge configured yet)" empty case 1 verbatim', () => {
+    const prompt = buildShapePrompt({
+      ...baseInput,
+      knowledge: { chunks: [], tenantHasAnyKnowledge: false },
+    });
+    expect(prompt).toContain('## Company knowledge (relevant to this conversation)');
+    expect(prompt).toContain('(none — no company knowledge configured yet)');
+  });
+
+  it('Test 3 — has-KB tenant + nothing relevant → "(none relevant to this message)" empty case 2 verbatim', () => {
+    const prompt = buildShapePrompt({
+      ...baseInput,
+      knowledge: { chunks: [], tenantHasAnyKnowledge: true },
+    });
+    expect(prompt).toContain('## Company knowledge (relevant to this conversation)');
+    expect(prompt).toContain('(none relevant to this message)');
+  });
+
+  it('Test 4 — section ordering pin: Recent inbound BEFORE Company knowledge BEFORE Channel + tone', () => {
+    const knowledge: ShaperKnowledgeResult = {
+      chunks: [
+        { chunk_id: 'c1', source_id: 's1', source_title: 'Doc', category: 'faq', chunk_text: 'x', score: 0.9 },
+      ],
+      tenantHasAnyKnowledge: true,
+    };
+    const prompt = buildShapePrompt({ ...baseInput, knowledge });
+    const idxRecentInbound = prompt.indexOf('## Recent inbound from contact');
+    const idxKnowledge = prompt.indexOf('## Company knowledge');
+    const idxChannelTone = prompt.indexOf('## Channel + tone');
+    expect(idxRecentInbound).toBeGreaterThan(-1);
+    expect(idxKnowledge).toBeGreaterThan(idxRecentInbound);
+    expect(idxChannelTone).toBeGreaterThan(idxKnowledge);
+    // Final ordering pin (KAN-839 + KAN-828 coexistence contract per Fred):
+    //   ## Recent inbound from contact
+    //   ## Company knowledge (relevant to this conversation)
+    //   ## Channel + tone
+  });
+
+  it('Test 5 — sentinel-token pin: chunk_text + source_title sentinels appear verbatim in rendered Shaper prompt', () => {
+    const sentinelTitle = 'KAN-828-shaper-pin-source-title-token-mno321';
+    const sentinelText = 'KAN-828-shaper-pin-chunk-text-token-pqr654 — verbatim flow into Shaper.';
+    const knowledge: ShaperKnowledgeResult = {
+      chunks: [
+        {
+          chunk_id: 'c1',
+          source_id: 's1',
+          source_title: sentinelTitle,
+          category: 'faq',
+          chunk_text: sentinelText,
+          score: 0.93,
+        },
+      ],
+      tenantHasAnyKnowledge: true,
+    };
+    const prompt = buildShapePrompt({ ...baseInput, knowledge });
+    expect(prompt).toContain(sentinelTitle);
+    expect(prompt).toContain(sentinelText);
+  });
+
+  it('Test 6 — knowledge=null → section omitted entirely (legacy + no-inbound paths)', () => {
+    const prompt = buildShapePrompt({ ...baseInput, knowledge: null });
+    expect(prompt).not.toContain('## Company knowledge');
+    expect(prompt).not.toContain('(none — no company knowledge configured yet)');
+    expect(prompt).not.toContain('(none relevant to this message)');
+  });
+
+  it('Test 7 — multi-chunk render sorted by score descending; per-chunk 400-char truncation', () => {
+    const longText = 'y'.repeat(500);
+    const knowledge: ShaperKnowledgeResult = {
+      chunks: [
+        { chunk_id: 'c1', source_id: 's1', source_title: 'Low', category: 'faq', chunk_text: 'low', score: 0.65 },
+        { chunk_id: 'c2', source_id: 's1', source_title: 'High', category: 'warranty', chunk_text: longText, score: 0.95 },
+      ],
+      tenantHasAnyKnowledge: true,
+    };
+    const prompt = buildShapePrompt({ ...baseInput, knowledge });
+    // High-score chunk first
+    expect(prompt.indexOf('[High]')).toBeLessThan(prompt.indexOf('[Low]'));
+    // Per-chunk 400-char truncation
+    expect(prompt).toContain('y'.repeat(400));
+    expect(prompt).not.toContain('y'.repeat(401));
   });
 });

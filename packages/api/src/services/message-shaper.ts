@@ -88,6 +88,37 @@ export interface ShapeMessageOptions {
   recentOutboundLimit?: number;
   /** Override Brain's suggestedChannel (for testing or operator manual override). */
   forceChannel?: ShapedMessageChannel;
+  /**
+   * KAN-828 — Knowledge Layer wiring. Brain calls retrieveRelevantChunks
+   * first (cache MISS, ~150ms); Shaper calls the SAME function with the
+   * SAME queryText (extracted via brain-service's extractQueryTextFromInbound)
+   * → Redis HIT in the typical 1-30s Brain → Shaper handoff window
+   * (architect spec §1.3 once-and-pass-via-Redis pattern).
+   *
+   * Both null → retrieval skipped; `## Company knowledge` section omitted
+   * from the Shaper prompt entirely (legacy callers, cron re-dispatch
+   * paths without an inbound, retrieval-disabled smoke probes).
+   */
+  redis?: ShaperRedis | null;
+  openai?: ShaperOpenAI | null;
+}
+
+/**
+ * KAN-828 — duck-typed client interfaces (mirror Brain Service's
+ * KnowledgeRedis / KnowledgeOpenAI). Pure module discipline: callers
+ * already instantiate these via existing redis-client.ts + llm-client.ts
+ * patterns; we accept whatever shape they pass.
+ */
+export interface ShaperRedis {
+  get(key: string): Promise<string | null>;
+  set(key: string, value: string, mode: 'EX', seconds: number): Promise<unknown>;
+}
+export interface ShaperOpenAI {
+  embeddings: {
+    create(params: { model: string; input: string; dimensions?: number }): Promise<{
+      data: Array<{ embedding: number[] }>;
+    }>;
+  };
 }
 
 export class MessageShaperDealNotFoundError extends Error {
@@ -188,8 +219,41 @@ export async function shapeMessage(
       ],
     },
     orderBy: { occurredAt: 'desc' },
-    select: { occurredAt: true, metadata: true },
+    select: { occurredAt: true, metadata: true, engagementType: true },
   });
+
+  // KAN-828 — Knowledge Layer retrieval. Use brain-service's
+  // extractQueryTextFromInbound to compute the SAME queryText Brain used
+  // — identical sha256 hash → Redis HIT on the typical 1-30s handoff
+  // (architect spec §1.3). queryText resolution is bodyPreview → subject
+  // → null; null → retrieval skipped; section omitted from prompt.
+  let knowledge: ShaperKnowledgeResult | null = null;
+  if (options.redis && options.openai && recentInbound) {
+    const { extractQueryTextFromInbound } = await import('./brain-service.js');
+    const queryText = extractQueryTextFromInbound([
+      {
+        engagementType: recentInbound.engagementType,
+        metadata: recentInbound.metadata,
+      },
+    ]);
+    if (queryText) {
+      try {
+        const { retrieveRelevantChunks } = await import('./knowledge-retrieval-service.js');
+        knowledge = await retrieveRelevantChunks(
+          prisma,
+          options.redis as unknown as Parameters<typeof retrieveRelevantChunks>[1],
+          options.openai as unknown as Parameters<typeof retrieveRelevantChunks>[2],
+          deal.tenantId,
+          dealId,
+          queryText,
+        );
+      } catch (err) {
+        console.warn(
+          `[message-shaper] knowledge-retrieval-failed dealId=${dealId} err=${(err as Error)?.message ?? String(err)}`,
+        );
+      }
+    }
+  }
 
   // 4. Resolve channel: forceChannel override > Brain suggestion > 'email' default.
   const suggestedChannel = brainDecision.nextBestAction.suggestedChannel;
@@ -215,6 +279,7 @@ export async function shapeMessage(
     channel,
     tone,
     recentOutbound: deal.engagements,
+    knowledge,
     recentInbound: recentInbound
       ? { occurredAt: recentInbound.occurredAt, metadata: recentInbound.metadata }
       : null,
@@ -350,6 +415,20 @@ interface PromptInbound {
 // Single source of truth: the persisted value IS the render value.
 const INBOUND_BODY_RENDER_MAX_CHARS = 2000;
 
+// KAN-828 — local mirror of retrieval service result shape (avoid circular
+// import; the prompt builder must stay synchronously callable from tests).
+export interface ShaperKnowledgeResult {
+  chunks: Array<{
+    chunk_id: string;
+    source_id: string;
+    source_title: string | null;
+    category: string;
+    chunk_text: string;
+    score: number;
+  }>;
+  tenantHasAnyKnowledge: boolean;
+}
+
 export function buildShapePrompt(input: {
   contact: PromptContact;
   pipeline: PromptPipeline;
@@ -359,8 +438,16 @@ export function buildShapePrompt(input: {
   tone: ShapedMessageTone;
   recentOutbound: PromptOutbound[];
   recentInbound: PromptInbound | null;
+  /**
+   * KAN-828 — retrieval result. When null, the `## Company knowledge`
+   * section is OMITTED from the prompt entirely (legacy callers without
+   * Knowledge Layer wiring, or paths with no inbound to ground retrieval).
+   * When non-null, renders per architect spec §3.4 between
+   * `## Recent inbound from contact` and `## Channel + tone`.
+   */
+  knowledge?: ShaperKnowledgeResult | null;
 }): string {
-  const { contact, pipeline, currentStage, brainReasoning, channel, tone, recentOutbound, recentInbound } = input;
+  const { contact, pipeline, currentStage, brainReasoning, channel, tone, recentOutbound, recentInbound, knowledge } = input;
 
   const contactName =
     [contact.firstName, contact.lastName].filter((p) => !!p && p.trim().length > 0).join(' ') ||
@@ -422,7 +509,7 @@ ${brainReasoning}
 
 ## Recent inbound from contact
 ${recentInboundBlock}
-
+${knowledge ? `\n## Company knowledge (relevant to this conversation)\n${renderShaperKnowledgeSection(knowledge)}\n` : ''}
 ## Channel + tone
 Channel: ${channel}
 Tone: ${tone}
@@ -523,4 +610,29 @@ function gracefulNoShape(
     reason: `Message Shaper fallback: ${reason}. Caller should retry, escalate, or surface for human composition.`,
     brainDecision,
   };
+}
+
+/**
+ * KAN-828 — render the `## Company knowledge` section for the Shaper prompt.
+ * Identical contract to brain-service's `renderKnowledgeSectionInline` per
+ * architect spec §3.4. Two empty cases verbatim. Sorted by score
+ * descending. 400-char per-chunk truncation. Inlined here (vs imported
+ * from knowledge-retrieval-service.ts) to keep buildShapePrompt
+ * synchronously callable from tests without dynamic-import overhead.
+ */
+function renderShaperKnowledgeSection(result: ShaperKnowledgeResult): string {
+  if (result.chunks.length === 0) {
+    return result.tenantHasAnyKnowledge
+      ? '(none relevant to this message)'
+      : '(none — no company knowledge configured yet)';
+  }
+  const sorted = [...result.chunks].sort((a, b) => b.score - a.score);
+  const lines: string[] = [];
+  for (let i = 0; i < sorted.length; i++) {
+    const c = sorted[i]!;
+    const sourceLabel = c.source_title ?? '(untitled source)';
+    const preview = c.chunk_text.slice(0, 400);
+    lines.push(`${i + 1}. [${sourceLabel}] (${c.category}) — score ${c.score.toFixed(2)}\n   ${preview}`);
+  }
+  return lines.join('\n');
 }

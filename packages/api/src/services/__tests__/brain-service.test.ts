@@ -665,3 +665,218 @@ describe('buildEvaluationPrompt — KAN-825 directive Trigger block', () => {
     expect(prompt).toContain('triggerContext=post_wait_acknowledgment');
   });
 });
+
+// ─────────────────────────────────────────────
+// KAN-828 — `## Company knowledge` section in Brain prompt
+// Sentinel-token pins on chunk_text + source_title per architect spec §3.4
+// + KAN-817 / KAN-825 / KAN-835 / KAN-839 contract pin pattern.
+// ─────────────────────────────────────────────
+
+describe('buildEvaluationPrompt — KAN-828 Company knowledge section', () => {
+  const baseInput = {
+    snapshot: {
+      dealStatus: 'open',
+      currentStageName: 'New',
+      currentStageOutcomeType: 'open',
+      daysInCurrentStage: 0,
+      engagementCount: 1,
+      lastEngagementType: 'email_received',
+      lastEngagementClass: 'positive',
+      daysSinceLastEngagement: 0,
+      moProgressPercent: null,
+      pipelineName: 'Default Pipeline',
+      pipelineObjectiveType: 'book_appointment',
+    },
+    contact: {
+      id: 'c',
+      tenantId: 't',
+      email: 'fred@example.com',
+      firstName: 'Fred',
+      lastName: null,
+      company: null,
+      phone: null,
+      currentStageId: null,
+      microObjectiveProgress: {},
+      metadata: {},
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    } as never,
+    recentEngagements: [],
+    recentTransitions: [],
+  };
+
+  it('Test 1 — KB-tenant + relevant inbound → ## Company knowledge populated with chunk text + source title', () => {
+    const prompt = buildEvaluationPrompt({
+      ...baseInput,
+      knowledge: {
+        chunks: [
+          {
+            chunk_id: 'c1',
+            source_id: 's1',
+            source_title: 'Knowledge Doc',
+            category: 'faq',
+            chunk_text: 'The Knowledge Layer chunk size is 500 tokens with 50-token overlap.',
+            score: 0.91,
+          },
+        ],
+        tenantHasAnyKnowledge: true,
+      },
+    });
+    expect(prompt).toContain('## Company knowledge (relevant to this conversation)');
+    expect(prompt).toContain('1. [Knowledge Doc] (faq) — score 0.91');
+    expect(prompt).toContain(
+      'The Knowledge Layer chunk size is 500 tokens with 50-token overlap.',
+    );
+  });
+
+  it('Test 2 — no-KB tenant → "(none — no company knowledge configured yet)" empty case 1 verbatim', () => {
+    const prompt = buildEvaluationPrompt({
+      ...baseInput,
+      knowledge: { chunks: [], tenantHasAnyKnowledge: false },
+    });
+    expect(prompt).toContain('## Company knowledge (relevant to this conversation)');
+    expect(prompt).toContain('(none — no company knowledge configured yet)');
+  });
+
+  it('Test 3 — has-KB tenant + nothing relevant → "(none relevant to this message)" empty case 2 verbatim', () => {
+    const prompt = buildEvaluationPrompt({
+      ...baseInput,
+      knowledge: { chunks: [], tenantHasAnyKnowledge: true },
+    });
+    expect(prompt).toContain('## Company knowledge (relevant to this conversation)');
+    expect(prompt).toContain('(none relevant to this message)');
+  });
+
+  it('Test 4 — knowledge=null → section omitted from prompt entirely (no inbound to ground against)', () => {
+    const prompt = buildEvaluationPrompt({
+      ...baseInput,
+      knowledge: null,
+    });
+    expect(prompt).not.toContain('## Company knowledge');
+    expect(prompt).not.toContain('(none — no company knowledge configured yet)');
+    expect(prompt).not.toContain('(none relevant to this message)');
+  });
+
+  it('Test 5 — sentinel-token pin: chunk_text + source_title sentinels appear verbatim in rendered prompt', () => {
+    const sentinelTitle = 'KAN-828-pin-source-title-token-qrs456';
+    const sentinelText = 'KAN-828-pin-chunk-text-token-tuv789 — proves verbatim flow.';
+    const prompt = buildEvaluationPrompt({
+      ...baseInput,
+      knowledge: {
+        chunks: [
+          {
+            chunk_id: 'c1',
+            source_id: 's1',
+            source_title: sentinelTitle,
+            category: 'faq',
+            chunk_text: sentinelText,
+            score: 0.88,
+          },
+        ],
+        tenantHasAnyKnowledge: true,
+      },
+    });
+    expect(prompt).toContain(sentinelTitle);
+    expect(prompt).toContain(sentinelText);
+  });
+
+  it('Test 6 — section ordering: Company knowledge appears AFTER Recent stage transitions and BEFORE Decision required', () => {
+    const prompt = buildEvaluationPrompt({
+      ...baseInput,
+      knowledge: {
+        chunks: [
+          {
+            chunk_id: 'c1',
+            source_id: 's1',
+            source_title: 'Doc',
+            category: 'faq',
+            chunk_text: 'content',
+            score: 0.9,
+          },
+        ],
+        tenantHasAnyKnowledge: true,
+      },
+    });
+    const idxTransitions = prompt.indexOf('## Recent stage transitions');
+    const idxKnowledge = prompt.indexOf('## Company knowledge');
+    const idxDecision = prompt.indexOf('## Decision required');
+    expect(idxTransitions).toBeGreaterThan(-1);
+    expect(idxKnowledge).toBeGreaterThan(idxTransitions);
+    expect(idxDecision).toBeGreaterThan(idxKnowledge);
+  });
+
+  it('Test 7 — token budget: 3 chunks at 400-char each + section header stays well under typical Brain prompt budget', () => {
+    // 400 chars × 3 chunks = 1200 chars of content + ~100 chars section
+    // header + ~50 chars per chunk metadata = ~1450 chars total. ~360
+    // tokens at cl100k_base. Well within 1500-token KB cap.
+    const longText = 'x'.repeat(500); // > 400 to verify per-chunk truncation
+    const prompt = buildEvaluationPrompt({
+      ...baseInput,
+      knowledge: {
+        chunks: [
+          { chunk_id: 'c1', source_id: 's1', source_title: 'A', category: 'faq', chunk_text: longText, score: 0.9 },
+          { chunk_id: 'c2', source_id: 's1', source_title: 'B', category: 'faq', chunk_text: longText, score: 0.85 },
+          { chunk_id: 'c3', source_id: 's1', source_title: 'C', category: 'faq', chunk_text: longText, score: 0.8 },
+        ],
+        tenantHasAnyKnowledge: true,
+      },
+    });
+    // Per-chunk 400-char truncation enforced
+    expect(prompt).toContain('x'.repeat(400));
+    expect(prompt).not.toContain('x'.repeat(401));
+    // Total prompt length sanity — ~3 × 400 + headers ≈ < 2000 chars added
+    // by the KB section. Existing prompt baseline is ~600 chars; total
+    // should stay well under 4000 chars (≈ 1000 tokens).
+    expect(prompt.length).toBeLessThan(4000);
+  });
+});
+
+// ─────────────────────────────────────────────
+// KAN-828 — extractQueryTextFromInbound helper
+// ─────────────────────────────────────────────
+
+describe('extractQueryTextFromInbound — KAN-828 query text resolution', () => {
+  it('returns bodyPreview when present on most-recent inbound', async () => {
+    const { extractQueryTextFromInbound } = await import('../brain-service.js');
+    const result = extractQueryTextFromInbound([
+      {
+        engagementType: 'email_received',
+        metadata: { bodyPreview: 'How does X work?', subject: 'Question' },
+      },
+    ]);
+    expect(result).toBe('How does X work?');
+  });
+
+  it('falls back to subject when bodyPreview empty/null', async () => {
+    const { extractQueryTextFromInbound } = await import('../brain-service.js');
+    const result = extractQueryTextFromInbound([
+      {
+        engagementType: 'email_received',
+        metadata: { bodyPreview: null, subject: 'Refund policy' },
+      },
+    ]);
+    expect(result).toBe('Refund policy');
+  });
+
+  it('returns null when both subject + bodyPreview empty', async () => {
+    const { extractQueryTextFromInbound } = await import('../brain-service.js');
+    const result = extractQueryTextFromInbound([
+      { engagementType: 'email_received', metadata: { bodyPreview: '', subject: '' } },
+    ]);
+    expect(result).toBeNull();
+  });
+
+  it('skips outbound engagements; uses first inbound found', async () => {
+    const { extractQueryTextFromInbound } = await import('../brain-service.js');
+    const result = extractQueryTextFromInbound([
+      { engagementType: 'email_send', metadata: { bodyPreview: 'outbound — should be skipped' } },
+      { engagementType: 'email_received', metadata: { bodyPreview: 'inbound — pick this' } },
+    ]);
+    expect(result).toBe('inbound — pick this');
+  });
+
+  it('returns null on empty engagement list', async () => {
+    const { extractQueryTextFromInbound } = await import('../brain-service.js');
+    expect(extractQueryTextFromInbound([])).toBeNull();
+  });
+});

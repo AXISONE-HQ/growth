@@ -139,6 +139,105 @@ export interface EvaluateOptions {
    *  pipeline state. Optional even with the post-advance context (the prompt
    *  renders "the new stage" as a fallback) but recommended. */
   postStageAdvance?: { fromStageName: string; toStageName: string };
+  /**
+   * KAN-828 — Knowledge Layer wiring. Caller injects Redis + OpenAI clients;
+   * Brain calls `retrieveRelevantChunks` with the most-recent inbound body
+   * as queryText and renders the result into the `## Company knowledge`
+   * prompt section. Both null → retrieval skipped entirely (the section is
+   * omitted from the prompt). Cache discipline: this is the FIRST retrieval
+   * for the (tenantId, dealId, queryHash) tuple; Shaper hits the same cache
+   * via the architect-spec §1.3 once-and-pass-via-Redis pattern.
+   */
+  redis?: KnowledgeRedis | null;
+  openai?: KnowledgeOpenAI | null;
+}
+
+/**
+ * KAN-828 — minimal duck-typed client interfaces. We don't import ioredis /
+ * openai directly here because (a) Brain Service is a pure module with
+ * minimal deps and (b) callers (apps/api push subscribers) already
+ * instantiate these clients via the existing redis-client.ts +
+ * llm-client.ts patterns. Accept whatever client they pass in; the
+ * retrieval service does the actual calls.
+ */
+export interface KnowledgeRedis {
+  get(key: string): Promise<string | null>;
+  set(key: string, value: string, mode: 'EX', seconds: number): Promise<unknown>;
+}
+export interface KnowledgeOpenAI {
+  embeddings: {
+    create(params: { model: string; input: string; dimensions?: number }): Promise<{
+      data: Array<{ embedding: number[] }>;
+    }>;
+  };
+}
+
+/**
+ * KAN-828 — local mirror of the retrieval service result type, declared
+ * here to avoid importing from knowledge-retrieval-service.ts at the type
+ * level (the actual function is loaded via dynamic import inside
+ * evaluateDealState to keep the module graph clean for tests that mock
+ * the retrieval call).
+ */
+export interface KnowledgeRetrievalResult {
+  chunks: Array<{
+    chunk_id: string;
+    source_id: string;
+    source_title: string | null;
+    category: string;
+    chunk_text: string;
+    score: number;
+  }>;
+  tenantHasAnyKnowledge: boolean;
+}
+
+/**
+ * KAN-828 — extract queryText for retrieval from the most-recent inbound
+ * Engagement. Returns null when no inbound is available (caller skips
+ * retrieval). Reads `metadata.bodyPreview` first (KAN-839 producer-consumer
+ * contract) then falls back to `metadata.subject` (subject-only inbound),
+ * then null.
+ */
+export function extractQueryTextFromInbound(
+  engagements: Array<{ engagementType: string; metadata?: unknown; occurredAt?: Date }>,
+): string | null {
+  for (const eng of engagements) {
+    if (!eng.engagementType.endsWith('_received')) continue;
+    const meta = (eng.metadata ?? {}) as Record<string, unknown>;
+    const body = typeof meta.bodyPreview === 'string' ? meta.bodyPreview.trim() : '';
+    if (body.length > 0) return body;
+    const subject = typeof meta.subject === 'string' ? meta.subject.trim() : '';
+    if (subject.length > 0) return subject;
+    return null;
+  }
+  return null;
+}
+
+/**
+ * KAN-828 — inline renderer matching the retrieval service's
+ * `renderKnowledgeSection`. Duplicated here so the prompt-builder is a
+ * pure function with no cross-module imports (the retrieval service
+ * itself is loaded via dynamic import in evaluateDealState; the prompt
+ * builder must stay synchronously callable from tests).
+ *
+ * Format locked per architect spec §3.4. Two empty cases per Fred's
+ * sub-cohort 1 note #1.
+ */
+function renderKnowledgeSectionInline(result: KnowledgeRetrievalResult): string {
+  if (result.chunks.length === 0) {
+    return result.tenantHasAnyKnowledge
+      ? '(none relevant to this message)'
+      : '(none — no company knowledge configured yet)';
+  }
+  const sorted = [...result.chunks].sort((a, b) => b.score - a.score);
+  const lines: string[] = [];
+  for (let i = 0; i < sorted.length; i++) {
+    const c = sorted[i]!;
+    const sourceLabel = c.source_title ?? '(untitled source)';
+    const preview = c.chunk_text.slice(0, 400);
+    lines.push(`${i + 1}. [${sourceLabel}] (${c.category}) — score ${c.score.toFixed(2)}\n   ${preview}`);
+  }
+  return lines.join('\n');
 }
 
 export class BrainServiceNotFoundError extends Error {
@@ -215,10 +314,40 @@ export async function evaluateDealState(
     };
   }
 
-  // 4. Build prompt. KAN-825 threads the triggerContext through so chained
+  // 4a. KAN-828 — Knowledge Layer retrieval. Run BEFORE buildEvaluationPrompt
+  // so the rendered prompt includes the `## Company knowledge` section.
+  // Skip retrieval entirely when:
+  //   - caller didn't inject redis/openai (legacy callers; backwards-compat)
+  //   - no inbound body to query against (e.g., post_stage_advance chained
+  //     calls have no fresh inbound — the section is omitted from prompt
+  //     rather than rendering a misleading empty case)
+  // Best-effort: retrieval failure does NOT block Brain; section is skipped
+  // and a warn log fires for ops visibility.
+  const queryText = extractQueryTextFromInbound(deal.engagements);
+  let knowledge: KnowledgeRetrievalResult | null = null;
+  if (options.redis && options.openai && queryText) {
+    try {
+      const { retrieveRelevantChunks } = await import('./knowledge-retrieval-service.js');
+      knowledge = await retrieveRelevantChunks(
+        prisma,
+        options.redis as unknown as Parameters<typeof retrieveRelevantChunks>[1],
+        options.openai as unknown as Parameters<typeof retrieveRelevantChunks>[2],
+        deal.tenantId,
+        dealId,
+        queryText,
+      );
+    } catch (err) {
+      console.warn(
+        `[brain-service] knowledge-retrieval-failed dealId=${dealId} err=${(err as Error)?.message ?? String(err)}`,
+      );
+    }
+  }
+
+  // 4b. Build prompt. KAN-825 threads the triggerContext through so chained
   // post-stage-advance calls render a directive prompt block that biases
   // Brain toward send_follow_up (default 'inbound' renders the legacy
-  // prompt unchanged).
+  // prompt unchanged). KAN-828 threads the retrieval result into the new
+  // `## Company knowledge` section.
   const userPrompt = buildEvaluationPrompt({
     snapshot,
     contact: deal.contact,
@@ -226,6 +355,7 @@ export async function evaluateDealState(
     recentTransitions: deal.stageHistory,
     triggerContext: options.triggerContext ?? 'inbound',
     postStageAdvance: options.postStageAdvance,
+    knowledge,
   });
 
   // 5. Call LLM. tenantId derived from the loaded Deal (KAN-745 per-tenant
@@ -391,6 +521,14 @@ export function buildEvaluationPrompt(input: {
   recentTransitions: DealStageHistory[];
   triggerContext?: BrainTriggerContext;
   postStageAdvance?: { fromStageName: string; toStageName: string };
+  /**
+   * KAN-828 — retrieval result from `retrieveRelevantChunks`. When null,
+   * the `## Company knowledge` section is OMITTED from the prompt entirely
+   * (legacy callers, post_stage_advance chained calls without an inbound,
+   * and retrieval-disabled paths all flow through this branch). When
+   * non-null, renders per architect spec §3.4.
+   */
+  knowledge?: KnowledgeRetrievalResult | null;
 }): string {
   const {
     snapshot,
@@ -399,6 +537,7 @@ export function buildEvaluationPrompt(input: {
     recentTransitions,
     triggerContext = 'inbound',
     postStageAdvance,
+    knowledge,
   } = input;
 
   const contactName =
@@ -499,7 +638,7 @@ Days since last engagement: ${snapshot.daysSinceLastEngagement ?? '(no engagemen
 
 ## Recent stage transitions (last 3)
 ${transitionsBlock}
-
+${knowledge ? `\n## Company knowledge (relevant to this conversation)\n${renderKnowledgeSectionInline(knowledge)}\n` : ''}
 ## Decision required
 Pick the best next action. Respond ONLY with the JSON shape specified in the system prompt.`;
 }
