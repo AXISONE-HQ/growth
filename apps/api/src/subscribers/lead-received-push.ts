@@ -72,9 +72,36 @@
  */
 import { Hono } from 'hono';
 import { z } from 'zod';
+import OpenAI from 'openai';
 import { LeadReceivedEventSchema } from '@growth/shared';
 import { prisma } from '../prisma.js';
 import { verifyPubsubOidc } from '../lib/oidc-pubsub-verify.js';
+import { getRedisClient } from '../services/redis-client.js';
+
+// KAN-828 fix-forward — Brain Service + Message Shaper need redis + openai
+// clients injected so the Knowledge Layer retrieval (retrieveRelevantChunks)
+// fires on every Brain/Shaper invocation. Without these, the modules treat
+// `redis=undefined / openai=undefined` as "retrieval disabled" and silently
+// skip the `## Company knowledge` section. The KAN-828 caller-wire-up gap
+// surfaced via 515-token Brain prompt forensic anchor on the post-deploy
+// smoke (matched pre-feature baseline exactly → retrieval never fired).
+//
+// Lazy singleton + null-on-missing-key. OpenAI's constructor throws
+// synchronously on missing/empty `apiKey` even when invoked lazily — so
+// in test envs without OPENAI_API_KEY we return null. Brain Service +
+// Message Shaper accept `openai: null` and skip retrieval entirely
+// (same behavior as pre-KAN-828 callers). In Cloud Run with the secret
+// injected, the real client is constructed on first call.
+let _openai: OpenAI | null = null;
+let _openaiAttempted = false;
+function getOpenAIClient(): OpenAI | null {
+  if (_openai || _openaiAttempted) return _openai;
+  _openaiAttempted = true;
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) return null;
+  _openai = new OpenAI({ apiKey });
+  return _openai;
+}
 
 // ─────────────────────────────────────────────
 // Variable-specifier dynamic imports — TS6059 cohort hygiene per
@@ -188,6 +215,10 @@ interface BrainServiceModule {
       // KAN-835 extends with `post_wait_acknowledgment`.
       triggerContext?: 'inbound' | 'post_stage_advance' | 'post_wait_acknowledgment';
       postStageAdvance?: { fromStageName: string; toStageName: string };
+      // KAN-828 — duck-typed Redis + OpenAI clients for Knowledge Layer
+      // retrieval. Inline mirror of canonical `EvaluateOptions.redis/openai`.
+      redis?: unknown;
+      openai?: unknown;
     },
   ) => Promise<{
     dealId: string;
@@ -244,6 +275,9 @@ interface MessageShaperModule {
       brainDecision?: Phase2BrainDecision;
       recentOutboundLimit?: number;
       forceChannel?: 'email' | 'sms' | 'meta_messenger';
+      // KAN-828 — duck-typed clients for Knowledge Layer retrieval.
+      redis?: unknown;
+      openai?: unknown;
     },
   ) => Promise<
     | {
@@ -775,8 +809,14 @@ async function wirePhase2Consumers(
 
   // Step 1: Brain evaluation — single LLM call per inbound; same decision
   // is passed through to all consumers (no double-eval per Phase 2 design).
+  // KAN-828: inject redis + openai so the Knowledge Layer retrieval fires.
   const { evaluateDealState } = await loadBrainServiceModule();
-  const brainDecision: Phase2BrainDecision = await evaluateDealState(prisma, dealId);
+  const redis = getRedisClient();
+  const openai = getOpenAIClient();
+  const brainDecision: Phase2BrainDecision = await evaluateDealState(prisma, dealId, {
+    redis,
+    openai,
+  });
 
   console.log(
     `[lead-received-push] phase-2-brain-evaluated dealId=${dealId} eventId=${eventId} actionType=${brainDecision.nextBestAction.type} confidence=${brainDecision.confidence.toFixed(2)} tokens=${brainDecision.llmInputTokens}/${brainDecision.llmOutputTokens}${isChainedInvocation ? ' chained=true' : ''}`,
@@ -826,6 +866,10 @@ async function wirePhase2Consumers(
       const chainedDecision: Phase2BrainDecision = await evaluateDealState(prisma, dealId, {
         triggerContext: 'post_stage_advance',
         postStageAdvance: { fromStageName, toStageName },
+        // KAN-828: chained Brain hits Redis cache from initial call (same
+        // queryHash) → architectural payoff per spec §1.3.
+        redis,
+        openai,
       });
       console.log(
         `[lead-received-push] phase-2-brain-evaluated dealId=${dealId} eventId=${eventId} actionType=${chainedDecision.nextBestAction.type} confidence=${chainedDecision.confidence.toFixed(2)} tokens=${chainedDecision.llmInputTokens}/${chainedDecision.llmOutputTokens} chained=true triggerContext=post_stage_advance`,
@@ -866,7 +910,12 @@ async function wirePhase2Consumers(
     const chainedDecision: Phase2BrainDecision = await evaluateDealState(
       prisma,
       dealId,
-      { triggerContext: 'post_wait_acknowledgment' },
+      {
+        triggerContext: 'post_wait_acknowledgment',
+        // KAN-828: chained Brain hits Redis cache from initial call.
+        redis,
+        openai,
+      },
     );
     console.log(
       `[lead-received-push] phase-2-brain-evaluated dealId=${dealId} eventId=${eventId} actionType=${chainedDecision.nextBestAction.type} confidence=${chainedDecision.confidence.toFixed(2)} tokens=${chainedDecision.llmInputTokens}/${chainedDecision.llmOutputTokens} chained=true triggerContext=post_wait_acknowledgment`,
@@ -913,9 +962,13 @@ async function dispatchPhase2Send(
   brainDecision: Phase2BrainDecision,
 ): Promise<void> {
   // 1. Shape the message via KAN-797a. Pass the pre-computed brainDecision
-  //    to avoid double Brain eval.
+  //    to avoid double Brain eval. KAN-828: inject redis + openai so the
+  //    Knowledge Layer retrieval HITs the cache from Brain's earlier call
+  //    (same queryHash → ~3ms vs ~150ms cold).
   const { shapeMessage } = await loadMessageShaperModule();
-  const shapeResult = await shapeMessage(prisma, dealId, { brainDecision });
+  const redis = getRedisClient();
+  const openai = getOpenAIClient();
+  const shapeResult = await shapeMessage(prisma, dealId, { brainDecision, redis, openai });
   if (shapeResult.type !== 'shaped') {
     console.warn(
       `[lead-received-push] phase-2-shape-no-shape dealId=${dealId} eventId=${eventId} reason=${shapeResult.reason}`,
