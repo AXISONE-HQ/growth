@@ -16,7 +16,7 @@
  * AxisOne's HubSpot contacts.
  */
 
-import type { WedgeSignal, WedgeSignalType } from './wedge-signals';
+import type { WedgeSignal, WedgeSignalType } from './wedge-signals.js';
 
 export type WedgeOpportunityType =
   | 'dormant_reactivation'
