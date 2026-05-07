@@ -39,11 +39,11 @@ import { TRPCError } from '@trpc/server';
 // you see the first compile error, trace it back to the Input schema in
 // that service file — it's the source of truth.
 import { type DecisionPayload, computeDivergence, type DivergenceFlag } from '@growth/shared';
-import { analyzeGapsForContact } from './objective-gap-analyzer';
-import { selectStrategy } from './strategy-selector';
-import { determineAction } from './action-determiner';
-import { scoreConfidence } from './confidence-scorer';
-import { evaluateThreshold, type ThresholdGateInput } from './threshold-gate';
+import { analyzeGapsForContact } from './objective-gap-analyzer.js';
+import { selectStrategy } from './strategy-selector.js';
+import { determineAction } from './action-determiner.js';
+import { scoreConfidence } from './confidence-scorer.js';
+import { evaluateThreshold, type ThresholdGateInput } from './threshold-gate.js';
 
 // KAN-738: variable-specifier dynamic import keeps agentic-decision-runner.ts
 // out of the apps/api static graph (TS6059 cohort). Same pattern as
@@ -75,19 +75,19 @@ import {
   InMemoryContextCache,
   type ContextCache,
   type ContextDatabase,
-} from './context-assembler';
+} from './context-assembler.js';
 import {
   logAndPublish,
   InMemoryAuditPubSubClient,
   type AuditEntry,
   type AuditLogStore,
   type AuditPubSubClient,
-} from './audit-logger';
+} from './audit-logger.js';
 import {
   publishActionDecided,
   publishEscalationTriggered,
-} from './action-decided-publisher';
-import { getPubSubClient } from '../lib/pubsub-client';
+} from './action-decided-publisher.js';
+import { getPubSubClient } from '../lib/pubsub-client.js';
 
 export interface PlaybookStepContext {
   /** Unique step identifier, e.g. "dormant_reactivation_14d:day_0". */

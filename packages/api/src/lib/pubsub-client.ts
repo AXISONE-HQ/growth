@@ -17,7 +17,7 @@ import {
   CloudPubSubClient,
   InMemoryPubSubClient,
   type PubSubClient,
-} from '../services/action-decided-publisher';
+} from '../services/action-decided-publisher.js';
 
 let cached: PubSubClient | null = null;
 
