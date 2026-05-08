@@ -51,12 +51,12 @@ interface MockSource {
 
 const TIER_HAPPY: {
   planTier: string;
-  limits: { maxSources: number; maxPdfMB: number; allowsPdf: boolean; allowsFaq: boolean; allowedCategories: string[] };
+  limits: { maxSources: number; maxPdfMB: number; allowsPdf: boolean; allowedCategories: string[] };
   currentSourceCount: number;
   remaining: number;
 } = {
   planTier: "pro",
-  limits: { maxSources: 5, maxPdfMB: 5, allowsPdf: true, allowsFaq: true, allowedCategories: ["faq", "inventory", "warranty", "pricing", "other"] },
+  limits: { maxSources: 5, maxPdfMB: 5, allowsPdf: true, allowedCategories: ["faq", "inventory", "warranty", "pricing", "other"] },
   currentSourceCount: 2,
   remaining: 3,
 };
@@ -186,13 +186,19 @@ describe("SourceList — KAN-829 sub-cohort 3", () => {
     expect(statuses).toContain("error");
   });
 
-  it("Test 3 — category tab click updates queryKey + triggers refetch", async () => {
+  it("Test 3 — clicking the FAQ tab swaps the body to FaqList (no ?category=faq query fires)", async () => {
+    // KAN-XXX — FAQ tab is now a render-mode switch, NOT a category filter.
+    // FAQ entries live in their own table (FaqList). Clicking the tab should:
+    //   - mark the tab as aria-selected
+    //   - render FaqList in place of the source table
+    //   - NOT fire ?category=faq against the sources endpoint (the route
+    //     dropped 'faq' from its allow-list)
     const sources: MockSource[] = [
       {
         id: "s1",
         sourceType: "pdf",
-        category: "faq",
-        title: "FAQ doc",
+        category: "warranty",
+        title: "Warranty doc",
         status: "ready",
         fileName: null,
         fileSizeBytes: null,
@@ -204,29 +210,21 @@ describe("SourceList — KAN-829 sub-cohort 3", () => {
     ];
     const { callsByUrl } = setupFetchMock({ sources });
     renderWithQuery();
-    await screen.findByText("FAQ doc");
+    await screen.findByText("Warranty doc");
 
-    // Initial fetch — no category param
-    const initialCalls = callsByUrl();
-    expect(Object.keys(initialCalls).some((u) => u.endsWith("/api/knowledge/sources"))).toBe(true);
-
-    // Click the FAQ tab — chips → underline tabs swap (Radix Tabs primitive,
-    // role="tab" + aria-selected). FilterChips component retired in this
-    // cohort. Use userEvent (full pointer event sequence) instead of
-    // fireEvent.click — Radix Tabs listens for pointerdown/up, not just click.
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
     const faqTab = screen.getByRole("tab", { name: "FAQ", selected: false });
     await user.click(faqTab);
 
-    // After click — a new fetch with ?category=faq fires
+    // Active tab carries aria-selected=true (Radix data-state="active")
     await waitFor(() => {
-      const updated = callsByUrl();
-      expect(Object.keys(updated).some((u) => u.includes("category=faq"))).toBe(true);
+      expect(screen.getByRole("tab", { name: "FAQ", selected: true })).toBeInTheDocument();
     });
 
-    // Active tab carries aria-selected=true (Radix data-state="active")
-    const faqTabAfter = screen.getByRole("tab", { name: "FAQ", selected: true });
-    expect(faqTabAfter).toBeInTheDocument();
+    // No ?category=faq query fires — the FAQ tab triggers FaqList rendering,
+    // not a category filter on the sources endpoint.
+    const updated = callsByUrl();
+    expect(Object.keys(updated).some((u) => u.includes("category=faq"))).toBe(false);
   });
 
   it("Test 4 — conditional polling: queued source → 5s interval; all-ready → polling disabled", async () => {
@@ -382,7 +380,7 @@ describe("SourceList — KAN-829 sub-cohort 3", () => {
         maxSources: 1,
         maxPdfMB: 0,
         allowsPdf: false,
-        allowsFaq: false,
+        
         allowedCategories: ["general"],
       },
       currentSourceCount: 1,

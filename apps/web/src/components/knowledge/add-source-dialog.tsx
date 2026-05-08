@@ -8,6 +8,10 @@
  * `/api/knowledge/sources`, then invalidates the sources + tier-limits
  * queries on success.
  *
+ * **KAN-XXX (FAQ first-class):** the legacy "Build FAQ" card removed.
+ * FAQ entries live in their own dialog flow at `add-faq-dialog.tsx` (5
+ * cards: PDF + paste text + 3 coming-soon).
+ *
  * **DS v1 compliance:**
  *  - All colors via `--ds-*` tokens (audited in test 11)
  *  - Composes shadcn primitives (Dialog, Button, Input, Textarea, Label,
@@ -21,8 +25,7 @@
  * **Validation (per architect spec + KAN-827 endpoint contract):**
  *  - PDF: required, ≤10MB, .pdf extension, application/pdf MIME
  *  - Paste-text title: 1-200 chars; rawContent: 1-50,000 chars
- *  - FAQ title: 1-200 chars; entries: ≥1; per-entry Q 1-2k, A 1-10k
- *  - Category: required; one of 6 canonical values
+ *  - Category: required; one of 4 canonical values (post-KAN-XXX)
  *
  * Client-side validation prevents submit; server is source-of-truth and
  * re-validates on POST.
@@ -44,9 +47,8 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
-import { FileText, Upload, MessageSquare, Globe, Table as TableIcon, Share2 } from "lucide-react";
+import { FileText, Upload, Globe, Table as TableIcon, Share2 } from "lucide-react";
 import { SourceTypeCard } from "./source-type-card";
-import { FAQEditor, type FAQEntry } from "./faq-editor";
 import { API_BASE, buildHeaders } from "@/lib/api";
 
 interface TierLimitsResponse {
@@ -55,7 +57,6 @@ interface TierLimitsResponse {
     maxSources: number;
     maxPdfMB: number;
     allowsPdf: boolean;
-    allowsFaq: boolean;
     allowedCategories: string[];
   };
   currentSourceCount: number;
@@ -66,21 +67,21 @@ interface TierLimitsResponse {
 // Types
 // ─────────────────────────────────────────────
 
-type SourceType = "pdf" | "paste_text" | "faq" | "website" | "spreadsheet" | "social";
-type Category = "general" | "faq" | "inventory" | "warranty" | "pricing" | "other";
-type Step = "choose-type" | "choose-category" | "pdf-input" | "paste-text-input" | "faq-input";
+type SourceType = "pdf" | "paste_text" | "website" | "spreadsheet" | "social";
+type Category = "general" | "inventory" | "warranty" | "pricing" | "other";
+type Step = "choose-type" | "choose-category" | "pdf-input" | "paste-text-input";
 
 interface AddSourceDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   /**
-   * Fired when the operator clicks a tier-locked card (PDF or FAQ on a tier
-   * that doesn't include them). The parent should close this dialog and open
+   * Fired when the operator clicks a tier-locked card (PDF on a tier
+   * that doesn't include it). The parent should close this dialog and open
    * the UpgradePromptDialog. Optional — when omitted (e.g., legacy callers
    * pre-cohort-6), tier-locked cards still render the lock treatment but
    * clicking is a no-op.
    */
-  onTierLocked?: (feature: "pdf" | "faq") => void;
+  onTierLocked?: (feature: "pdf") => void;
 }
 
 // ─────────────────────────────────────────────
@@ -93,7 +94,6 @@ const TITLE_MAX = 200;
 
 const CATEGORY_OPTIONS: Array<{ value: Category; label: string; hint: string }> = [
   { value: "general", label: "General", hint: "Company description, mission, anything broad" },
-  { value: "faq", label: "FAQ", hint: "Common questions and how the AI should answer them" },
   { value: "inventory", label: "Inventory", hint: "Product catalog, stock levels, SKU details" },
   { value: "warranty", label: "Warranty", hint: "Policy text, claim instructions, coverage windows" },
   { value: "pricing", label: "Pricing", hint: "Pricing sheets, discounts, tier definitions" },
@@ -134,8 +134,6 @@ export function AddSourceDialog({
   const [pdfTitle, setPdfTitle] = React.useState("");
   const [pasteTitle, setPasteTitle] = React.useState("");
   const [pasteContent, setPasteContent] = React.useState("");
-  const [faqTitle, setFaqTitle] = React.useState("");
-  const [faqEntries, setFaqEntries] = React.useState<FAQEntry[]>([{ question: "", answer: "" }]);
 
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
 
@@ -149,8 +147,6 @@ export function AddSourceDialog({
     setPdfTitle("");
     setPasteTitle("");
     setPasteContent("");
-    setFaqTitle("");
-    setFaqEntries([{ question: "", answer: "" }]);
     setErrorMessage(null);
   }, []);
 
@@ -162,7 +158,7 @@ export function AddSourceDialog({
     [onOpenChange, resetState],
   );
 
-  // Mutation — accepts FormData (PDF) or JSON body (paste / faq)
+  // Mutation — accepts FormData (PDF) or JSON body (paste)
   const mutation = useMutation({
     mutationFn: async (input:
       | { kind: "pdf"; body: FormData }
@@ -231,7 +227,6 @@ export function AddSourceDialog({
     if (!selectedCategory || !selectedType) return;
     if (selectedType === "pdf") setStep("pdf-input");
     else if (selectedType === "paste_text") setStep("paste-text-input");
-    else if (selectedType === "faq") setStep("faq-input");
   };
 
   // ─────────────────────────────────────────────
@@ -290,38 +285,6 @@ export function AddSourceDialog({
     });
   };
 
-  const submitFaq = () => {
-    setErrorMessage(null);
-    if (!faqTitle.trim()) {
-      setErrorMessage("Title is required.");
-      return;
-    }
-    if (faqEntries.length === 0) {
-      setErrorMessage("Add at least one Q+A entry.");
-      return;
-    }
-    for (const [i, e] of faqEntries.entries()) {
-      if (!e.question.trim()) {
-        setErrorMessage(`Entry ${i + 1}: question is required.`);
-        return;
-      }
-      if (!e.answer.trim()) {
-        setErrorMessage(`Entry ${i + 1}: answer is required.`);
-        return;
-      }
-    }
-    if (!selectedCategory) return;
-    mutation.mutate({
-      kind: "json",
-      body: {
-        sourceType: "faq",
-        category: selectedCategory,
-        title: faqTitle.trim(),
-        faqEntries,
-      },
-    });
-  };
-
   // ─────────────────────────────────────────────
   // Render — dispatches by step
   // ─────────────────────────────────────────────
@@ -376,19 +339,6 @@ export function AddSourceDialog({
             onSubmit={submitPasteText}
           />
         ) : null}
-
-        {step === "faq-input" ? (
-          <Step3FaqInput
-            title={faqTitle}
-            onTitleChange={setFaqTitle}
-            entries={faqEntries}
-            onEntriesChange={setFaqEntries}
-            error={errorMessage}
-            submitting={mutation.isPending}
-            onBack={() => setStep("choose-category")}
-            onSubmit={submitFaq}
-          />
-        ) : null}
       </DialogContent>
     </Dialog>
   );
@@ -408,8 +358,6 @@ function stepTitle(step: Step): string {
       return "Upload PDF";
     case "paste-text-input":
       return "Paste text";
-    case "faq-input":
-      return "Build your FAQ";
   }
 }
 
@@ -423,25 +371,20 @@ function stepDescription(step: Step): string {
       return "Drop a PDF up to 10MB. The AI will chunk and embed it within seconds.";
     case "paste-text-input":
       return "Paste up to 50,000 characters. Use this for company descriptions or internal notes.";
-    case "faq-input":
-      return "Add Q+A pairs the AI can cite directly. Each pair becomes one retrievable chunk.";
   }
 }
 
 // ─────────────────────────────────────────────
-// Step 1 — 6-card grid (3 functional, 3 disabled)
+// Step 1 — 5-card grid (2 functional, 3 disabled). KAN-XXX dropped FAQ card.
 // ─────────────────────────────────────────────
 
-// Card config — drives state derivation per current tier limits. `feature`
-// links a card to the tier-flag it depends on; `notImplemented` flags cards
-// whose backend doesn't exist yet (web/spreadsheet/social).
 interface CardConfig {
   type: SourceType;
   title: string;
   description: string;
   icon: React.ComponentType<{ className?: string; "aria-hidden"?: boolean | "true" | "false" }>;
   /** Tier feature this card requires; undefined = always available when implemented. */
-  feature?: "pdf" | "faq";
+  feature?: "pdf";
   notImplemented?: boolean;
   comingSoonHint?: string;
 }
@@ -459,13 +402,6 @@ const CARD_CONFIGS: CardConfig[] = [
     title: "Paste text",
     description: "Company description, internal notes, FAQ content",
     icon: Upload,
-  },
-  {
-    type: "faq",
-    title: "Build FAQ",
-    description: "Question + answer pairs the AI can cite directly",
-    icon: MessageSquare,
-    feature: "faq",
   },
   {
     type: "website",
@@ -497,7 +433,7 @@ type CardState = "available" | "tier-locked" | "coming-soon";
 
 function deriveCardState(
   card: CardConfig,
-  limits: { allowsPdf: boolean; allowsFaq: boolean } | null,
+  limits: { allowsPdf: boolean } | null,
 ): CardState {
   if (card.notImplemented) return "coming-soon";
   // Loading state (limits === null) falls through to "available" — server
@@ -505,7 +441,6 @@ function deriveCardState(
   // tier-locked treatment that clears once the query resolves.
   if (!limits) return "available";
   if (card.feature === "pdf" && !limits.allowsPdf) return "tier-locked";
-  if (card.feature === "faq" && !limits.allowsFaq) return "tier-locked";
   return "available";
 }
 
@@ -515,8 +450,8 @@ function Step1ChooseType({
   onTierLocked,
 }: {
   onSelect: (t: SourceType) => void;
-  tierLimits: { allowsPdf: boolean; allowsFaq: boolean } | null;
-  onTierLocked?: (feature: "pdf" | "faq") => void;
+  tierLimits: { allowsPdf: boolean } | null;
+  onTierLocked?: (feature: "pdf") => void;
 }): React.ReactElement {
   return (
     <div className="grid grid-cols-2 gap-3 py-2">
@@ -526,7 +461,7 @@ function Step1ChooseType({
         const handleClick = () => {
           if (state === "available") {
             // SourceType narrowing — the available branch only fires for
-            // implemented types (pdf / paste_text / faq).
+            // implemented types (pdf / paste_text).
             onSelect(card.type);
           } else if (state === "tier-locked" && card.feature) {
             onTierLocked?.(card.feature);
@@ -812,65 +747,6 @@ function Step3PasteText({
           aria-label="Save pasted text source"
         >
           {submitting ? "Saving…" : "Save source"}
-        </Button>
-      </DialogFooter>
-    </>
-  );
-}
-
-// ─────────────────────────────────────────────
-// Step 3 — FAQ input
-// ─────────────────────────────────────────────
-
-function Step3FaqInput({
-  title,
-  onTitleChange,
-  entries,
-  onEntriesChange,
-  error,
-  submitting,
-  onBack,
-  onSubmit,
-}: {
-  title: string;
-  onTitleChange: (t: string) => void;
-  entries: FAQEntry[];
-  onEntriesChange: (e: FAQEntry[]) => void;
-  error: string | null;
-  submitting: boolean;
-  onBack: () => void;
-  onSubmit: () => void;
-}): React.ReactElement {
-  return (
-    <>
-      <div className="flex flex-col gap-4 py-2 max-h-[60vh] overflow-y-auto">
-        <div className="flex flex-col gap-2">
-          <Label htmlFor="faq-title">FAQ title</Label>
-          <Input
-            id="faq-title"
-            value={title}
-            onChange={(e) => onTitleChange(e.target.value)}
-            placeholder="e.g., Customer onboarding FAQ"
-            maxLength={TITLE_MAX}
-          />
-        </div>
-        <FAQEditor entries={entries} onChange={onEntriesChange} />
-        {error ? (
-          <p role="alert" className="text-xs" style={{ color: "var(--ds-danger-text)" }}>
-            {error}
-          </p>
-        ) : null}
-      </div>
-      <DialogFooter>
-        <Button variant="outline" onClick={onBack} aria-label="Go back to category">
-          Back
-        </Button>
-        <Button
-          onClick={onSubmit}
-          disabled={!title.trim() || submitting}
-          aria-label="Save FAQ source"
-        >
-          {submitting ? "Saving…" : "Save FAQ"}
         </Button>
       </DialogFooter>
     </>

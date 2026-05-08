@@ -17,7 +17,6 @@ interface TierLimitsResponse {
     maxSources: number;
     maxPdfMB: number;
     allowsPdf: boolean;
-    allowsFaq: boolean;
     allowedCategories: string[];
   };
   currentSourceCount: number;
@@ -35,7 +34,7 @@ export default function StatusPillPreview(): JSX.Element {
       const res = await fetch('/api/knowledge/tier-limits');
       if (!res.ok) {
         // Don't throw — we just want to prove the query ran end-to-end
-        return { planTier: 'unknown', limits: { maxSources: 0, maxPdfMB: 0, allowsPdf: false, allowsFaq: false, allowedCategories: [] }, currentSourceCount: 0, remaining: 0 };
+        return { planTier: 'unknown', limits: { maxSources: 0, maxPdfMB: 0, allowsPdf: false, allowedCategories: [] }, currentSourceCount: 0, remaining: 0 };
       }
       return (await res.json()) as TierLimitsResponse;
     },

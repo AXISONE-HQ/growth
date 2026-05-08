@@ -1,16 +1,24 @@
 /**
  * KAN-827 — Sprint 11a Knowledge ingestion pipeline schemas.
  *
- * Three input paths in MVP per the architect spec §2 + KAN-827 ticket:
+ * Two MVP input paths:
  *   - 'pdf'        — multipart upload, parsed by pdf-parse
  *   - 'paste_text' — raw text body in JSON
- *   - 'faq'        — Q&A pairs (each pair = one chunk; embed Q, store full A)
  *
  * The HTTP intake endpoint writes a `knowledge_source` row with status='queued'
  * and publishes a `knowledge.source_ingested` Pub/Sub event. The async push
  * subscriber in apps/api/src/subscribers reads the event, dispatches by
  * sourceType to the appropriate handler, runs chunking + embedding, and
  * transitions status → 'ready' (or 'error' on failure).
+ *
+ * **KAN-XXX (FAQ first-class):** the legacy `'faq'` sourceType + Q&A
+ * `FaqIngestBodySchema` are removed. FAQ entries are now their own entity
+ * (`packages/api/src/services/faq-entries.ts` + `apps/api/src/routes/faq-entries.ts`)
+ * with synchronous embedding (no Pub/Sub). The shared `'faq'` category
+ * value is dropped from KnowledgeCategoryV2Enum since net-new FAQ-typed
+ * sources can't be created — but pre-existing chunks with category='faq'
+ * remain valid retrieval rows (PROD COUNT(*)=0 globally pre-flight, so no
+ * data migration needed).
  *
  * Replaces the legacy KAN-707 (`IngestRequestSchema` + `knowledge.ingest.requested`
  * topic) — the legacy schema mapped to the dropped KAN-786 tables; KAN-826
@@ -28,18 +36,22 @@ import { z } from "zod";
  * Source ingestion path. The handler dispatches on this value:
  *   - 'pdf'         → pdf-parse → semantic chunking
  *   - 'paste_text'  → semantic chunking direct
- *   - 'faq'         → Q&A pair → 1 chunk per pair (embed Q, store A)
+ *
+ * KAN-XXX dropped 'faq' — FAQ entries are first-class (FaqEntry table).
  */
-export const KnowledgeSourceTypeEnum = z.enum(["pdf", "paste_text", "faq"]);
+export const KnowledgeSourceTypeEnum = z.enum(["pdf", "paste_text"]);
 export type KnowledgeSourceType = z.infer<typeof KnowledgeSourceTypeEnum>;
 
 /**
  * Tenant-classification category for the source. Drives the partial retrieval
  * index `(tenant_id, category) WHERE status='ready'` per architect spec §1.6
  * — chunks denormalize this from source.category for the hot-path pre-filter.
+ *
+ * KAN-XXX dropped 'faq' from create-side validation. The string value
+ * remains valid for any pre-existing chunks; new sources can't be tagged
+ * with it.
  */
 export const KnowledgeCategoryV2Enum = z.enum([
-  "faq",
   "inventory",
   "warranty",
   "pricing",
@@ -87,27 +99,16 @@ export const PasteTextIngestBodySchema = z.object({
 export type PasteTextIngestBody = z.infer<typeof PasteTextIngestBodySchema>;
 
 /**
- * FAQ Q&A pair intake body (JSON). One pair = one chunk; the embedder embeds
- * the question, stores the answer in chunk_text, and the question lives on
- * `knowledge_chunk.question_text` for surface display + future re-ranking.
+ * KAN-XXX — `FaqIngestBodySchema` removed. FAQ entries are first-class
+ * (`FaqEntry` Prisma model + dedicated `/api/knowledge/faqs` endpoints with
+ * synchronous embedding). The legacy multi-pair contract gap (KAN-841) is
+ * superseded structurally by the new entity.
+ *
+ * JSON intake now narrows to paste_text only. The discriminator field
+ * survives for forward-compat with future intake source types (web crawl,
+ * spreadsheet, etc.).
  */
-export const FaqIngestBodySchema = z.object({
-  sourceType: z.literal("faq"),
-  ...COMMON_INTAKE_FIELDS,
-  question: z.string().min(1).max(2_000),
-  answer: z.string().min(1).max(10_000),
-});
-export type FaqIngestBody = z.infer<typeof FaqIngestBodySchema>;
-
-/**
- * Discriminated union for the JSON intake paths (paste_text + faq). PDF
- * doesn't appear here — PDF goes through multipart and the Hono route parses
- * the form fields directly because zod can't natively validate `File`/Buffer.
- */
-export const JsonIngestBodySchema = z.discriminatedUnion("sourceType", [
-  PasteTextIngestBodySchema,
-  FaqIngestBodySchema,
-]);
+export const JsonIngestBodySchema = PasteTextIngestBodySchema;
 export type JsonIngestBody = z.infer<typeof JsonIngestBodySchema>;
 
 /**

@@ -11,18 +11,17 @@
  * |---------------|-------------|-------------------------------------------|
  * | `free`        | Starter     | 1 paste-text source, 50K chars, no PDF    |
  * | `starter`     | Starter     | Same as free (treated as synonyms)        |
- * | `pro`         | Growth      | 5 sources, 5MB PDF, FAQ editor, all cats  |
+ * | `pro`         | Growth      | 5 sources, 5MB PDF, all categories        |
  * | `enterprise`  | Revenue     | Effectively unlimited, 10MB PDF           |
  * | (anything else) | Starter   | Safe default — don't crash on enum drift  |
+ *
+ * **KAN-XXX (FAQ first-class):** FAQ is now a separate entity (FaqEntry
+ * table, dedicated UI) with no per-tier gating. `allowsFaq` removed from
+ * this contract — every tier gets unlimited FAQ entries.
  *
  * **KAN-848 follow-up** tracks the proper enum alignment (rename `pro` →
  * `growth`, `enterprise` → `revenue`, deprecate `free` as `starter` synonym
  * via Prisma migration). Sprint 12+ low priority.
- *
- * **Why no Prisma `PlanTier` import:** `planTier` is a String column in
- * the schema, not a Prisma enum. We accept `string` and fall through to
- * Starter limits on unknown values for forward-compat with KAN-848's
- * eventual rename.
  */
 
 export interface TierLimits {
@@ -32,8 +31,6 @@ export interface TierLimits {
   maxPdfMB: number;
   /** Whether the tier can upload PDF source_type. */
   allowsPdf: boolean;
-  /** Whether the tier can use the FAQ Q&A editor. */
-  allowsFaq: boolean;
   /** Categories the tier can assign sources to. Drives the
    *  category radio in the Add Source flow + server-side validation. */
   allowedCategories: string[];
@@ -43,7 +40,6 @@ const FREE_LIMITS: TierLimits = {
   maxSources: 1,
   maxPdfMB: 0,
   allowsPdf: false,
-  allowsFaq: false, // free tier paste-text only per Sprint 11 PRD §9
   allowedCategories: ['general'],
 };
 
@@ -51,16 +47,14 @@ const PRO_LIMITS: TierLimits = {
   maxSources: 5,
   maxPdfMB: 5,
   allowsPdf: true,
-  allowsFaq: true,
-  allowedCategories: ['general', 'faq', 'inventory', 'warranty', 'pricing', 'other'],
+  allowedCategories: ['general', 'inventory', 'warranty', 'pricing', 'other'],
 };
 
 const ENTERPRISE_LIMITS: TierLimits = {
   maxSources: 9999, // effectively unlimited
   maxPdfMB: 10,
   allowsPdf: true,
-  allowsFaq: true,
-  allowedCategories: ['general', 'faq', 'inventory', 'warranty', 'pricing', 'other'],
+  allowedCategories: ['general', 'inventory', 'warranty', 'pricing', 'other'],
 };
 
 export function tierLimits(planTier: string): TierLimits {

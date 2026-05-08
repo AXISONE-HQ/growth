@@ -36,6 +36,8 @@ function makeMocks(opts: {
   cachedResult?: RetrievalResult | null;
   rows?: MockChunkRow[];
   sourceCount?: number;
+  /** KAN-XXX — empty-case branch counts both KnowledgeSource AND FaqEntry. */
+  faqCount?: number;
   redisFailRead?: boolean;
 } = {}) {
   const redisGet = vi.fn(async () => {
@@ -48,6 +50,7 @@ function makeMocks(opts: {
   const queryRawUnsafe = vi.fn(async () => opts.rows ?? []);
   const executeRawUnsafe = vi.fn(async () => 1);
   const sourceCount = vi.fn(async () => opts.sourceCount ?? 0);
+  const faqCount = vi.fn(async () => opts.faqCount ?? 0);
   const auditLogCreate = vi.fn(async () => ({ id: "audit-1" }));
   // The mock tx has the same shape as prisma — the retrieval service calls
   // tx.$executeRawUnsafe + tx.$queryRawUnsafe inside the $transaction cb.
@@ -63,12 +66,13 @@ function makeMocks(opts: {
     $executeRawUnsafe: executeRawUnsafe,
     $transaction,
     knowledgeSource: { count: sourceCount },
+    faqEntry: { count: faqCount },
     auditLog: { create: auditLogCreate },
   } as unknown as PrismaClient;
 
   const openai = {} as OpenAI; // not invoked since embed() is mocked
 
-  return { prisma, redis, openai, redisGet, redisSet, queryRawUnsafe, executeRawUnsafe, sourceCount, auditLogCreate, $transaction };
+  return { prisma, redis, openai, redisGet, redisSet, queryRawUnsafe, executeRawUnsafe, sourceCount, faqCount, auditLogCreate, $transaction };
 }
 
 beforeEach(() => {
@@ -261,5 +265,75 @@ describe("renderKnowledgeSection — prompt assembly", () => {
     };
     const rendered = renderKnowledgeSection(result);
     expect(rendered).toContain("[(untitled source)]");
+  });
+});
+
+// ─────────────────────────────────────────────
+// KAN-XXX — FAQ entries surface in retrieval (Option i: LEFT JOIN both parents)
+// ─────────────────────────────────────────────
+
+describe("KAN-XXX — FAQ entry retrieval", () => {
+  it("FAQ chunk surfaces with parentType='faq' and source_title=question text", async () => {
+    embedMock.mockResolvedValueOnce([
+      { position: 0, text: "q", tokenCount: 0, embedding: HAPPY_VEC },
+    ]);
+    // Simulate the SQL row shape the service maps from: parent_type='faq',
+    // source_id NULL, faq_entry_id set, source_title COALESCEd from the
+    // FAQ entry's question text.
+    const mocks = makeMocks({
+      rows: [
+        {
+          chunk_id: "fc1",
+          source_id: null as unknown as string, // SQL returns NULL for FAQ chunks
+          source_title: "What's the warranty?",
+          category: "faq",
+          chunk_text: "Five years parts and labor.",
+          score: 0.92,
+          // Extra fields the service projects from the SQL — pass them through
+          // via type cast to avoid expanding the test fixture interface.
+          ...({
+            faq_entry_id: "f1",
+            parent_type: "faq",
+          } as object),
+        } as MockChunkRow,
+      ],
+    });
+
+    const result = await retrieveRelevantChunks(
+      mocks.prisma,
+      mocks.redis,
+      mocks.openai,
+      TENANT_A,
+      DEAL_A,
+      "How long is the warranty?",
+    );
+
+    expect(result.chunks).toHaveLength(1);
+    expect(result.chunks[0]!.parentType).toBe("faq");
+    expect(result.chunks[0]!.faq_entry_id).toBe("f1");
+    expect(result.chunks[0]!.source_id).toBeNull();
+    expect(result.chunks[0]!.source_title).toBe("What's the warranty?");
+  });
+
+  it("empty filtered + zero KnowledgeSource + non-zero FaqEntry → tenantHasAnyKnowledge=true", async () => {
+    embedMock.mockResolvedValueOnce([
+      { position: 0, text: "q", tokenCount: 0, embedding: HAPPY_VEC },
+    ]);
+    // No rows from pgvector, but the tenant has FAQ entries — empty-case
+    // branch should distinguish "no relevant chunks" from "no KB at all".
+    const mocks = makeMocks({ rows: [], sourceCount: 0, faqCount: 3 });
+
+    const result = await retrieveRelevantChunks(
+      mocks.prisma,
+      mocks.redis,
+      mocks.openai,
+      TENANT_A,
+      DEAL_A,
+      "anything",
+    );
+
+    expect(result.chunks).toHaveLength(0);
+    expect(result.tenantHasAnyKnowledge).toBe(true);
+    expect(mocks.faqCount).toHaveBeenCalled();
   });
 });

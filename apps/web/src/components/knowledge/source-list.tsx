@@ -40,6 +40,7 @@ import { AddSourceDialog } from "./add-source-dialog";
 import { SourceDetailDialog } from "./source-detail-dialog";
 import { DeleteSourceConfirm } from "./delete-source-confirm";
 import { CategoryTabs } from "./category-tabs";
+import { FaqList } from "./faq-list";
 import {
   UpgradePromptDialog,
   type UpgradeReason,
@@ -68,7 +69,6 @@ interface TierLimitsResponse {
     maxSources: number;
     maxPdfMB: number;
     allowsPdf: boolean;
-    allowsFaq: boolean;
     allowedCategories: string[];
   };
   currentSourceCount: number;
@@ -101,11 +101,16 @@ export function SourceList(): React.ReactElement {
     | null
   >(null);
 
+  // KAN-XXX — when the FAQ tab is active, treat the sources query as
+  // unfiltered (FAQ entries don't live in knowledge_source). The body
+  // renders FaqList in FAQ mode regardless of this query's data, so the
+  // request is just precaching for when the user switches back.
+  const sourceCategoryFilter = categoryFilter === "faq" ? null : categoryFilter;
   const sourcesQuery = useQuery<{ sources: KnowledgeSource[] }>({
-    queryKey: ["knowledge", "sources", { category: categoryFilter }],
+    queryKey: ["knowledge", "sources", { category: sourceCategoryFilter }],
     queryFn: async () => {
-      const path = categoryFilter
-        ? `/api/knowledge/sources?category=${categoryFilter}`
+      const path = sourceCategoryFilter
+        ? `/api/knowledge/sources?category=${sourceCategoryFilter}`
         : "/api/knowledge/sources";
       const res = await fetch(`${API_BASE}${path}`, { headers: await buildHeaders() });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -158,16 +163,24 @@ export function SourceList(): React.ReactElement {
     setUpgradePrompt({ reason: "feature-locked", feature });
   }, []);
 
+  // KAN-XXX — FAQ tab is a render-mode switch, NOT a category filter.
+  // FAQ entries live in their own table; FaqList owns its own Add CTA,
+  // empty state, and table layout. The tier-limit pill applies to
+  // KnowledgeSource rows only (FAQ entries are unlimited per cohort
+  // decision 6) — hidden when the FAQ tab is active.
+  const isFaqTab = categoryFilter === "faq";
+
   return (
     <div className="flex flex-col gap-4">
-      {/* Tier-limit pill + Add CTA row — page-level hero/section-header now
-       * owned by app/settings/knowledge/page.tsx (DS v1 alignment cohort). */}
-      <div className="flex items-center justify-between">
-        {tierData ? <TierLimitPill tier={tierData} /> : <span aria-hidden="true" />}
-        <Button onClick={handleAddClick} aria-label="Add knowledge source">
-          Add knowledge source
-        </Button>
-      </div>
+      {/* Source-tab header — hidden in FAQ mode (FaqList renders its own). */}
+      {!isFaqTab ? (
+        <div className="flex items-center justify-between">
+          {tierData ? <TierLimitPill tier={tierData} /> : <span aria-hidden="true" />}
+          <Button onClick={handleAddClick} aria-label="Add knowledge source">
+            Add knowledge source
+          </Button>
+        </div>
+      ) : null}
 
       {/* Category filter — underline tabs (was filter chips pre-cohort).
        * null↔'all' boundary mapper: SourceList stores `categoryFilter`
@@ -179,9 +192,11 @@ export function SourceList(): React.ReactElement {
         onCategoryChange={(next) => setCategoryFilter(next === "all" ? null : next)}
       />
 
-      {/* Body — empty / loading skeletons / error / table per spec Part 4 */}
+      {/* Body — FaqList in FAQ mode, else the source table flow. */}
       <div className="mt-2">
-        {sourcesQuery.isLoading ? (
+        {isFaqTab ? (
+          <FaqList />
+        ) : sourcesQuery.isLoading ? (
           <SkeletonTable />
         ) : sourcesQuery.isError ? (
           <ErrorState onRetry={() => void sourcesQuery.refetch()} />

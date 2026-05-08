@@ -9,6 +9,10 @@
  * collapse this duplication to a single source of truth (and rename
  * Prisma `pro` → `growth`, `enterprise` → `revenue` per PRD vocab).
  *
+ * **KAN-XXX (FAQ first-class):** `allowsFaq` removed — FAQ entries are
+ * a separate entity (FaqEntry table) with no tier gating. Only PDF tier
+ * gating remains; `recommendedTierFor` narrows to `feature: "pdf"`.
+ *
  * Why a client mirror exists at all: the upgrade dialog needs to render the
  * comparison table BEFORE the user takes any action. Network round-tripping
  * for a static feature matrix would lag the UX, and the server stays the
@@ -30,7 +34,6 @@ export interface TierFeatureMap {
   maxSources: number;
   maxFileSizeMb: number;
   allowsPdf: boolean;
-  allowsFaq: boolean;
   /** Short "what it includes" copy rendered in the comparison table. */
   description: string;
 }
@@ -40,29 +43,25 @@ const TIER_FEATURES: Record<Tier, TierFeatureMap> = {
     maxSources: 1,
     maxFileSizeMb: 0,
     allowsPdf: false,
-    allowsFaq: false,
     description: "1 source, paste text only",
   },
   starter: {
     maxSources: 1,
     maxFileSizeMb: 0,
     allowsPdf: false,
-    allowsFaq: false,
     description: "1 source, paste text only",
   },
   pro: {
     maxSources: 5,
     maxFileSizeMb: 5,
     allowsPdf: true,
-    allowsFaq: true,
-    description: "5 sources, PDF up to 5 MB, FAQ entries",
+    description: "5 sources, PDF up to 5 MB",
   },
   enterprise: {
     maxSources: 9999,
     maxFileSizeMb: 10,
     allowsPdf: true,
-    allowsFaq: true,
-    description: "9,999 sources, PDF up to 10 MB, FAQ entries",
+    description: "9,999 sources, PDF up to 10 MB",
   },
 };
 
@@ -106,18 +105,21 @@ export function nextTier(tier: Tier): Tier | null {
  * Returns the lowest tier that resolves the upgrade reason. `null` when the
  * user is already at a tier where the reason cannot be resolved by a higher
  * plan (e.g., enterprise count-at-limit — they need a custom-limit conversation).
+ *
+ * **KAN-XXX:** the only feature-gate left is `pdf` — FAQ entries removed
+ * from the gating surface.
  */
 export function recommendedTierFor(
   reason: "count-at-limit" | "feature-locked",
   currentTier: Tier,
-  feature?: "pdf" | "faq",
+  feature?: "pdf",
 ): Tier | null {
   if (reason === "count-at-limit") {
     return nextTier(currentTier);
   }
-  // feature-locked — pdf and faq both unlock at pro
-  if (feature === "pdf" || feature === "faq") {
-    if (TIER_FEATURES[currentTier][feature === "pdf" ? "allowsPdf" : "allowsFaq"]) {
+  // feature-locked — pdf unlocks at pro
+  if (feature === "pdf") {
+    if (TIER_FEATURES[currentTier].allowsPdf) {
       return null;
     }
     return "pro";

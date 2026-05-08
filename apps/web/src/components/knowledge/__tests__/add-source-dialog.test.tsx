@@ -1,11 +1,14 @@
 /**
  * KAN-829 sub-cohort 4 — AddSourceDialog tests.
  *
- * 13 tests per spec covering: Step 1 grid (6 cards, 3 disabled), gate on
- * disabled card click, full PDF / paste-text / FAQ flows, validation
- * (PDF size cap, paste-text char cap, FAQ minimum entry), submission
- * success (mutation + invalidation + close), submission error (display +
- * dialog stays open), microcopy + DS forbidden-words audits.
+ * Tests cover Step 1 grid (5 cards post-KAN-XXX: 2 functional, 3 disabled),
+ * gate on disabled card click, full PDF / paste-text flows, validation
+ * (PDF size cap, paste-text char cap), submission success (mutation +
+ * invalidation + close), submission error (display + dialog stays open),
+ * microcopy + DS forbidden-words audits, tier-gating UX for PDF.
+ *
+ * **KAN-XXX:** the legacy "Build FAQ" card + FAQ-flow tests are removed.
+ * FAQ entries are first-class with their own dialog flow (add-faq-dialog).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, act, fireEvent } from "@testing-library/react";
@@ -55,11 +58,11 @@ afterEach(() => {
 });
 
 describe("AddSourceDialog — KAN-829 sub-cohort 4", () => {
-  it("Test 1 — Step 1 renders 6 source-type cards", () => {
+  it("Test 1 — Step 1 renders 5 source-type cards (KAN-XXX dropped FAQ card)", () => {
     renderDialog();
     expect(screen.getByText("Upload PDF")).toBeInTheDocument();
     expect(screen.getByText("Paste text")).toBeInTheDocument();
-    expect(screen.getByText("Build FAQ")).toBeInTheDocument();
+    expect(screen.queryByText("Build FAQ")).not.toBeInTheDocument();
     expect(screen.getByText("Connect website")).toBeInTheDocument();
     expect(screen.getByText("Upload spreadsheet")).toBeInTheDocument();
     expect(screen.getByText("Connect social")).toBeInTheDocument();
@@ -95,9 +98,9 @@ describe("AddSourceDialog — KAN-829 sub-cohort 4", () => {
     const pdfCard = screen.getByText("Upload PDF").closest("button")!;
     await user.click(pdfCard);
     expect(screen.getByText("Choose a category")).toBeInTheDocument();
-    // Radio group with 6 categories present
+    // Radio group with 5 categories present (KAN-XXX dropped 'FAQ' option)
     expect(screen.getByText("General")).toBeInTheDocument();
-    expect(screen.getByText("FAQ")).toBeInTheDocument();
+    expect(screen.queryByText("FAQ")).not.toBeInTheDocument();
     expect(screen.getByText("Inventory")).toBeInTheDocument();
     expect(screen.getByText("Warranty")).toBeInTheDocument();
     expect(screen.getByText("Pricing")).toBeInTheDocument();
@@ -159,28 +162,8 @@ describe("AddSourceDialog — KAN-829 sub-cohort 4", () => {
     expect(screen.getByText(/0 \/ 50,000/)).toBeInTheDocument();
   });
 
-  it("Test 8 — FAQ editor: add row + remove row + minimum 1 row enforced", async () => {
-    const user = userEvent.setup();
-    renderDialog();
-    await user.click(screen.getByText("Build FAQ").closest("button")!);
-    await user.click(screen.getByLabelText(/General/i, { selector: "input" }));
-    await user.click(screen.getByRole("button", { name: /Confirm category and continue/i }));
-
-    // Initial: 1 entry (Entry 1)
-    expect(screen.getByText("Entry 1")).toBeInTheDocument();
-    // Remove button on the only entry is disabled
-    const removeBtn = screen.getByRole("button", { name: /Remove entry 1/i });
-    expect(removeBtn).toBeDisabled();
-
-    // Click "Add another Q+A" → now 2 entries
-    await user.click(screen.getByRole("button", { name: /Add another Q and A entry/i }));
-    expect(screen.getByText("Entry 2")).toBeInTheDocument();
-
-    // Remove the second entry → back to 1
-    const removeBtn2 = screen.getByRole("button", { name: /Remove entry 2/i });
-    await user.click(removeBtn2);
-    expect(screen.queryByText("Entry 2")).not.toBeInTheDocument();
-  });
+  // KAN-XXX dropped: Test 8 (FAQ editor row management) — FAQ entries
+  // moved to add-faq-dialog.tsx (single Q+A; tested in add-faq-dialog.test.tsx).
 
   it("Test 9 — paste-text submit success → mutation invalidates queries + closes dialog", async () => {
     const user = userEvent.setup();
@@ -246,7 +229,6 @@ describe("AddSourceDialog — KAN-829 sub-cohort 4", () => {
     const expectedVerbTitles = [
       "Upload PDF",
       "Paste text",
-      "Build FAQ",
       "Connect website",
       "Upload spreadsheet",
       "Connect social",
@@ -256,7 +238,7 @@ describe("AddSourceDialog — KAN-829 sub-cohort 4", () => {
       expect(screen.getByText(title)).toBeInTheDocument();
       // Verb-first audit: first word must be one of the allowlisted verbs
       const firstWord = title.split(" ")[0]!;
-      expect(["Upload", "Paste", "Build", "Connect"]).toContain(firstWord);
+      expect(["Upload", "Paste", "Connect"]).toContain(firstWord);
     }
   });
 
@@ -290,10 +272,10 @@ describe("AddSourceDialog — KAN-829 sub-cohort 4", () => {
     onTierLocked: ReturnType<typeof vi.fn>;
   } {
     const TIER_LIMITS = {
-      free: { maxSources: 1, maxPdfMB: 0, allowsPdf: false, allowsFaq: false, allowedCategories: ["general"] },
-      starter: { maxSources: 1, maxPdfMB: 0, allowsPdf: false, allowsFaq: false, allowedCategories: ["general"] },
-      pro: { maxSources: 5, maxPdfMB: 5, allowsPdf: true, allowsFaq: true, allowedCategories: ["general", "faq", "inventory", "warranty", "pricing", "other"] },
-      enterprise: { maxSources: 9999, maxPdfMB: 10, allowsPdf: true, allowsFaq: true, allowedCategories: ["general", "faq", "inventory", "warranty", "pricing", "other"] },
+      free: { maxSources: 1, maxPdfMB: 0, allowsPdf: false, allowedCategories: ["general"] },
+      starter: { maxSources: 1, maxPdfMB: 0, allowsPdf: false, allowedCategories: ["general"] },
+      pro: { maxSources: 5, maxPdfMB: 5, allowsPdf: true, allowedCategories: ["general", "faq", "inventory", "warranty", "pricing", "other"] },
+      enterprise: { maxSources: 9999, maxPdfMB: 10, allowsPdf: true, allowedCategories: ["general", "faq", "inventory", "warranty", "pricing", "other"] },
     } as const;
     const onOpenChange = vi.fn();
     const onTierLocked = vi.fn();
@@ -339,16 +321,8 @@ describe("AddSourceDialog — KAN-829 sub-cohort 4", () => {
     expect(screen.queryByText("Choose a category")).not.toBeInTheDocument();
   });
 
-  it("Test 15 — tier-locked FAQ on Starter → calls onTierLocked('faq')", async () => {
-    const user = userEvent.setup();
-    const { onTierLocked } = renderDialogWithTier({ tier: "starter" });
-    await waitFor(() => {
-      const faqCard = screen.getByText("Build FAQ").closest("button")!;
-      expect(faqCard.getAttribute("data-locked-reason")).toBe("tier");
-    });
-    await user.click(screen.getByText("Build FAQ").closest("button")!);
-    expect(onTierLocked).toHaveBeenCalledWith("faq");
-  });
+  // KAN-XXX dropped: Test 15 (FAQ tier-locked) — FAQ entries no longer
+  // tier-gated. Locked-card logic now exercises only PDF (Test 14 covers it).
 
   it("Test 16 — coming-soon cards stay disabled and do NOT call onTierLocked", async () => {
     const user = userEvent.setup();
@@ -362,7 +336,7 @@ describe("AddSourceDialog — KAN-829 sub-cohort 4", () => {
     expect(screen.queryByText("Choose a category")).not.toBeInTheDocument();
   });
 
-  it("Test 17 — Pro tier: PDF + FAQ cards are 'available' and advance to step 2 on click", async () => {
+  it("Test 17 — Pro tier: PDF card is 'available' and advances to step 2 on click", async () => {
     const user = userEvent.setup();
     const { onTierLocked } = renderDialogWithTier({ tier: "pro" });
     await waitFor(() => {

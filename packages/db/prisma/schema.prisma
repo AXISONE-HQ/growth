@@ -81,6 +81,7 @@ model Tenant {
   escalations            Escalation[]
   knowledgeBase          KnowledgeBase[]
   knowledgeSources       KnowledgeSource[]
+  faqEntries             FaqEntry[]
   knowledgeGapSummaries  KnowledgeGapSummary[]
   aiAgentConfigs         AiAgentConfig[]
   contactStates          ContactState[]
@@ -1029,24 +1030,37 @@ model KnowledgeSource {
   @@map("knowledge_source")
 }
 
+// KAN-XXX (FAQ first-class) — KnowledgeChunk parent FK is now polymorphic:
+// EXACTLY ONE of `sourceId` or `faqEntryId` is set per row. Enforced at the
+// DB layer via a CHECK constraint added in the same migration:
+//   CHECK ((source_id IS NULL) <> (faq_entry_id IS NULL))
+// The XOR predicate (`<>` on null-equality) requires precisely one operand
+// non-null. Belt-and-suspenders: app-layer writers also assert the invariant
+// before INSERT (faq-entries.ts service + knowledge-ingestion-service).
 model KnowledgeChunk {
   id           String                      @id @default(uuid())
-  /// DENORMALIZED from KnowledgeSource for retrieval performance. Drives
+  /// DENORMALIZED from parent for retrieval performance. Drives
   /// the partial index (tenant_id, category) WHERE status='ready' which
   /// is the hot-path pre-filter on every Brain/Shaper retrieval call.
   tenantId     String                      @map("tenant_id")
-  sourceId     String                      @map("source_id")
+  /// Parent FK: KnowledgeSource path (PDF / paste_text). XOR with faqEntryId
+  /// per the DB CHECK constraint. Null when this chunk belongs to a FaqEntry.
+  sourceId     String?                     @map("source_id")
+  /// KAN-XXX — Parent FK: FaqEntry path. XOR with sourceId per the DB CHECK
+  /// constraint. Null when this chunk belongs to a KnowledgeSource.
+  faqEntryId   String?                     @map("faq_entry_id")
   /// Plain-text chunk content fed to retrieval ranking + LLM context.
   chunkText    String                      @map("chunk_text") @db.Text
-  /// 0-based ordinal within the source. Used for "X of N" UI + ordering.
+  /// 0-based ordinal within the parent. Used for "X of N" UI + ordering.
   position     Int
-  /// DENORMALIZED from source.category for the partial-index pre-filter.
+  /// DENORMALIZED from parent for the partial-index pre-filter. For FaqEntry
+  /// chunks the category is fixed to 'faq' at insert time.
   category     String
   /// 'ready' | 'deleted'. Soft-delete pattern: chunks marked 'deleted'
   /// disappear from retrieval but remain for audit trail until 30-day cron.
   status       String                      @default("ready")
-  /// For Q&A sources only: the original question text (chunkText holds
-  /// the answer). Null for PDFs and paste_text sources.
+  /// For Q&A chunks only: the question text (chunkText holds the answer).
+  /// Null for PDFs and paste_text chunks.
   questionText String?                     @map("question_text") @db.Text
   /// pgvector(1536) — matches OpenAI text-embedding-3-small. Hardcoded
   /// dimension forces deliberation if the model ever changes.
@@ -1054,11 +1068,54 @@ model KnowledgeChunk {
   metadata     Json                        @default("{}")
   createdAt    DateTime                    @default(now()) @map("created_at")
 
-  source KnowledgeSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  source   KnowledgeSource? @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  faqEntry FaqEntry?        @relation(fields: [faqEntryId], references: [id], onDelete: Cascade)
 
   @@index([sourceId])
+  @@index([faqEntryId])
   @@index([tenantId, status, category])
   @@map("knowledge_chunk")
+}
+
+// ─────────────────────────────────────────────
+// KAN-XXX — FAQ as first-class entity (Sprint 11b)
+// ─────────────────────────────────────────────
+//
+// Supersedes KAN-841's FAQ-via-KnowledgeSource multi-pair contract. Each
+// FAQ entry is one row with one Q+A pair → one KnowledgeChunk via the
+// faqEntryId FK. Embedding generated SYNCHRONOUSLY on create/update from
+// `Question: <q>\n\nAnswer: <a>` via the existing text-embedding-3-small
+// pipeline (no Pub/Sub; the embedder is a pure function).
+//
+// Tier-gating intentionally omitted — all tiers (free, starter, pro,
+// enterprise) get unlimited FAQ entries per the locked decisions in this
+// cohort's brief.
+//
+// Status transitions (sync, in-process):
+//   queued → embedding → ready  (success path)
+//   queued → embedding → error  (terminal failure with errorDetail)
+model FaqEntry {
+  id          String    @id @default(uuid())
+  tenantId    String    @map("tenant_id")
+  question    String    @db.Text
+  answer      String    @db.Text
+  /// 'queued' | 'embedding' | 'ready' | 'error'. Soft-delete via deletedAt;
+  /// status remains its terminal value when deletedAt is set so admin lists
+  /// can exclude deleted rows via `WHERE deleted_at IS NULL`.
+  status      String    @default("queued")
+  errorDetail String?   @map("error_detail")
+  /// Set by soft-delete. Hourly cron hard-deletes after 30 days, mirroring
+  /// the KnowledgeSource pattern (architect spec §1.4).
+  deletedAt   DateTime? @map("deleted_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  tenant Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  chunks KnowledgeChunk[]
+
+  @@index([tenantId, deletedAt])
+  @@index([tenantId, createdAt])
+  @@map("faq_entries")
 }
 
 model KnowledgeGapSummary {

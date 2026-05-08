@@ -79,7 +79,7 @@ describe("KAN-827 — POST /api/knowledge/sources auth + validation", () => {
     const res = await knowledgeSourcesApp.request("/sources", {
       method: "POST",
       headers: { "x-tenant-id": TENANT_A, "content-type": "application/json" },
-      body: JSON.stringify({ sourceType: "paste_text", category: "faq", rawContent: "x" }),
+      body: JSON.stringify({ sourceType: "paste_text", category: "other", rawContent: "x" }),
     });
 
     expect(res.status).toBe(401);
@@ -97,7 +97,7 @@ describe("KAN-827 — POST /api/knowledge/sources auth + validation", () => {
         "authorization": "Bearer bad-token",
         "content-type": "application/json",
       },
-      body: JSON.stringify({ sourceType: "paste_text", category: "faq", rawContent: "x" }),
+      body: JSON.stringify({ sourceType: "paste_text", category: "other", rawContent: "x" }),
     });
 
     expect(res.status).toBe(401);
@@ -108,7 +108,7 @@ describe("KAN-827 — POST /api/knowledge/sources auth + validation", () => {
     const res = await knowledgeSourcesApp.request("/sources", {
       method: "POST",
       headers: { authorization: "Bearer good-token", "content-type": "application/json" },
-      body: JSON.stringify({ sourceType: "paste_text", category: "faq", rawContent: "x" }),
+      body: JSON.stringify({ sourceType: "paste_text", category: "other", rawContent: "x" }),
     });
 
     expect(res.status).toBe(400);
@@ -127,7 +127,7 @@ describe("KAN-827 — POST /api/knowledge/sources auth + validation", () => {
       },
       body: JSON.stringify({
         sourceType: "paste_text",
-        category: "faq",
+        category: "other",
         rawContent: "Refunds: 30 days from purchase, with proof of payment.",
       }),
     });
@@ -231,7 +231,7 @@ describe("KAN-827 — push subscriber: knowledge.source_ingested handler", () =>
       tenantId: TENANT_A,
       sourceId: "550e8400-e29b-41d4-a716-446655440000",
       sourceType: "paste_text",
-      category: "faq",
+      category: "other",
     };
 
     const res = await knowledgeSourceIngestedPushApp.request("/knowledge-source-ingested", {
@@ -283,7 +283,7 @@ describe("KAN-827 — push subscriber: knowledge.source_ingested handler", () =>
       tenantId: TENANT_A,
       sourceId: "550e8400-e29b-41d4-a716-446655440001",
       sourceType: "paste_text",
-      category: "faq",
+      category: "other",
     };
 
     const res = await knowledgeSourceIngestedPushApp.request("/knowledge-source-ingested", {
