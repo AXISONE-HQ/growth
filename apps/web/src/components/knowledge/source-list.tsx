@@ -39,6 +39,7 @@ import { CategoryBadge, type Category } from "@/components/ui/knowledge/category
 import { AddSourceDialog } from "./add-source-dialog";
 import { SourceDetailDialog } from "./source-detail-dialog";
 import { DeleteSourceConfirm } from "./delete-source-confirm";
+import { CategoryTabs } from "./category-tabs";
 import {
   UpgradePromptDialog,
   type UpgradeReason,
@@ -74,13 +75,16 @@ interface TierLimitsResponse {
   remaining: number;
 }
 
-const FILTER_CHIPS: Array<{ key: string | null; label: string }> = [
-  { key: null, label: "All" },
-  { key: "faq", label: "FAQ" },
-  { key: "inventory", label: "Inventory" },
-  { key: "warranty", label: "Warranty" },
-  { key: "pricing", label: "Pricing" },
-  { key: "other", label: "Other" },
+// Category filter options. `'all'` is the unfiltered sentinel — the
+// SourceList ↔ CategoryTabs boundary maps it to/from the internal
+// `null`-state convention (null means "no category filter applied").
+const CATEGORY_TABS: Array<{ value: string; label: string }> = [
+  { value: "all", label: "All" },
+  { value: "faq", label: "FAQ" },
+  { value: "inventory", label: "Inventory" },
+  { value: "warranty", label: "Warranty" },
+  { value: "pricing", label: "Pricing" },
+  { value: "other", label: "Other" },
 ];
 
 export function SourceList(): React.ReactElement {
@@ -165,8 +169,15 @@ export function SourceList(): React.ReactElement {
         </Button>
       </div>
 
-      {/* Filter chips */}
-      <FilterChips active={categoryFilter} onSelect={setCategoryFilter} />
+      {/* Category filter — underline tabs (was filter chips pre-cohort).
+       * null↔'all' boundary mapper: SourceList stores `categoryFilter`
+       * as `string | null` (null = no filter), CategoryTabs uses 'all'
+       * as the unfiltered sentinel value. */}
+      <CategoryTabs
+        categories={CATEGORY_TABS}
+        selectedCategory={categoryFilter ?? "all"}
+        onCategoryChange={(next) => setCategoryFilter(next === "all" ? null : next)}
+      />
 
       {/* Body — empty / loading skeletons / error / table per spec Part 4 */}
       <div className="mt-2">
@@ -264,50 +275,6 @@ function TierLimitPill({ tier }: { tier: TierLimitsResponse }): React.ReactEleme
     >
       {label}
     </div>
-  );
-}
-
-// ─────────────────────────────────────────────
-// FilterChips — composed shadcn Buttons; selected state via DS violet token.
-// ─────────────────────────────────────────────
-
-function FilterChips({
-  active,
-  onSelect,
-}: {
-  active: string | null;
-  onSelect: (key: string | null) => void;
-}): React.ReactElement {
-  return (
-    <nav aria-label="Filter sources by category" className="flex flex-wrap gap-2">
-      {FILTER_CHIPS.map((chip) => {
-        const isActive = active === chip.key;
-        return (
-          <button
-            key={chip.label}
-            type="button"
-            onClick={() => onSelect(chip.key)}
-            aria-pressed={isActive}
-            className="inline-flex items-center px-3 py-1 rounded-full text-micro border motion-default focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 [--tw-ring-color:var(--ds-violet-500)] [--tw-ring-offset-color:var(--ds-ring-offset)]"
-            style={
-              isActive
-                ? {
-                    backgroundColor: "var(--ds-violet-100)",
-                    color: "var(--ds-violet-700)",
-                    borderColor: "color-mix(in srgb, var(--ds-violet-500) 30%, transparent)",
-                  }
-                : {
-                    backgroundColor: "var(--ds-surface-base)",
-                    color: "var(--ds-ink-secondary)",
-                    borderColor: "var(--ds-border-default)",
-                  }
-            }
-          >
-            {chip.label}
-          </button>
-        );
-      })}
-    </nav>
   );
 }
 

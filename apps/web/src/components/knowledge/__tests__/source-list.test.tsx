@@ -16,6 +16,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, act, fireEvent } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 // KAN-829 sub-cohort 7 — mock firebase so buildHeaders() can attach a
@@ -185,7 +186,7 @@ describe("SourceList — KAN-829 sub-cohort 3", () => {
     expect(statuses).toContain("error");
   });
 
-  it("Test 3 — filter chip click updates queryKey + triggers refetch", async () => {
+  it("Test 3 — category tab click updates queryKey + triggers refetch", async () => {
     const sources: MockSource[] = [
       {
         id: "s1",
@@ -209,11 +210,13 @@ describe("SourceList — KAN-829 sub-cohort 3", () => {
     const initialCalls = callsByUrl();
     expect(Object.keys(initialCalls).some((u) => u.endsWith("/api/knowledge/sources"))).toBe(true);
 
-    // Click "FAQ" chip
-    const faqChip = screen.getByRole("button", { name: "FAQ", pressed: false });
-    await act(async () => {
-      fireEvent.click(faqChip);
-    });
+    // Click the FAQ tab — chips → underline tabs swap (Radix Tabs primitive,
+    // role="tab" + aria-selected). FilterChips component retired in this
+    // cohort. Use userEvent (full pointer event sequence) instead of
+    // fireEvent.click — Radix Tabs listens for pointerdown/up, not just click.
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    const faqTab = screen.getByRole("tab", { name: "FAQ", selected: false });
+    await user.click(faqTab);
 
     // After click — a new fetch with ?category=faq fires
     await waitFor(() => {
@@ -221,9 +224,9 @@ describe("SourceList — KAN-829 sub-cohort 3", () => {
       expect(Object.keys(updated).some((u) => u.includes("category=faq"))).toBe(true);
     });
 
-    // Selected chip carries aria-pressed=true
-    const faqChipAfter = screen.getByRole("button", { name: "FAQ", pressed: true });
-    expect(faqChipAfter).toBeInTheDocument();
+    // Active tab carries aria-selected=true (Radix data-state="active")
+    const faqTabAfter = screen.getByRole("tab", { name: "FAQ", selected: true });
+    expect(faqTabAfter).toBeInTheDocument();
   });
 
   it("Test 4 — conditional polling: queued source → 5s interval; all-ready → polling disabled", async () => {
