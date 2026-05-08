@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>growth — Brain Status mockup</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+:root {
+  --surface-base: #FBF9F4;
+  --surface-raised: #FFFFFF;
+  --surface-sunken: #F4F0E6;
+  --ink-primary: #1F1432;
+  --ink-secondary: #4A3F5C;
+  --ink-tertiary: #8A7F9C;
+  --border-subtle: #ECE6D9;
+  --border-default: #DDD3C0;
+  --violet-100: #EEEAFC;
+  --violet-500: #5C3FE5;
+  --violet-700: #3B249E;
+  --emerald-100: #DCF4EB;
+  --emerald-500: #0EA882;
+  --emerald-700: #0A6B52;
+  --warning: #D97706;
+  --warning-soft: #FCEFD9;
+  --warning-text: #92590E;
+  --danger: #C73E3E;
+  --danger-soft: #F8E1E1;
+  --danger-text: #8E2424;
+}
+html, body {
+  background: var(--surface-base); color: var(--ink-primary);
+  font-family: 'Inter', system-ui, sans-serif;
+  font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+}
+.font-mono { font-family: 'JetBrains Mono', monospace; }
+.tabular { font-variant-numeric: tabular-nums; }
+.brand-mark {
+  width: 28px; height: 28px; border-radius: 8px; background: var(--violet-500);
+  display: inline-flex; align-items: center; justify-content: center;
+  color: white; font-weight: 500; font-size: 13px;
+}
+.sidebar {
+  width: 240px; background: var(--surface-raised);
+  border-right: 0.5px solid var(--border-subtle);
+  height: 100vh; position: fixed; left: 0; top: 0;
+  display: flex; flex-direction: column;
+}
+.nav-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px; border-radius: 8px;
+  font-size: 13px; color: var(--ink-secondary);
+  transition: background 100ms; cursor: pointer;
+}
+.nav-item:hover { background: var(--surface-sunken); }
+.nav-item.active {
+  background: var(--violet-100); color: var(--violet-700); font-weight: 500;
+}
+.nav-item .badge {
+  margin-left: auto; font-size: 11px; padding: 1px 6px; border-radius: 999px;
+  background: var(--danger-soft); color: var(--danger-text);
+}
+.topbar {
+  height: 56px; background: var(--surface-raised);
+  border-bottom: 0.5px solid var(--border-subtle);
+  display: flex; align-items: center; padding: 0 24px; gap: 16px;
+  position: sticky; top: 0; z-index: 10;
+}
+.search-input {
+  flex: 1; max-width: 400px;
+  background: var(--surface-base); border: 0.5px solid var(--border-subtle);
+  border-radius: 8px; padding: 7px 12px 7px 34px;
+  font-size: 13px; color: var(--ink-primary);
+}
+.search-input::placeholder { color: var(--ink-tertiary); }
+.status-pill {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 5px 12px; border-radius: 999px;
+  background: var(--surface-base); border: 0.5px solid var(--border-subtle);
+  font-size: 12px; color: var(--ink-primary);
+}
+.status-dot {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--emerald-500);
+  box-shadow: 0 0 0 4px rgba(14, 168, 130, 0.18);
+  animation: pulse 1.5s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 4px rgba(14, 168, 130, 0.18); }
+  50% { box-shadow: 0 0 0 8px rgba(14, 168, 130, 0.06); }
+}
+.btn-primary {
+  background: var(--violet-500); color: white;
+  padding: 7px 14px; border-radius: 7px;
+  font-size: 12px; font-weight: 500;
+}
+.btn-secondary {
+  background: transparent; color: var(--ink-secondary);
+  padding: 7px 14px; border-radius: 7px;
+  font-size: 12px; font-weight: 500; border: 0.5px solid var(--border-default);
+}
+.btn-ghost {
+  background: transparent; color: var(--ink-tertiary);
+  padding: 7px 12px; border-radius: 7px; font-size: 12px;
+}
+.btn-ghost:hover { background: var(--surface-sunken); color: var(--ink-secondary); }
+.layer-card {
+  background: white; border: 0.5px solid var(--border-subtle);
+  border-radius: 14px; padding: 22px;
+}
+.layer-tag {
+  display: inline-block; padding: 2px 10px; border-radius: 999px;
+  font-size: 11px; font-weight: 500; letter-spacing: 0.4px; text-transform: uppercase;
+}
+.bar-track { background: var(--surface-sunken); height: 8px; border-radius: 999px; overflow: hidden; }
+.bar-fill { height: 100%; border-radius: 999px; }
+.list-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 0; font-size: 13px;
+}
+.list-row .dot {
+  width: 14px; height: 14px; border-radius: 50%; flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.list-row .dot svg { width: 10px; height: 10px; }
+.dot-known { background: var(--emerald-500); color: white; }
+.dot-missing { background: white; border: 1.5px solid var(--warning); color: var(--warning); }
+.dot-pulse-violet {
+  width: 10px; height: 10px; border-radius: 50%; background: var(--violet-500);
+  box-shadow: 0 0 0 4px rgba(92, 63, 229, 0.18);
+  animation: pulse 1.5s ease-in-out infinite;
+}
+.avatar {
+  width: 28px; height: 28px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 500;
+  background: var(--violet-100); color: var(--violet-700);
+}
+.callout {
+  padding: 12px 14px; border-radius: 10px;
+  font-size: 12px; line-height: 1.55;
+}
+.score-ring {
+  position: relative; width: 140px; height: 140px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .status-dot, .dot-pulse-violet { animation: none; }
+}
+</style>
+</head>
+<body>
+
+<!-- Sidebar -->
+<aside class="sidebar">
+  <div class="px-4 py-4 flex items-center gap-2.5" style="border-bottom: 0.5px solid var(--border-subtle);">
+    <div class="brand-mark">g</div>
+    <div>
+      <div class="text-[14px] font-medium" style="color: var(--ink-primary);">growth</div>
+      <div class="text-[11px]" style="color: var(--ink-tertiary);">Acme Corp · Production</div>
+    </div>
+  </div>
+
+  <nav class="flex-1 px-3 py-4 space-y-0.5">
+    <div class="text-[10px] font-medium uppercase tracking-wide px-3 mb-1.5" style="color: var(--ink-tertiary);">Operate</div>
+    <div class="nav-item">
+      <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6h16.5M3.75 12h16.5m-16.5 5.25h16.5"/></svg>
+      Decision Feed
+    </div>
+    <div class="nav-item active">
+      <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.241-.438.613-.43.992a6.759 6.759 0 010 .255c-.008.378.137.75.43.991l1.004.827c.424.35.534.955.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.28c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.02-.398-1.109-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.991a6.932 6.932 0 010-.255c.007-.38-.138-.751-.43-.992l-1.004-.827a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.28z"/><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+      Business Brain
+    </div>
+    <div class="nav-item">
+      <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.964-3.07M12 6.375a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zm8.25 2.25a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z"/></svg>
+      Contacts
+    </div>
+    <div class="nav-item">
+      <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"/></svg>
+      Escalations
+      <span class="badge">3</span>
+    </div>
+    <div class="nav-item">
+      <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11.42 15.17L17.25 21A2.652 2.652 0 0021 17.25l-5.877-5.877M11.42 15.17l2.496-3.03c.317-.384.74-.626 1.208-.766M11.42 15.17l-4.655 5.653a2.548 2.548 0 11-3.586-3.586l6.837-5.63m5.108-.233c.55-.164 1.163-.188 1.743-.14a4.5 4.5 0 004.486-6.336l-3.276 3.277a3.004 3.004 0 01-2.25-2.25l3.276-3.276a4.5 4.5 0 00-6.336 4.486c.091 1.076-.071 2.264-.904 2.95l-.102.085m-1.745 1.437L5.909 7.5H4.5L2.25 3.75l1.5-1.5L7.5 4.5v1.409l4.26 4.26m-1.745 1.437l1.745-1.437m6.615 8.206L15.75 15.75M4.867 19.125h.008v.008h-.008v-.008z"/></svg>
+      Objectives
+    </div>
+    <div class="text-[10px] font-medium uppercase tracking-wide px-3 mb-1.5 mt-5" style="color: var(--ink-tertiary);">Govern</div>
+    <div class="nav-item">
+      <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"/></svg>
+      Audit log
+    </div>
+    <div class="nav-item">
+      <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12c0 1.268-.63 2.39-1.593 3.068a3.745 3.745 0 01-1.043 3.296 3.745 3.745 0 01-3.296 1.043A3.745 3.745 0 0112 21c-1.268 0-2.39-.63-3.068-1.593a3.746 3.746 0 01-3.296-1.043 3.745 3.745 0 01-1.043-3.296A3.745 3.745 0 013 12c0-1.268.63-2.39 1.593-3.068a3.745 3.745 0 011.043-3.296 3.746 3.746 0 013.296-1.043A3.746 3.746 0 0112 3c1.268 0 2.39.63 3.068 1.593a3.746 3.746 0 013.296 1.043 3.746 3.746 0 011.043 3.296A3.745 3.745 0 0121 12z"/></svg>
+      Knowledge center
+    </div>
+    <div class="nav-item">
+      <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M10.343 3.94c.09-.542.56-.94 1.11-.94h1.093c.55 0 1.02.398 1.11.94l.149.894c.07.424.384.764.78.93.398.164.855.142 1.205-.108l.737-.527a1.125 1.125 0 011.45.12l.773.774c.39.389.44 1.002.12 1.45l-.527.737c-.25.35-.272.806-.107 1.204.165.397.505.71.93.78l.893.15c.543.09.94.56.94 1.109v1.094c0 .55-.397 1.02-.94 1.11l-.893.149c-.425.07-.765.383-.93.78-.165.398-.143.854.107 1.204l.527.738c.32.447.269 1.06-.12 1.45l-.774.773a1.125 1.125 0 01-1.449.12l-.738-.527c-.35-.25-.806-.272-1.203-.107-.397.165-.71.505-.781.929l-.149.894c-.09.542-.56.94-1.11.94h-1.094c-.55 0-1.019-.398-1.11-.94l-.148-.894c-.071-.424-.384-.764-.781-.93-.398-.164-.854-.142-1.204.108l-.738.527c-.447.32-1.06.269-1.45-.12l-.773-.774a1.125 1.125 0 01-.12-1.45l.527-.737c.25-.35.273-.806.108-1.204-.165-.397-.505-.71-.93-.78l-.894-.15c-.542-.09-.94-.56-.94-1.109v-1.094c0-.55.398-1.02.94-1.11l.894-.149c.424-.07.765-.383.93-.78.165-.398.143-.854-.107-1.204l-.527-.738a1.125 1.125 0 01.12-1.45l.773-.773a1.125 1.125 0 011.45-.12l.737.527c.35.25.807.272 1.204.107.397-.165.71-.505.78-.929l.15-.894z"/><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+      AI controls
+    </div>
+    <div class="nav-item">
+      <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13.5 21v-7.5a.75.75 0 01.75-.75h3a.75.75 0 01.75.75V21m-4.5 0H2.36m11.14 0H18m0 0h3.64m-1.39 0V9.349m-16.5 11.65V9.35m0 0a3.001 3.001 0 003.75-.615A2.993 2.993 0 009.75 9.75c.896 0 1.7-.393 2.25-1.016a2.993 2.993 0 002.25 1.016c.896 0 1.7-.393 2.25-1.016a3.001 3.001 0 003.75.614m-16.5 0a3.004 3.004 0 01-.621-4.72L4.318 3.44A1.5 1.5 0 015.378 3h13.243a1.5 1.5 0 011.06.44l1.19 1.189a3 3 0 01-.621 4.72m-13.5 8.65h3.75a.75.75 0 00.75-.75V13.5a.75.75 0 00-.75-.75H6.75a.75.75 0 00-.75.75v3.75c0 .415.336.75.75.75z"/></svg>
+      Settings
+    </div>
+  </nav>
+
+  <div class="px-3 py-3" style="border-top: 0.5px solid var(--border-subtle);">
+    <div class="flex items-center gap-2.5 px-2 py-2 rounded-lg hover:bg-stone-50 cursor-pointer">
+      <div class="avatar">FB</div>
+      <div class="flex-1 min-w-0">
+        <div class="text-[12px] font-medium truncate" style="color: var(--ink-primary);">Fred Binette</div>
+        <div class="text-[11px] truncate" style="color: var(--ink-tertiary);">Admin</div>
+      </div>
+    </div>
+  </div>
+</aside>
+
+<!-- Main canvas -->
+<main style="margin-left: 240px;">
+  <header class="topbar">
+    <div class="relative" style="flex: 1; max-width: 400px;">
+      <svg class="absolute left-3 top-1/2 -translate-y-1/2" width="14" height="14" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" style="color: var(--ink-tertiary);"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z"/></svg>
+      <input class="search-input w-full" placeholder="Search contacts, decisions, knowledge..." />
+    </div>
+    <div class="ml-auto flex items-center gap-3">
+      <span class="status-pill">
+        <span class="status-dot"></span>
+        <span class="font-medium">System active</span>
+      </span>
+    </div>
+  </header>
+
+  <div class="px-8 py-7 max-w-[1100px]">
+
+    <!-- Page header -->
+    <div class="flex items-end justify-between mb-7">
+      <div>
+        <h1 class="text-[24px] font-medium leading-tight" style="color: var(--ink-primary);">Business Brain</h1>
+        <p class="text-[13px] mt-1" style="color: var(--ink-secondary);">What growth understands about your business — and what it's still learning.</p>
+      </div>
+      <div class="text-[12px]" style="color: var(--ink-tertiary);">
+        Last synced <span class="tabular">4 min ago</span>
+      </div>
+    </div>
+
+    <!-- Hero: overall intelligence score -->
+    <div class="rounded-2xl p-7 mb-7" style="background: white; border: 0.5px solid var(--border-subtle);">
+      <div class="grid grid-cols-[180px_1fr] gap-8 items-center">
+
+        <!-- Score ring (SVG) -->
+        <div class="score-ring">
+          <svg viewBox="0 0 140 140" width="140" height="140">
+            <circle cx="70" cy="70" r="60" fill="none" stroke="#F4F0E6" stroke-width="10"/>
+            <circle cx="70" cy="70" r="60" fill="none" stroke="#5C3FE5" stroke-width="10"
+                    stroke-dasharray="377" stroke-dashoffset="105.6" stroke-linecap="round"
+                    transform="rotate(-90 70 70)"/>
+            <text x="70" y="68" text-anchor="middle" fill="#1F1432" font-family="Inter" font-size="32" font-weight="500" style="font-variant-numeric: tabular-nums;">72</text>
+            <text x="70" y="86" text-anchor="middle" fill="#8A7F9C" font-family="Inter" font-size="11">/ 100</text>
+          </svg>
+        </div>
+
+        <div>
+          <div class="text-[11px] font-medium uppercase tracking-wide mb-1" style="color: var(--violet-700);">Overall intelligence</div>
+          <h2 class="text-[20px] font-medium mb-2" style="color: var(--ink-primary);">growth understands your business well, and is still learning.</h2>
+          <p class="text-[14px] leading-relaxed mb-4" style="color: var(--ink-secondary);">
+            Confidence in decisions improves as the four layers below mature. The biggest lever right now is <span class="font-medium" style="color: var(--ink-primary);">Outcome Learning</span> — once you've completed 100+ objectives, the AI can predict strategy success with significantly higher accuracy.
+          </p>
+          <div class="flex items-center gap-4 text-[12px]">
+            <span class="flex items-center gap-1.5" style="color: var(--emerald-700);">
+              <span class="w-2 h-2 rounded-full" style="background: var(--emerald-500);"></span>
+              <span class="tabular">+4 points</span> this week
+            </span>
+            <span style="color: var(--ink-tertiary);">·</span>
+            <span style="color: var(--ink-tertiary);">Forecast: <span class="tabular" style="color: var(--ink-primary);">88</span> by end of June</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Layer cards grid -->
+    <div class="grid grid-cols-2 gap-5 mb-7">
+
+      <!-- Layer 1: Industry Blueprint -->
+      <section class="layer-card">
+        <header class="flex items-start justify-between mb-4">
+          <div>
+            <span class="layer-tag" style="background: var(--violet-100); color: var(--violet-700);">Layer 1 · Blueprint</span>
+            <h3 class="text-[18px] font-medium mt-2" style="color: var(--ink-primary);">Industry blueprint</h3>
+            <p class="text-[12px] mt-0.5" style="color: var(--ink-tertiary);">Customer model · journey · KPIs · strategy templates</p>
+          </div>
+          <span class="text-[11px] font-medium px-2 py-0.5 rounded-full" style="background: var(--emerald-100); color: var(--emerald-700);">Active</span>
+        </header>
+
+        <div class="text-[13px] mb-3" style="color: var(--ink-secondary);">
+          Generic B2B services template — applied at activation.
+        </div>
+
+        <div class="callout" style="background: var(--surface-base); border: 0.5px solid var(--border-subtle);">
+          <div class="flex items-center justify-between">
+            <span style="color: var(--ink-secondary);">Specialized vertical blueprint available:</span>
+            <button class="text-[12px] font-medium" style="color: var(--violet-500);">B2B SaaS pack →</button>
+          </div>
+        </div>
+
+        <footer class="mt-4 pt-3 flex items-center justify-between" style="border-top: 0.5px solid var(--border-subtle);">
+          <span class="text-[12px]" style="color: var(--ink-tertiary);">Set at tenant creation · static</span>
+          <button class="btn-ghost text-[12px]" style="color: var(--violet-500);">View blueprint contents →</button>
+        </footer>
+      </section>
+
+      <!-- Layer 2: Company Truth -->
+      <section class="layer-card">
+        <header class="flex items-start justify-between mb-3">
+          <div>
+            <span class="layer-tag" style="background: var(--violet-100); color: var(--violet-700);">Layer 2 · Company Truth</span>
+            <h3 class="text-[18px] font-medium mt-2" style="color: var(--ink-primary);">Company truth</h3>
+            <p class="text-[12px] mt-0.5" style="color: var(--ink-tertiary);">Products · pricing · positioning · constraints</p>
+          </div>
+          <span class="text-[11px] font-medium tabular px-2 py-0.5 rounded-full" style="background: var(--violet-100); color: var(--violet-700);">82%</span>
+        </header>
+
+        <div class="bar-track mb-4"><div class="bar-fill" style="width: 82%; background: var(--violet-500);"></div></div>
+
+        <ul class="mb-3">
+          <li class="list-row">
+            <span class="dot dot-known"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg></span>
+            <span style="color: var(--ink-primary);">Products and pricing</span>
+            <span class="ml-auto text-[12px]" style="color: var(--ink-tertiary);">8 products</span>
+          </li>
+          <li class="list-row">
+            <span class="dot dot-known"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg></span>
+            <span style="color: var(--ink-primary);">Core value propositions</span>
+            <span class="ml-auto text-[12px]" style="color: var(--ink-tertiary);">12 statements</span>
+          </li>
+          <li class="list-row">
+            <span class="dot dot-known"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg></span>
+            <span style="color: var(--ink-primary);">Objection handling scripts</span>
+            <span class="ml-auto text-[12px]" style="color: var(--ink-tertiary);">6 objections</span>
+          </li>
+          <li class="list-row">
+            <span class="dot dot-missing">!</span>
+            <span style="color: var(--ink-secondary);">Competitor positioning</span>
+            <span class="ml-auto text-[12px]" style="color: var(--warning-text);">missing</span>
+          </li>
+          <li class="list-row">
+            <span class="dot dot-missing">!</span>
+            <span style="color: var(--ink-secondary);">Case studies / social proof</span>
+            <span class="ml-auto text-[12px]" style="color: var(--warning-text);">missing</span>
+          </li>
+        </ul>
+
+        <footer class="mt-1 pt-3 flex items-center justify-between" style="border-top: 0.5px solid var(--border-subtle);">
+          <span class="text-[12px]" style="color: var(--ink-tertiary);">Last edit <span class="tabular">2h</span> ago by Fred</span>
+          <button class="btn-primary">Add missing data</button>
+        </footer>
+      </section>
+
+      <!-- Layer 3: Behavioral Learning -->
+      <section class="layer-card">
+        <header class="flex items-start justify-between mb-3">
+          <div>
+            <span class="layer-tag" style="background: var(--violet-100); color: var(--violet-700);">Layer 3 · Behavioral</span>
+            <h3 class="text-[18px] font-medium mt-2" style="color: var(--ink-primary);">Behavioral learning</h3>
+            <p class="text-[12px] mt-0.5" style="color: var(--ink-tertiary);">Engagement patterns — timing, channel, response</p>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="dot-pulse-violet"></span>
+            <span class="text-[11px] font-medium tabular px-2 py-0.5 rounded-full" style="background: var(--violet-100); color: var(--violet-700);">61%</span>
+          </div>
+        </header>
+
+        <div class="bar-track mb-4"><div class="bar-fill" style="width: 61%; background: var(--violet-500);"></div></div>
+
+        <div class="space-y-2.5 mb-3">
+          <div class="flex items-baseline justify-between text-[13px]">
+            <span style="color: var(--ink-secondary);">Best channel</span>
+            <span style="color: var(--ink-primary);"><span class="font-medium">SMS</span> · <span class="tabular" style="color: var(--ink-tertiary);">62% response rate</span></span>
+          </div>
+          <div class="flex items-baseline justify-between text-[13px]">
+            <span style="color: var(--ink-secondary);">Best timing</span>
+            <span style="color: var(--ink-primary);"><span class="font-medium">Tue–Thu</span> <span style="color: var(--ink-tertiary);">10am–2pm local</span></span>
+          </div>
+          <div class="flex items-baseline justify-between text-[13px]">
+            <span style="color: var(--ink-secondary);">Top responding segment</span>
+            <span style="color: var(--ink-primary);"><span class="font-medium">Inbound referrals</span></span>
+          </div>
+          <div class="flex items-baseline justify-between text-[13px]">
+            <span style="color: var(--ink-secondary);">Sample size</span>
+            <span style="color: var(--ink-primary);"><span class="tabular">234</span> interactions · <span style="color: var(--emerald-700);">growing</span></span>
+          </div>
+        </div>
+
+        <footer class="mt-1 pt-3 flex items-center justify-between" style="border-top: 0.5px solid var(--border-subtle);">
+          <span class="text-[12px]" style="color: var(--ink-tertiary);">Auto-learning · updates after every conversation</span>
+          <button class="btn-ghost text-[12px]" style="color: var(--violet-500);">View patterns →</button>
+        </footer>
+      </section>
+
+      <!-- Layer 4: Outcome Learning -->
+      <section class="layer-card">
+        <header class="flex items-start justify-between mb-3">
+          <div>
+            <span class="layer-tag" style="background: var(--violet-100); color: var(--violet-700);">Layer 4 · Outcome</span>
+            <h3 class="text-[18px] font-medium mt-2" style="color: var(--ink-primary);">Outcome learning</h3>
+            <p class="text-[12px] mt-0.5" style="color: var(--ink-tertiary);">What works — by strategy, channel, segment</p>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="dot-pulse-violet"></span>
+            <span class="text-[11px] font-medium tabular px-2 py-0.5 rounded-full" style="background: var(--warning-soft); color: var(--warning-text);">43%</span>
+          </div>
+        </header>
+
+        <div class="bar-track mb-4"><div class="bar-fill" style="width: 43%; background: var(--warning);"></div></div>
+
+        <div class="space-y-2.5 mb-3">
+          <div class="flex items-baseline justify-between text-[13px]">
+            <span style="color: var(--ink-secondary);">Direct conversion</span>
+            <span class="tabular" style="color: var(--emerald-700);">34% win</span>
+          </div>
+          <div class="flex items-baseline justify-between text-[13px]">
+            <span style="color: var(--ink-secondary);">Re-engagement</span>
+            <span class="tabular" style="color: var(--ink-primary);">18% win</span>
+          </div>
+          <div class="flex items-baseline justify-between text-[13px]">
+            <span style="color: var(--ink-secondary);">Trust building</span>
+            <span class="tabular" style="color: var(--ink-tertiary);">— learning</span>
+          </div>
+          <div class="flex items-baseline justify-between text-[13px]">
+            <span style="color: var(--ink-secondary);">Sample size</span>
+            <span style="color: var(--ink-primary);"><span class="tabular">31</span> outcomes · <span class="tabular" style="color: var(--ink-tertiary);">need 100+ for high-confidence ML</span></span>
+          </div>
+        </div>
+
+        <div class="callout mt-3" style="background: var(--warning-soft); color: var(--warning-text);">
+          <span class="font-medium">This is your biggest lever.</span> Each completed objective makes growth measurably better at picking strategies. Right now the AI uses statistical heuristics; at 100+ outcomes it switches to ML predictions.
+        </div>
+      </section>
+
+    </div>
+
+    <!-- Memory snapshot footer -->
+    <div class="rounded-xl p-5 mb-10" style="background: white; border: 0.5px solid var(--border-subtle);">
+      <div class="flex items-center justify-between mb-3">
+        <div class="flex items-center gap-3">
+          <h3 class="text-[15px] font-medium" style="color: var(--ink-primary);">Recent Brain updates</h3>
+          <span class="text-[11px] font-medium px-2 py-0.5 rounded-full" style="background: var(--emerald-100); color: var(--emerald-700);">Live</span>
+        </div>
+        <button class="btn-ghost">Open audit log →</button>
+      </div>
+      <ul class="space-y-2.5">
+        <li class="flex items-baseline gap-3 text-[13px] py-1.5" style="border-top: 0.5px solid var(--border-subtle);">
+          <span class="tabular text-[12px]" style="color: var(--ink-tertiary); min-width: 56px;">2m ago</span>
+          <span style="color: var(--ink-primary);">Added pattern: <span class="font-mono text-[12px] px-1.5 py-0.5 rounded" style="background: var(--surface-sunken);">referral_segment.preferred_channel = sms (n=47)</span></span>
+        </li>
+        <li class="flex items-baseline gap-3 text-[13px] py-1.5" style="border-top: 0.5px solid var(--border-subtle);">
+          <span class="tabular text-[12px]" style="color: var(--ink-tertiary); min-width: 56px;">8m ago</span>
+          <span style="color: var(--ink-primary);">Updated outcome: Direct conversion win rate <span class="tabular">32% → 34%</span> after Lisa Park booking</span>
+        </li>
+        <li class="flex items-baseline gap-3 text-[13px] py-1.5" style="border-top: 0.5px solid var(--border-subtle);">
+          <span class="tabular text-[12px]" style="color: var(--ink-tertiary); min-width: 56px;">22m ago</span>
+          <span style="color: var(--ink-primary);">Recorded objection: <span class="font-mono text-[12px] px-1.5 py-0.5 rounded" style="background: var(--surface-sunken);">pricing.too_high</span> from Michael Torres — handler script not in Brain</span>
+        </li>
+        <li class="flex items-baseline gap-3 text-[13px] py-1.5" style="border-top: 0.5px solid var(--border-subtle);">
+          <span class="tabular text-[12px]" style="color: var(--ink-tertiary); min-width: 56px;">1h ago</span>
+          <span style="color: var(--ink-primary);">Synced from HubSpot: <span class="tabular">8 new contacts · 2 deal stage updates</span></span>
+        </li>
+      </ul>
+    </div>
+
+    <footer class="text-center mt-8 mb-10 text-[12px]" style="color: var(--ink-tertiary);">
+      Mockup · growth design system v1 · AxisOne
+    </footer>
+
+  </div>
+</main>
+
+</body>
+</html>

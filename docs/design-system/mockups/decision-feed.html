@@ -1,0 +1,580 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>growth — Decision Feed mockup</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+:root {
+  --surface-base: #FBF9F4;
+  --surface-raised: #FFFFFF;
+  --surface-sunken: #F4F0E6;
+  --ink-primary: #1F1432;
+  --ink-secondary: #4A3F5C;
+  --ink-tertiary: #8A7F9C;
+  --border-subtle: #ECE6D9;
+  --border-default: #DDD3C0;
+  --violet-100: #EEEAFC;
+  --violet-500: #5C3FE5;
+  --violet-600: #4A30C7;
+  --violet-700: #3B249E;
+  --emerald-100: #DCF4EB;
+  --emerald-500: #0EA882;
+  --emerald-700: #0A6B52;
+  --warning: #D97706;
+  --warning-soft: #FCEFD9;
+  --warning-text: #92590E;
+  --danger: #C73E3E;
+  --danger-soft: #F8E1E1;
+  --danger-text: #8E2424;
+}
+html, body {
+  background: var(--surface-base); color: var(--ink-primary);
+  font-family: 'Inter', system-ui, sans-serif;
+  font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+}
+.font-mono { font-family: 'JetBrains Mono', monospace; }
+.tabular { font-variant-numeric: tabular-nums; }
+.brand-mark {
+  width: 28px; height: 28px; border-radius: 8px; background: var(--violet-500);
+  display: inline-flex; align-items: center; justify-content: center;
+  color: white; font-weight: 500; font-size: 13px;
+}
+.sidebar {
+  width: 240px; background: var(--surface-raised);
+  border-right: 0.5px solid var(--border-subtle);
+  height: 100vh; position: fixed; left: 0; top: 0;
+  display: flex; flex-direction: column;
+}
+.nav-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px; border-radius: 8px;
+  font-size: 13px; color: var(--ink-secondary);
+  transition: background 100ms;
+  cursor: pointer;
+}
+.nav-item:hover { background: var(--surface-sunken); }
+.nav-item.active {
+  background: var(--violet-100); color: var(--violet-700); font-weight: 500;
+}
+.nav-item .badge {
+  margin-left: auto; font-size: 11px; padding: 1px 6px; border-radius: 999px;
+  background: var(--danger-soft); color: var(--danger-text);
+}
+.topbar {
+  height: 56px; background: var(--surface-raised);
+  border-bottom: 0.5px solid var(--border-subtle);
+  display: flex; align-items: center; padding: 0 24px; gap: 16px;
+  position: sticky; top: 0; z-index: 10;
+}
+.search-input {
+  flex: 1; max-width: 400px;
+  background: var(--surface-base); border: 0.5px solid var(--border-subtle);
+  border-radius: 8px; padding: 7px 12px 7px 34px;
+  font-size: 13px; color: var(--ink-primary);
+}
+.search-input::placeholder { color: var(--ink-tertiary); }
+.status-pill {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 5px 12px; border-radius: 999px;
+  background: var(--surface-base); border: 0.5px solid var(--border-subtle);
+  font-size: 12px; color: var(--ink-primary);
+}
+.status-dot {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--emerald-500);
+  box-shadow: 0 0 0 4px rgba(14, 168, 130, 0.18);
+  animation: pulse 1.5s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 4px rgba(14, 168, 130, 0.18); }
+  50% { box-shadow: 0 0 0 8px rgba(14, 168, 130, 0.06); }
+}
+.confidence-badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 1px 8px; border-radius: 999px;
+  font-size: 11px; font-weight: 500;
+  border: 0.5px solid;
+}
+.confidence-badge .cdot {
+  width: 5px; height: 5px; border-radius: 50%;
+}
+.conf-high { background: var(--emerald-100); color: var(--emerald-700); border-color: #9FD9C2; }
+.conf-high .cdot { background: var(--emerald-500); }
+.conf-normal { background: var(--violet-100); color: var(--violet-700); border-color: #C7B8F4; }
+.conf-normal .cdot { background: var(--violet-500); }
+.conf-low { background: var(--warning-soft); color: var(--warning-text); border-color: #F1D4A0; }
+.conf-low .cdot { background: var(--warning); }
+.conf-below { background: var(--danger-soft); color: var(--danger-text); border-color: #EBB5B5; }
+.conf-below .cdot { background: var(--danger); }
+.metric-cell {
+  background: white; padding: 16px 20px;
+}
+.metric-label {
+  font-size: 12px; color: var(--ink-tertiary); margin-bottom: 4px;
+}
+.metric-value {
+  font-size: 22px; font-weight: 500; color: var(--ink-primary);
+}
+.feed-row {
+  display: grid; grid-template-columns: 4px 1fr; gap: 0;
+  background: white; border: 0.5px solid var(--border-subtle);
+  border-radius: 12px; transition: border-color 100ms;
+}
+.feed-row:hover { border-color: var(--border-default); }
+.feed-row.escalation {
+  border-left: 4px solid var(--danger);
+  border-top-left-radius: 12px; border-bottom-left-radius: 12px;
+}
+.feed-row.success {
+  border-left: 4px solid var(--emerald-500);
+}
+.feed-row.pending {
+  border-left: 4px solid var(--warning);
+}
+.feed-row.ai-acting {
+  border-left: 4px solid var(--violet-500);
+}
+.feed-row.overridden {
+  border-left: 4px solid var(--ink-tertiary);
+  opacity: 0.75;
+}
+.action-icon {
+  width: 32px; height: 32px; border-radius: 8px;
+  display: inline-flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.btn-primary {
+  background: var(--violet-500); color: white;
+  padding: 7px 14px; border-radius: 7px;
+  font-size: 12px; font-weight: 500;
+}
+.btn-secondary {
+  background: transparent; color: var(--ink-secondary);
+  padding: 7px 14px; border-radius: 7px;
+  font-size: 12px; font-weight: 500; border: 0.5px solid var(--border-default);
+}
+.btn-ghost {
+  background: transparent; color: var(--ink-tertiary);
+  padding: 7px 12px; border-radius: 7px;
+  font-size: 12px;
+}
+.btn-ghost:hover { background: var(--surface-sunken); color: var(--ink-secondary); }
+.filter-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 12px; border-radius: 999px;
+  background: white; border: 0.5px solid var(--border-subtle);
+  font-size: 12px; color: var(--ink-secondary);
+  cursor: pointer; transition: all 100ms;
+}
+.filter-pill:hover { border-color: var(--border-default); }
+.filter-pill.active {
+  background: var(--violet-100); color: var(--violet-700);
+  border-color: #C7B8F4; font-weight: 500;
+}
+.reasoning-block {
+  margin-top: 12px; padding: 10px 14px; border-radius: 8px;
+  background: var(--surface-sunken); font-size: 12px;
+  color: var(--ink-secondary); font-family: 'JetBrains Mono', monospace;
+  line-height: 1.6;
+}
+.avatar {
+  width: 28px; height: 28px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 500;
+  background: var(--violet-100); color: var(--violet-700);
+}
+@media (prefers-reduced-motion: reduce) {
+  .status-dot { animation: none; }
+}
+</style>
+</head>
+<body>
+
+<!-- Sidebar -->
+<aside class="sidebar">
+  <div class="px-4 py-4 flex items-center gap-2.5" style="border-bottom: 0.5px solid var(--border-subtle);">
+    <div class="brand-mark">g</div>
+    <div>
+      <div class="text-[14px] font-medium" style="color: var(--ink-primary);">growth</div>
+      <div class="text-[11px]" style="color: var(--ink-tertiary);">Acme Corp · Production</div>
+    </div>
+  </div>
+
+  <nav class="flex-1 px-3 py-4 space-y-0.5">
+    <div class="text-[10px] font-medium uppercase tracking-wide px-3 mb-1.5" style="color: var(--ink-tertiary);">Operate</div>
+    <div class="nav-item active">
+      <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6h16.5M3.75 12h16.5m-16.5 5.25h16.5"/></svg>
+      Decision Feed
+    </div>
+    <div class="nav-item">
+      <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.241-.438.613-.43.992a6.759 6.759 0 010 .255c-.008.378.137.75.43.991l1.004.827c.424.35.534.955.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.28c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.02-.398-1.109-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.991a6.932 6.932 0 010-.255c.007-.38-.138-.751-.43-.992l-1.004-.827a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.28z"/><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+      Business Brain
+    </div>
+    <div class="nav-item">
+      <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.964-3.07M12 6.375a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zm8.25 2.25a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z"/></svg>
+      Contacts
+    </div>
+    <div class="nav-item">
+      <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"/></svg>
+      Escalations
+      <span class="badge">3</span>
+    </div>
+    <div class="nav-item">
+      <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11.42 15.17L17.25 21A2.652 2.652 0 0021 17.25l-5.877-5.877M11.42 15.17l2.496-3.03c.317-.384.74-.626 1.208-.766M11.42 15.17l-4.655 5.653a2.548 2.548 0 11-3.586-3.586l6.837-5.63m5.108-.233c.55-.164 1.163-.188 1.743-.14a4.5 4.5 0 004.486-6.336l-3.276 3.277a3.004 3.004 0 01-2.25-2.25l3.276-3.276a4.5 4.5 0 00-6.336 4.486c.091 1.076-.071 2.264-.904 2.95l-.102.085m-1.745 1.437L5.909 7.5H4.5L2.25 3.75l1.5-1.5L7.5 4.5v1.409l4.26 4.26m-1.745 1.437l1.745-1.437m6.615 8.206L15.75 15.75M4.867 19.125h.008v.008h-.008v-.008z"/></svg>
+      Objectives
+    </div>
+    <div class="text-[10px] font-medium uppercase tracking-wide px-3 mb-1.5 mt-5" style="color: var(--ink-tertiary);">Govern</div>
+    <div class="nav-item">
+      <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"/></svg>
+      Audit log
+    </div>
+    <div class="nav-item">
+      <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12c0 1.268-.63 2.39-1.593 3.068a3.745 3.745 0 01-1.043 3.296 3.745 3.745 0 01-3.296 1.043A3.745 3.745 0 0112 21c-1.268 0-2.39-.63-3.068-1.593a3.746 3.746 0 01-3.296-1.043 3.745 3.745 0 01-1.043-3.296A3.745 3.745 0 013 12c0-1.268.63-2.39 1.593-3.068a3.745 3.745 0 011.043-3.296 3.746 3.746 0 013.296-1.043A3.746 3.746 0 0112 3c1.268 0 2.39.63 3.068 1.593a3.746 3.746 0 013.296 1.043 3.746 3.746 0 011.043 3.296A3.745 3.745 0 0121 12z"/></svg>
+      Knowledge center
+    </div>
+    <div class="nav-item">
+      <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M10.343 3.94c.09-.542.56-.94 1.11-.94h1.093c.55 0 1.02.398 1.11.94l.149.894c.07.424.384.764.78.93.398.164.855.142 1.205-.108l.737-.527a1.125 1.125 0 011.45.12l.773.774c.39.389.44 1.002.12 1.45l-.527.737c-.25.35-.272.806-.107 1.204.165.397.505.71.93.78l.893.15c.543.09.94.56.94 1.109v1.094c0 .55-.397 1.02-.94 1.11l-.893.149c-.425.07-.765.383-.93.78-.165.398-.143.854.107 1.204l.527.738c.32.447.269 1.06-.12 1.45l-.774.773a1.125 1.125 0 01-1.449.12l-.738-.527c-.35-.25-.806-.272-1.203-.107-.397.165-.71.505-.781.929l-.149.894c-.09.542-.56.94-1.11.94h-1.094c-.55 0-1.019-.398-1.11-.94l-.148-.894c-.071-.424-.384-.764-.781-.93-.398-.164-.854-.142-1.204.108l-.738.527c-.447.32-1.06.269-1.45-.12l-.773-.774a1.125 1.125 0 01-.12-1.45l.527-.737c.25-.35.273-.806.108-1.204-.165-.397-.505-.71-.93-.78l-.894-.15c-.542-.09-.94-.56-.94-1.109v-1.094c0-.55.398-1.02.94-1.11l.894-.149c.424-.07.765-.383.93-.78.165-.398.143-.854-.107-1.204l-.527-.738a1.125 1.125 0 01.12-1.45l.773-.773a1.125 1.125 0 011.45-.12l.737.527c.35.25.807.272 1.204.107.397-.165.71-.505.78-.929l.15-.894z"/><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+      AI controls
+    </div>
+    <div class="nav-item">
+      <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13.5 21v-7.5a.75.75 0 01.75-.75h3a.75.75 0 01.75.75V21m-4.5 0H2.36m11.14 0H18m0 0h3.64m-1.39 0V9.349m-16.5 11.65V9.35m0 0a3.001 3.001 0 003.75-.615A2.993 2.993 0 009.75 9.75c.896 0 1.7-.393 2.25-1.016a2.993 2.993 0 002.25 1.016c.896 0 1.7-.393 2.25-1.016a3.001 3.001 0 003.75.614m-16.5 0a3.004 3.004 0 01-.621-4.72L4.318 3.44A1.5 1.5 0 015.378 3h13.243a1.5 1.5 0 011.06.44l1.19 1.189a3 3 0 01-.621 4.72m-13.5 8.65h3.75a.75.75 0 00.75-.75V13.5a.75.75 0 00-.75-.75H6.75a.75.75 0 00-.75.75v3.75c0 .415.336.75.75.75z"/></svg>
+      Settings
+    </div>
+  </nav>
+
+  <div class="px-3 py-3" style="border-top: 0.5px solid var(--border-subtle);">
+    <div class="flex items-center gap-2.5 px-2 py-2 rounded-lg hover:bg-stone-50 cursor-pointer">
+      <div class="avatar">FB</div>
+      <div class="flex-1 min-w-0">
+        <div class="text-[12px] font-medium truncate" style="color: var(--ink-primary);">Fred Binette</div>
+        <div class="text-[11px] truncate" style="color: var(--ink-tertiary);">Admin</div>
+      </div>
+    </div>
+  </div>
+</aside>
+
+<!-- Main canvas -->
+<main style="margin-left: 240px;">
+  <!-- Topbar -->
+  <header class="topbar">
+    <div class="relative" style="flex: 1; max-width: 400px;">
+      <svg class="absolute left-3 top-1/2 -translate-y-1/2" width="14" height="14" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" style="color: var(--ink-tertiary);"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z"/></svg>
+      <input class="search-input w-full" placeholder="Search contacts, decisions, knowledge..." />
+    </div>
+    <div class="ml-auto flex items-center gap-3">
+      <span class="status-pill">
+        <span class="status-dot"></span>
+        <span class="font-medium">System active</span>
+      </span>
+      <button class="btn-ghost flex items-center gap-2">
+        <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <div class="px-8 py-7 max-w-[1100px]">
+    <!-- Page header -->
+    <div class="flex items-end justify-between mb-6">
+      <div>
+        <h1 class="text-[24px] font-medium leading-tight" style="color: var(--ink-primary);">Decision Feed</h1>
+        <p class="text-[13px] mt-1" style="color: var(--ink-secondary);">Live stream of every action growth is taking right now.</p>
+      </div>
+      <div class="flex items-center gap-2">
+        <button class="btn-ghost flex items-center gap-1.5">
+          <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/></svg>
+          Export
+        </button>
+        <button class="btn-secondary flex items-center gap-1.5">
+          <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6.042A8.967 8.967 0 006 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 016 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 016-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0018 18a8.967 8.967 0 00-6 2.292m0-14.25v14.25"/></svg>
+          Open audit log
+        </button>
+      </div>
+    </div>
+
+    <!-- KPI strip -->
+    <div class="grid grid-cols-5 gap-px rounded-xl overflow-hidden mb-6" style="background: var(--border-subtle);">
+      <div class="metric-cell">
+        <div class="metric-label">Brain intelligence</div>
+        <div class="metric-value tabular">72<span class="text-[14px]" style="color: var(--ink-tertiary);">/100</span></div>
+        <div class="text-[12px] tabular mt-1" style="color: var(--emerald-700);">↑ 4 this week</div>
+      </div>
+      <div class="metric-cell">
+        <div class="metric-label">Active contacts</div>
+        <div class="metric-value tabular">847</div>
+        <div class="text-[12px] tabular mt-1" style="color: var(--ink-tertiary);">in conversation</div>
+      </div>
+      <div class="metric-cell">
+        <div class="metric-label">Decisions today</div>
+        <div class="metric-value tabular">234</div>
+        <div class="text-[12px] tabular mt-1" style="color: var(--ink-tertiary);">avg confidence 79%</div>
+      </div>
+      <div class="metric-cell">
+        <div class="metric-label">Objectives achieved</div>
+        <div class="metric-value tabular">31</div>
+        <div class="text-[12px] tabular mt-1" style="color: var(--ink-tertiary);">4 booked · 27 qualified</div>
+      </div>
+      <div class="metric-cell">
+        <div class="metric-label">Escalations</div>
+        <div class="metric-value tabular" style="color: var(--danger-text);">3</div>
+        <div class="text-[12px] mt-1" style="color: var(--danger-text);">need your attention</div>
+      </div>
+    </div>
+
+    <!-- Filter row -->
+    <div class="flex items-center gap-2 mb-5">
+      <span class="filter-pill active">
+        All activity
+        <span class="tabular" style="color: var(--ink-tertiary);">234</span>
+      </span>
+      <span class="filter-pill">
+        <span style="color: var(--violet-500);">●</span>
+        AI decisions
+        <span class="tabular" style="color: var(--ink-tertiary);">189</span>
+      </span>
+      <span class="filter-pill">
+        <span style="color: var(--emerald-500);">●</span>
+        Objectives achieved
+        <span class="tabular" style="color: var(--ink-tertiary);">31</span>
+      </span>
+      <span class="filter-pill">
+        <span style="color: var(--warning);">●</span>
+        Awaiting approval
+        <span class="tabular" style="color: var(--ink-tertiary);">11</span>
+      </span>
+      <span class="filter-pill">
+        <span style="color: var(--danger);">●</span>
+        Escalations
+        <span class="tabular" style="color: var(--ink-tertiary);">3</span>
+      </span>
+      <div class="ml-auto text-[12px]" style="color: var(--ink-tertiary);">
+        Live · last update <span class="tabular">2s</span> ago
+      </div>
+    </div>
+
+    <!-- Feed stream -->
+    <div class="space-y-3">
+
+      <!-- Escalation -->
+      <div class="feed-row escalation">
+        <div></div>
+        <div class="px-5 py-4">
+          <div class="flex items-start gap-3">
+            <div class="action-icon" style="background: var(--danger-soft);">
+              <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" style="color: var(--danger-text);"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"/></svg>
+            </div>
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-3 mb-1">
+                <span class="text-[11px] font-medium uppercase tracking-wide" style="color: var(--danger-text);">Escalation required</span>
+                <span class="confidence-badge conf-below"><span class="cdot"></span>31% · escalated</span>
+                <span class="text-[12px] tabular ml-auto" style="color: var(--ink-tertiary);">8m ago</span>
+              </div>
+              <div class="text-[14px] mb-1.5" style="color: var(--ink-primary);">
+                <span class="font-medium">Michael Torres</span>
+                <span style="color: var(--ink-tertiary);"> · Bright Studios · Direct conversion</span>
+              </div>
+              <p class="text-[13px]" style="color: var(--ink-secondary);">
+                Confidence dropped after pricing objection — below your 40% threshold. AI paused; needs your input.
+              </p>
+              <div class="reasoning-block">
+                3 touches over 8 days · qualified on timeline + authority · stalled on budget objection · pricing tolerance signal missing from Brain · Direct strategy recommends pause for human framing
+              </div>
+              <div class="flex items-center gap-2 mt-3">
+                <button class="btn-primary">Take over conversation</button>
+                <button class="btn-secondary">Adjust strategy</button>
+                <button class="btn-ghost ml-auto">View contact →</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- AI decision: high confidence -->
+      <div class="feed-row ai-acting">
+        <div></div>
+        <div class="px-5 py-4">
+          <div class="flex items-start gap-3">
+            <div class="action-icon" style="background: var(--violet-100);">
+              <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" style="color: var(--violet-500);"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.125A59.769 59.769 0 0121.485 12 59.768 59.768 0 013.27 20.875L5.999 12zm0 0h7.5"/></svg>
+            </div>
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-3 mb-1">
+                <span class="text-[11px] font-medium uppercase tracking-wide" style="color: var(--violet-700);">Sending follow-up</span>
+                <span class="confidence-badge conf-high"><span class="cdot"></span>87% · high</span>
+                <span class="text-[12px] tabular ml-auto" style="color: var(--ink-tertiary);">2m ago</span>
+              </div>
+              <div class="text-[14px] mb-1.5" style="color: var(--ink-primary);">
+                <span class="font-medium">Sarah Chen</span>
+                <span style="color: var(--ink-tertiary);"> · Acme Corp · Direct conversion · SMS</span>
+              </div>
+              <p class="text-[13px]" style="color: var(--ink-secondary);">
+                Budget confirmed ($5K range), timeline Q2, decision maker reached. Sending pricing options + booking link.
+              </p>
+              <div class="flex items-center gap-3 mt-3">
+                <button class="btn-ghost text-[12px] font-medium" style="color: var(--violet-500);">View reasoning →</button>
+                <button class="btn-ghost ml-auto">Override</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Pending: high deal value rule -->
+      <div class="feed-row pending">
+        <div></div>
+        <div class="px-5 py-4">
+          <div class="flex items-start gap-3">
+            <div class="action-icon" style="background: var(--warning-soft);">
+              <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" style="color: var(--warning-text);"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+            </div>
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-3 mb-1">
+                <span class="text-[11px] font-medium uppercase tracking-wide" style="color: var(--warning-text);">Awaiting your approval</span>
+                <span class="confidence-badge conf-high"><span class="cdot"></span>91% · high</span>
+                <span class="text-[12px] tabular ml-auto" style="color: var(--ink-tertiary);">5m ago</span>
+              </div>
+              <div class="text-[14px] mb-1.5" style="color: var(--ink-primary);">
+                <span class="font-medium">Diana Patel</span>
+                <span style="color: var(--ink-tertiary);"> · Lighthouse Capital · Deal value $42K · Direct conversion</span>
+              </div>
+              <p class="text-[13px]" style="color: var(--ink-secondary);">
+                AI has prepared a proposal and 30-min call slot. Held for human approval per your rule: <span class="font-mono text-[12px] px-1.5 py-0.5 rounded" style="background: var(--surface-sunken);">deal_value > $25K</span>.
+              </p>
+              <div class="flex items-center gap-2 mt-3">
+                <button class="btn-primary">Approve and send</button>
+                <button class="btn-secondary">Edit message</button>
+                <button class="btn-ghost ml-auto">View proposal →</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Re-engagement: normal confidence -->
+      <div class="feed-row ai-acting">
+        <div></div>
+        <div class="px-5 py-4">
+          <div class="flex items-start gap-3">
+            <div class="action-icon" style="background: var(--violet-100);">
+              <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" style="color: var(--violet-500);"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99"/></svg>
+            </div>
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-3 mb-1">
+                <span class="text-[11px] font-medium uppercase tracking-wide" style="color: var(--violet-700);">Re-engaging cold contact</span>
+                <span class="confidence-badge conf-normal"><span class="cdot"></span>71% · normal</span>
+                <span class="text-[12px] tabular ml-auto" style="color: var(--ink-tertiary);">12m ago</span>
+              </div>
+              <div class="text-[14px] mb-1.5" style="color: var(--ink-primary);">
+                <span class="font-medium">Tom Bradley</span>
+                <span style="color: var(--ink-tertiary);"> · Quarterhouse · Re-engagement · Email</span>
+              </div>
+              <p class="text-[13px]" style="color: var(--ink-secondary);">
+                Inactive 45 days. Trying a new angle: Q2 availability window — referenced his earlier interest in onboarding by April 30.
+              </p>
+              <div class="flex items-center gap-3 mt-3">
+                <button class="btn-ghost text-[12px] font-medium" style="color: var(--violet-500);">View reasoning →</button>
+                <button class="btn-ghost ml-auto">Override</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Objective achieved -->
+      <div class="feed-row success">
+        <div></div>
+        <div class="px-5 py-4">
+          <div class="flex items-start gap-3">
+            <div class="action-icon" style="background: var(--emerald-100);">
+              <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5" style="color: var(--emerald-700);"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5"/></svg>
+            </div>
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-3 mb-1">
+                <span class="text-[11px] font-medium uppercase tracking-wide" style="color: var(--emerald-700);">Objective achieved</span>
+                <span class="text-[12px] tabular ml-auto" style="color: var(--ink-tertiary);">22m ago</span>
+              </div>
+              <div class="text-[14px] mb-1" style="color: var(--ink-primary);">
+                <span class="font-medium">Lisa Park</span>
+                <span style="color: var(--ink-tertiary);"> · Northwave · Booking confirmed for May 8 at 2:30 PM</span>
+              </div>
+              <p class="text-[13px]" style="color: var(--ink-secondary);">
+                Direct conversion successful in 4 touches over 6 days. Recorded as outcome — Brain learning updated.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- AI decision: low confidence -->
+      <div class="feed-row ai-acting">
+        <div></div>
+        <div class="px-5 py-4">
+          <div class="flex items-start gap-3">
+            <div class="action-icon" style="background: var(--violet-100);">
+              <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" style="color: var(--violet-500);"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.76c0 1.6 1.123 2.994 2.707 3.227 1.087.16 2.185.283 3.293.369V21l4.184-4.183a1.14 1.14 0 01.778-.332 48.294 48.294 0 005.83-.498c1.585-.233 2.708-1.626 2.708-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0012 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018z"/></svg>
+            </div>
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-3 mb-1">
+                <span class="text-[11px] font-medium uppercase tracking-wide" style="color: var(--violet-700);">Asking discovery question</span>
+                <span class="confidence-badge conf-low"><span class="cdot"></span>47% · low</span>
+                <span class="text-[12px] tabular ml-auto" style="color: var(--ink-tertiary);">28m ago</span>
+              </div>
+              <div class="text-[14px] mb-1.5" style="color: var(--ink-primary);">
+                <span class="font-medium">Marcus Lin</span>
+                <span style="color: var(--ink-tertiary);"> · Fold &amp; Co · Trust building · WhatsApp</span>
+              </div>
+              <p class="text-[13px]" style="color: var(--ink-secondary);">
+                First touch — confidence is low because Brain has no historical data on this contact yet. Asking what they're trying to solve before pitching anything.
+              </p>
+              <div class="flex items-center gap-3 mt-3">
+                <button class="btn-ghost text-[12px] font-medium" style="color: var(--violet-500);">View reasoning →</button>
+                <button class="btn-ghost ml-auto">Override</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Overridden -->
+      <div class="feed-row overridden">
+        <div></div>
+        <div class="px-5 py-4">
+          <div class="flex items-start gap-3">
+            <div class="action-icon" style="background: var(--surface-sunken);">
+              <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" style="color: var(--ink-tertiary);"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z"/></svg>
+            </div>
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-3 mb-1">
+                <span class="text-[11px] font-medium uppercase tracking-wide" style="color: var(--ink-tertiary);">Overridden by you</span>
+                <span class="text-[12px] tabular ml-auto" style="color: var(--ink-tertiary);">42m ago</span>
+              </div>
+              <div class="text-[14px] mb-1" style="color: var(--ink-primary);">
+                <span class="font-medium">Priya Shah</span>
+                <span style="color: var(--ink-tertiary);"> · Helio · Strategy switched from Re-engagement → Trust building</span>
+              </div>
+              <p class="text-[13px]" style="color: var(--ink-secondary);">
+                Your note: "She's a referral from David — long sales cycle. Don't pressure."
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="text-center mt-8 mb-4">
+      <button class="btn-secondary">Load earlier activity</button>
+    </div>
+
+    <footer class="text-center mt-6 mb-10 text-[12px]" style="color: var(--ink-tertiary);">
+      Mockup · growth design system v1 · AxisOne
+    </footer>
+
+  </div>
+</main>
+
+</body>
+</html>

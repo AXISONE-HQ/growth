@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>growth — Onboarding flow mockup</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+:root {
+  --surface-base: #FBF9F4;
+  --surface-raised: #FFFFFF;
+  --surface-sunken: #F4F0E6;
+  --ink-primary: #1F1432;
+  --ink-secondary: #4A3F5C;
+  --ink-tertiary: #8A7F9C;
+  --border-subtle: #ECE6D9;
+  --border-default: #DDD3C0;
+  --violet-100: #EEEAFC;
+  --violet-500: #5C3FE5;
+  --violet-600: #4A30C7;
+  --violet-700: #3B249E;
+  --emerald-100: #DCF4EB;
+  --emerald-500: #0EA882;
+  --emerald-700: #0A6B52;
+  --warning: #D97706;
+  --warning-soft: #FCEFD9;
+  --warning-text: #92590E;
+  --danger: #C73E3E;
+}
+html, body {
+  background: var(--surface-base);
+  color: var(--ink-primary);
+  font-family: 'Inter', system-ui, sans-serif;
+  font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+}
+.font-mono { font-family: 'JetBrains Mono', monospace; }
+.tabular { font-variant-numeric: tabular-nums; }
+.brand-mark {
+  width: 28px; height: 28px; border-radius: 8px; background: var(--violet-500);
+  display: inline-flex; align-items: center; justify-content: center;
+  color: white; font-weight: 500; font-size: 13px;
+}
+.step-shell {
+  background: var(--surface-raised);
+  border: 0.5px solid var(--border-subtle);
+  border-radius: 16px;
+  overflow: hidden;
+}
+.step-tag {
+  display: inline-block; padding: 2px 10px; border-radius: 999px;
+  background: var(--violet-100); color: var(--violet-700);
+  font-size: 11px; font-weight: 500; letter-spacing: 0.4px; text-transform: uppercase;
+}
+.btn-primary {
+  background: var(--violet-500); color: white;
+  padding: 10px 18px; border-radius: 8px;
+  font-size: 13px; font-weight: 500; transition: background 150ms;
+}
+.btn-primary:hover { background: var(--violet-600); }
+.btn-secondary {
+  background: transparent; color: var(--ink-secondary);
+  padding: 10px 18px; border-radius: 8px;
+  font-size: 13px; font-weight: 500; border: 0.5px solid var(--border-default);
+}
+.btn-source {
+  background: white; border: 0.5px solid var(--border-subtle);
+  padding: 14px 16px; border-radius: 12px;
+  display: flex; align-items: center; justify-content: space-between;
+  transition: border-color 150ms;
+}
+.btn-source:hover { border-color: var(--border-default); }
+.bar-track { background: var(--surface-sunken); height: 6px; border-radius: 999px; overflow: hidden; }
+.bar-fill { height: 100%; background: var(--violet-500); border-radius: 999px; transition: width 600ms; }
+.dot-pulse {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--violet-500);
+  position: relative; box-shadow: 0 0 0 4px rgba(92, 63, 229, 0.18);
+  animation: pulse 1.5s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 4px rgba(92, 63, 229, 0.18); }
+  50% { box-shadow: 0 0 0 8px rgba(92, 63, 229, 0.06); }
+}
+.radio {
+  width: 18px; height: 18px; border-radius: 50%;
+  border: 1.5px solid var(--border-default); flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.radio-checked {
+  border-color: var(--violet-500);
+}
+.radio-checked::after {
+  content: ''; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--violet-500);
+}
+.option-row {
+  background: white; border: 0.5px solid var(--border-subtle);
+  padding: 14px 16px; border-radius: 12px;
+  display: flex; align-items: center; gap: 12px;
+  cursor: pointer; transition: all 150ms;
+}
+.option-row:hover { border-color: var(--border-default); background: #FCFAF7; }
+.option-row.selected { border-color: var(--violet-500); background: var(--violet-100); }
+.tick {
+  width: 18px; height: 18px; border-radius: 50%; background: var(--emerald-500);
+  display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+}
+.tick svg { width: 11px; height: 11px; color: white; }
+@media (prefers-reduced-motion: reduce) {
+  .dot-pulse { animation: none; }
+  .bar-fill { transition: none; }
+}
+</style>
+</head>
+<body>
+
+<div class="max-w-[920px] mx-auto px-6 py-12">
+
+  <!-- Header -->
+  <header class="flex items-center justify-between mb-10">
+    <div class="flex items-center gap-2.5">
+      <div class="brand-mark">g</div>
+      <div>
+        <div class="text-[15px] font-medium" style="color: var(--ink-primary);">growth</div>
+        <div class="text-[11px]" style="color: var(--ink-tertiary);">by AxisOne</div>
+      </div>
+    </div>
+    <div class="text-[12px]" style="color: var(--ink-tertiary);">Onboarding flow · 5 steps</div>
+  </header>
+
+  <div class="mb-8">
+    <h1 class="text-[28px] font-medium leading-tight" style="color: var(--ink-primary);">
+      Welcome to growth
+    </h1>
+    <p class="text-[15px] mt-2" style="color: var(--ink-secondary);">
+      Connect your data. growth handles the rest.
+    </p>
+  </div>
+
+  <!-- Step 1: Connect data -->
+  <div class="step-shell mb-6">
+    <div class="px-7 py-5 flex items-center justify-between" style="border-bottom: 0.5px solid var(--border-subtle);">
+      <div class="flex items-center gap-3">
+        <span class="step-tag">Step 1 of 5</span>
+        <span class="text-[14px]" style="color: var(--ink-secondary);">Connect your data sources</span>
+      </div>
+      <div class="bar-track" style="width: 120px;"><div class="bar-fill" style="width: 20%;"></div></div>
+    </div>
+    <div class="px-7 py-7">
+      <h2 class="text-[20px] font-medium mb-1" style="color: var(--ink-primary);">
+        Where does your business live?
+      </h2>
+      <p class="text-[13px] mb-6" style="color: var(--ink-secondary);">
+        Pick one to get started. You can connect more later. growth never asks you to map fields.
+      </p>
+      <div class="grid grid-cols-1 gap-2.5">
+        <button class="btn-source">
+          <div class="flex items-center gap-3">
+            <div class="w-9 h-9 rounded-md flex items-center justify-center" style="background: #FF7A59;">
+              <span class="text-white font-medium text-[13px]">H</span>
+            </div>
+            <div class="text-left">
+              <div class="text-[14px] font-medium" style="color: var(--ink-primary);">HubSpot CRM</div>
+              <div class="text-[12px] flex items-center gap-1.5" style="color: var(--emerald-700);">
+                <span class="tick" style="width: 14px; height: 14px;">
+                  <svg fill="none" viewBox="0 0 24 24" stroke-width="3" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                </span>
+                Connected · 1,247 contacts · 312 deals
+              </div>
+            </div>
+          </div>
+          <div class="text-[12px]" style="color: var(--ink-tertiary);">Disconnect</div>
+        </button>
+        <button class="btn-source">
+          <div class="flex items-center gap-3">
+            <div class="w-9 h-9 rounded-md flex items-center justify-center" style="background: var(--surface-sunken); color: var(--ink-secondary);">
+              <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3"/></svg>
+            </div>
+            <div class="text-left">
+              <div class="text-[14px] font-medium" style="color: var(--ink-primary);">CSV upload</div>
+              <div class="text-[12px]" style="color: var(--ink-tertiary);">Bulk import existing contacts</div>
+            </div>
+          </div>
+          <div class="text-[13px] font-medium" style="color: var(--violet-500);">Upload →</div>
+        </button>
+        <button class="btn-source">
+          <div class="flex items-center gap-3">
+            <div class="w-9 h-9 rounded-md flex items-center justify-center" style="background: var(--surface-sunken); color: var(--ink-secondary);">
+              <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 9.776c.112-.017.227-.026.344-.026h15.812c.117 0 .232.009.344.026m-16.5 0a2.25 2.25 0 00-1.883 2.542l.857 6a2.25 2.25 0 002.227 1.932H19.05a2.25 2.25 0 002.227-1.932l.857-6a2.25 2.25 0 00-1.883-2.542m-16.5 0V6A2.25 2.25 0 016 3.75h3.879a1.5 1.5 0 011.06.44l2.122 2.12a1.5 1.5 0 001.06.44H18A2.25 2.25 0 0120.25 9v.776"/></svg>
+            </div>
+            <div class="text-left">
+              <div class="text-[14px] font-medium" style="color: var(--ink-primary);">Web form widget</div>
+              <div class="text-[12px]" style="color: var(--ink-tertiary);">Embed on your site to capture new leads</div>
+            </div>
+          </div>
+          <div class="text-[13px] font-medium" style="color: var(--violet-500);">Get embed code →</div>
+        </button>
+      </div>
+      <div class="flex items-center justify-end gap-2 mt-7">
+        <button class="btn-primary">Continue with HubSpot →</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Step 2: AI analyzes -->
+  <div class="step-shell mb-6">
+    <div class="px-7 py-5 flex items-center justify-between" style="border-bottom: 0.5px solid var(--border-subtle);">
+      <div class="flex items-center gap-3">
+        <span class="step-tag">Step 2 of 5</span>
+        <span class="text-[14px]" style="color: var(--ink-secondary);">growth is reading your business</span>
+      </div>
+      <div class="bar-track" style="width: 120px;"><div class="bar-fill" style="width: 40%;"></div></div>
+    </div>
+    <div class="px-7 py-9" style="background: var(--surface-base);">
+      <div class="flex items-center gap-2 mb-3">
+        <div class="dot-pulse"></div>
+        <span class="text-[12px] font-medium uppercase tracking-wide" style="color: var(--violet-500);">growth is thinking</span>
+      </div>
+      <h2 class="text-[24px] font-medium leading-tight mb-2" style="color: var(--ink-primary);">
+        Building your Living Business Brain
+      </h2>
+      <p class="text-[14px] mb-7" style="color: var(--ink-secondary);">
+        No setup. No field mapping. growth is figuring out what your business does, who your customers are, and how revenue flows — by reading what's already there.
+      </p>
+
+      <div class="space-y-4">
+        <!-- Layer 1: done -->
+        <div class="flex items-start gap-4">
+          <div class="tick mt-0.5">
+            <svg fill="none" viewBox="0 0 24 24" stroke-width="3" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+          </div>
+          <div class="flex-1">
+            <div class="flex items-center justify-between mb-1.5">
+              <span class="text-[14px] font-medium" style="color: var(--ink-primary);">Reading your contacts</span>
+              <span class="text-[12px]" style="color: var(--ink-tertiary);">Found 1,247 contacts across 312 companies</span>
+            </div>
+            <div class="bar-track"><div class="bar-fill" style="width: 100%; background: var(--emerald-500);"></div></div>
+          </div>
+        </div>
+
+        <!-- Layer 2: done -->
+        <div class="flex items-start gap-4">
+          <div class="tick mt-0.5">
+            <svg fill="none" viewBox="0 0 24 24" stroke-width="3" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+          </div>
+          <div class="flex-1">
+            <div class="flex items-center justify-between mb-1.5">
+              <span class="text-[14px] font-medium" style="color: var(--ink-primary);">Mapping your products and pricing</span>
+              <span class="text-[12px]" style="color: var(--ink-tertiary);">Identified 8 product types · price range $1.2K–$45K</span>
+            </div>
+            <div class="bar-track"><div class="bar-fill" style="width: 100%; background: var(--emerald-500);"></div></div>
+          </div>
+        </div>
+
+        <!-- Layer 3: in progress -->
+        <div class="flex items-start gap-4">
+          <div class="dot-pulse mt-1.5" style="margin-left: 5px;"></div>
+          <div class="flex-1">
+            <div class="flex items-center justify-between mb-1.5">
+              <span class="text-[14px] font-medium" style="color: var(--ink-primary);">Understanding your pipeline</span>
+              <span class="text-[12px] tabular" style="color: var(--violet-500);">71% · analyzing 312 deals</span>
+            </div>
+            <div class="bar-track"><div class="bar-fill" style="width: 71%;"></div></div>
+          </div>
+        </div>
+
+        <!-- Layer 4: queued -->
+        <div class="flex items-start gap-4">
+          <div class="w-[18px] h-[18px] rounded-full border-2 mt-0.5" style="border-color: var(--border-default);"></div>
+          <div class="flex-1">
+            <div class="flex items-center justify-between mb-1.5">
+              <span class="text-[14px]" style="color: var(--ink-tertiary);">Inferring strategy templates</span>
+              <span class="text-[12px]" style="color: var(--ink-tertiary);">Queued</span>
+            </div>
+            <div class="bar-track"><div class="bar-fill" style="width: 0%;"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="mt-7 px-4 py-3 rounded-md text-[12px] font-mono" style="background: white; border: 0.5px solid var(--border-subtle); color: var(--ink-secondary);">
+        Sample pattern detected: 67% of inbound leads convert via SMS within 48h of first touch · suggesting Direct Conversion as default strategy
+      </div>
+    </div>
+  </div>
+
+  <!-- Step 3: AI proposes -->
+  <div class="step-shell mb-6">
+    <div class="px-7 py-5 flex items-center justify-between" style="border-bottom: 0.5px solid var(--border-subtle);">
+      <div class="flex items-center gap-3">
+        <span class="step-tag">Step 3 of 5</span>
+        <span class="text-[14px]" style="color: var(--ink-secondary);">growth's understanding</span>
+      </div>
+      <div class="bar-track" style="width: 120px;"><div class="bar-fill" style="width: 60%;"></div></div>
+    </div>
+    <div class="px-7 py-7">
+      <h2 class="text-[20px] font-medium mb-2" style="color: var(--ink-primary);">
+        Here's what I understand about your business.
+      </h2>
+      <p class="text-[14px] mb-6" style="color: var(--ink-secondary);">
+        Read through. If something's off, you can adjust on the next step.
+      </p>
+
+      <div class="space-y-4">
+        <div class="flex gap-4 px-5 py-4 rounded-lg" style="background: var(--surface-base); border: 0.5px solid var(--border-subtle);">
+          <div class="text-[11px] font-medium mt-0.5 px-2 py-0.5 rounded-full uppercase tracking-wide whitespace-nowrap" style="background: var(--violet-100); color: var(--violet-700);">Industry</div>
+          <p class="text-[14px] leading-relaxed" style="color: var(--ink-primary);">
+            You appear to be a <span class="font-medium">B2B services company</span> — likely consulting or professional services. Your average deal size is <span class="font-medium tabular">$8,400</span> and your sales cycle averages <span class="font-medium tabular">23 days</span>.
+          </p>
+        </div>
+
+        <div class="flex gap-4 px-5 py-4 rounded-lg" style="background: var(--surface-base); border: 0.5px solid var(--border-subtle);">
+          <div class="text-[11px] font-medium mt-0.5 px-2 py-0.5 rounded-full uppercase tracking-wide whitespace-nowrap" style="background: var(--violet-100); color: var(--violet-700);">Objective</div>
+          <p class="text-[14px] leading-relaxed" style="color: var(--ink-primary);">
+            Your primary objective seems to be <span class="font-medium">booking consultations</span>. 78% of your closed-won deals started with a discovery call.
+          </p>
+        </div>
+
+        <div class="flex gap-4 px-5 py-4 rounded-lg" style="background: var(--surface-base); border: 0.5px solid var(--border-subtle);">
+          <div class="text-[11px] font-medium mt-0.5 px-2 py-0.5 rounded-full uppercase tracking-wide whitespace-nowrap" style="background: var(--violet-100); color: var(--violet-700);">Segments</div>
+          <div class="text-[14px] leading-relaxed" style="color: var(--ink-primary);">
+            <p class="mb-2">I've identified three distinct segments:</p>
+            <ul class="space-y-1 ml-1">
+              <li>· <span class="font-medium">Inbound leads</span> (524 contacts) — high intent, fast cycle</li>
+              <li>· <span class="font-medium">Referrals</span> (218 contacts) — highest conversion rate at 41%</li>
+              <li>· <span class="font-medium">Cold prospects</span> (505 contacts) — long-tail, needs nurturing</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="flex gap-4 px-5 py-4 rounded-lg" style="background: var(--surface-base); border: 0.5px solid var(--border-subtle);">
+          <div class="text-[11px] font-medium mt-0.5 px-2 py-0.5 rounded-full uppercase tracking-wide whitespace-nowrap" style="background: var(--violet-100); color: var(--violet-700);">Strategy</div>
+          <div class="text-[14px] leading-relaxed" style="color: var(--ink-primary);">
+            <p>Here's the strategy I'd run:</p>
+            <ul class="mt-2 space-y-1.5 ml-1">
+              <li>· <span class="font-medium">Direct conversion</span> for inbound and referral contacts — high intent signal</li>
+              <li>· <span class="font-medium">Re-engagement</span> for any contact inactive more than 30 days</li>
+              <li>· <span class="font-medium">Trust building</span> for cold prospects — multi-touch, lower urgency</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <div class="flex items-center justify-between mt-7">
+        <button class="btn-secondary">← Adjust segments</button>
+        <button class="btn-primary">This looks right →</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Step 4: 5 questions -->
+  <div class="step-shell mb-6">
+    <div class="px-7 py-5 flex items-center justify-between" style="border-bottom: 0.5px solid var(--border-subtle);">
+      <div class="flex items-center gap-3">
+        <span class="step-tag">Step 4 of 5</span>
+        <span class="text-[14px]" style="color: var(--ink-secondary);">A few quick confirmations</span>
+      </div>
+      <div class="bar-track" style="width: 120px;"><div class="bar-fill" style="width: 80%;"></div></div>
+    </div>
+    <div class="px-7 py-7">
+      <div class="text-[12px] mb-2 tabular" style="color: var(--ink-tertiary);">Question 2 of 4</div>
+      <h2 class="text-[20px] font-medium mb-2" style="color: var(--ink-primary);">
+        What's the primary action you want growth to drive?
+      </h2>
+      <p class="text-[13px] mb-5" style="color: var(--ink-secondary);">
+        I've pre-selected the most likely answer based on your data. Change it if it's wrong.
+      </p>
+
+      <div class="space-y-2">
+        <div class="option-row selected">
+          <span class="radio radio-checked"></span>
+          <div class="flex-1">
+            <div class="text-[14px] font-medium" style="color: var(--ink-primary);">Book a consultation or meeting</div>
+            <div class="text-[12px]" style="color: var(--ink-secondary);">Recommended — 78% of your historical conversions</div>
+          </div>
+        </div>
+        <div class="option-row">
+          <span class="radio"></span>
+          <div class="flex-1">
+            <div class="text-[14px]" style="color: var(--ink-primary);">Generate a quote or proposal request</div>
+          </div>
+        </div>
+        <div class="option-row">
+          <span class="radio"></span>
+          <div class="flex-1">
+            <div class="text-[14px]" style="color: var(--ink-primary);">Schedule a product demo</div>
+          </div>
+        </div>
+        <div class="option-row">
+          <span class="radio"></span>
+          <div class="flex-1">
+            <div class="text-[14px]" style="color: var(--ink-primary);">Close a purchase</div>
+          </div>
+        </div>
+        <div class="option-row">
+          <span class="radio"></span>
+          <div class="flex-1">
+            <div class="text-[14px]" style="color: var(--ink-primary);">Something else</div>
+            <div class="text-[12px]" style="color: var(--ink-tertiary);">Tell me what — I'll adapt</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="flex items-center justify-between mt-7">
+        <button class="btn-secondary">← Previous</button>
+        <button class="btn-primary">Next →</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Step 5: Go live -->
+  <div class="step-shell mb-6">
+    <div class="px-7 py-5 flex items-center justify-between" style="border-bottom: 0.5px solid var(--border-subtle);">
+      <div class="flex items-center gap-3">
+        <span class="step-tag">Step 5 of 5</span>
+        <span class="text-[14px]" style="color: var(--ink-secondary);">Activation</span>
+      </div>
+      <div class="bar-track" style="width: 120px;"><div class="bar-fill" style="width: 100%; background: var(--emerald-500);"></div></div>
+    </div>
+    <div class="px-7 py-9" style="background: var(--surface-base);">
+      <h2 class="text-[24px] font-medium mb-2" style="color: var(--ink-primary);">
+        growth is ready.
+      </h2>
+      <p class="text-[14px] mb-6" style="color: var(--ink-secondary);">
+        Here's what your AI will do the moment you activate. You can pause anytime, and you'll review every escalation.
+      </p>
+
+      <div class="rounded-xl p-5 mb-6" style="background: white; border: 0.5px solid var(--border-subtle);">
+        <div class="grid grid-cols-2 gap-x-8 gap-y-4">
+          <div>
+            <div class="text-[11px] font-medium uppercase tracking-wide mb-1" style="color: var(--ink-tertiary);">Objective</div>
+            <div class="text-[14px]" style="color: var(--ink-primary);">Book consultations</div>
+          </div>
+          <div>
+            <div class="text-[11px] font-medium uppercase tracking-wide mb-1" style="color: var(--ink-tertiary);">Active contacts at launch</div>
+            <div class="text-[14px] tabular" style="color: var(--ink-primary);">847</div>
+          </div>
+          <div>
+            <div class="text-[11px] font-medium uppercase tracking-wide mb-1" style="color: var(--ink-tertiary);">Strategies</div>
+            <div class="text-[14px]" style="color: var(--ink-primary);">Direct conversion · Re-engagement · Trust building</div>
+          </div>
+          <div>
+            <div class="text-[11px] font-medium uppercase tracking-wide mb-1" style="color: var(--ink-tertiary);">Channels</div>
+            <div class="text-[14px]" style="color: var(--ink-primary);">SMS · Email · WhatsApp</div>
+          </div>
+          <div>
+            <div class="text-[11px] font-medium uppercase tracking-wide mb-1" style="color: var(--ink-tertiary);">Confidence threshold</div>
+            <div class="text-[14px] tabular" style="color: var(--ink-primary);">40% — below this, escalate to you</div>
+          </div>
+          <div>
+            <div class="text-[11px] font-medium uppercase tracking-wide mb-1" style="color: var(--ink-tertiary);">First decisions expected</div>
+            <div class="text-[14px]" style="color: var(--ink-primary);">Within 2 hours</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="flex items-center justify-between">
+        <button class="btn-secondary">← Review settings</button>
+        <button class="btn-primary" style="padding: 12px 28px; font-size: 14px;">Activate growth →</button>
+      </div>
+    </div>
+  </div>
+
+  <footer class="text-center mt-10 text-[12px]" style="color: var(--ink-tertiary);">
+    Mockup · growth design system v1 · AxisOne
+  </footer>
+
+</div>
+
+</body>
+</html>

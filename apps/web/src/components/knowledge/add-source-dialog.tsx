@@ -195,10 +195,10 @@ export function AddSourceDialog({
             break;
           case 401:
           case 403:
-            userMessage = "Sign in expired. Please refresh and try again.";
+            userMessage = "Sign in expired. Refresh and try again.";
             break;
           default:
-            userMessage = "Something went wrong. Please try again.";
+            userMessage = "Something went wrong. Try again later.";
         }
         throw new Error(userMessage);
       }
@@ -241,7 +241,7 @@ export function AddSourceDialog({
   const submitPdf = () => {
     setErrorMessage(null);
     if (!pdfFile) {
-      setErrorMessage("Please choose a PDF file.");
+      setErrorMessage("Choose a PDF file.");
       return;
     }
     if (pdfFile.size > PDF_MAX_BYTES) {
@@ -647,7 +647,7 @@ function Step3PdfInput({
     <>
       <div className="flex flex-col gap-3 py-2">
         <div
-          className="flex flex-col items-center text-center py-8 px-6 rounded-lg border-2 border-dashed cursor-pointer"
+          className="flex flex-col items-center text-center py-8 px-6 rounded-lg border-2 border-dashed cursor-pointer motion-default focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 [--tw-ring-color:var(--ds-violet-500)] [--tw-ring-offset-color:var(--ds-ring-offset)]"
           style={{
             backgroundColor: "var(--ds-surface-sunken)",
             borderColor: "var(--ds-border-default)",

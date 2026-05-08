@@ -155,37 +155,25 @@ export function SourceList(): React.ReactElement {
   }, []);
 
   return (
-    <div className="px-6 py-8 max-w-6xl mx-auto">
-      {/* Page header — title + subtitle + Add CTA (disabled placeholder until sub-cohort 4) */}
-      <header className="flex items-start justify-between mb-6">
-        <div>
-          <h1
-            className="text-2xl font-medium leading-tight"
-            style={{ color: "var(--ds-ink-secondary)" }}
-          >
-            Knowledge sources
-          </h1>
-          <p className="text-sm mt-1" style={{ color: "var(--ds-ink-tertiary)" }}>
-            Documents the AI uses to answer customer questions
-          </p>
-        </div>
+    <div className="flex flex-col gap-4">
+      {/* Tier-limit pill + Add CTA row — page-level hero/section-header now
+       * owned by app/settings/knowledge/page.tsx (DS v1 alignment cohort). */}
+      <div className="flex items-center justify-between">
+        {tierData ? <TierLimitPill tier={tierData} /> : <span aria-hidden="true" />}
         <Button onClick={handleAddClick} aria-label="Add knowledge source">
-          Add source
+          Add knowledge source
         </Button>
-      </header>
-
-      {/* Tier-limit pill */}
-      {tierData ? <TierLimitPill tier={tierData} /> : null}
+      </div>
 
       {/* Filter chips */}
       <FilterChips active={categoryFilter} onSelect={setCategoryFilter} />
 
-      {/* Body — empty state OR table */}
-      <div className="mt-6">
+      {/* Body — empty / loading skeletons / error / table per spec Part 4 */}
+      <div className="mt-2">
         {sourcesQuery.isLoading ? (
-          <p className="text-sm" style={{ color: "var(--ds-ink-tertiary)" }}>
-            Loading sources…
-          </p>
+          <SkeletonTable />
+        ) : sourcesQuery.isError ? (
+          <ErrorState onRetry={() => void sourcesQuery.refetch()} />
         ) : sources.length === 0 ? (
           <EmptyState onAdd={handleAddClick} />
         ) : (
@@ -300,7 +288,7 @@ function FilterChips({
             type="button"
             onClick={() => onSelect(chip.key)}
             aria-pressed={isActive}
-            className="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium border transition-colors"
+            className="inline-flex items-center px-3 py-1 rounded-full text-micro border motion-default focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 [--tw-ring-color:var(--ds-violet-500)] [--tw-ring-offset-color:var(--ds-ring-offset)]"
             style={
               isActive
                 ? {
@@ -328,29 +316,107 @@ function FilterChips({
 // ─────────────────────────────────────────────
 
 function EmptyState({ onAdd }: { onAdd: () => void }): React.ReactElement {
+  // Three-part empty state per spec docs/design-system/v1.md Part 4:
+  //   1. Why it's empty (heading)
+  //   2. When it will populate (body)
+  //   3. What the user can do (CTA)
   return (
     <div
       className="flex flex-col items-center text-center py-16 px-6 rounded-lg border"
       style={{
-        backgroundColor: "var(--ds-surface-base)",
+        backgroundColor: "var(--ds-surface-raised)",
         borderColor: "var(--ds-border-subtle)",
       }}
     >
-      <h2
-        className="text-lg font-medium mb-2"
+      <h3
+        className="text-h3 mb-2"
+        style={{ color: "var(--ds-ink-primary)" }}
+      >
+        No knowledge sources yet.
+      </h3>
+      <p
+        className="text-body max-w-md mb-6"
         style={{ color: "var(--ds-ink-secondary)" }}
       >
-        No knowledge yet
-      </h2>
-      <p
-        className="text-sm max-w-md mb-6"
-        style={{ color: "var(--ds-ink-tertiary)" }}
-      >
-        Upload a PDF, paste text, or build your FAQ. The AI uses your knowledge
-        to answer customer questions specifically — not generically.
+        Sources appear here as you add them. The AI uses them to answer customer questions specifically — not generically.
       </p>
-      <Button onClick={onAdd} aria-label="Add your first knowledge source">
-        Add your first source
+      <Button onClick={onAdd} aria-label="Add knowledge source">
+        Add knowledge source
+      </Button>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+// SkeletonTable — loading state per spec Part 4 (400ms-3s window).
+// Surface-sunken bg, no shimmer, matches final shape.
+// ─────────────────────────────────────────────
+
+function SkeletonTable(): React.ReactElement {
+  return (
+    <div
+      className="rounded-lg border overflow-hidden"
+      style={{ borderColor: "var(--ds-border-subtle)" }}
+      aria-label="Loading knowledge sources"
+      role="status"
+    >
+      {Array.from({ length: 4 }, (_, i) => (
+        <div
+          key={i}
+          className="flex items-center gap-4 px-4 py-4 border-b last:border-0"
+          style={{ borderColor: "var(--ds-border-subtle)" }}
+        >
+          <div
+            className="rounded h-4 flex-[2]"
+            style={{ backgroundColor: "var(--ds-surface-sunken)" }}
+            aria-hidden="true"
+          />
+          <div
+            className="rounded h-4 flex-1"
+            style={{ backgroundColor: "var(--ds-surface-sunken)" }}
+            aria-hidden="true"
+          />
+          <div
+            className="rounded h-4 flex-1"
+            style={{ backgroundColor: "var(--ds-surface-sunken)" }}
+            aria-hidden="true"
+          />
+          <div
+            className="rounded h-4 w-20"
+            style={{ backgroundColor: "var(--ds-surface-sunken)" }}
+            aria-hidden="true"
+          />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+// ErrorState — distinguish user-fixable from system-retriable per spec Part 4.
+// This one is system-retriable: retry hits the same query, no user action needed.
+// ─────────────────────────────────────────────
+
+function ErrorState({ onRetry }: { onRetry: () => void }): React.ReactElement {
+  return (
+    <div
+      role="alert"
+      className="flex flex-col items-center text-center py-12 px-6 rounded-lg border"
+      style={{
+        backgroundColor: "var(--ds-danger-soft)",
+        borderColor: "var(--ds-danger)",
+        color: "var(--ds-danger-text)",
+      }}
+    >
+      <p className="text-body mb-4">
+        We couldn&apos;t load your knowledge sources. Try again.
+      </p>
+      <Button
+        variant="outline"
+        onClick={onRetry}
+        aria-label="Retry loading knowledge sources"
+      >
+        Try again
       </Button>
     </div>
   );

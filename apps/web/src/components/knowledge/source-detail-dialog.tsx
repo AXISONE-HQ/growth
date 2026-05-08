@@ -44,6 +44,7 @@ import { Button } from "@/components/ui/button";
 import { StatusPill, type StatusPillStatus } from "@/components/ui/knowledge/status-pill";
 import { CategoryBadge, type Category } from "@/components/ui/knowledge/category-badge";
 import { API_BASE, buildHeaders } from "@/lib/api";
+import { relativeTime } from "@/lib/relative-time";
 
 interface SourceDetail {
   id: string;
@@ -389,17 +390,6 @@ function sourceTypeLabel(t: SourceDetail["sourceType"]): string {
   }
 }
 
-// "just now" inside the formatter is the only allowed instance of "just" in
-// rendered copy — the forbidden-words audit allows-lists this exact string.
-function relativeTime(date: Date): string {
-  const diffMs = Date.now() - date.getTime();
-  const sec = Math.floor(diffMs / 1000);
-  if (sec < 60) return "just now";
-  const min = Math.floor(sec / 60);
-  if (min < 60) return `${min}m ago`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr}h ago`;
-  const days = Math.floor(hr / 24);
-  if (days < 30) return `${days}d ago`;
-  return date.toLocaleDateString();
-}
+// `relativeTime` lifted to apps/web/src/lib/relative-time.ts and re-exported
+// here for back-compat with any caller that imported it from this module.
+// MetricStrip's "Last source added" cell consumes the same util.
