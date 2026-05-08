@@ -227,6 +227,41 @@ describe("SourceList — KAN-829 sub-cohort 3", () => {
     expect(Object.keys(updated).some((u) => u.includes("category=faq"))).toBe(false);
   });
 
+  it("Test 3b — clicking the Services tab swaps the body to ServiceList (no ?category=services query fires)", async () => {
+    // KAN-XXX — Services tab is a render-mode switch parallel to FAQ. Same
+    // contract: aria-selected toggles + ServiceList renders + no
+    // ?category=services hits the sources endpoint.
+    const sources: MockSource[] = [
+      {
+        id: "s1",
+        sourceType: "pdf",
+        category: "warranty",
+        title: "Warranty doc",
+        status: "ready",
+        fileName: null,
+        fileSizeBytes: null,
+        errorDetail: null,
+        createdAt: "2026-05-06T10:00:00Z",
+        updatedAt: "2026-05-06T10:00:00Z",
+        chunkCount: 3,
+      },
+    ];
+    const { callsByUrl } = setupFetchMock({ sources });
+    renderWithQuery();
+    await screen.findByText("Warranty doc");
+
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    const servicesTab = screen.getByRole("tab", { name: "Services", selected: false });
+    await user.click(servicesTab);
+
+    await waitFor(() => {
+      expect(screen.getByRole("tab", { name: "Services", selected: true })).toBeInTheDocument();
+    });
+
+    const updated = callsByUrl();
+    expect(Object.keys(updated).some((u) => u.includes("category=services"))).toBe(false);
+  });
+
   it("Test 4 — conditional polling: queued source → 5s interval; all-ready → polling disabled", async () => {
     // Verifies the refetchInterval contract by checking the function-form
     // logic returns 5000 vs false based on source statuses.

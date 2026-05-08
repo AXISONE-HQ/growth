@@ -74,9 +74,11 @@ function makeStatefulMocks(opts: {
   });
   const executeRawUnsafe = vi.fn(async () => 1);
   const sourceCount = vi.fn(async () => 1); // tenant has KB by default
-  // KAN-XXX — empty-case branch counts both KnowledgeSource AND FaqEntry;
-  // mock both so the fallback path (filtered.length === 0) doesn't TypeError.
+  // KAN-849/XXX — empty-case branch counts KnowledgeSource + FaqEntry +
+  // Service; mock all three so the fallback (filtered.length === 0) doesn't
+  // TypeError.
   const faqCount = vi.fn(async () => 0);
+  const serviceCount = vi.fn(async () => 0);
   const auditLogCreate = vi.fn(async () => ({ id: "audit-1" }));
 
   const txMock = {
@@ -93,6 +95,7 @@ function makeStatefulMocks(opts: {
     $transaction,
     knowledgeSource: { count: sourceCount },
     faqEntry: { count: faqCount },
+    service: { count: serviceCount },
     auditLog: { create: auditLogCreate },
   } as unknown as PrismaClient;
 

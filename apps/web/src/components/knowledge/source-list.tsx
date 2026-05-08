@@ -41,6 +41,7 @@ import { SourceDetailDialog } from "./source-detail-dialog";
 import { DeleteSourceConfirm } from "./delete-source-confirm";
 import { CategoryTabs } from "./category-tabs";
 import { FaqList } from "./faq-list";
+import { ServiceList } from "./service-list";
 import {
   UpgradePromptDialog,
   type UpgradeReason,
@@ -78,9 +79,14 @@ interface TierLimitsResponse {
 // Category filter options. `'all'` is the unfiltered sentinel — the
 // SourceList ↔ CategoryTabs boundary maps it to/from the internal
 // `null`-state convention (null means "no category filter applied").
+//
+// `'faq'` (KAN-849) and `'services'` (KAN-XXX) are render-mode switches —
+// they mount FaqList / ServiceList instead of filtering the source table.
+// All other tabs filter knowledge_source rows by category.
 const CATEGORY_TABS: Array<{ value: string; label: string }> = [
   { value: "all", label: "All" },
   { value: "faq", label: "FAQ" },
+  { value: "services", label: "Services" },
   { value: "inventory", label: "Inventory" },
   { value: "warranty", label: "Warranty" },
   { value: "pricing", label: "Pricing" },
@@ -101,11 +107,15 @@ export function SourceList(): React.ReactElement {
     | null
   >(null);
 
-  // KAN-XXX — when the FAQ tab is active, treat the sources query as
-  // unfiltered (FAQ entries don't live in knowledge_source). The body
-  // renders FaqList in FAQ mode regardless of this query's data, so the
-  // request is just precaching for when the user switches back.
-  const sourceCategoryFilter = categoryFilter === "faq" ? null : categoryFilter;
+  // KAN-849/XXX — when the FAQ or Services tab is active, treat the sources
+  // query as unfiltered (FAQ entries / Services don't live in knowledge_source).
+  // The body renders FaqList / ServiceList in those modes regardless of this
+  // query's data, so the request is just precaching for when the user
+  // switches back.
+  const sourceCategoryFilter =
+    categoryFilter === "faq" || categoryFilter === "services"
+      ? null
+      : categoryFilter;
   const sourcesQuery = useQuery<{ sources: KnowledgeSource[] }>({
     queryKey: ["knowledge", "sources", { category: sourceCategoryFilter }],
     queryFn: async () => {
@@ -163,17 +173,20 @@ export function SourceList(): React.ReactElement {
     setUpgradePrompt({ reason: "feature-locked", feature });
   }, []);
 
-  // KAN-XXX — FAQ tab is a render-mode switch, NOT a category filter.
-  // FAQ entries live in their own table; FaqList owns its own Add CTA,
-  // empty state, and table layout. The tier-limit pill applies to
-  // KnowledgeSource rows only (FAQ entries are unlimited per cohort
-  // decision 6) — hidden when the FAQ tab is active.
+  // KAN-849/XXX — FAQ + Services tabs are render-mode switches, NOT category
+  // filters. Each lives in its own table and owns its own Add CTA, empty
+  // state, and table layout. The tier-limit pill applies to KnowledgeSource
+  // rows only (FAQ + Services are unlimited per cohort decision) — hidden
+  // when either custom-entity tab is active.
   const isFaqTab = categoryFilter === "faq";
+  const isServicesTab = categoryFilter === "services";
+  const isCustomEntityTab = isFaqTab || isServicesTab;
 
   return (
     <div className="flex flex-col gap-4">
-      {/* Source-tab header — hidden in FAQ mode (FaqList renders its own). */}
-      {!isFaqTab ? (
+      {/* Source-tab header — hidden in custom-entity modes (FaqList /
+       * ServiceList render their own Add CTA). */}
+      {!isCustomEntityTab ? (
         <div className="flex items-center justify-between">
           {tierData ? <TierLimitPill tier={tierData} /> : <span aria-hidden="true" />}
           <Button onClick={handleAddClick} aria-label="Add knowledge source">
@@ -192,10 +205,13 @@ export function SourceList(): React.ReactElement {
         onCategoryChange={(next) => setCategoryFilter(next === "all" ? null : next)}
       />
 
-      {/* Body — FaqList in FAQ mode, else the source table flow. */}
+      {/* Body — FaqList / ServiceList in their respective modes, else the
+       * source table flow. */}
       <div className="mt-2">
         {isFaqTab ? (
           <FaqList />
+        ) : isServicesTab ? (
+          <ServiceList />
         ) : sourcesQuery.isLoading ? (
           <SkeletonTable />
         ) : sourcesQuery.isError ? (

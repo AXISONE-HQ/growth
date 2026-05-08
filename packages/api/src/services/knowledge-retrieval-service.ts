@@ -71,27 +71,31 @@ export interface RetrievedChunk {
    */
   source_id: string | null;
   /**
-   * KAN-XXX — FaqEntry parent FK. NULL when the chunk belongs to a
-   * KnowledgeSource. Optional in the type so legacy fixtures that
-   * pre-date FAQ first-class don't need updating en-masse; new code paths
-   * always populate it (or its NULL counterpart).
+   * KAN-849 — FaqEntry parent FK. NULL when the chunk belongs to a
+   * KnowledgeSource or Service. Optional so legacy fixtures don't need
+   * updating en-masse.
    */
   faq_entry_id?: string | null;
   /**
-   * Citation label: source.title for KnowledgeSource chunks, or the
-   * verbatim FAQ question text for FaqEntry chunks. Null only when the
-   * source has no title (PDFs without operator-supplied title fall back
-   * to the file name in the admin UI; retrieval surfaces null here and
-   * the consumer renders "(untitled source)").
+   * KAN-XXX — Service parent FK. NULL when the chunk belongs to a
+   * KnowledgeSource or FaqEntry. Optional for the same backwards-compat
+   * reason as `faq_entry_id`.
+   */
+  service_id?: string | null;
+  /**
+   * Citation label: COALESCEd across source.title / faq.question /
+   * service.title. Null only when none of the parents has a title (PDFs
+   * without operator-supplied title fall back to the file name in the
+   * admin UI; retrieval surfaces null here and the consumer renders
+   * "(untitled source)").
    */
   source_title: string | null;
   /**
-   * KAN-XXX — discriminator for downstream consumers that need to know
-   * whether a chunk came from a curated FAQ entry vs. a parsed source.
-   * Brain/Shaper currently treat both equivalently; this field is
-   * metadata-only for them. Optional for backwards-compat with fixtures.
+   * KAN-849/XXX — discriminator across the three parent paths. Brain/Shaper
+   * currently treat all three equivalently; this field is metadata-only
+   * for them. Optional for backwards-compat with fixtures.
    */
-  parentType?: "source" | "faq";
+  parentType?: "source" | "faq" | "service";
   category: string;
   chunk_text: string;
   /** Cosine similarity in [0, 1]; higher = more relevant. */
@@ -170,12 +174,13 @@ export async function retrieveRelevantChunks(
   //    the partial index `(tenant_id, category) WHERE status='ready'` matches
   //    this predicate exactly for hot-path performance.
   //
-  //    KAN-XXX: chunks now have a polymorphic parent — exactly one of
-  //    `source_id` or `faq_entry_id` is set. LEFT JOIN both parents and
-  //    exclude rows whose parent has been soft-deleted (kept until the
-  //    30-day hard-delete cron). `parent_type` discriminates downstream;
-  //    `source_title` COALESCEs the source title or the FAQ question text
-  //    so existing consumers reading the field keep working.
+  //    KAN-XXX: chunks now have a polymorphic parent across THREE tables —
+  //    exactly one of `source_id`, `faq_entry_id`, `service_id` is set per
+  //    the DB CHECK. LEFT JOIN all three; exclude rows whose parent has
+  //    been soft-deleted (kept until the 30-day hard-delete cron).
+  //    `parent_type` discriminates downstream; `source_title` COALESCEs
+  //    the source title / FAQ question text / service title so existing
+  //    consumers reading the field keep working.
   //
   //    SET LOCAL is scoped to the enclosing transaction; outside a tx it's
   //    silently a no-op (PG semantics). Wrap both statements in $transaction
@@ -186,6 +191,7 @@ export async function retrieveRelevantChunks(
       chunk_id: string;
       source_id: string | null;
       faq_entry_id: string | null;
+      service_id: string | null;
       source_title: string | null;
       parent_type: string;
       category: string;
@@ -196,8 +202,13 @@ export async function retrieveRelevantChunks(
       SELECT c.id AS chunk_id,
              c.source_id,
              c.faq_entry_id,
-             COALESCE(s.title, f.question) AS source_title,
-             CASE WHEN c.faq_entry_id IS NOT NULL THEN 'faq' ELSE 'source' END AS parent_type,
+             c.service_id,
+             COALESCE(s.title, f.question, svc.title) AS source_title,
+             CASE
+               WHEN c.service_id IS NOT NULL THEN 'service'
+               WHEN c.faq_entry_id IS NOT NULL THEN 'faq'
+               ELSE 'source'
+             END AS parent_type,
              c.category,
              c.chunk_text,
              1 - (c.embedding <=> $1::vector(1536)) AS score
@@ -209,9 +220,12 @@ export async function retrieveRelevantChunks(
       LEFT JOIN faq_entries f
         ON f.id = c.faq_entry_id
         AND f.deleted_at IS NULL
+      LEFT JOIN services svc
+        ON svc.id = c.service_id
+        AND svc.deleted_at IS NULL
       WHERE c.tenant_id = $2
         AND c.status = 'ready'
-        AND (s.id IS NOT NULL OR f.id IS NOT NULL)
+        AND (s.id IS NOT NULL OR f.id IS NOT NULL OR svc.id IS NOT NULL)
       ORDER BY c.embedding <=> $1::vector(1536)
       LIMIT $3
       `,
@@ -226,21 +240,23 @@ export async function retrieveRelevantChunks(
   const filtered = rows.filter((r) => r.score >= minScore);
 
   // 6. Differentiate the two empty cases.
-  //    KAN-XXX: tenant "has knowledge" if EITHER a non-deleted KnowledgeSource
-  //    OR a non-deleted FaqEntry exists. Either parent table populated drives
-  //    the "(none relevant to this message)" prompt instead of "(none — no
-  //    company knowledge configured yet)".
+  //    KAN-XXX: tenant "has knowledge" if ANY of (KnowledgeSource, FaqEntry,
+  //    Service) is populated and non-deleted. ANY parent table populated
+  //    drives the "(none relevant to this message)" prompt instead of
+  //    "(none — no company knowledge configured yet)".
   let tenantHasAnyKnowledge = filtered.length > 0;
   if (!tenantHasAnyKnowledge) {
     const cast = prisma as unknown as {
       knowledgeSource: { count: (args: { where: Record<string, unknown> }) => Promise<number> };
       faqEntry: { count: (args: { where: Record<string, unknown> }) => Promise<number> };
+      service: { count: (args: { where: Record<string, unknown> }) => Promise<number> };
     };
-    const [sourceCount, faqCount] = await Promise.all([
+    const [sourceCount, faqCount, serviceCount] = await Promise.all([
       cast.knowledgeSource.count({ where: { tenantId, status: { not: "deleted" } } }),
       cast.faqEntry.count({ where: { tenantId, deletedAt: null } }),
+      cast.service.count({ where: { tenantId, deletedAt: null } }),
     ]);
-    tenantHasAnyKnowledge = sourceCount > 0 || faqCount > 0;
+    tenantHasAnyKnowledge = sourceCount > 0 || faqCount > 0 || serviceCount > 0;
   }
 
   const result: RetrievalResult = {
@@ -248,8 +264,14 @@ export async function retrieveRelevantChunks(
       chunk_id: r.chunk_id,
       source_id: r.source_id,
       faq_entry_id: r.faq_entry_id,
+      service_id: r.service_id,
       source_title: r.source_title,
-      parentType: r.parent_type === "faq" ? "faq" : "source",
+      parentType:
+        r.parent_type === "service"
+          ? "service"
+          : r.parent_type === "faq"
+            ? "faq"
+            : "source",
       category: r.category,
       chunk_text: r.chunk_text,
       score: r.score,
