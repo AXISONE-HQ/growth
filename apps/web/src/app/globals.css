@@ -2,10 +2,16 @@
 @tailwind components;
 @tailwind utilities;
 
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+/* DS v1 keeps Inter on weights 400 + 500 only per Part 1 spec. shadcn primitives
+ * (card / sheet / dialog / badge titles) currently use font-semibold (600), which
+ * blocks dropping 600/700 from the import without a primitive-override pass.
+ * Tracked separately as the shadcn-override follow-up filed at this cohort's
+ * close-out gate. Until then, ship the broader weight set so primitives render
+ * correctly. JetBrains Mono added for .text-mono-sm (reasoning panels, IDs). */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 
 :root {
-  /* growth design tokens */
+  /* growth design tokens (legacy — kept for back-compat) */
   --primary-950: #020617;
   --primary-900: #0F172A;
   --primary-800: #1E293B;
@@ -39,35 +45,82 @@
   --amber-500: #F59E0B;
   --amber-400: #FBBF24;
 
-  /* Growth Design System v1 — Sprint 11a additive tokens (KAN-829 sub-cohort 2).
-   * Non-breaking additive layer — existing UI continues to use the shadcn
-   * tokens below. New Sprint 11a components reference --ds-* tokens.
-   * KAN-847 will consolidate (rename --ds-violet-500 → --violet-500, etc.)
-   * after the full DS v1 palette + AI-aware Product Layer components ship.
+  /* ─────────────────────────────────────────────────────────────────────────
+   * Growth Design System v1 — foundation tokens
    *
-   * Spec source: Confluence page 4456463 (Growth Design System v1).
-   * The "spec ≠ implementation" gap surfaced by KAN-829 sub-cohort 2
-   * pre-flight: tokens were documented but never landed in CSS.
-   */
+   * Source of truth: docs/design-system/v1.md (Part 1: AxisOne Master Brand).
+   * KAN-829 sub-cohort 2 added the partial subset; this expansion completes
+   * the foundation per Part 1 color tables + adds the type scale, motion
+   * tokens, tabular-nums utility, and ring-offset token referenced by every
+   * focus-visible style across the codebase.
+   *
+   * KAN-842 (PROMOTION CANDIDATE component lift) tracks the consolidation
+   * into a Tailwind config extension + extraction to a separate tokens.css.
+   * For now everything lives inline so the cohort is self-contained.
+   * ───────────────────────────────────────────────────────────────────────── */
+
+  /* — Surfaces (spec Part 1 §Surfaces) — */
+  --ds-surface-base:    #FBF9F4;
+  --ds-surface-raised:  #FFFFFF;
+  --ds-surface-sunken:  #F4F0E6;
+  --ds-surface-overlay: rgba(31, 20, 50, 0.40);
+
+  /* — Ink / text (spec Part 1 §Ink) — */
+  --ds-ink-primary:    #1F1432;
+  --ds-ink-secondary:  #4A3F5C;
+  --ds-ink-tertiary:   #8A7F9C;
+  --ds-ink-disabled:   #C4B8D4;
+  --ds-ink-on-accent:  #FFFFFF;
+
+  /* — Borders (spec Part 1 §Borders) — */
+  --ds-border-subtle:  #ECE6D9;
+  --ds-border-default: #DDD3C0;
+  --ds-border-strong:  #BCB1A0;
+
+  /* — Brand: violet ramp (spec Part 1 §Brand accents) — */
+  --ds-violet-50:  #F5F2FE;
   --ds-violet-100: #EEEAFC;
   --ds-violet-500: #5C3FE5;
+  --ds-violet-600: #4A30C7;
   --ds-violet-700: #3B249E;
+  --ds-violet-900: #1F1432;
+
+  /* — Brand: emerald ramp (spec Part 1 §Brand accents) — */
+  --ds-emerald-50:  #EAFAF3;
   --ds-emerald-100: #DCF4EB;
   --ds-emerald-500: #0EA882;
   --ds-emerald-700: #0A6B52;
-  --ds-surface-base: #FBF9F4;
-  --ds-surface-sunken: #F4F0E6;
-  --ds-ink-secondary: #4A3F5C;
-  --ds-ink-tertiary: #8A7F9C;
-  --ds-border-subtle: #ECE6D9;
-  --ds-border-default: #DDD3C0;
-  --ds-danger-soft: #F8E1E1;
-  --ds-danger-text: #8E2424;
-  --ds-danger: #C73E3E;
-  /* Warning palette — used by category-badge `pricing` + tier-limit warn state */
+
+  /* — Semantic: warning + danger (spec Part 1 §Semantic colors) — */
+  --ds-warning:      #D97706;
   --ds-warning-soft: #FCEFD9;
   --ds-warning-text: #92590E;
-  --ds-warning: #D97706;
+  --ds-danger:       #C73E3E;
+  --ds-danger-soft:  #F8E1E1;
+  --ds-danger-text:  #8E2424;
+
+  /* — Focus-ring offset (spec Part 6 §Accessibility) —
+   * Spec line 602: focus-visible:ring-offset-stone-50. Stone-50 is Tailwind's
+   * #FAFAF9, functionally equivalent to surface-base in light mode. Components
+   * reference [--tw-ring-offset-color:var(--ds-ring-offset)] to keep the ring
+   * offset surface-aware without a Tailwind config change. */
+  --ds-ring-offset: var(--ds-surface-base);
+
+  /* ─────────────────────────────────────────────────────────────────────────
+   * Motion tokens (spec Part 1 §Motion). Consumed via inline
+   * `style={{ transition: 'var(--motion-default)' }}` or the .motion-* utility
+   * classes below. prefers-reduced-motion handled at consumer level for
+   * transforms; the .motion-pulse keyframe block respects it natively.
+   * ───────────────────────────────────────────────────────────────────────── */
+  --motion-instant: 100ms ease-out;
+  --motion-quick:   150ms ease-out;
+  --motion-default: 200ms cubic-bezier(0.4, 0, 0.2, 1);
+  --motion-slow:    350ms cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* — Elevation (spec Part 1 §Elevation) — borders, not shadows.
+   * --ds-shadow-overlay reserved for modals + popovers + command palette. */
+  --ds-shadow-subtle:  0 1px 2px rgba(31, 20, 50, 0.06), 0 0 0 0.5px rgba(31, 20, 50, 0.04);
+  --ds-shadow-overlay: 0 12px 32px rgba(31, 20, 50, 0.12), 0 4px 8px rgba(31, 20, 50, 0.08);
 
   /* shadcn-ui design tokens (HSL components, no `hsl()` wrapper — Tailwind composes them) */
   --background: 0 0% 100%;
@@ -100,24 +153,79 @@
 
 body {
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-  background: #F3F4F6;
-  color: #111827;
+  background: var(--ds-surface-base);
+  color: var(--ds-ink-primary);
   min-height: 100vh;
 }
 
-/* Confidence badge colors */
+/* ─────────────────────────────────────────────────────────────────────────
+ * Type scale (spec Part 1 §Typography) — 10 utility classes bundling
+ * font-size + line-height + font-weight. Values verbatim from spec.
+ *
+ * Rule: two weights only (400 + 500). No 600/700 in DS v1 components.
+ * Sentence case throughout. Numbers: tabular-nums on KPIs.
+ * ───────────────────────────────────────────────────────────────────────── */
+.text-display  { font-size: 36px; line-height: 44px; font-weight: 500; }
+.text-h1       { font-size: 28px; line-height: 36px; font-weight: 500; }
+.text-h2       { font-size: 22px; line-height: 30px; font-weight: 500; }
+.text-h3       { font-size: 18px; line-height: 26px; font-weight: 500; }
+.text-body-lg  { font-size: 16px; line-height: 24px; font-weight: 400; }
+.text-body     { font-size: 14px; line-height: 22px; font-weight: 400; }
+.text-label    { font-size: 13px; line-height: 18px; font-weight: 500; }
+.text-caption  { font-size: 12px; line-height: 18px; font-weight: 400; }
+.text-micro    { font-size: 11px; line-height: 16px; font-weight: 500; }
+.text-mono-sm  { font-size: 13px; line-height: 20px; font-weight: 400; font-family: 'JetBrains Mono', ui-monospace, monospace; }
+
+/* Tabular numerals — required on numeric KPIs, audit log entries, confidence
+ * scores. Pair with .text-h2 / .text-h3 for column-aligned display. */
+.tabular-nums { font-variant-numeric: tabular-nums; }
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * Motion utility classes (spec Part 1 §Motion)
+ * `class="motion-default"` → 200ms cubic-bezier transition (the canonical).
+ * .motion-pulse animates the box-shadow ring around a status dot 1500ms
+ * ease-in-out infinite — used by AIStatusIndicator active variant.
+ * ───────────────────────────────────────────────────────────────────────── */
+.motion-instant { transition: var(--motion-instant); }
+.motion-quick   { transition: var(--motion-quick); }
+.motion-default { transition: var(--motion-default); }
+.motion-slow    { transition: var(--motion-slow); }
+
+@keyframes ds-pulse-ring {
+  0%, 100% { box-shadow: 0 0 0 3px rgba(14, 168, 130, 0.15); }
+  50%      { box-shadow: 0 0 0 6px rgba(14, 168, 130, 0.05); }
+}
+.motion-pulse {
+  animation: ds-pulse-ring 1500ms ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .motion-pulse { animation: none; }
+}
+
+/* Legacy — pre-DS pulse animation kept for back-compat with any consumer
+ * that hasn't migrated to .motion-pulse yet. Retire when KAN-842 lands. */
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.animate-pulse-slow {
+  animation: pulse 2s ease-in-out infinite;
+}
+
+/* Confidence badge colors (legacy — pre-DS Decision Feed era). Tracked
+ * separately for retirement (filed at this cohort's close-out gate). */
 .conf-high { color: #059669; background: #ECFDF5; }
 .conf-normal { color: #D97706; background: #FFFBEB; }
 .conf-low { color: #DC2626; background: #FEF2F2; }
 .conf-critical { color: #DC2626; background: #FEF2F2; }
 
-/* Strategy badge colors */
+/* Strategy badge colors (legacy) */
 .strategy-direct { background: #ECFDF5; color: #059669; }
 .strategy-reengage { background: #FEF3C7; color: #D97706; }
 .strategy-guided { background: #EEF2FF; color: #4F46E5; }
 .strategy-trust { background: #FEF2F2; color: #DC2626; }
 
-/* Channel badge */
+/* Channel badge (legacy) */
 .channel-badge {
   font-size: 11px;
   font-weight: 500;
@@ -127,17 +235,7 @@ body {
   color: #6B7280;
 }
 
-/* Pulse animation for status dot */
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.4; }
-}
-
-.animate-pulse-slow {
-  animation: pulse 2s ease-in-out infinite;
-}
-
-/* Scrollbar styling */
+/* Scrollbar styling — DS-aligned (uses --ds-border-* tokens) */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -146,9 +244,9 @@ body {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #CBD5E1;
+  background: var(--ds-border-default);
   border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #94A3B8;
+  background: var(--ds-border-strong);
 }

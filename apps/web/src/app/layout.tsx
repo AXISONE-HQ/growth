@@ -27,6 +27,7 @@ import { Toaster } from 'sonner';
 import { queryClient } from '@/lib/query-client';
 import { isDemoMode } from '@/lib/demo-mode';
 import { DemoModeBanner } from '@/components/demo-mode-banner';
+import { AIStatusIndicator } from '@/components/growth/ai-status-indicator';
 
 // KAN-718 nav surgery:
 //   - /pipelines (mock) → redirect to /settings/pipelines (KAN-702 real)
@@ -212,10 +213,10 @@ function AppShell({ children }: { children: React.ReactNode }) {
         <header className="flex items-center justify-between px-8 py-3 border-b border-gray-200 bg-white sticky top-0 z-40">
           <div className="flex items-center gap-4">
             <h1 className="text-lg font-semibold text-gray-900">{currentTitle}</h1>
-            <div className="flex items-center gap-1.5 text-[13px] text-emerald-600 bg-emerald-50 px-2.5 py-1 rounded-full">
-              <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse-slow" />
-              growth is active
-            </div>
+            {/* DS v1 alignment cohort — AIStatusIndicator replaces the inline
+             * pill. Hardcoded status="active" until system-health backend wires
+             * up (future ticket alongside Decision Feed surface, Sprint 12+). */}
+            <AIStatusIndicator status="active" />
           </div>
 
           <div className="flex-1 max-w-[480px] mx-6">

@@ -115,16 +115,19 @@ afterEach(() => {
 // ─────────────────────────────────────────────
 
 describe("SourceList — KAN-829 sub-cohort 3", () => {
-  it("Test 1 — empty state renders verbatim DS v1 copy", async () => {
+  it("Test 1 — three-part empty state per DS v1 spec Part 4", async () => {
     setupFetchMock({ sources: [] });
     renderWithQuery();
-    expect(await screen.findByText("No knowledge yet")).toBeInTheDocument();
+    // Part 1: why it's empty
+    expect(await screen.findByText("No knowledge sources yet.")).toBeInTheDocument();
+    // Part 2: when it will populate
     expect(
       screen.getByText(
-        /Upload a PDF, paste text, or build your FAQ\. The AI uses your knowledge to answer customer questions specifically — not generically\./,
+        /Sources appear here as you add them\. The AI uses them to answer customer questions specifically — not generically\./,
       ),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Add your first knowledge source/i })).toBeInTheDocument();
+    // Part 3: what the user can do (verb + object CTA)
+    expect(screen.getAllByRole("button", { name: /Add knowledge source/i })[0]).toBeInTheDocument();
   });
 
   it("Test 2 — table renders all source rows when data present", async () => {
@@ -306,17 +309,16 @@ describe("SourceList — KAN-829 sub-cohort 3", () => {
   it("Test 7 — all UI labels are sentence case (no Title Case, no ALL CAPS except eyebrows)", async () => {
     setupFetchMock({ sources: [] });
     renderWithQuery();
-    await screen.findByText("No knowledge yet");
+    await screen.findByText("No knowledge sources yet.");
 
     // Sample the rendered text labels (visible text only). Sentence case
     // means the FIRST word starts with an uppercase letter, and subsequent
     // words start lowercase (proper nouns + acronyms exempt).
+    // DS v1 alignment cohort: hero ("Knowledge Center" + descriptive subtitle)
+    // moved to app/settings/knowledge/page.tsx — out of SourceList's scope.
     const visibleLabels = [
-      "Knowledge sources",
-      "Documents the AI uses to answer customer questions",
-      "Add source",
-      "No knowledge yet",
-      "Add your first source",
+      "Add knowledge source",
+      "No knowledge sources yet.",
       "All",
       "FAQ",
       "Inventory",
@@ -342,7 +344,7 @@ describe("SourceList — KAN-829 sub-cohort 3", () => {
   it("Test 8 — no forbidden words in rendered copy", async () => {
     setupFetchMock({ sources: [] });
     renderWithQuery();
-    await screen.findByText("No knowledge yet");
+    await screen.findByText("No knowledge sources yet.");
 
     const FORBIDDEN = [
       "magic",
@@ -423,9 +425,12 @@ describe("SourceList — KAN-829 sub-cohort 3", () => {
     setupFetchMock({ sources: [] });
     renderWithQuery();
 
-    await screen.findByText("No knowledge yet");
+    await screen.findByText("No knowledge sources yet.");
 
-    const addBtn = screen.getByRole("button", { name: /Add knowledge source/i });
+    // Two "Add knowledge source" buttons render in empty state — the top-row
+    // CTA AND the three-part empty-state CTA per DS v1 spec Part 4. Pick the
+    // first (top-row) for the click; either should produce the same effect.
+    const addBtn = screen.getAllByRole("button", { name: /Add knowledge source/i })[0]!;
     await act(async () => {
       addBtn.click();
     });
