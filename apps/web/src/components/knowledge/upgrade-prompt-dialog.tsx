@@ -7,8 +7,11 @@
  *
  * Two `reason` variants drive heading + body copy:
  *  - `count-at-limit` — operator clicked Add Source while already at the cap
- *  - `feature-locked` — operator clicked a card (PDF / FAQ) their tier
- *    doesn't include
+ *  - `feature-locked` — operator clicked a card (PDF) their tier doesn't include
+ *
+ * **KAN-XXX (FAQ first-class):** the FAQ feature-locked variant is removed
+ * since FAQ entries are now unlimited across all tiers (their own table,
+ * own dialog, no gating). Only PDF remains as a gated feature.
  *
  * Always-shown plan comparison (compact, NOT a giant pricing table) helps the
  * operator orient between current tier and recommended tier. Row logic per
@@ -64,7 +67,8 @@ import {
 import { getTenantId } from "@/lib/api";
 
 export type UpgradeReason = "count-at-limit" | "feature-locked";
-export type LockedFeature = "pdf" | "faq";
+// KAN-XXX — FAQ entries no longer tier-gated; PDF is the only feature-lock surface.
+export type LockedFeature = "pdf";
 
 interface UpgradePromptDialogProps {
   open: boolean;
@@ -77,13 +81,11 @@ interface UpgradePromptDialogProps {
 
 const FEATURE_LABEL: Record<LockedFeature, string> = {
   pdf: "PDF uploads",
-  faq: "FAQ entries",
 };
 
 const REASON_SUMMARY: Record<string, string> = {
   "count-at-limit": "count at limit",
   "feature-locked:pdf": "unlock PDF uploads",
-  "feature-locked:faq": "unlock FAQ entries",
 };
 
 export function UpgradePromptDialog({

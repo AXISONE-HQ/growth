@@ -8,7 +8,8 @@
  *   3. Dispatch by sourceType to the appropriate handler:
  *        - 'pdf'        → pdf-parse(metadata.pdfBase64) → chunk()
  *        - 'paste_text' → chunk(rawContent)
- *        - 'faq'        → 1 chunk per Q+A pair: embed Q, store A in chunk_text
+ *      (KAN-XXX dropped the 'faq' branch — FAQ entries are first-class
+ *       and embed synchronously via `faq-entries.ts` service.)
  *   4. embed() each chunk
  *   5. Write `knowledge_chunk` rows in a transaction (atomic — partial
  *      failure rolls back chunks AND status transition)
@@ -193,26 +194,6 @@ async function extractAndChunk(row: SourceRow): Promise<Chunk[]> {
   if (row.sourceType === "paste_text") {
     return chunkText(row.rawContent ?? "");
   }
-  if (row.sourceType === "faq") {
-    // 1 chunk = 1 Q+A pair. Embed the question (in chunkText for
-    // ingestion-side semantics; the consumer renders chunkText as the
-    // answer because we swap for storage). Architect spec §2 places the
-    // question on `knowledge_chunk.question_text` and the answer on
-    // `chunk_text`. So we embed the question and store both.
-    const question = typeof meta.question === "string" ? meta.question : "";
-    const answer = row.rawContent ?? "";
-    if (!question || !answer) return [];
-    // Single chunk; tokenCount counts the question we'll embed.
-    const qChunks = chunkText(question);
-    if (qChunks.length === 0) return [];
-    return [
-      {
-        position: 0,
-        text: question,
-        tokenCount: qChunks[0]!.tokenCount,
-      },
-    ];
-  }
   if (row.sourceType === "pdf") {
     const base64 = typeof meta.pdfBase64 === "string" ? meta.pdfBase64 : "";
     if (!base64) return [];
@@ -242,29 +223,29 @@ async function writeChunkRows(
   row: SourceRow,
   embedded: EmbeddedChunk[],
 ): Promise<void> {
-  const isFaq = row.sourceType === "faq";
-  const meta = (row.metadata ?? {}) as Record<string, unknown>;
-  const answer = row.rawContent ?? "";
-  const question = isFaq && typeof meta.question === "string" ? meta.question : null;
-
+  // KAN-XXX: source-side chunks always set `source_id` and leave
+  // `faq_entry_id` NULL. The DB CHECK constraint
+  // `(source_id IS NULL) <> (faq_entry_id IS NULL)` enforces the XOR
+  // invariant — sibling FAQ writes in faq-entries.ts only ever populate
+  // the inverse side.
   for (const c of embedded) {
     const id = randomUUID();
-    const chunkText = isFaq ? answer : c.text;
     const embeddingLiteral = `[${c.embedding.join(",")}]`;
     const metadataJson = JSON.stringify({ tokenCount: c.tokenCount });
     await prisma.$executeRaw`
       INSERT INTO knowledge_chunk (
-        id, tenant_id, source_id, chunk_text, position, category, status,
+        id, tenant_id, source_id, faq_entry_id, chunk_text, position, category, status,
         question_text, embedding, metadata, created_at
       ) VALUES (
         ${id},
         ${row.tenantId},
         ${row.id},
-        ${chunkText},
+        NULL,
+        ${c.text},
         ${c.position},
         ${row.category},
         'ready',
-        ${question},
+        NULL,
         ${embeddingLiteral}::vector(1536),
         ${metadataJson}::jsonb,
         NOW()

@@ -193,9 +193,9 @@ describe("KAN-829 — DELETE /api/knowledge/sources/:id", () => {
   it("Test 4 — soft-delete: status='deleted', deleted_at set; audit log emit; chunkCount captured", async () => {
     knowledgeSourceFindFirstMock.mockResolvedValue({
       id: "src-to-delete",
-      sourceType: "faq",
+      sourceType: "paste_text",
       category: "pricing",
-      title: "Pricing FAQ",
+      title: "Pricing notes",
     });
     knowledgeChunkCountMock.mockResolvedValue(3);
 
@@ -248,7 +248,7 @@ describe("KAN-829 — DELETE /api/knowledge/sources/:id", () => {
 // ─────────────────────────────────────────────
 
 describe("KAN-829 — GET /api/knowledge/tier-limits", () => {
-  async function callTierLimits(): Promise<{ planTier: string; limits: { maxSources: number; allowsPdf: boolean; allowsFaq: boolean }; currentSourceCount: number; remaining: number }> {
+  async function callTierLimits(): Promise<{ planTier: string; limits: { maxSources: number; allowsPdf: boolean }; currentSourceCount: number; remaining: number }> {
     const res = await knowledgeSourcesApp.request("/tier-limits", {
       method: "GET",
       headers: VALID_BEARER,
@@ -257,7 +257,7 @@ describe("KAN-829 — GET /api/knowledge/tier-limits", () => {
     return (await res.json()) as never;
   }
 
-  it("Test 5 — planTier='free' → Starter limits (1 source, no PDF, no FAQ)", async () => {
+  it("Test 5 — planTier='free' → Starter limits (1 source, no PDF)", async () => {
     tenantFindUniqueMock.mockResolvedValue({ planTier: "free" });
     knowledgeSourceCountMock.mockResolvedValue(0);
 
@@ -265,7 +265,6 @@ describe("KAN-829 — GET /api/knowledge/tier-limits", () => {
     expect(body.planTier).toBe("free");
     expect(body.limits.maxSources).toBe(1);
     expect(body.limits.allowsPdf).toBe(false);
-    expect(body.limits.allowsFaq).toBe(false);
     expect(body.currentSourceCount).toBe(0);
     expect(body.remaining).toBe(1);
   });
@@ -279,14 +278,13 @@ describe("KAN-829 — GET /api/knowledge/tier-limits", () => {
     expect(body.limits.allowsPdf).toBe(false);
   });
 
-  it("Test 5c — planTier='pro' → Growth limits (5 sources, 5MB PDF, FAQ enabled)", async () => {
+  it("Test 5c — planTier='pro' → Growth limits (5 sources, 5MB PDF)", async () => {
     tenantFindUniqueMock.mockResolvedValue({ planTier: "pro" });
     knowledgeSourceCountMock.mockResolvedValue(2);
 
     const body = await callTierLimits();
     expect(body.limits.maxSources).toBe(5);
     expect(body.limits.allowsPdf).toBe(true);
-    expect(body.limits.allowsFaq).toBe(true);
     expect(body.currentSourceCount).toBe(2);
     expect(body.remaining).toBe(3);
   });

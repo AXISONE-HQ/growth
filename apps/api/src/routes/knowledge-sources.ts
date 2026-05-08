@@ -1,9 +1,13 @@
 /**
  * KAN-827 — Sprint 11a knowledge ingestion HTTP intake.
  *
- * `POST /api/knowledge/sources` — three input paths:
+ * `POST /api/knowledge/sources` — two input paths:
  *   - multipart/form-data → PDF upload (max 10 MB; pdf-parse runs async in worker)
- *   - application/json    → paste_text (max 50K chars) OR faq Q&A pair
+ *   - application/json    → paste_text (max 50K chars)
+ *
+ * **KAN-XXX (FAQ first-class):** the legacy `'faq'` sourceType branch
+ * removed. FAQ entries are their own resource at `/api/knowledge/faqs/*`
+ * with synchronous embedding (`apps/api/src/routes/faq-entries.ts`).
  *
  * Auth: Firebase ID token via Authorization: Bearer header + x-tenant-id
  * header. Mirrors the tRPC protectedProcedure auth pattern (apps/api/src/trpc.ts)
@@ -12,7 +16,7 @@
  *
  * Flow:
  *   1. Verify Firebase token + extract tenantId
- *   2. Parse + validate body (multipart for PDF, JSON for paste_text/faq)
+ *   2. Parse + validate body (multipart for PDF, JSON for paste_text)
  *   3. Compute SHA-256 fileChecksum for per-tenant idempotency dedup
  *   4. Write knowledge_source row with status='queued'
  *   5. Publish `knowledge.source_ingested` event
@@ -21,9 +25,7 @@
  * On any failure: 400/401/413/500 with explicit error code; no row written.
  *
  * Replaces the legacy KAN-707 `knowledgeIngest.request` tRPC procedure
- * (deleted in KAN-826). The legacy `/pubsub/knowledge-ingest` route still
- * exists as dead code (no producers post-KAN-826); KAN-841 follow-up
- * decommissions it.
+ * (deleted in KAN-826).
  */
 import { Hono } from "hono";
 import { createHash, randomUUID } from "node:crypto";
@@ -79,8 +81,8 @@ async function authenticate(authHeader: string | undefined, tenantHeader: string
 
 async function persistAndPublish(input: {
   tenantId: string;
-  sourceType: "pdf" | "paste_text" | "faq";
-  category: "faq" | "inventory" | "warranty" | "pricing" | "other";
+  sourceType: "pdf" | "paste_text";
+  category: "inventory" | "warranty" | "pricing" | "other";
   title: string | null;
   fileName: string | null;
   fileSizeBytes: number | null;
@@ -195,7 +197,7 @@ knowledgeSourcesApp.post("/sources", async (c) => {
     const result = await persistAndPublish({
       tenantId,
       sourceType: "pdf",
-      category: category as "faq" | "inventory" | "warranty" | "pricing" | "other",
+      category: category as "inventory" | "warranty" | "pricing" | "other",
       title,
       fileName,
       fileSizeBytes: file.size,
@@ -206,7 +208,7 @@ knowledgeSourcesApp.post("/sources", async (c) => {
     return c.json(result, 202);
   }
 
-  // ── JSON paths (paste_text + faq) ────────────────────────────────
+  // ── JSON path (paste_text) — KAN-XXX dropped 'faq' branch ─────────
   if (contentType.startsWith("application/json")) {
     let json: unknown;
     try {
@@ -220,38 +222,19 @@ knowledgeSourcesApp.post("/sources", async (c) => {
     }
 
     const body = parsed.data;
-    if (body.sourceType === "paste_text") {
-      const fileChecksum = createHash("sha256").update(body.rawContent).digest("hex");
-      const result = await persistAndPublish({
-        tenantId,
-        sourceType: "paste_text",
-        category: body.category,
-        title: body.title ?? null,
-        fileName: null,
-        fileSizeBytes: body.rawContent.length,
-        fileChecksum,
-        rawContent: body.rawContent,
-        metadata: {},
-      });
-      return c.json(result, 202);
-    }
-    if (body.sourceType === "faq") {
-      // Q+A combined for checksum so re-upload of (Q,A) pair detects dedup.
-      const checksumPayload = `${body.question}\n${body.answer}`;
-      const fileChecksum = createHash("sha256").update(checksumPayload).digest("hex");
-      const result = await persistAndPublish({
-        tenantId,
-        sourceType: "faq",
-        category: body.category,
-        title: body.title ?? null,
-        fileName: null,
-        fileSizeBytes: checksumPayload.length,
-        fileChecksum,
-        rawContent: body.answer,
-        metadata: { question: body.question },
-      });
-      return c.json(result, 202);
-    }
+    const fileChecksum = createHash("sha256").update(body.rawContent).digest("hex");
+    const result = await persistAndPublish({
+      tenantId,
+      sourceType: "paste_text",
+      category: body.category,
+      title: body.title ?? null,
+      fileName: null,
+      fileSizeBytes: body.rawContent.length,
+      fileChecksum,
+      rawContent: body.rawContent,
+      metadata: {},
+    });
+    return c.json(result, 202);
   }
 
   return c.json({ error: "Unsupported Content-Type — expected multipart/form-data or application/json" }, 415);
@@ -306,7 +289,9 @@ function asAdminPrisma(): KnowledgeAdminPrisma {
 // GET /api/knowledge/sources?category=...
 // ─────────────────────────────────────────────
 
-const KNOWLEDGE_CATEGORIES = ['general', 'faq', 'inventory', 'warranty', 'pricing', 'other'] as const;
+// KAN-XXX dropped 'faq' from create-side allow-list; FAQ entries are first-class.
+// 'general' kept for forward-compat with existing tier-limits values.
+const KNOWLEDGE_CATEGORIES = ['general', 'inventory', 'warranty', 'pricing', 'other'] as const;
 
 knowledgeSourcesApp.get("/sources", async (c) => {
   const auth = await authenticate(c.req.header("authorization"), c.req.header("x-tenant-id"));
@@ -492,7 +477,6 @@ knowledgeSourcesApp.get("/tier-limits", async (c) => {
       maxSources: number;
       maxPdfMB: number;
       allowsPdf: boolean;
-      allowsFaq: boolean;
       allowedCategories: string[];
     };
   };

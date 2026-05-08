@@ -149,31 +149,6 @@ describe("knowledge-ingestion-service", () => {
     expect(mock.sourceUpdate).not.toHaveBeenCalled();
   });
 
-  it("FAQ path — embeds question, stores answer in chunk_text + question on row", async () => {
-    const mock = makePrismaMock({
-      id: "src-faq",
-      tenantId: "tenant-a",
-      sourceType: "faq",
-      category: "faq",
-      status: "queued",
-      rawContent: "Yes, refunds are honored within 30 days.",
-      metadata: { question: "What is your refund policy?" },
-    });
-    // For FAQ, chunker is called with the question text; orchestrator
-    // synthesizes a single chunk with the question as text.
-    chunkMock.mockReturnValue([{ position: 0, text: "What is your refund policy?", tokenCount: 7 }]);
-    embedMock.mockResolvedValue([
-      {
-        position: 0,
-        text: "What is your refund policy?",
-        tokenCount: 7,
-        embedding: Array(1536).fill(0.5),
-      },
-    ]);
-
-    const result = await ingestSource(mock.prisma, "src-faq");
-
-    expect(result.type).toBe("completed");
-    expect(mock.executeRawCalls).toHaveLength(1);
-  });
+  // KAN-XXX — the legacy 'faq' sourceType branch is removed; FAQ entries
+  // are first-class with sync embedding via faq-entries.ts service.
 });

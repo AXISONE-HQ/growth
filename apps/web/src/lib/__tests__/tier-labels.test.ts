@@ -42,29 +42,25 @@ describe("tier-labels — KAN-829 sub-cohort 6", () => {
       maxSources: 1,
       maxFileSizeMb: 0,
       allowsPdf: false,
-      allowsFaq: false,
       description: "1 source, paste text only",
     });
     expect(tierFeatures("starter")).toEqual({
       maxSources: 1,
       maxFileSizeMb: 0,
       allowsPdf: false,
-      allowsFaq: false,
       description: "1 source, paste text only",
     });
     expect(tierFeatures("pro")).toEqual({
       maxSources: 5,
       maxFileSizeMb: 5,
       allowsPdf: true,
-      allowsFaq: true,
-      description: "5 sources, PDF up to 5 MB, FAQ entries",
+      description: "5 sources, PDF up to 5 MB",
     });
     expect(tierFeatures("enterprise")).toEqual({
       maxSources: 9999,
       maxFileSizeMb: 10,
       allowsPdf: true,
-      allowsFaq: true,
-      description: "9,999 sources, PDF up to 10 MB, FAQ entries",
+      description: "9,999 sources, PDF up to 10 MB",
     });
   });
 
@@ -75,14 +71,12 @@ describe("tier-labels — KAN-829 sub-cohort 6", () => {
     expect(recommendedTierFor("count-at-limit", "enterprise")).toBeNull();
   });
 
-  it("Test 5 — recommendedTierFor feature-locked: pdf+faq on free/starter→pro; on pro→null (already unlocked)", () => {
+  it("Test 5 — recommendedTierFor feature-locked: pdf on free/starter→pro; on pro→null (already unlocked)", () => {
+    // KAN-XXX dropped FAQ from feature-locked surface; only PDF remains.
     expect(recommendedTierFor("feature-locked", "free", "pdf")).toBe("pro");
-    expect(recommendedTierFor("feature-locked", "free", "faq")).toBe("pro");
     expect(recommendedTierFor("feature-locked", "starter", "pdf")).toBe("pro");
-    expect(recommendedTierFor("feature-locked", "starter", "faq")).toBe("pro");
     // Already unlocked — no upgrade recommendation needed
     expect(recommendedTierFor("feature-locked", "pro", "pdf")).toBeNull();
-    expect(recommendedTierFor("feature-locked", "pro", "faq")).toBeNull();
     expect(recommendedTierFor("feature-locked", "enterprise", "pdf")).toBeNull();
   });
 

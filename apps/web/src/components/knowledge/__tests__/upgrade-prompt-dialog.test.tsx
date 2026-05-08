@@ -87,21 +87,24 @@ describe("UpgradePromptDialog — KAN-829 sub-cohort 6", () => {
     expect(proRow?.getAttribute("data-recommended")).toBe("true");
   });
 
-  it("Test 4 — feature-locked FAQ on Starter recommends Pro (synonym-skip not visible — Starter is current)", () => {
+  it("Test 4 — feature-locked PDF on Starter recommends Pro (synonym-skip not visible — Starter is current)", () => {
+    // KAN-XXX: FAQ feature-locked variant removed (FAQ entries no longer
+    // tier-gated). PDF is now the only feature-locked surface; this test
+    // exercises the same comparison-table semantics with PDF as the trigger.
     render(
       <UpgradePromptDialog
         open
         onOpenChange={() => {}}
         reason="feature-locked"
         currentTier="starter"
-        feature="faq"
+        feature="pdf"
       />,
     );
     expect(
-      screen.getByText("FAQ entries is on a higher plan."),
+      screen.getByText("PDF uploads is on a higher plan."),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/FAQ entries is available on Pro and above/i),
+      screen.getByText(/PDF uploads is available on Pro and above/i),
     ).toBeInTheDocument();
     // Starter row present, NO Free row (synonym skip)
     const table = screen.getByLabelText("Plan comparison");
@@ -184,16 +187,16 @@ describe("UpgradePromptDialog — KAN-829 sub-cohort 6", () => {
     expect(m2.subject).toBe("Upgrade request — Free → Pro");
     expect(m2.body).toMatch(/Reason: unlock PDF uploads\./);
 
-    // starter + feature-locked FAQ
+    // starter + feature-locked PDF (KAN-XXX dropped FAQ variant)
     const m3 = buildMailto({
       reason: "feature-locked",
       currentTier: "starter",
       recommended: "pro",
-      feature: "faq",
+      feature: "pdf",
       isEnterpriseCeiling: false,
     });
     expect(m3.subject).toBe("Upgrade request — Starter → Pro");
-    expect(m3.body).toMatch(/Reason: unlock FAQ entries\./);
+    expect(m3.body).toMatch(/Reason: unlock PDF uploads\./);
 
     // enterprise ceiling
     const m4 = buildMailto({
@@ -211,16 +214,15 @@ describe("UpgradePromptDialog — KAN-829 sub-cohort 6", () => {
     const matrix: Array<{
       reason: "count-at-limit" | "feature-locked";
       currentTier: "free" | "starter" | "pro" | "enterprise";
-      feature?: "pdf" | "faq";
+      feature?: "pdf";
     }> = [
       { reason: "count-at-limit", currentTier: "free" },
       { reason: "count-at-limit", currentTier: "starter" },
       { reason: "count-at-limit", currentTier: "pro" },
       { reason: "count-at-limit", currentTier: "enterprise" },
+      // KAN-XXX dropped FAQ feature-locked variants — PDF is the only gated feature.
       { reason: "feature-locked", currentTier: "free", feature: "pdf" },
-      { reason: "feature-locked", currentTier: "free", feature: "faq" },
       { reason: "feature-locked", currentTier: "starter", feature: "pdf" },
-      { reason: "feature-locked", currentTier: "starter", feature: "faq" },
     ];
 
     const FORBIDDEN_SUB6 = [
