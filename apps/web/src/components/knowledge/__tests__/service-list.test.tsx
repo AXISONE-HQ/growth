@@ -22,11 +22,14 @@ vi.mock("@/lib/firebase", () => ({
 
 import { ServiceList } from "../service-list";
 
+// KAN-851 fix-forward: Prisma serializes Decimal columns to STRING in JSON
+// ("250.00"), not number. Mocks below use the string shape to match real
+// API payloads — earlier number-shape mocks masked the toFixed crash.
 interface MockService {
   id: string;
   title: string;
   description: string;
-  price: number | null;
+  price: string | number | null;
   priceUnit: "PER_HOUR" | "PER_MONTH" | "PER_PROJECT" | "PER_UNIT" | "FIXED" | "CUSTOM";
   priceCustomLabel: string | null;
   startDate: string | null;
@@ -45,7 +48,7 @@ function makeService(overrides: Partial<MockService> = {}): MockService {
     id: "s1",
     title: "Senior Engineering Mentorship",
     description: "Weekly 1:1.",
-    price: 250,
+    price: "250.00",
     priceUnit: "PER_HOUR",
     priceCustomLabel: null,
     startDate: null,
@@ -108,7 +111,7 @@ describe("ServiceList — KAN-XXX", () => {
     const long = "A".repeat(120);
     setupFetchMock({
       services: [
-        makeService({ title: long, price: 50, priceUnit: "PER_HOUR" }),
+        makeService({ title: long, price: "50.00", priceUnit: "PER_HOUR" }),
       ],
     });
     renderWithClient(<ServiceList />);
@@ -117,6 +120,23 @@ describe("ServiceList — KAN-XXX", () => {
       expect(screen.getByText(`${"A".repeat(80)}…`)).toBeInTheDocument();
     });
     expect(screen.getByText("$50.00 per hour")).toBeInTheDocument();
+  });
+
+  it("Test 2b — renders price correctly when API returns Decimal as string (KAN-851)", async () => {
+    // Regression guard: Prisma serializes Decimal(10,2) to JSON as STRING.
+    // Earlier mocks used number, masking the .toFixed crash. This test
+    // exercises the string-shape path that PROD actually emits.
+    setupFetchMock({
+      services: [
+        makeService({ title: "Launch", price: "299.00", priceUnit: "PER_MONTH" }),
+        makeService({ id: "s2", title: "Test service", price: "250.00", priceUnit: "PER_HOUR" }),
+      ],
+    });
+    renderWithClient(<ServiceList />);
+    await waitFor(() => {
+      expect(screen.getByText("$299.00 per month")).toBeInTheDocument();
+    });
+    expect(screen.getByText("$250.00 per hour")).toBeInTheDocument();
   });
 
   it("Test 3 — Add CTA click opens AddServiceDialog", async () => {

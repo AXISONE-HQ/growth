@@ -42,11 +42,14 @@ import { API_BASE, buildHeaders } from "@/lib/api";
 import { relativeTime } from "@/lib/relative-time";
 import { formatServicePrice, type ServicePriceUnit } from "@/lib/service-pricing";
 
+// KAN-851 fix-forward: `price` accepts `string | number | null` because
+// Prisma serializes Decimal columns to string in JSON ("250.00"). The
+// formatServicePrice helper coerces both shapes via Number().
 interface Service {
   id: string;
   title: string;
   description: string;
-  price: number | null;
+  price: string | number | null;
   priceUnit: ServicePriceUnit;
   priceCustomLabel: string | null;
   startDate: string | null;

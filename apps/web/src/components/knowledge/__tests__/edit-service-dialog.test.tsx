@@ -28,11 +28,15 @@ vi.mock("sonner", () => ({
 
 import { EditServiceDialog } from "../edit-service-dialog";
 
+// KAN-851 fix-forward: price uses string shape to match Prisma's JSON
+// serialization of Decimal(10,2). The dialog's pre-fill uses
+// `String(service.price)`, so both string and number shapes produce the
+// same input value — but PROD only ever emits strings.
 const SERVICE = {
   id: "s1",
   title: "Senior Mentorship",
   description: "Weekly 1:1.",
-  price: 250,
+  price: "250.00",
   priceUnit: "PER_HOUR" as const,
   priceCustomLabel: null,
   startDate: null,

@@ -35,11 +35,14 @@ const TITLE_MAX = 200;
 const DESCRIPTION_MAX = 2_000;
 const PRICE_LABEL_MAX = 200;
 
+// KAN-851 fix-forward: `price` accepts `string | number | null` because
+// Prisma serializes Decimal columns to string in JSON ("250.00"). The pre-fill
+// on line ~79 uses `String(service.price)` which is shape-tolerant.
 interface ServiceShape {
   id: string;
   title: string;
   description: string;
-  price: number | null;
+  price: string | number | null;
   priceUnit: ServicePriceUnit;
   priceCustomLabel: string | null;
   startDate: string | null;
