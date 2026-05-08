@@ -82,6 +82,7 @@ model Tenant {
   knowledgeBase          KnowledgeBase[]
   knowledgeSources       KnowledgeSource[]
   faqEntries             FaqEntry[]
+  services               Service[]
   knowledgeGapSummaries  KnowledgeGapSummary[]
   aiAgentConfigs         AiAgentConfig[]
   contactStates          ContactState[]
@@ -1030,37 +1031,43 @@ model KnowledgeSource {
   @@map("knowledge_source")
 }
 
-// KAN-XXX (FAQ first-class) — KnowledgeChunk parent FK is now polymorphic:
-// EXACTLY ONE of `sourceId` or `faqEntryId` is set per row. Enforced at the
-// DB layer via a CHECK constraint added in the same migration:
-//   CHECK ((source_id IS NULL) <> (faq_entry_id IS NULL))
-// The XOR predicate (`<>` on null-equality) requires precisely one operand
-// non-null. Belt-and-suspenders: app-layer writers also assert the invariant
-// before INSERT (faq-entries.ts service + knowledge-ingestion-service).
+// KAN-XXX (Services first-class) — KnowledgeChunk parent FK is polymorphic
+// across THREE parent tables now: KnowledgeSource, FaqEntry, Service.
+// EXACTLY ONE of (sourceId, faqEntryId, serviceId) is set per row. Enforced
+// at the DB layer via a 3-way CHECK constraint:
+//   CHECK ((source_id IS NOT NULL)::int +
+//          (faq_entry_id IS NOT NULL)::int +
+//          (service_id IS NOT NULL)::int = 1)
+// The 2-way XOR (introduced in KAN-849) is dropped + replaced atomically by
+// the migration in this cohort. Belt-and-suspenders: app-layer writers
+// (faq-entries.ts, services.ts, knowledge-ingestion-service.ts) only ever
+// populate exactly one of the three FKs.
 model KnowledgeChunk {
   id           String                      @id @default(uuid())
   /// DENORMALIZED from parent for retrieval performance. Drives
   /// the partial index (tenant_id, category) WHERE status='ready' which
   /// is the hot-path pre-filter on every Brain/Shaper retrieval call.
   tenantId     String                      @map("tenant_id")
-  /// Parent FK: KnowledgeSource path (PDF / paste_text). XOR with faqEntryId
-  /// per the DB CHECK constraint. Null when this chunk belongs to a FaqEntry.
+  /// Parent FK: KnowledgeSource path (PDF / paste_text). Mutually exclusive
+  /// with faqEntryId + serviceId per the 3-way DB CHECK constraint.
   sourceId     String?                     @map("source_id")
-  /// KAN-XXX — Parent FK: FaqEntry path. XOR with sourceId per the DB CHECK
-  /// constraint. Null when this chunk belongs to a KnowledgeSource.
+  /// Parent FK: FaqEntry path (KAN-849). Mutually exclusive per the CHECK.
   faqEntryId   String?                     @map("faq_entry_id")
+  /// KAN-XXX — Parent FK: Service path. Mutually exclusive per the CHECK.
+  serviceId    String?                     @map("service_id")
   /// Plain-text chunk content fed to retrieval ranking + LLM context.
   chunkText    String                      @map("chunk_text") @db.Text
   /// 0-based ordinal within the parent. Used for "X of N" UI + ordering.
   position     Int
-  /// DENORMALIZED from parent for the partial-index pre-filter. For FaqEntry
-  /// chunks the category is fixed to 'faq' at insert time.
+  /// DENORMALIZED from parent for the partial-index pre-filter. Sentinel
+  /// values: 'faq' for FaqEntry chunks, 'service' for Service chunks,
+  /// the source's category string for KnowledgeSource chunks.
   category     String
   /// 'ready' | 'deleted'. Soft-delete pattern: chunks marked 'deleted'
   /// disappear from retrieval but remain for audit trail until 30-day cron.
   status       String                      @default("ready")
   /// For Q&A chunks only: the question text (chunkText holds the answer).
-  /// Null for PDFs and paste_text chunks.
+  /// Null for PDFs / paste_text / service chunks.
   questionText String?                     @map("question_text") @db.Text
   /// pgvector(1536) — matches OpenAI text-embedding-3-small. Hardcoded
   /// dimension forces deliberation if the model ever changes.
@@ -1070,9 +1077,11 @@ model KnowledgeChunk {
 
   source   KnowledgeSource? @relation(fields: [sourceId], references: [id], onDelete: Cascade)
   faqEntry FaqEntry?        @relation(fields: [faqEntryId], references: [id], onDelete: Cascade)
+  service  Service?         @relation(fields: [serviceId], references: [id], onDelete: Cascade)
 
   @@index([sourceId])
   @@index([faqEntryId])
+  @@index([serviceId])
   @@index([tenantId, status, category])
   @@map("knowledge_chunk")
 }
@@ -1116,6 +1125,75 @@ model FaqEntry {
   @@index([tenantId, deletedAt])
   @@index([tenantId, createdAt])
   @@map("faq_entries")
+}
+
+// ─────────────────────────────────────────────
+// KAN-XXX — Services as first-class entity (Sprint 11b)
+// ─────────────────────────────────────────────
+//
+// Structured service catalog: title + description + pricing (numeric +
+// unit OR custom-label escape hatch) + availability window (optional) +
+// included/excluded line items. Each row produces exactly one
+// KnowledgeChunk via the polymorphic `serviceId` FK; the embedder runs
+// SYNCHRONOUSLY on create/update from a templated text body (see
+// `packages/api/src/services/services.ts:buildServiceEmbedText`).
+//
+// Tier-gating intentionally omitted — all tiers get unlimited services
+// per the locked decisions in this cohort's brief (mirrors FAQ pattern).
+//
+// Status transitions (sync, in-process):
+//   queued → embedding → ready  (success path)
+//   queued → embedding → error  (terminal failure with errorDetail)
+model Service {
+  id                String           @id @default(uuid())
+  tenantId          String           @map("tenant_id")
+  title             String
+  description       String           @db.Text
+  /// Nullable when priceUnit=CUSTOM (operator typed a free-form label
+  /// like "Contact for quote" instead of a numeric price). Otherwise the
+  /// numeric value paired with the priceUnit (e.g., 50.00 + PER_HOUR =
+  /// "$50 per hour").
+  price             Decimal?         @db.Decimal(10, 2)
+  priceUnit         ServicePriceUnit @map("price_unit")
+  /// Required when priceUnit=CUSTOM; otherwise null. App layer validates;
+  /// no DB CHECK because Prisma can't natively express "required iff X".
+  priceCustomLabel  String?          @map("price_custom_label")
+  /// Availability window. Both nullable; null+null = "Ongoing" rendering.
+  /// Stored as Date (no time component) per Decision F.
+  startDate         DateTime?        @map("start_date") @db.Date
+  endDate           DateTime?        @map("end_date") @db.Date
+  /// Bullet-point arrays. Postgres native text[] via Prisma String[].
+  /// Empty arrays = "skip the section" in the rendered embed text.
+  includedItems     String[]         @map("included_items")
+  excludedItems     String[]         @map("excluded_items")
+  /// 'queued' | 'embedding' | 'ready' | 'error'. Mirrors FaqEntry pattern.
+  status            String           @default("queued")
+  errorDetail       String?          @map("error_detail")
+  /// Set by soft-delete. Hourly cron hard-deletes after 30 days.
+  deletedAt         DateTime?        @map("deleted_at")
+  createdAt         DateTime         @default(now()) @map("created_at")
+  updatedAt         DateTime         @updatedAt @map("updated_at")
+
+  tenant Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  chunks KnowledgeChunk[]
+
+  @@index([tenantId, deletedAt])
+  @@index([tenantId, createdAt])
+  @@map("services")
+}
+
+/// Pricing unit for a Service. CUSTOM is the escape hatch for non-numeric
+/// pricing ("Contact for quote", "By the engagement", etc.) — paired with
+/// `priceCustomLabel` when chosen.
+enum ServicePriceUnit {
+  PER_HOUR
+  PER_MONTH
+  PER_PROJECT
+  PER_UNIT
+  FIXED
+  CUSTOM
+
+  @@map("service_price_unit")
 }
 
 model KnowledgeGapSummary {

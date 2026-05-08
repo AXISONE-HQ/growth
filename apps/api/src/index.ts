@@ -34,6 +34,7 @@ import { knowledgeSourceIngestedPushApp } from "./subscribers/knowledge-source-i
 import { leadApiApp } from "./routes/lead-api.js";
 import { knowledgeSourcesApp } from "./routes/knowledge-sources.js";
 import { faqEntriesApp } from "./routes/faq-entries.js";
+import { servicesApp } from "./routes/services.js";
 import { cronDeferredSendApp } from "./internal/cron-deferred-send.js";
 import { getPubSubClient } from "../../../packages/api/src/lib/pubsub-client.js";
 import { setLLMCostPublisher } from "../../../packages/api/src/services/llm-client.js";
@@ -114,8 +115,10 @@ app.route("/api/v1/leads", leadApiApp);
 // ============================================================================
 
 app.route("/api/knowledge", knowledgeSourcesApp);
-// KAN-XXX — FAQ entries as first-class admin resource (separate table + sync embed)
+// KAN-849 — FAQ entries as first-class admin resource (separate table + sync embed)
 app.route("/api/knowledge", faqEntriesApp);
+// KAN-XXX — Services as first-class admin resource (separate table + sync embed)
+app.route("/api/knowledge", servicesApp);
 
 // ============================================================================
 // tRPC SERVER
