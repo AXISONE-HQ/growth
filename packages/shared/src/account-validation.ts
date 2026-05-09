@@ -250,3 +250,32 @@ export const DisclosureCreateSchema = z.object({
   appliesToChannels: z.array(z.enum(["email", "sms", "whatsapp"])).default([]),
 });
 export type DisclosureCreate = z.infer<typeof DisclosureCreateSchema>;
+
+// ─────────────────────────────────────────────
+// KAN-855 — Cohort 2 logo upload schemas
+// ─────────────────────────────────────────────
+
+/** Spec §2 decision 2: PNG, JPG, SVG, WebP, ≤5MB. */
+export const ALLOWED_LOGO_MIMES = [
+  "image/png",
+  "image/jpeg",
+  "image/svg+xml",
+  "image/webp",
+] as const;
+export const MAX_LOGO_BYTES = 5 * 1024 * 1024;
+
+export const LogoUploadInputSchema = z.object({
+  contentType: z.enum(ALLOWED_LOGO_MIMES),
+  sizeBytes: z.number().int().positive().max(MAX_LOGO_BYTES, {
+    message: `Logo must be under ${MAX_LOGO_BYTES / 1024 / 1024} MB`,
+  }),
+});
+export type LogoUploadInput = z.infer<typeof LogoUploadInputSchema>;
+
+export const LogoFinalizeInputSchema = z.object({
+  /** Opaque to the client; equals the GCS object name returned by
+   * uploadLogo. Server validates the path prefix matches ctx.tenantId
+   * before touching GCS. */
+  uploadId: z.string().min(1),
+});
+export type LogoFinalizeInput = z.infer<typeof LogoFinalizeInputSchema>;

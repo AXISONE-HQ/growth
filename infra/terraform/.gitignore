@@ -1,0 +1,13 @@
+# Local Terraform state — never commit. State is per-machine + may
+# contain credentials. Production state lives in the operator's
+# authorized environment per `feedback_terraform_unmanaged_aspirational_state`.
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+crash.log
+crash.*.log
+
+# Plans saved with `-out` — sometimes contain secrets in plan text
+*.tfplan

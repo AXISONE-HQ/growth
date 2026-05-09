@@ -20,6 +20,9 @@ import {
   SocialProfileCreateSchema,
   DisclosureCreateSchema,
   buildAccountFieldUpdatedEvent,
+  // KAN-855 — Account Page Cohort 2 (logo upload)
+  LogoUploadInputSchema,
+  LogoFinalizeInputSchema,
 } from "@growth/shared";
 // KAN-852 — Account Page publisher + flag. Cross-rootDir static imports
 // trigger TS6059 (KAN-689 cohort), so we use the variable-specifier
@@ -41,6 +44,43 @@ async function loadAccountPublisher(): Promise<AccountPublisherModule> {
   const spec = "../../../packages/api/src/services/account-field-updated-publisher.js";
   _accountPublisherModule = (await import(spec)) as AccountPublisherModule;
   return _accountPublisherModule;
+}
+
+// KAN-855 — Account Page Cohort 2 logo storage helpers. Same dynamic-import
+// dance as the publisher above (cross-rootDir; KAN-689 cohort hygiene).
+interface AccountLogoStorageModule {
+  ALLOWED_LOGO_MIME_TO_EXT: Record<string, "png" | "jpg" | "svg" | "webp">;
+  getSignedUploadUrl: (
+    tenantId: string,
+    mime: "image/png" | "image/jpeg" | "image/svg+xml" | "image/webp",
+  ) => Promise<{ uploadUrl: string; objectName: string; uploadId: string; contentType: string }>;
+  getSignedReadUrl: (objectName: string) => Promise<string>;
+  downloadObject: (objectName: string) => Promise<Buffer>;
+  deleteObject: (objectName: string) => Promise<void>;
+  objectExists: (objectName: string) => Promise<boolean>;
+  generateAndUploadVariants: (
+    tenantId: string,
+    originalBuffer: Buffer,
+    ext: "png" | "jpg" | "webp",
+    timestamp: number,
+  ) => Promise<{ size256: string; size128: string; size64: string }>;
+  enrichLogoUrls: (
+    storedLogoUrl: string | null,
+    storedLogoVariants: { "256"?: string; "128"?: string; "64"?: string } | null,
+  ) => Promise<{
+    logoUrl: string | null;
+    logoVariants: { 256: string; 128: string; 64: string } | null;
+  }>;
+  isOwnedByTenant: (objectName: string, tenantId: string) => boolean;
+  parseExtFromObjectName: (objectName: string) => "png" | "jpg" | "svg" | "webp" | null;
+  parseTimestampFromObjectName: (objectName: string) => number | null;
+}
+let _accountLogoStorageModule: AccountLogoStorageModule | null = null;
+async function loadAccountLogoStorage(): Promise<AccountLogoStorageModule> {
+  if (_accountLogoStorageModule) return _accountLogoStorageModule;
+  const spec = "../../../packages/api/src/services/account-logo-storage.js";
+  _accountLogoStorageModule = (await import(spec)) as AccountLogoStorageModule;
+  return _accountLogoStorageModule;
 }
 // KAN-826: legacy KAN-707 ingest imports REMOVED — KnowledgeSourceTypeEnum,
 // KnowledgeSourceStatusEnum, PER_TENANT_INGEST_QUEUE_DEPTH_LIMIT,
@@ -3504,6 +3544,20 @@ const observabilityRouter = router({
 // the call site.
 // ============================================================================
 
+/** KAN-855 — translate stored GCS object names on AccountProfile.logoUrl
+ * + logoVariants into freshly-signed GET URLs (1hr TTL). Mutating helper:
+ * returns the same row with the two columns rewritten. Called by
+ * account.get + every mutation handler that returns the row. */
+async function _withSignedLogoUrls(row: any): Promise<any> {
+  if (!row) return row;
+  const storage = await loadAccountLogoStorage();
+  const enriched = await storage.enrichLogoUrls(
+    row.logoUrl ?? null,
+    (row.logoVariants ?? null) as { "256"?: string; "128"?: string; "64"?: string } | null,
+  );
+  return { ...row, logoUrl: enriched.logoUrl, logoVariants: enriched.logoVariants };
+}
+
 /** Deep-equality helper for diff detection — JSON-stringify is sufficient
  * because the columns we compare are scalars, primitive arrays, or JSON
  * blobs (weeklyHours, logoVariants). Order-sensitive on arrays, which is
@@ -3589,7 +3643,7 @@ async function _applyAccountUpdate(
     }
   }
 
-  return updated;
+  return _withSignedLogoUrls(updated);
 }
 
 // Exported (rather than const) so the KAN-852 integration test in
@@ -3598,38 +3652,38 @@ async function _applyAccountUpdate(
 // the full appRouter graph.
 export const accountRouter = router({
   // GET — load AccountProfile for the active tenant. Provisions on first
-  // touch so the UI sees a usable row immediately after tenant creation.
+  // touch via upsert so the UI sees a usable row immediately after tenant
+  // creation. KAN-855 (Cohort 2 / Fred E.4): switched from
+  // findUnique+conditional create to upsert — the prior shape race-loses
+  // when two concurrent requests both find the row missing and both try
+  // to create, hitting the @unique constraint on tenantId.
+  //
+  // KAN-855 also enriches logoUrl/logoVariants from stored object names
+  // to freshly-signed GET URLs (1hr TTL) so the browser can render the
+  // logo without backing storage being public.
   get: protectedProcedure.query(async ({ ctx }) => {
     const tenantId = ctx.tenantId;
     if (!tenantId) {
       throw new TRPCError({ code: "UNAUTHORIZED", message: "Missing tenant context" });
     }
-    let row: any = await (ctx.prisma as any).accountProfile?.findUnique({
+    const tenant: any = await (ctx.prisma as any).tenant?.findUnique({
+      where: { id: tenantId },
+      select: { name: true },
+    });
+    if (!tenant) {
+      throw new TRPCError({ code: "NOT_FOUND", message: "Tenant not found" });
+    }
+    const row: any = await (ctx.prisma as any).accountProfile?.upsert({
       where: { tenantId },
+      create: { tenantId, legalName: tenant.name },
+      update: {},
       include: {
         socialProfiles: { orderBy: { position: "asc" } },
         observedHolidays: { orderBy: { date: "asc" } },
         industryDisclosures: { orderBy: { position: "asc" } },
       },
     });
-    if (!row) {
-      const tenant: any = await (ctx.prisma as any).tenant?.findUnique({
-        where: { id: tenantId },
-        select: { name: true },
-      });
-      if (!tenant) {
-        throw new TRPCError({ code: "NOT_FOUND", message: "Tenant not found" });
-      }
-      row = await (ctx.prisma as any).accountProfile?.create({
-        data: { tenantId, legalName: tenant.name },
-        include: {
-          socialProfiles: true,
-          observedHolidays: true,
-          industryDisclosures: true,
-        },
-      });
-    }
-    return row;
+    return _withSignedLogoUrls(row);
   }),
 
   // ── Tab updates ──
@@ -3780,6 +3834,232 @@ export const accountRouter = router({
       }
       return { ok: true };
     }),
+
+  // ─────────────────────────────────────────────
+  // KAN-855 — logo upload (signed-URL flow)
+  // ─────────────────────────────────────────────
+  // Three-step flow:
+  //   1. uploadLogo  — server returns a 15-min signed PUT URL + uploadId
+  //   2. (browser PUTs the file body directly to GCS — no API roundtrip)
+  //   3. finalizeLogo — server reads the uploaded original, runs Sharp
+  //      to generate 256/128/64 variants, persists URLs in AccountProfile.
+  //
+  // Tenant scope: every mutation that accepts a client uploadId/objectName
+  // calls isOwnedByTenant(name, ctx.tenantId) before touching GCS. The
+  // path prefix `tenants/{tenantId}/account/logo-` is the only acceptable
+  // shape — anything else throws FORBIDDEN.
+  //
+  // Concurrent-upload tech debt (Fred E.1): if a user uploads logo A and
+  // immediately uploads B before A's variants finalize, A's variants may
+  // get orphaned in GCS. Cleanup is deferred to a janitor cron later.
+
+  uploadLogo: protectedProcedure
+    .input(LogoUploadInputSchema)
+    .mutation(async ({ ctx, input }) => {
+      const tenantId = ctx.tenantId;
+      if (!tenantId) {
+        throw new TRPCError({ code: "UNAUTHORIZED", message: "Missing tenant context" });
+      }
+      const storage = await loadAccountLogoStorage();
+      const result = await storage.getSignedUploadUrl(tenantId, input.contentType);
+      // Returned to the browser:
+      //   uploadUrl  — PUT here within 15 min
+      //   uploadId   — opaque, pass back to finalizeLogo (it equals
+      //                objectName but the client shouldn't depend on
+      //                that — server enforces tenant scope)
+      //   contentType — same value the client sent; mirror so the
+      //                browser PUT request can match Content-Type
+      return {
+        uploadUrl: result.uploadUrl,
+        uploadId: result.uploadId,
+        contentType: result.contentType,
+      };
+    }),
+
+  finalizeLogo: protectedProcedure
+    .input(LogoFinalizeInputSchema)
+    .mutation(async ({ ctx, input }) => {
+      const tenantId = ctx.tenantId;
+      if (!tenantId) {
+        throw new TRPCError({ code: "UNAUTHORIZED", message: "Missing tenant context" });
+      }
+      const storage = await loadAccountLogoStorage();
+      // Tenant-scope guardrail — never trust the client.
+      if (!storage.isOwnedByTenant(input.uploadId, tenantId)) {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message: "uploadId does not belong to this tenant",
+        });
+      }
+      // Object must already exist (PUT preceded this call).
+      const exists = await storage.objectExists(input.uploadId);
+      if (!exists) {
+        throw new TRPCError({
+          code: "NOT_FOUND",
+          message: "Uploaded object not found — did the PUT complete?",
+        });
+      }
+      const ext = storage.parseExtFromObjectName(input.uploadId);
+      const ts = storage.parseTimestampFromObjectName(input.uploadId);
+      if (!ext || ts === null) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "Malformed uploadId — expected logo-{timestamp}.{ext}",
+        });
+      }
+
+      // Variant generation:
+      //   SVG — vector, no raster resize. Point all 3 sizes at the
+      //         original SVG path. Spec §2 decision 2.
+      //   raster — Sharp generates + uploads 3 variants. On failure
+      //         (or 10s timeout), the original logo upload still
+      //         succeeds; logoVariants stays null; client shows a
+      //         "Retry thumbnails" button that calls regenerateVariants.
+      let logoVariants: { "256": string; "128": string; "64": string } | null = null;
+      let variantWarning: string | null = null;
+
+      if (ext === "svg") {
+        logoVariants = {
+          "256": input.uploadId,
+          "128": input.uploadId,
+          "64": input.uploadId,
+        };
+      } else {
+        try {
+          const original = await storage.downloadObject(input.uploadId);
+          const v = await storage.generateAndUploadVariants(
+            tenantId,
+            original,
+            ext as "png" | "jpg" | "webp",
+            ts,
+          );
+          logoVariants = { "256": v.size256, "128": v.size128, "64": v.size64 };
+        } catch (err) {
+          variantWarning = err instanceof Error ? err.message : String(err);
+        }
+      }
+
+      const updated: any = await (ctx.prisma as any).accountProfile?.update({
+        where: { tenantId },
+        data: {
+          logoUrl: input.uploadId,
+          logoVariants,
+        },
+        include: {
+          socialProfiles: { orderBy: { position: "asc" } },
+          observedHolidays: { orderBy: { date: "asc" } },
+          industryDisclosures: { orderBy: { position: "asc" } },
+        },
+      });
+      const enriched = await _withSignedLogoUrls(updated);
+      return { ...enriched, variantWarning };
+    }),
+
+  removeLogo: protectedProcedure.mutation(async ({ ctx }) => {
+    const tenantId = ctx.tenantId;
+    if (!tenantId) {
+      throw new TRPCError({ code: "UNAUTHORIZED", message: "Missing tenant context" });
+    }
+    const storage = await loadAccountLogoStorage();
+    const profile: any = await (ctx.prisma as any).accountProfile?.findUnique({
+      where: { tenantId },
+      select: { logoUrl: true, logoVariants: true },
+    });
+    // Best-effort GCS cleanup — `ignoreNotFound: true` on each delete so
+    // a partial state from a failed earlier finalize doesn't block the
+    // user from clearing the logo.
+    if (profile?.logoUrl) {
+      const namesToDelete = new Set<string>([profile.logoUrl]);
+      const variants = (profile.logoVariants ?? null) as Record<string, string> | null;
+      if (variants) {
+        for (const v of Object.values(variants)) {
+          if (typeof v === "string") namesToDelete.add(v);
+        }
+      }
+      await Promise.all(
+        Array.from(namesToDelete).map((n) => storage.deleteObject(n).catch(() => undefined)),
+      );
+    }
+    const updated: any = await (ctx.prisma as any).accountProfile?.update({
+      where: { tenantId },
+      data: { logoUrl: null, logoVariants: null },
+      include: {
+        socialProfiles: { orderBy: { position: "asc" } },
+        observedHolidays: { orderBy: { date: "asc" } },
+        industryDisclosures: { orderBy: { position: "asc" } },
+      },
+    });
+    return _withSignedLogoUrls(updated);
+  }),
+
+  // Recovery path (Fred E.2) — Sharp failed during finalizeLogo, the
+  // original logo persisted but logoVariants stayed null. Client offers
+  // a "Retry thumbnails" button that calls this mutation. Re-downloads
+  // the original from GCS and re-runs variant generation. No new GCS
+  // upload of the original; the existing logoUrl stays put.
+  regenerateVariants: protectedProcedure.mutation(async ({ ctx }) => {
+    const tenantId = ctx.tenantId;
+    if (!tenantId) {
+      throw new TRPCError({ code: "UNAUTHORIZED", message: "Missing tenant context" });
+    }
+    const storage = await loadAccountLogoStorage();
+    const profile: any = await (ctx.prisma as any).accountProfile?.findUnique({
+      where: { tenantId },
+      select: { logoUrl: true },
+    });
+    if (!profile?.logoUrl) {
+      throw new TRPCError({
+        code: "NOT_FOUND",
+        message: "No logo set — upload a logo first",
+      });
+    }
+    const objectName = profile.logoUrl as string;
+    if (!storage.isOwnedByTenant(objectName, tenantId)) {
+      throw new TRPCError({ code: "FORBIDDEN", message: "Logo not owned by this tenant" });
+    }
+    const ext = storage.parseExtFromObjectName(objectName);
+    const ts = storage.parseTimestampFromObjectName(objectName);
+    if (!ext || ts === null) {
+      throw new TRPCError({
+        code: "BAD_REQUEST",
+        message: "Stored logoUrl has malformed shape",
+      });
+    }
+    if (ext === "svg") {
+      // SVG never had real variants — short-circuit cleanly.
+      const updated: any = await (ctx.prisma as any).accountProfile?.update({
+        where: { tenantId },
+        data: {
+          logoVariants: { "256": objectName, "128": objectName, "64": objectName },
+        },
+        include: {
+          socialProfiles: { orderBy: { position: "asc" } },
+          observedHolidays: { orderBy: { date: "asc" } },
+          industryDisclosures: { orderBy: { position: "asc" } },
+        },
+      });
+      return _withSignedLogoUrls(updated);
+    }
+    const original = await storage.downloadObject(objectName);
+    const v = await storage.generateAndUploadVariants(
+      tenantId,
+      original,
+      ext as "png" | "jpg" | "webp",
+      ts,
+    );
+    const updated: any = await (ctx.prisma as any).accountProfile?.update({
+      where: { tenantId },
+      data: {
+        logoVariants: { "256": v.size256, "128": v.size128, "64": v.size64 },
+      },
+      include: {
+        socialProfiles: { orderBy: { position: "asc" } },
+        observedHolidays: { orderBy: { date: "asc" } },
+        industryDisclosures: { orderBy: { position: "asc" } },
+      },
+    });
+    return _withSignedLogoUrls(updated);
+  }),
 });
 
 export const appRouter = router({
