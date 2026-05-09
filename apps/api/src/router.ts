@@ -3693,7 +3693,20 @@ export const accountRouter = router({
 
   updateContact: protectedProcedure
     .input(ContactUpdateSchema)
-    .mutation(async ({ ctx, input }) => _applyAccountUpdate(ctx, input)),
+    .mutation(async ({ ctx, input }) => {
+      // KAN-857 Decision 8: when mailingSameAsPhysical=true, server
+      // explicitly nulls mailingAddress so a stale value from a prior
+      // toggle-off session can't survive a toggle-on save. The boolean
+      // is the source of truth; downstream consumers (email composer,
+      // etc.) read mailingSameAsPhysical and substitute physicalAddress
+      // when reading. Wrapping at the procedure level keeps the shared
+      // _applyAccountUpdate helper free of contact-specific logic.
+      const normalized: typeof input =
+        input.mailingSameAsPhysical === true
+          ? { ...input, mailingAddress: null }
+          : input;
+      return _applyAccountUpdate(ctx, normalized);
+    }),
 
   updateHours: protectedProcedure
     .input(HoursUpdateSchema)
