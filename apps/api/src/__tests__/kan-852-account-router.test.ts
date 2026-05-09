@@ -27,6 +27,7 @@ const {
   accountProfileFindUniqueMock,
   accountProfileCreateMock,
   accountProfileUpdateMock,
+  accountProfileUpsertMock,
   tenantFindUniqueMock,
   observedHolidayCreateMock,
   observedHolidayDeleteManyMock,
@@ -36,12 +37,16 @@ const {
   industryDisclosureFindFirstMock,
   industryDisclosureCreateMock,
   industryDisclosureDeleteManyMock,
+  // KAN-855 — logo storage stubs. Default no-op so Cohort 1 tests don't
+  // accidentally hit GCS via the new account.get → enrichLogoUrls path.
+  enrichLogoUrlsMock,
 } = vi.hoisted(() => ({
   publishMock: vi.fn(async () => ({ messageId: "test-msg-id", skipped: false })),
   accountEventsEnabledMock: vi.fn(() => false),
   accountProfileFindUniqueMock: vi.fn(),
   accountProfileCreateMock: vi.fn(),
   accountProfileUpdateMock: vi.fn(),
+  accountProfileUpsertMock: vi.fn(),
   tenantFindUniqueMock: vi.fn(),
   observedHolidayCreateMock: vi.fn(),
   observedHolidayDeleteManyMock: vi.fn(),
@@ -51,6 +56,10 @@ const {
   industryDisclosureFindFirstMock: vi.fn(),
   industryDisclosureCreateMock: vi.fn(),
   industryDisclosureDeleteManyMock: vi.fn(),
+  enrichLogoUrlsMock: vi.fn(async (logoUrl: string | null, _v: unknown) => ({
+    logoUrl,
+    logoVariants: null,
+  })),
 }));
 
 vi.mock("firebase-admin/auth", () => ({
@@ -72,6 +81,26 @@ vi.mock(
   }),
 );
 
+// KAN-855 — stub the logo storage module so Cohort 1 router tests don't
+// touch GCS via the new account.get → enrichLogoUrls hook.
+vi.mock(
+  "../../../../packages/api/src/services/account-logo-storage.js",
+  () => ({
+    enrichLogoUrls: (logoUrl: string | null, v: unknown) =>
+      (enrichLogoUrlsMock as (...a: unknown[]) => unknown)(logoUrl, v),
+    isOwnedByTenant: (objectName: string, tenantId: string) =>
+      objectName.startsWith(`tenants/${tenantId}/account/logo-`),
+    parseExtFromObjectName: () => "png",
+    parseTimestampFromObjectName: () => 1700000000000,
+    getSignedUploadUrl: vi.fn(),
+    getSignedReadUrl: vi.fn(),
+    downloadObject: vi.fn(),
+    deleteObject: vi.fn(),
+    objectExists: vi.fn(),
+    generateAndUploadVariants: vi.fn(),
+  }),
+);
+
 import { accountRouter } from "../router.js";
 
 const TENANT_A = "11111111-1111-4111-8111-111111111111";
@@ -88,6 +117,8 @@ const mockedPrisma = {
       (accountProfileCreateMock as (...a: unknown[]) => unknown)(...args),
     update: (...args: unknown[]) =>
       (accountProfileUpdateMock as (...a: unknown[]) => unknown)(...args),
+    upsert: (...args: unknown[]) =>
+      (accountProfileUpsertMock as (...a: unknown[]) => unknown)(...args),
   },
   tenant: {
     findUnique: (...args: unknown[]) =>
@@ -153,6 +184,7 @@ beforeEach(() => {
   accountProfileFindUniqueMock.mockReset();
   accountProfileCreateMock.mockReset();
   accountProfileUpdateMock.mockReset();
+  accountProfileUpsertMock.mockReset();
   tenantFindUniqueMock.mockReset();
   observedHolidayCreateMock.mockReset();
   observedHolidayDeleteManyMock.mockReset();
@@ -162,6 +194,7 @@ beforeEach(() => {
   industryDisclosureFindFirstMock.mockReset();
   industryDisclosureCreateMock.mockReset();
   industryDisclosureDeleteManyMock.mockReset();
+  enrichLogoUrlsMock.mockClear();
 });
 
 // ─────────────────────────────────────────────
@@ -169,35 +202,43 @@ beforeEach(() => {
 // ─────────────────────────────────────────────
 
 describe("accountRouter.get", () => {
-  it("returns existing AccountProfile when present", async () => {
-    accountProfileFindUniqueMock.mockResolvedValue(BASE_PROFILE);
+  // KAN-855 (Cohort 2 / Fred E.4): get switched from findUnique +
+  // conditional create to upsert (race-safety on concurrent first-touch).
+  it("returns existing AccountProfile via upsert (where match) — idempotent on second call", async () => {
+    tenantFindUniqueMock.mockResolvedValue({ name: "Acme Inc." });
+    accountProfileUpsertMock.mockResolvedValue(BASE_PROFILE);
     const caller = buildCaller();
     const out = await caller.get();
-    expect(out).toEqual(BASE_PROFILE);
-    expect(accountProfileFindUniqueMock).toHaveBeenCalledWith(
+    expect(out).toMatchObject({ id: BASE_PROFILE.id });
+    expect(accountProfileUpsertMock).toHaveBeenCalledWith(
       expect.objectContaining({ where: { tenantId: TENANT_A } }),
     );
+    // Calling twice returns the same row — race-safe; no duplicate
+    // create attempt.
+    await caller.get();
+    expect(accountProfileUpsertMock).toHaveBeenCalledTimes(2);
     expect(accountProfileCreateMock).not.toHaveBeenCalled();
   });
 
-  it("provisions on first touch using Tenant.name as legalName", async () => {
-    accountProfileFindUniqueMock.mockResolvedValue(null);
+  it("provisions on first touch using Tenant.name as legalName (via upsert.create branch)", async () => {
     tenantFindUniqueMock.mockResolvedValue({ name: "Acme Inc." });
-    accountProfileCreateMock.mockResolvedValue({ ...BASE_PROFILE });
+    accountProfileUpsertMock.mockResolvedValue({ ...BASE_PROFILE, legalName: "Acme Inc." });
     const caller = buildCaller();
     await caller.get();
-    expect(accountProfileCreateMock).toHaveBeenCalledWith(
+    expect(accountProfileUpsertMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: { tenantId: TENANT_A, legalName: "Acme Inc." },
+        where: { tenantId: TENANT_A },
+        create: { tenantId: TENANT_A, legalName: "Acme Inc." },
+        update: {},
       }),
     );
   });
 
   it("throws NOT_FOUND when tenant row is missing", async () => {
-    accountProfileFindUniqueMock.mockResolvedValue(null);
     tenantFindUniqueMock.mockResolvedValue(null);
     const caller = buildCaller();
     await expect(caller.get()).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(accountProfileUpsertMock).not.toHaveBeenCalled();
   });
 });
 
@@ -453,11 +494,12 @@ describe("accountRouter.addDisclosure / removeDisclosure", () => {
 // ─────────────────────────────────────────────
 
 describe("KAN-852 — tenant-isolation invariants", () => {
-  it("every accountProfile.findUnique on the router uses { tenantId: ctx.tenantId }", async () => {
-    accountProfileFindUniqueMock.mockResolvedValue(BASE_PROFILE);
+  it("get's upsert targets the row by { tenantId: ctx.tenantId } (not by id)", async () => {
+    tenantFindUniqueMock.mockResolvedValue({ name: "Acme Inc." });
+    accountProfileUpsertMock.mockResolvedValue(BASE_PROFILE);
     const caller = buildCaller();
     await caller.get();
-    expect(accountProfileFindUniqueMock).toHaveBeenCalledWith(
+    expect(accountProfileUpsertMock).toHaveBeenCalledWith(
       expect.objectContaining({ where: { tenantId: TENANT_A } }),
     );
   });
