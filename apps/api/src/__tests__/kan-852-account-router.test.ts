@@ -101,6 +101,41 @@ vi.mock(
   }),
 );
 
+// KAN-859 — stub the blueprint-loader module so Cohort 1 router tests
+// don't hit prisma.brainSnapshot via the new account.get → resolveLegalDefaults
+// path. The legalDefaults shape is exercised in
+// kan-859-account-get-legal-defaults.test.ts; this stub just keeps the
+// Cohort 1 surface contract intact.
+vi.mock(
+  "../../../../packages/api/src/services/blueprint-loader.js",
+  () => ({
+    getBlueprintForTenant: vi.fn(async () => ({
+      legalDefaults: {
+        en: {
+          optOutLanguage: "Reply STOP to unsubscribe.",
+          emailFooterDisclosure: "Default footer (en).",
+        },
+      },
+    })),
+    resolveLegalDefaults: vi.fn(() => ({
+      optOutLanguage: "Reply STOP to unsubscribe.",
+      emailFooterDisclosure: "Default footer (en).",
+      source: {
+        optOutLanguage: "language",
+        emailFooterDisclosure: "language",
+      },
+    })),
+    GENERIC_BLUEPRINT: {
+      legalDefaults: {
+        en: {
+          optOutLanguage: "Reply STOP to unsubscribe.",
+          emailFooterDisclosure: "Default footer (en).",
+        },
+      },
+    },
+  }),
+);
+
 import { accountRouter } from "../router.js";
 
 const TENANT_A = "11111111-1111-4111-8111-111111111111";
