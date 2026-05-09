@@ -40,6 +40,17 @@ const TENANT_SCOPED_MODELS = [
   'KnowledgeSource',
   'KnowledgeChunk',
   'KnowledgeGapSummary',
+  // KAN-852: Account Page Cohort 1. AccountProfile is 1:1 with Tenant via
+  // tenant_id @unique. Its 4 children (SocialProfile, ObservedHoliday,
+  // IndustryDisclosure, AccountFieldDetection) are deliberately NOT listed —
+  // they have no direct tenant_id column; tenant scope flows transitively
+  // through account_profile_id → AccountProfile.tenantId. Auto-injecting
+  // tenantId into a where clause for those models would target a
+  // non-existent column and break every query. Same precedent as
+  // ChunkEffectiveness (line ~38). If Cohort 5/6 introduces $queryRaw
+  // against AccountFieldDetection, add an accountTenantGuardMiddleware
+  // mirroring knowledgeTenantGuardMiddleware below.
+  'AccountProfile',
 ] as const;
 
 // KAN-826 — defensive guardrail (architect spec §6.1). Knowledge Layer queries

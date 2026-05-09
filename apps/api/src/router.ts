@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Prisma, ChannelConnection } from "@prisma/client";
 import { SecretManagerServiceClient } from "@google-cloud/secret-manager";
 import { router, publicProcedure, protectedProcedure, adminProcedure } from "./trpc.js";
@@ -10,7 +10,38 @@ import {
   TargetPeriodEnum,
   KnowledgeCategoryEnum,
   LeadAssignmentPostureEnum,
+  // KAN-852 — Account Page Cohort 1
+  IdentityUpdateSchema,
+  ContactUpdateSchema,
+  HoursUpdateSchema,
+  PaymentsUpdateSchema,
+  LegalUpdateSchema,
+  HolidayCreateSchema,
+  SocialProfileCreateSchema,
+  DisclosureCreateSchema,
+  buildAccountFieldUpdatedEvent,
 } from "@growth/shared";
+// KAN-852 — Account Page publisher + flag. Cross-rootDir static imports
+// trigger TS6059 (KAN-689 cohort), so we use the variable-specifier
+// dynamic-import workaround per `reference_variable_specifier_dynamic_import`
+// memory + existing pattern in this file (see contactsRouter at line ~210).
+// Test suites can still vi.mock the path because the dynamic spec resolves
+// at runtime.
+import type { AccountFieldUpdatedEvent } from "@growth/shared";
+interface AccountPublisherModule {
+  publishAccountFieldUpdated: (event: AccountFieldUpdatedEvent) => Promise<{
+    messageId?: string;
+    skipped: boolean;
+  }>;
+  accountEventsEnabled: () => boolean;
+}
+let _accountPublisherModule: AccountPublisherModule | null = null;
+async function loadAccountPublisher(): Promise<AccountPublisherModule> {
+  if (_accountPublisherModule) return _accountPublisherModule;
+  const spec = "../../../packages/api/src/services/account-field-updated-publisher.js";
+  _accountPublisherModule = (await import(spec)) as AccountPublisherModule;
+  return _accountPublisherModule;
+}
 // KAN-826: legacy KAN-707 ingest imports REMOVED — KnowledgeSourceTypeEnum,
 // KnowledgeSourceStatusEnum, PER_TENANT_INGEST_QUEUE_DEPTH_LIMIT,
 // IngestRequestedEvent, IngestStatus, IngestRequestSchema, and the
@@ -3457,6 +3488,300 @@ const observabilityRouter = router({
   }),
 });
 
+// ============================================================================
+// KAN-852 — Account Page Cohort 1. Tenant-facing Company Truth: identity,
+// contact, hours, payments, legal. Spec page Confluence/SD/5046274.
+//
+// Cohort 1 ships: get + 5 tab-update mutations + child entity CRUD
+// (holidays, social profiles, industry disclosures). Out of scope here per
+// spec: detect-from-website (Cohort 5/6) and logo signed-URL flow (Cohort 2).
+//
+// Pub/Sub: every successful update emits one `account.field_updated` event
+// per changed field. The publish call is gated by ACCOUNT_EVENTS_ENABLED
+// env flag (default false) — Cohort 6 wires the AuditLog subscriber and
+// flips the flag. Until then no real Pub/Sub call fires; the publisher
+// returns `{skipped:true}` so existing tests + telemetry can still observe
+// the call site.
+// ============================================================================
+
+/** Deep-equality helper for diff detection — JSON-stringify is sufficient
+ * because the columns we compare are scalars, primitive arrays, or JSON
+ * blobs (weeklyHours, logoVariants). Order-sensitive on arrays, which is
+ * the desired behavior — reordering supportedLanguages IS a change. */
+function _accountValuesEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (a === null || b === null) return a === b;
+  if (a === undefined || b === undefined) return a === b;
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/** Apply a partial update to AccountProfile, emit one Pub/Sub event per
+ * changed field, return the updated row. Provisions on first call so
+ * the UI never has to call a separate `create` endpoint. */
+async function _applyAccountUpdate(
+  ctx: { prisma: any; tenantId?: string; firebaseUser: { uid: string; email?: string } | null },
+  data: Record<string, unknown>,
+): Promise<any> {
+  const tenantId = ctx.tenantId;
+  if (!tenantId) {
+    throw new TRPCError({ code: "UNAUTHORIZED", message: "Missing tenant context" });
+  }
+  // Provision-on-first-touch: many UI flows hit a tab and Save before they
+  // ever GET. Defaults to Tenant.name for legalName so the row passes the
+  // NOT NULL constraint.
+  const existing: any = await (ctx.prisma as any).accountProfile?.findUnique({
+    where: { tenantId },
+  });
+  let current: any = existing;
+  if (!current) {
+    const tenant: any = await (ctx.prisma as any).tenant?.findUnique({
+      where: { id: tenantId },
+      select: { name: true },
+    });
+    if (!tenant) {
+      throw new TRPCError({ code: "NOT_FOUND", message: "Tenant not found" });
+    }
+    current = await (ctx.prisma as any).accountProfile?.create({
+      data: { tenantId, legalName: tenant.name },
+    });
+  }
+
+  // Diff: only fields actually changed get an event. The mutation sends
+  // the same row back via update.data either way; the event matters for
+  // audit-log signal.
+  const changed: Array<{ path: string; oldValue: unknown; newValue: unknown }> = [];
+  for (const [path, newValue] of Object.entries(data)) {
+    if (!_accountValuesEqual(current[path], newValue)) {
+      changed.push({ path, oldValue: current[path] ?? null, newValue });
+    }
+  }
+
+  const updated: any = await (ctx.prisma as any).accountProfile?.update({
+    where: { tenantId },
+    data,
+    include: {
+      socialProfiles: { orderBy: { position: "asc" } },
+      observedHolidays: { orderBy: { date: "asc" } },
+      industryDisclosures: { orderBy: { position: "asc" } },
+    },
+  });
+
+  if (changed.length > 0) {
+    const pub = await loadAccountPublisher();
+    if (pub.accountEventsEnabled()) {
+      for (const c of changed) {
+        const event = buildAccountFieldUpdatedEvent({
+          eventId: randomUUID(),
+          tenantId,
+          fieldPath: c.path,
+          oldValue: c.oldValue,
+          newValue: c.newValue,
+          source: "human",
+          userId: ctx.firebaseUser?.uid ?? null,
+        });
+        // Fire-and-forget: failures must NOT roll back the row update — the
+        // user's save is the canonical action; the audit-log event is
+        // best-effort. Cohort 6 wires retry/dead-letter at the subscriber.
+        await pub.publishAccountFieldUpdated(event).catch(() => {
+          /* swallow — audit event is best-effort by design */
+        });
+      }
+    }
+  }
+
+  return updated;
+}
+
+// Exported (rather than const) so the KAN-852 integration test in
+// apps/api/src/__tests__/kan-852-account-router.test.ts can construct a
+// caller directly via `accountRouter.createCaller(ctx)` without pulling
+// the full appRouter graph.
+export const accountRouter = router({
+  // GET — load AccountProfile for the active tenant. Provisions on first
+  // touch so the UI sees a usable row immediately after tenant creation.
+  get: protectedProcedure.query(async ({ ctx }) => {
+    const tenantId = ctx.tenantId;
+    if (!tenantId) {
+      throw new TRPCError({ code: "UNAUTHORIZED", message: "Missing tenant context" });
+    }
+    let row: any = await (ctx.prisma as any).accountProfile?.findUnique({
+      where: { tenantId },
+      include: {
+        socialProfiles: { orderBy: { position: "asc" } },
+        observedHolidays: { orderBy: { date: "asc" } },
+        industryDisclosures: { orderBy: { position: "asc" } },
+      },
+    });
+    if (!row) {
+      const tenant: any = await (ctx.prisma as any).tenant?.findUnique({
+        where: { id: tenantId },
+        select: { name: true },
+      });
+      if (!tenant) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Tenant not found" });
+      }
+      row = await (ctx.prisma as any).accountProfile?.create({
+        data: { tenantId, legalName: tenant.name },
+        include: {
+          socialProfiles: true,
+          observedHolidays: true,
+          industryDisclosures: true,
+        },
+      });
+    }
+    return row;
+  }),
+
+  // ── Tab updates ──
+  updateIdentity: protectedProcedure
+    .input(IdentityUpdateSchema)
+    .mutation(async ({ ctx, input }) => _applyAccountUpdate(ctx, input)),
+
+  updateContact: protectedProcedure
+    .input(ContactUpdateSchema)
+    .mutation(async ({ ctx, input }) => _applyAccountUpdate(ctx, input)),
+
+  updateHours: protectedProcedure
+    .input(HoursUpdateSchema)
+    .mutation(async ({ ctx, input }) => _applyAccountUpdate(ctx, input)),
+
+  updatePayments: protectedProcedure
+    .input(PaymentsUpdateSchema)
+    .mutation(async ({ ctx, input }) => _applyAccountUpdate(ctx, input)),
+
+  updateLegal: protectedProcedure
+    .input(LegalUpdateSchema)
+    .mutation(async ({ ctx, input }) => _applyAccountUpdate(ctx, input)),
+
+  // ── Holidays ──
+  // Tenant scope flows transitively: all queries filter via the parent
+  // AccountProfile.tenantId. We never trust a child id alone — always
+  // verify the FK chain back to ctx.tenantId before mutating.
+  addHoliday: protectedProcedure
+    .input(HolidayCreateSchema)
+    .mutation(async ({ ctx, input }) => {
+      const profile: any = await (ctx.prisma as any).accountProfile?.findUnique({
+        where: { tenantId: ctx.tenantId },
+        select: { id: true },
+      });
+      if (!profile) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "AccountProfile not provisioned" });
+      }
+      return (ctx.prisma as any).observedHoliday?.create({
+        data: {
+          accountProfileId: profile.id,
+          name: input.name,
+          date: new Date(input.date),
+          recurring: input.recurring,
+        },
+      });
+    }),
+
+  removeHoliday: protectedProcedure
+    .input(z.object({ id: z.string().min(1) }))
+    .mutation(async ({ ctx, input }) => {
+      // FK-transitive isolation: deleteMany with a JOIN-shape where on the
+      // parent's tenantId guarantees the row belongs to this tenant.
+      const result: any = await (ctx.prisma as any).observedHoliday?.deleteMany({
+        where: {
+          id: input.id,
+          accountProfile: { tenantId: ctx.tenantId },
+        },
+      });
+      if (!result || result.count === 0) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Holiday not found" });
+      }
+      return { ok: true };
+    }),
+
+  // ── Social profiles ──
+  addSocialProfile: protectedProcedure
+    .input(SocialProfileCreateSchema)
+    .mutation(async ({ ctx, input }) => {
+      const profile: any = await (ctx.prisma as any).accountProfile?.findUnique({
+        where: { tenantId: ctx.tenantId },
+        select: { id: true },
+      });
+      if (!profile) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "AccountProfile not provisioned" });
+      }
+      // Append at end — UI can reorder later (Cohort 2+).
+      const last: any = await (ctx.prisma as any).socialProfile?.findFirst({
+        where: { accountProfileId: profile.id },
+        orderBy: { position: "desc" },
+        select: { position: true },
+      });
+      const position = (last?.position ?? -1) + 1;
+      return (ctx.prisma as any).socialProfile?.create({
+        data: {
+          accountProfileId: profile.id,
+          platform: input.platform,
+          url: input.url,
+          handle: input.handle ?? null,
+          position,
+        },
+      });
+    }),
+
+  removeSocialProfile: protectedProcedure
+    .input(z.object({ id: z.string().min(1) }))
+    .mutation(async ({ ctx, input }) => {
+      const result: any = await (ctx.prisma as any).socialProfile?.deleteMany({
+        where: {
+          id: input.id,
+          accountProfile: { tenantId: ctx.tenantId },
+        },
+      });
+      if (!result || result.count === 0) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Social profile not found" });
+      }
+      return { ok: true };
+    }),
+
+  // ── Industry disclosures ──
+  addDisclosure: protectedProcedure
+    .input(DisclosureCreateSchema)
+    .mutation(async ({ ctx, input }) => {
+      const profile: any = await (ctx.prisma as any).accountProfile?.findUnique({
+        where: { tenantId: ctx.tenantId },
+        select: { id: true },
+      });
+      if (!profile) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "AccountProfile not provisioned" });
+      }
+      const last: any = await (ctx.prisma as any).industryDisclosure?.findFirst({
+        where: { accountProfileId: profile.id },
+        orderBy: { position: "desc" },
+        select: { position: true },
+      });
+      const position = (last?.position ?? -1) + 1;
+      return (ctx.prisma as any).industryDisclosure?.create({
+        data: {
+          accountProfileId: profile.id,
+          label: input.label,
+          body: input.body,
+          appliesToChannels: input.appliesToChannels,
+          position,
+        },
+      });
+    }),
+
+  removeDisclosure: protectedProcedure
+    .input(z.object({ id: z.string().min(1) }))
+    .mutation(async ({ ctx, input }) => {
+      const result: any = await (ctx.prisma as any).industryDisclosure?.deleteMany({
+        where: {
+          id: input.id,
+          accountProfile: { tenantId: ctx.tenantId },
+        },
+      });
+      if (!result || result.count === 0) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Disclosure not found" });
+      }
+      return { ok: true };
+    }),
+});
+
 export const appRouter = router({
   contacts: contactsRouter,
   pipelines: pipelinesRouter,
@@ -3483,6 +3808,8 @@ export const appRouter = router({
   inbox: inboxRouter,
   tenantApiKeys: tenantApiKeysRouter,
   observability: observabilityRouter,
+  // KAN-852 — Account Page Cohort 1
+  account: accountRouter,
 });
 
 export type AppRouter = typeof appRouter;
