@@ -82,6 +82,40 @@ async function loadAccountLogoStorage(): Promise<AccountLogoStorageModule> {
   _accountLogoStorageModule = (await import(spec)) as AccountLogoStorageModule;
   return _accountLogoStorageModule;
 }
+
+// KAN-859 — Account Page Cohort 4 Blueprint defaults resolver. Same
+// dynamic-import dance as the logo storage + publisher (cross-rootDir
+// guard for KAN-689 cohort hygiene). Used by `account.get` to enrich
+// the response with resolved Blueprint defaults so the Legal tab
+// renders "Blueprint default" vs "Custom" without leaking Blueprint
+// internals to the client.
+interface BlueprintLoaderModule {
+  getBlueprintForTenant: (tenantId: string) => Promise<{ legalDefaults: unknown } | null>;
+  GENERIC_BLUEPRINT: { legalDefaults: unknown };
+  resolveLegalDefaults: (input: {
+    accountProfile: {
+      optOutLanguage: string | null;
+      emailFooterDisclosure: string | null;
+      defaultLanguage: string;
+    };
+    blueprint: { legalDefaults: unknown };
+  }) => {
+    optOutLanguage: string;
+    emailFooterDisclosure: string;
+    source: {
+      optOutLanguage: "override" | "language" | "fallback_en";
+      emailFooterDisclosure: "override" | "language" | "fallback_en";
+    };
+  };
+}
+let _blueprintLoaderModule: BlueprintLoaderModule | null = null;
+async function loadBlueprintLoader(): Promise<BlueprintLoaderModule> {
+  if (_blueprintLoaderModule) return _blueprintLoaderModule;
+  const spec = "../../../packages/api/src/services/blueprint-loader.js";
+  _blueprintLoaderModule = (await import(spec)) as BlueprintLoaderModule;
+  return _blueprintLoaderModule;
+}
+
 // KAN-826: legacy KAN-707 ingest imports REMOVED — KnowledgeSourceTypeEnum,
 // KnowledgeSourceStatusEnum, PER_TENANT_INGEST_QUEUE_DEPTH_LIMIT,
 // IngestRequestedEvent, IngestStatus, IngestRequestSchema, and the
@@ -3683,7 +3717,21 @@ export const accountRouter = router({
         industryDisclosures: { orderBy: { position: "asc" } },
       },
     });
-    return _withSignedLogoUrls(row);
+    const enriched = await _withSignedLogoUrls(row);
+    // KAN-859 — resolve Blueprint defaults for the Legal tab. Falls
+    // back to the bundled GENERIC_BLUEPRINT when no active BrainSnapshot
+    // exists for the tenant (new tenants pre-Cohort 5 detection).
+    const bp = await loadBlueprintLoader();
+    const blueprint = (await bp.getBlueprintForTenant(tenantId)) ?? bp.GENERIC_BLUEPRINT;
+    const legalDefaults = bp.resolveLegalDefaults({
+      accountProfile: {
+        optOutLanguage: row?.optOutLanguage ?? null,
+        emailFooterDisclosure: row?.emailFooterDisclosure ?? null,
+        defaultLanguage: row?.defaultLanguage ?? "en",
+      },
+      blueprint,
+    });
+    return { ...enriched, legalDefaults };
   }),
 
   // ── Tab updates ──
