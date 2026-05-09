@@ -93,6 +93,8 @@ model Tenant {
   deals                  Deal[]
   engagements            Engagement[]
   deferredSends          DeferredSend[]
+  // KAN-852 — Account Page Cohort 1. 1:1 by AccountProfile.tenantId @unique.
+  accountProfile         AccountProfile?
 
   //   tenantSettings  TenantSettings[]  // commented out for smoke build (model missing on main)
   channelConnections ChannelConnection[]
@@ -126,6 +128,13 @@ model Blueprint {
   customerModel     Json     @map("customer_model")
   journeys          Json
   strategyTemplates Json     @map("strategy_templates")
+  // KAN-852 — Account Page Cohort 1. Per-vertical legal defaults the
+  // /settings/account/legal tab pre-fills when the tenant hasn't
+  // overridden them. Shape: { optOutLanguage: string, emailFooterDisclosure: string }.
+  // Backfilled for existing rows in the same migration. Future verticals
+  // (Real Estate, Automotive, Financial) populate with their own
+  // jurisdiction-specific minimums.
+  legalDefaults     Json?    @map("legal_defaults")
   isActive          Boolean  @default(true) @map("is_active")
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")
@@ -1435,4 +1444,162 @@ enum SignalClass {
   neutral
 
   @@map("signal_class")
+}
+
+// ─────────────────────────────────────────────
+// ACCOUNT PAGE — KAN-852 Cohort 1
+// Tenant-facing settings page at /settings/account. AccountProfile owns the
+// canonical Company Truth fields (identity, contact, hours, payments, legal).
+// Children link via accountProfileId — they follow the ChunkEffectiveness
+// precedent (no direct tenant_id column; tenant scope flows transitively
+// through the parent's tenantId via FK + JOIN). They are deliberately NOT
+// added to TENANT_SCOPED_MODELS in packages/db/src/middleware/tenant.ts —
+// the auto-inject middleware would try to filter on a non-existent column
+// and break every query. See KAN-826 architecture for the same pattern.
+// ─────────────────────────────────────────────
+
+model AccountProfile {
+  id                    String   @id @default(cuid())
+  tenantId              String   @unique @map("tenant_id")
+  tenant                Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  // Identity
+  legalName             String   @map("legal_name")
+  displayName           String?  @map("display_name")
+  logoUrl               String?  @map("logo_url")
+  logoVariants          Json?    @map("logo_variants")
+  websiteUrl            String?  @map("website_url")
+  oneLineDescription    String?  @db.VarChar(200) @map("one_line_description")
+  industry              String?
+
+  // Contact
+  primaryPhone          String?  @map("primary_phone")
+  supportPhone          String?  @map("support_phone")
+  primaryEmail          String?  @map("primary_email")
+  supportEmail          String?  @map("support_email")
+  physicalAddress       String?  @db.Text @map("physical_address")
+  mailingAddress        String?  @db.Text @map("mailing_address")
+  mailingSameAsPhysical Boolean  @default(true) @map("mailing_same_as_physical")
+
+  // Address structured (AI-populated, optional)
+  addressStreet         String?  @map("address_street")
+  addressCity           String?  @map("address_city")
+  addressRegion         String?  @map("address_region")
+  addressPostal         String?  @map("address_postal")
+  addressCountry        String?  @map("address_country")
+
+  // Service area
+  serviceAreaType       String   @default("local") @map("service_area_type")
+  serviceAreaRadiusKm   Int?     @map("service_area_radius_km")
+  serviceAreaRegions    Json?    @map("service_area_regions")
+
+  // Hours
+  timeZone              String   @default("America/Toronto") @map("time_zone")
+  weeklyHours           Json     @default("{}") @map("weekly_hours")
+  afterHoursBehavior    String   @default("send_anyway") @map("after_hours_behavior")
+
+  // Payments
+  defaultCurrency       String   @default("USD") @map("default_currency")
+  additionalCurrencies  String[] @default([]) @map("additional_currencies")
+  acceptedPaymentMethods String[] @default([]) @map("accepted_payment_methods")
+  depositRequired       Boolean  @default(false) @map("deposit_required")
+  depositType           String?  @map("deposit_type")
+  depositValue          Decimal? @db.Decimal(10, 2) @map("deposit_value")
+  refundWindowDays      Int?     @map("refund_window_days")
+
+  // Legal
+  taxId                 String?  @map("tax_id")
+  businessRegNumber     String?  @map("business_reg_number")
+  jurisdiction          String?
+  optOutLanguage        String?  @db.Text @map("opt_out_language")
+  emailFooterDisclosure String?  @db.Text @map("email_footer_disclosure")
+
+  // Locale
+  defaultLanguage       String   @default("en") @map("default_language")
+  supportedLanguages    String[] @default(["en"]) @map("supported_languages")
+
+  // Detect-from-website state (Cohort 5 wires the worker; columns ship now)
+  lastDetectAt          DateTime? @map("last_detect_at")
+  lastDetectSource      String?   @map("last_detect_source")
+  detectStatus          String?   @map("detect_status")
+
+  createdAt             DateTime @default(now()) @map("created_at")
+  updatedAt             DateTime @updatedAt @map("updated_at")
+
+  socialProfiles        SocialProfile[]
+  observedHolidays      ObservedHoliday[]
+  industryDisclosures   IndustryDisclosure[]
+  fieldDetections       AccountFieldDetection[]
+
+  @@index([tenantId])
+  @@map("account_profile")
+}
+
+// FK-transitive tenant scope (no direct tenant_id) — see ChunkEffectiveness
+// precedent at line ~1219. Reads must JOIN to AccountProfile to enforce
+// tenant boundary; do NOT add to TENANT_SCOPED_MODELS.
+model SocialProfile {
+  id               String         @id @default(cuid())
+  accountProfileId String         @map("account_profile_id")
+  accountProfile   AccountProfile @relation(fields: [accountProfileId], references: [id], onDelete: Cascade)
+
+  platform         String
+  url              String
+  handle           String?
+  position         Int            @default(0)
+
+  @@index([accountProfileId])
+  @@map("social_profile")
+}
+
+// FK-transitive tenant scope — see ChunkEffectiveness precedent.
+model ObservedHoliday {
+  id               String         @id @default(cuid())
+  accountProfileId String         @map("account_profile_id")
+  accountProfile   AccountProfile @relation(fields: [accountProfileId], references: [id], onDelete: Cascade)
+
+  name             String
+  date             DateTime       @db.Date
+  recurring        Boolean        @default(false)
+
+  @@index([accountProfileId, date])
+  @@map("observed_holiday")
+}
+
+// FK-transitive tenant scope — see ChunkEffectiveness precedent.
+model IndustryDisclosure {
+  id                String         @id @default(cuid())
+  accountProfileId  String         @map("account_profile_id")
+  accountProfile    AccountProfile @relation(fields: [accountProfileId], references: [id], onDelete: Cascade)
+
+  label             String
+  body              String         @db.Text
+  appliesToChannels String[]       @default([]) @map("applies_to_channels")
+  position          Int            @default(0)
+
+  @@index([accountProfileId])
+  @@map("industry_disclosure")
+}
+
+// FK-transitive tenant scope — see ChunkEffectiveness precedent.
+// Cohort 5 worker writes; Cohort 6 UI consumes. Schema lands now to keep
+// the migration set atomic.
+model AccountFieldDetection {
+  id               String         @id @default(cuid())
+  accountProfileId String         @map("account_profile_id")
+  accountProfile   AccountProfile @relation(fields: [accountProfileId], references: [id], onDelete: Cascade)
+
+  fieldPath        String         @map("field_path")
+  proposedValue    String         @db.Text @map("proposed_value")
+  confidence       Float
+  sourceUrl        String?        @map("source_url")
+  sourceSnippet    String?        @db.Text @map("source_snippet")
+  status           String         @default("proposed")
+  decidedAt        DateTime?      @map("decided_at")
+  decidedBy        String?        @map("decided_by")
+  createdAt        DateTime       @default(now()) @map("created_at")
+
+  @@index([accountProfileId, fieldPath])
+  @@index([accountProfileId, status])
+  @@map("account_field_detection")
 }

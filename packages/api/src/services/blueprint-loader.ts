@@ -168,6 +168,17 @@ const StrategyTemplateSchema = z.object({
 /**
  * The complete Blueprint schema — the full knowledge package loaded per tenant.
  */
+// KAN-852 — Account Page Cohort 1. Per-vertical legal defaults the
+// /settings/account/legal tab pre-fills when the tenant hasn't overridden
+// them. Optional on the in-memory Blueprint shape because legacy
+// Blueprints in-flight may not have it set yet (the migration backfills
+// existing rows with the canonical CASL/CAN-SPAM minimums; future
+// vertical-specific Blueprints populate their own).
+const LegalDefaultsSchema = z.object({
+  optOutLanguage: z.string(),
+  emailFooterDisclosure: z.string(),
+});
+
 const BlueprintSchema = z.object({
   id: z.string().uuid(),
   name: z.string(),
@@ -182,6 +193,7 @@ const BlueprintSchema = z.object({
   objections: z.array(ObjectionSchema),
   revenueModels: z.array(RevenueModelSchema),
   strategyTemplates: z.array(StrategyTemplateSchema),
+  legalDefaults: LegalDefaultsSchema.optional(),
   metadata: z.object({
     author: z.string(),
     isDefault: z.boolean(),
@@ -1014,6 +1026,21 @@ const GENERIC_BLUEPRINT: Blueprint = {
       cooldownPeriod: '0 days',
     },
   ],
+
+  // ── KAN-852: Account Page legal defaults ──
+  // CASL/CAN-SPAM minimums applied to the /settings/account/legal tab when
+  // the tenant hasn't overridden them. Mirrors the migration backfill so
+  // fresh tenants and pre-existing tenants land on the same baseline.
+  // TODO (Cohort 4 / pre-launch): legal review of emailFooterDisclosure.
+  // Current text is the minimum CAN-SPAM compliant placeholder pending
+  // counsel sign-off. Tenants always see + can edit; this is fallback only.
+  legalDefaults: {
+    optOutLanguage: 'Reply STOP to unsubscribe.',
+    emailFooterDisclosure:
+      'You received this email because you opted in or have an existing relationship with us. ' +
+      'To stop receiving these emails, click the unsubscribe link in this message. ' +
+      '[Business Name] · [Physical Mailing Address]',
+  },
 
   // ── Metadata ──
   metadata: {
