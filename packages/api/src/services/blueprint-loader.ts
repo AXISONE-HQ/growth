@@ -170,14 +170,23 @@ const StrategyTemplateSchema = z.object({
  */
 // KAN-852 — Account Page Cohort 1. Per-vertical legal defaults the
 // /settings/account/legal tab pre-fills when the tenant hasn't overridden
-// them. Optional on the in-memory Blueprint shape because legacy
-// Blueprints in-flight may not have it set yet (the migration backfills
-// existing rows with the canonical CASL/CAN-SPAM minimums; future
-// vertical-specific Blueprints populate their own).
-const LegalDefaultsSchema = z.object({
+// them. Keyed by ISO 639-1 language code: `en` is required (always-on
+// fallback the resolver lands on when the tenant's defaultLanguage is
+// missing or unknown), `fr` is required at MVP (CASL applies in Quebec
+// per spec §2 decision 4) but typed `optional` here so future vertical-
+// specific Blueprints can ship `en`-only and add `fr` later. The
+// resolveLegalDefaults helper below handles fall-through.
+const LegalBundleSchema = z.object({
   optOutLanguage: z.string(),
   emailFooterDisclosure: z.string(),
 });
+export type LegalBundle = z.infer<typeof LegalBundleSchema>;
+
+const LegalDefaultsSchema = z.object({
+  en: LegalBundleSchema,
+  fr: LegalBundleSchema.optional(),
+});
+export type LegalDefaults = z.infer<typeof LegalDefaultsSchema>;
 
 const BlueprintSchema = z.object({
   id: z.string().uuid(),
@@ -1027,19 +1036,32 @@ const GENERIC_BLUEPRINT: Blueprint = {
     },
   ],
 
-  // ── KAN-852: Account Page legal defaults ──
+  // ── KAN-852: Account Page legal defaults — language-keyed ──
   // CASL/CAN-SPAM minimums applied to the /settings/account/legal tab when
-  // the tenant hasn't overridden them. Mirrors the migration backfill so
-  // fresh tenants and pre-existing tenants land on the same baseline.
-  // TODO (Cohort 4 / pre-launch): legal review of emailFooterDisclosure.
-  // Current text is the minimum CAN-SPAM compliant placeholder pending
-  // counsel sign-off. Tenants always see + can edit; this is fallback only.
+  // the tenant hasn't overridden them. Keyed by ISO 639-1 — CASL applies
+  // in Quebec, so `fr` is mandatory at MVP per spec §2 decision 4.
+  // Mirrors the migration backfill (single source of truth between code +
+  // SQL). The router resolves at read time via resolveLegalDefaults below.
+  // The `[Business Name]` and `[Physical Mailing Address]` macros are
+  // substituted per-tenant by the email composer (Cohort 4/5 wires
+  // substitution).
+  // TODO (Cohort 4 / pre-launch): legal review of both language blocks
+  // pending counsel sign-off.
   legalDefaults: {
-    optOutLanguage: 'Reply STOP to unsubscribe.',
-    emailFooterDisclosure:
-      'You received this email because you opted in or have an existing relationship with us. ' +
-      'To stop receiving these emails, click the unsubscribe link in this message. ' +
-      '[Business Name] · [Physical Mailing Address]',
+    en: {
+      optOutLanguage: 'Reply STOP to unsubscribe.',
+      emailFooterDisclosure:
+        'You received this email because you opted in or have an existing relationship with us. ' +
+        'To stop receiving these emails, click the unsubscribe link in this message. ' +
+        '[Business Name] · [Physical Mailing Address]',
+    },
+    fr: {
+      optOutLanguage: 'Répondez STOP pour vous désabonner.',
+      emailFooterDisclosure:
+        'Vous recevez ce courriel parce que vous vous êtes inscrit ou que vous avez une relation existante avec nous. ' +
+        'Pour cesser de recevoir ces courriels, cliquez sur le lien de désabonnement dans ce message. ' +
+        '[Business Name] · [Physical Mailing Address]',
+    },
   },
 
   // ── Metadata ──
@@ -1454,6 +1476,103 @@ router.get('/brain/snapshot', async (req: Request, res: Response) => {
 });
 
 export default router;
+// ── KAN-852: legalDefaults resolver ────────────────────────────────────────
+//
+// Per-language fall-through for the /settings/account/legal tab. Cohort 1
+// has no consumer (router writes raw fields, no detection acceptance path
+// yet); Cohort 4 wires the Legal tab UI which calls this on every render.
+// Defining it now keeps the resolution semantics canonical so Cohort 4
+// can't drift.
+//
+// Resolution order for each field (`optOutLanguage`, `emailFooterDisclosure`):
+//   1. Tenant override on AccountProfile column — wins when non-null
+//   2. Blueprint legalDefaults[accountProfile.defaultLanguage] — language match
+//   3. Blueprint legalDefaults.en — universal fallback
+//   4. Throw — Blueprint seed bug, must fail loud (legalDefaults is missing
+//      or `en` block missing entirely; should never happen in PROD because
+//      the migration backfills + GENERIC_BLUEPRINT seeds both)
+//
+// **Override staleness on language switch**: tenant overrides are stored
+// in flat AccountProfile columns (NOT keyed by language). When a tenant
+// switches `defaultLanguage`, their existing override stays attached
+// regardless of whether it's still in the new language. Cohort 4 design
+// open question: per-language overrides vs. flat-with-stale-warning vs.
+// auto-translate. For Cohort 1, semantics are crisp: override applies to
+// whatever the tenant picks; clearing it falls back to Blueprint.
+//
+// Cohort 4 importer: `import { resolveLegalDefaults } from '...'` — pass
+// the AccountProfile row + the tenant's loaded Blueprint.
+
+export interface ResolveLegalDefaultsInput {
+  /** AccountProfile row — only the 3 fields the resolver reads. */
+  accountProfile: {
+    optOutLanguage: string | null;
+    emailFooterDisclosure: string | null;
+    defaultLanguage: string;
+  };
+  /** Blueprint row from prisma — `legalDefaults` is `Json` so accept unknown. */
+  blueprint: {
+    legalDefaults: unknown;
+  };
+}
+
+export interface ResolvedLegalDefaults {
+  optOutLanguage: string;
+  emailFooterDisclosure: string;
+  /** Which source each field resolved from — useful for the UI's
+   * "Blueprint default" vs. "Custom" badge in §7.6. */
+  source: {
+    optOutLanguage: 'override' | 'language' | 'fallback_en';
+    emailFooterDisclosure: 'override' | 'language' | 'fallback_en';
+  };
+}
+
+export function resolveLegalDefaults(
+  input: ResolveLegalDefaultsInput,
+): ResolvedLegalDefaults {
+  // Validate Blueprint shape at the boundary — throws with a clear error
+  // if the Blueprint seed is broken (legalDefaults null, or missing `en`).
+  const parsed = LegalDefaultsSchema.safeParse(input.blueprint.legalDefaults);
+  if (!parsed.success) {
+    throw new Error(
+      'Blueprint.legalDefaults is missing or malformed — Generic Blueprint seed bug. ' +
+        'Expected shape: { en: { optOutLanguage, emailFooterDisclosure }, fr?: same }. ' +
+        `Got: ${JSON.stringify(input.blueprint.legalDefaults).slice(0, 200)}`,
+    );
+  }
+  const defaults = parsed.data;
+  const lang = input.accountProfile.defaultLanguage;
+  // `en` is required by the schema — type-narrow via direct access.
+  const langBundle =
+    (lang === 'en' ? defaults.en : (defaults as Record<string, LegalBundle | undefined>)[lang]) ??
+    undefined;
+  const fallback = defaults.en;
+
+  function resolveField(
+    fieldName: 'optOutLanguage' | 'emailFooterDisclosure',
+  ): { value: string; source: 'override' | 'language' | 'fallback_en' } {
+    const override = input.accountProfile[fieldName];
+    if (override != null && override.length > 0) {
+      return { value: override, source: 'override' };
+    }
+    if (langBundle) {
+      return { value: langBundle[fieldName], source: 'language' };
+    }
+    return { value: fallback[fieldName], source: 'fallback_en' };
+  }
+
+  const opt = resolveField('optOutLanguage');
+  const footer = resolveField('emailFooterDisclosure');
+  return {
+    optOutLanguage: opt.value,
+    emailFooterDisclosure: footer.value,
+    source: {
+      optOutLanguage: opt.source,
+      emailFooterDisclosure: footer.source,
+    },
+  };
+}
+
 export { loadBlueprintForTenant, getBlueprintForTenant, GENERIC_BLUEPRINT };
 export {
   BlueprintSchema,
@@ -1463,6 +1582,8 @@ export {
   ObjectionSchema,
   RevenueModelSchema,
   StrategyTemplateSchema,
+  LegalDefaultsSchema,
+  LegalBundleSchema,
 };
 export type {
   Blueprint,

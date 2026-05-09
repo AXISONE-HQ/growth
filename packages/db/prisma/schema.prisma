@@ -130,10 +130,15 @@ model Blueprint {
   strategyTemplates Json     @map("strategy_templates")
   // KAN-852 — Account Page Cohort 1. Per-vertical legal defaults the
   // /settings/account/legal tab pre-fills when the tenant hasn't
-  // overridden them. Shape: { optOutLanguage: string, emailFooterDisclosure: string }.
-  // Backfilled for existing rows in the same migration. Future verticals
-  // (Real Estate, Automotive, Financial) populate with their own
-  // jurisdiction-specific minimums.
+  // overridden them. Shape: keyed by ISO 639-1 language code —
+  // { en: { optOutLanguage, emailFooterDisclosure },
+  //   fr?: { optOutLanguage, emailFooterDisclosure } } —
+  // because CASL applies in Quebec (spec §2 decision 4 locks `en` + `fr`
+  // at MVP). The router resolves at read time via
+  // resolveLegalDefaults() in blueprint-loader.ts:
+  //   tenant override → blueprint.legalDefaults[defaultLanguage] → .en.
+  // Backfilled for existing rows with both languages in the same
+  // migration. Future verticals populate their own keyed bundles.
   legalDefaults     Json?    @map("legal_defaults")
   isActive          Boolean  @default(true) @map("is_active")
   createdAt         DateTime @default(now()) @map("created_at")
@@ -1511,6 +1516,18 @@ model AccountProfile {
   taxId                 String?  @map("tax_id")
   businessRegNumber     String?  @map("business_reg_number")
   jurisdiction          String?
+  // KAN-852 — flat tenant override columns. Stored as raw strings (not
+  // keyed by language) so most tenants — who operate in one language at
+  // a time — get crisp save/clear semantics. The override applies to
+  // whatever the tenant's current `defaultLanguage` is at read time;
+  // when they switch defaultLanguage, an existing override goes stale
+  // (still attached, but possibly in the previous language). Cohort 4
+  // Legal tab UI surfaces a "Custom" badge when set and a "Blueprint
+  // default" badge when null; clearing the field falls back to
+  // Blueprint.legalDefaults via resolveLegalDefaults() in
+  // blueprint-loader.ts. Cohort 4 design open question (tracked on
+  // Confluence spec §2): per-language override columns vs. flat-with-
+  // stale-warning vs. auto-translate.
   optOutLanguage        String?  @db.Text @map("opt_out_language")
   emailFooterDisclosure String?  @db.Text @map("email_footer_disclosure")
 

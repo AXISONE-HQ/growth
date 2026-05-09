@@ -24,20 +24,37 @@
 ALTER TABLE "blueprints" ADD COLUMN "legal_defaults" JSONB;
 
 -- Backfill canonical CASL/CAN-SPAM minimums for existing Blueprint rows.
--- The Generic B2B/B2C Blueprint (only seed today) gets these defaults; future
--- vertical-specific Blueprints (Real Estate, Automotive, Financial) populate
--- their own jurisdiction-specific overrides.
+-- Keyed by ISO 639-1 language code. CASL applies in Quebec — French
+-- (`fr`) is required at MVP per spec §2 decision 4.
 --
--- TODO (Cohort 4 / pre-launch): legal review of the email_footer_disclosure
--- block. Current text is the minimum CAN-SPAM compliant placeholder pending
--- counsel sign-off.
+-- The Generic B2B/B2C Blueprint (only seed today) gets both `en` and `fr`;
+-- future vertical-specific Blueprints (Real Estate, Automotive, Financial)
+-- populate their own jurisdiction-specific overrides.
+--
+-- The router resolves at read time:
+--   blueprint.legalDefaults[accountProfile.defaultLanguage] ?? .en
+--
+-- TODO (Cohort 4 / pre-launch): legal review of both language blocks
+-- pending counsel sign-off. Current text is the minimum CAN-SPAM/CASL
+-- compliant placeholder. The `[Business Name]` and `[Physical Mailing
+-- Address]` macros are substituted per-tenant by the email composer
+-- (Cohort 4/5 wires the substitution).
 UPDATE "blueprints"
 SET "legal_defaults" = jsonb_build_object(
-  'optOutLanguage', 'Reply STOP to unsubscribe.',
-  'emailFooterDisclosure',
-    E'You received this email because you opted in or have an existing relationship with us. ' ||
-    E'To stop receiving these emails, click the unsubscribe link in this message. ' ||
-    E'[Business Name] · [Physical Mailing Address]'
+  'en', jsonb_build_object(
+    'optOutLanguage', 'Reply STOP to unsubscribe.',
+    'emailFooterDisclosure',
+      E'You received this email because you opted in or have an existing relationship with us. ' ||
+      E'To stop receiving these emails, click the unsubscribe link in this message. ' ||
+      E'[Business Name] · [Physical Mailing Address]'
+  ),
+  'fr', jsonb_build_object(
+    'optOutLanguage', E'Répondez STOP pour vous désabonner.',
+    'emailFooterDisclosure',
+      E'Vous recevez ce courriel parce que vous vous êtes inscrit ou que vous avez une relation existante avec nous. ' ||
+      E'Pour cesser de recevoir ces courriels, cliquez sur le lien de désabonnement dans ce message. ' ||
+      E'[Business Name] · [Physical Mailing Address]'
+  )
 )
 WHERE "legal_defaults" IS NULL;
 
