@@ -80,7 +80,18 @@ function isValidTaskBody(b: unknown): b is TaskBody {
   );
 }
 
-accountDetectHandlerApp.post("/internal/account-detect-handler", async (c) => {
+// KAN-872 — bare-paths convention per the cleanup tracked in KAN-871.
+// Inner sub-app declares `/account-detect-handler`; index.ts mounts at
+// `/internal`; live URL composes to `/internal/account-detect-handler`,
+// matching the HANDLER_URL fallback constant in
+// `services/account-detect-tasks-client.ts` exactly. Pre-fix the inner
+// declaration was `/internal/account-detect-handler` which produced the
+// `/internal/internal/...` double-prefix bug — same class as the
+// KAN-866 subscriber bug fixed in KAN-870. Cloud Tasks deliveries
+// to the single-prefix URL had been silently 404'ing in PROD until
+// this fix landed (one confirmed real delivery 404 at 2026-05-10
+// 03:45:33Z after KAN-867 frontend went live).
+accountDetectHandlerApp.post("/account-detect-handler", async (c) => {
   // OIDC verification — same audience-derivation pattern that
   // verifyPubsubOidc uses for Pub/Sub push (KAN-732). Cloud Tasks
   // OIDC tokens are issued by the Cloud Tasks Service Agent
