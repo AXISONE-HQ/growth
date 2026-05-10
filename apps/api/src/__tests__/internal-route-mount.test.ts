@@ -42,10 +42,10 @@ const EXPECTED_LIVE_URLS: readonly ExpectedLiveUrl[] = [
       "KAN-866 — Pub/Sub push_endpoint per infra/terraform/account-field-updated.tf",
   },
   {
-    liveUrl: "/internal/internal/account-detect-handler",
+    liveUrl: "/internal/account-detect-handler",
     innerSourcePath: "apps/api/src/internal/account-detect-handler.ts",
     description:
-      "KAN-862 — Cloud Tasks HANDLER_URL constant (double-prefix; convention cleanup tracked in sibling follow-up)",
+      "KAN-862 — Cloud Tasks HANDLER_URL constant (single-prefix post-KAN-872 cleanup; matches HANDLER_URL fallback in account-detect-tasks-client.ts)",
   },
   {
     liveUrl: "/internal/cron/deferred-send-evaluator",
