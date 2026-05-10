@@ -4110,6 +4110,43 @@ export const accountRouter = router({
   }),
 
   // ─────────────────────────────────────────────
+  // KAN-866 — Cohort 6: per-field "Last updated" caption batch query.
+  // ─────────────────────────────────────────────
+  // Reads the most recent AuditLog row per fieldPath, scoped to
+  // tenant + actionType='account_field_updated'. JSON-path filter on
+  // payload.fieldPath — performance follow-up KAN-867 files a GIN index
+  // when audit_log nears 100K rows per tenant. Single endpoint accepts
+  // an array so each tab page does ONE roundtrip rather than N.
+  //
+  // Returns Record<fieldPath, { actor, createdAt } | null>. Missing
+  // fieldPaths get `null` (no audit row yet). The web LastUpdatedCaption
+  // renders nothing for null entries (matches HubSpot/Salesforce/GCC).
+  getFieldsLastUpdated: protectedProcedure
+    .input(z.object({ fieldPaths: z.array(z.string().min(1)).min(1).max(20) }))
+    .query(async ({ ctx, input }) => {
+      const tenantId = ctx.tenantId;
+      if (!tenantId) {
+        throw new TRPCError({ code: "UNAUTHORIZED", message: "Missing tenant context" });
+      }
+      const out: Record<string, { actor: string; createdAt: string } | null> = {};
+      for (const fp of input.fieldPaths) {
+        const row = (await (ctx.prisma as any).auditLog?.findFirst({
+          where: {
+            tenantId,
+            actionType: "account_field_updated",
+            payload: { path: ["fieldPath"], equals: fp },
+          },
+          orderBy: { createdAt: "desc" },
+          select: { actor: true, createdAt: true },
+        })) as { actor: string | null; createdAt: Date } | null;
+        out[fp] = row
+          ? { actor: row.actor ?? "system", createdAt: row.createdAt.toISOString() }
+          : null;
+      }
+      return out;
+    }),
+
+  // ─────────────────────────────────────────────
   // KAN-855 — logo upload (signed-URL flow)
   // ─────────────────────────────────────────────
   // Three-step flow:

@@ -37,6 +37,8 @@ import { faqEntriesApp } from "./routes/faq-entries.js";
 import { servicesApp } from "./routes/services.js";
 import { cronDeferredSendApp } from "./internal/cron-deferred-send.js";
 import { accountDetectHandlerApp } from "./internal/account-detect-handler.js";
+import { accountFieldUpdatedSubscriberApp } from "./internal/account-field-updated-subscriber.js";
+import { accountDetectEventsSseApp } from "./internal/account-detect-events-sse.js";
 import { getPubSubClient } from "../../../packages/api/src/lib/pubsub-client.js";
 import { setLLMCostPublisher } from "../../../packages/api/src/services/llm-client.js";
 
@@ -110,6 +112,20 @@ app.route("/internal", cronDeferredSendApp);
 // (Cloud Tasks Service Agent mints the token impersonating pubsub-invoker
 // per infra/terraform/account-detect.tf).
 app.route("/internal", accountDetectHandlerApp);
+
+// KAN-866 — Cohort 6 push subscriber consuming `account.field_updated`
+// (sibling to KAN-862 detect handler). Writes one AuditLog row per
+// changed field, idempotent on eventId. Mounted at
+// /internal/account-field-updated-subscriber. OIDC-protected via the
+// canonical pubsub-invoker SA per infra/terraform/account-field-updated.tf.
+app.route("/internal", accountFieldUpdatedSubscriberApp);
+
+// KAN-866 — Cohort 6 SSE channel for live detection-progress updates.
+// First SSE endpoint in the codebase; pattern documented inline in the
+// module. Mounted at /api/account/detect-events?jobId=X (the route is
+// declared on the inner Hono app at /account/detect-events; the /api
+// prefix here matches the EventSource URL the web client opens).
+app.route("/api", accountDetectEventsSseApp);
 
 // ============================================================================
 // PUBLIC LEAD API (KAN-742) — API-key authenticated, rate-limited, idempotent

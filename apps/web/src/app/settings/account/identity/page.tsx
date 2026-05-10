@@ -3,21 +3,20 @@
 /**
  * KAN-855 — Identity tab. Spec §7.2.
  *
- * 6 form rows: legalName, displayName, websiteUrl, oneLineDescription,
- * industry, social profiles. Logo uploader on top. Save button at the
- * bottom. "Detect from website" rendered but disabled with tooltip
- * "Available in a future release" — Cohort 5/6 wires the scrape.
+ * KAN-866 — Cohort 6 wiring:
+ *   - "Detect from website" button now enabled, fires
+ *     account.detectFromWebsite mutation via DetectButton (single-button
+ *     pattern: re-labels to "Re-scan website" after first successful scan).
+ *   - ScanningStateCard mounts while a scan is in progress, driven by
+ *     SSE events from /api/account/detect-events.
+ *   - DetectionAffordances rendered after each detection-eligible input:
+ *     legalName, displayName, oneLineDescription, socialProfiles.
+ *   - LastUpdatedCaption renders below each detection-eligible field
+ *     (static text — KAN-830 wires the click-through to /audit later).
  *
- * Save semantics:
- *   - Optimistic: form state updates immediately on Save click; we
- *     invalidate the account.get cache after success so children
- *     (logo, social list) re-fetch fresh signed URLs.
- *   - Revert-on-error: mutation onError restores the pre-save form state.
- *   - Dirty detection: button is enabled only when at least one field
- *     differs from the loaded server state.
+ * Save semantics unchanged from Cohort 3.
  *
- * Fred decision A: compose from existing atoms. No FormField/FormSection
- * primitive — Label + Input + Textarea inline with consistent gap utilities.
+ * Decision A: compose from existing atoms. No FormField primitive.
  */
 import * as React from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -30,6 +29,16 @@ import { Button } from "@/components/ui/button";
 import { trpcQuery, trpcMutation } from "@/lib/api";
 import { LogoUploader } from "../_components/logo-uploader";
 import { SocialProfileList, type SocialProfileRow } from "../_components/social-profile-list";
+import { DetectButton } from "../_components/detect-button";
+import { ScanningStateCard } from "../_components/scanning-state-card";
+import {
+  DetectionAffordances,
+  type DetectionRow,
+} from "../_components/detection-affordances";
+import {
+  LastUpdatedCaption,
+  type LastUpdatedEntry,
+} from "../_components/last-updated-caption";
 
 interface AccountProfile {
   id: string;
@@ -54,6 +63,13 @@ interface IdentityFormState {
   oneLineDescription: string;
   industry: string;
 }
+
+const IDENTITY_DETECTION_FIELDS = [
+  "legalName",
+  "displayName",
+  "oneLineDescription",
+  "socialProfiles",
+] as const;
 
 function profileToForm(p: AccountProfile): IdentityFormState {
   return {
@@ -84,6 +100,17 @@ function diffPatch(before: IdentityFormState, after: IdentityFormState): Record<
   return patch;
 }
 
+interface ProposalsResponse {
+  proposals: DetectionRow[];
+}
+
+function pickDetection(
+  proposals: DetectionRow[],
+  fieldPath: string,
+): DetectionRow | null {
+  return proposals.find((p) => p.fieldPath === fieldPath) ?? null;
+}
+
 export default function IdentityTabPage(): React.ReactElement {
   const queryClient = useQueryClient();
   const accountQuery = useQuery<AccountProfile>({
@@ -91,11 +118,24 @@ export default function IdentityTabPage(): React.ReactElement {
     queryFn: () => trpcQuery<AccountProfile>("account.get"),
   });
 
+  const proposalsQuery = useQuery<ProposalsResponse>({
+    queryKey: ["account", "detection-proposals"],
+    queryFn: () => trpcQuery<ProposalsResponse>("account.getDetectionProposals"),
+  });
+
+  const lastUpdatedQuery = useQuery<Record<string, LastUpdatedEntry | null>>({
+    queryKey: ["account", "fields-last-updated", IDENTITY_DETECTION_FIELDS],
+    queryFn: () =>
+      trpcQuery<Record<string, LastUpdatedEntry | null>>(
+        "account.getFieldsLastUpdated",
+        { fieldPaths: [...IDENTITY_DETECTION_FIELDS] },
+      ),
+  });
+
   const [form, setForm] = React.useState<IdentityFormState | null>(null);
   const [savedSnapshot, setSavedSnapshot] = React.useState<IdentityFormState | null>(null);
+  const [activeJobId, setActiveJobId] = React.useState<string | null>(null);
 
-  // Sync server state into form once on first load + after every refetch
-  // unless the form is dirty (don't clobber unsaved edits).
   React.useEffect(() => {
     if (!accountQuery.data) return;
     const next = profileToForm(accountQuery.data);
@@ -115,9 +155,9 @@ export default function IdentityTabPage(): React.ReactElement {
       setSavedSnapshot(next);
       setForm(next);
       toast.success("Account saved.");
+      queryClient.invalidateQueries({ queryKey: ["account", "fields-last-updated"] });
     },
     onError: (err: Error) => {
-      // Revert form to last-known-good (savedSnapshot) per spec.
       if (savedSnapshot) setForm(savedSnapshot);
       toast.error(err.message || "Couldn't save. Try again.");
     },
@@ -178,6 +218,9 @@ export default function IdentityTabPage(): React.ReactElement {
   const isDirty = Object.keys(patch).length > 0;
   const canSave = isDirty && form.legalName.trim().length > 0 && !saveMutation.isPending;
   const profile = accountQuery.data!;
+  const proposals = proposalsQuery.data?.proposals ?? [];
+  const lastUpdated = lastUpdatedQuery.data ?? {};
+  const hasScannedBefore = profile.lastDetectAt !== null;
 
   return (
     <Card className="mt-6">
@@ -222,6 +265,8 @@ export default function IdentityTabPage(): React.ReactElement {
           <p className="text-xs" style={{ color: "var(--ds-ink-tertiary)" }}>
             The registered name on your business documents.
           </p>
+          <LastUpdatedCaption entry={lastUpdated["legalName"] ?? null} />
+          <DetectionAffordances detection={pickDetection(proposals, "legalName")} />
         </div>
 
         {/* Display name */}
@@ -237,9 +282,11 @@ export default function IdentityTabPage(): React.ReactElement {
             How AI refers to your business in messages. Defaults to legal
             name if blank.
           </p>
+          <LastUpdatedCaption entry={lastUpdated["displayName"] ?? null} />
+          <DetectionAffordances detection={pickDetection(proposals, "displayName")} />
         </div>
 
-        {/* Website + Detect-from-website (disabled) */}
+        {/* Website + Detect-from-website */}
         <div className="flex flex-col gap-2">
           <Label htmlFor="website-url">Website</Label>
           <div className="flex gap-2">
@@ -251,19 +298,27 @@ export default function IdentityTabPage(): React.ReactElement {
               placeholder="https://example.com"
               className="flex-1"
             />
-            <Button
-              type="button"
-              variant="outline"
-              disabled
-              title="Available in a future release"
-              aria-label="Detect from website"
-            >
-              Detect from website
-            </Button>
+            <DetectButton
+              websiteUrl={form.websiteUrl}
+              hasScannedBefore={hasScannedBefore}
+              disabled={activeJobId !== null}
+              onScanStarted={({ jobId }) => setActiveJobId(jobId)}
+            />
           </div>
           <p className="text-xs" style={{ color: "var(--ds-ink-tertiary)" }}>
             AI cites this in re-engagement messages.
           </p>
+          {activeJobId && (
+            <ScanningStateCard
+              jobId={activeJobId}
+              onCompleted={() => {
+                setActiveJobId(null);
+                queryClient.invalidateQueries({ queryKey: ["account", "detection-proposals"] });
+                queryClient.invalidateQueries({ queryKey: ["account", "get"] });
+              }}
+              onFailed={() => setActiveJobId(null)}
+            />
+          )}
         </div>
 
         {/* One-line description */}
@@ -280,6 +335,8 @@ export default function IdentityTabPage(): React.ReactElement {
             {form.oneLineDescription.length} / 200 — AI uses this to ground
             messaging context. Keep it short.
           </span>
+          <LastUpdatedCaption entry={lastUpdated["oneLineDescription"] ?? null} />
+          <DetectionAffordances detection={pickDetection(proposals, "oneLineDescription")} />
         </div>
 
         {/* Industry */}
@@ -305,6 +362,8 @@ export default function IdentityTabPage(): React.ReactElement {
             profiles={profile.socialProfiles ?? []}
             onChange={() => queryClient.invalidateQueries({ queryKey: ["account", "get"] })}
           />
+          <LastUpdatedCaption entry={lastUpdated["socialProfiles"] ?? null} />
+          <DetectionAffordances detection={pickDetection(proposals, "socialProfiles")} />
         </section>
       </CardContent>
       <CardFooter className="flex justify-end gap-3">

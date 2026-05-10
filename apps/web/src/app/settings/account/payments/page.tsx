@@ -38,6 +38,16 @@ import { CurrencySelect } from "../_components/currency-select";
 import { AdditionalCurrenciesMultiSelect } from "../_components/additional-currencies-multi-select";
 import { DepositPolicyEditor } from "../_components/deposit-policy-editor";
 import { RefundWindowInput } from "../_components/refund-window-input";
+import {
+  DetectionAffordances,
+  type DetectionRow,
+} from "../_components/detection-affordances";
+import {
+  LastUpdatedCaption,
+  type LastUpdatedEntry,
+} from "../_components/last-updated-caption";
+
+const PAYMENTS_DETECTION_FIELDS = ["acceptedPaymentMethods"] as const;
 
 interface AccountProfile {
   defaultCurrency: string;
@@ -110,11 +120,29 @@ function diffPatch(
   return patch;
 }
 
+interface ProposalsResponse {
+  proposals: DetectionRow[];
+}
+
 export default function PaymentsTabPage(): React.ReactElement {
   const queryClient = useQueryClient();
   const accountQuery = useQuery<AccountProfile>({
     queryKey: ["account", "get"],
     queryFn: () => trpcQuery<AccountProfile>("account.get"),
+  });
+
+  const proposalsQuery = useQuery<ProposalsResponse>({
+    queryKey: ["account", "detection-proposals"],
+    queryFn: () => trpcQuery<ProposalsResponse>("account.getDetectionProposals"),
+  });
+
+  const lastUpdatedQuery = useQuery<Record<string, LastUpdatedEntry | null>>({
+    queryKey: ["account", "fields-last-updated", PAYMENTS_DETECTION_FIELDS],
+    queryFn: () =>
+      trpcQuery<Record<string, LastUpdatedEntry | null>>(
+        "account.getFieldsLastUpdated",
+        { fieldPaths: [...PAYMENTS_DETECTION_FIELDS] },
+      ),
   });
 
   const [form, setForm] = React.useState<PaymentsFormState | null>(null);
@@ -196,6 +224,10 @@ export default function PaymentsTabPage(): React.ReactElement {
   const patch = diffPatch(snapshot, form);
   const isDirty = Object.keys(patch).length > 0;
   const canSave = isDirty && !saveMutation.isPending;
+  const proposals = proposalsQuery.data?.proposals ?? [];
+  const lastUpdated = lastUpdatedQuery.data ?? {};
+  const acceptedPaymentMethodsDetection =
+    proposals.find((p) => p.fieldPath === "acceptedPaymentMethods") ?? null;
 
   function handleDefaultCurrencyChange(next: string): void {
     if (!form) return;
@@ -245,6 +277,8 @@ export default function PaymentsTabPage(): React.ReactElement {
               setForm({ ...form, acceptedPaymentMethods: next })
             }
           />
+          <LastUpdatedCaption entry={lastUpdated["acceptedPaymentMethods"] ?? null} />
+          <DetectionAffordances detection={acceptedPaymentMethodsDetection} />
         </div>
 
         <div className="flex flex-col gap-2">

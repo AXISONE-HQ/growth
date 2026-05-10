@@ -2,9 +2,15 @@
  * KAN-855 — Account Page Cohort 2 layout. Wraps every nested
  * /settings/account/* page with the Tab navigation bar. Composes
  * existing atoms (no new shared primitive) per Fred's decision A.
+ *
+ * KAN-866 — Cohort 6 mounts DriftBanner ABOVE AccountTabs (spec §7.1).
+ * The banner self-no-ops when there are no proposed detections, so the
+ * layout stays visually clean for tenants with nothing pending.
  */
+"use client";
 import * as React from "react";
 import { AccountTabs } from "./_components/account-tabs";
+import { DriftBanner } from "./_components/drift-banner";
 
 export default function AccountSettingsLayout({
   children,
@@ -27,6 +33,7 @@ export default function AccountSettingsLayout({
           How growth refers to your business in messages and decisions.
         </p>
       </header>
+      <DriftBanner />
       <AccountTabs />
       {children}
     </div>

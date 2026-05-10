@@ -45,6 +45,8 @@ import {
   publishDetectFailed,
   publishDetectDeadLetter,
 } from "../services/account-detect-publishers.js";
+import { buildAccountDetectLifecycleAuditPayload } from "@growth/shared";
+import { fanoutDetectEvent } from "./account-detect-events-sse.js";
 
 export const accountDetectHandlerApp = new Hono();
 
@@ -152,6 +154,27 @@ accountDetectHandlerApp.post("/internal/account-detect-handler", async (c) => {
 
   const startedAt = Date.now();
 
+  // Look up the AccountProfile row id up-front. Cohort 6 lifecycle
+  // audit-log writes need it (entityId field of the canonical payload),
+  // and the failure path needs it too — passing it down to runDetectScan
+  // also avoids a duplicate findUnique inside the scan loop.
+  //
+  // If the profile is missing, that's a setup bug (the detectFromWebsite
+  // mutation should have provisioned it). Log + still run the scan: the
+  // scan's own findUnique throws FETCH_FAILED, which lands a publish but
+  // SKIPS the audit-log write because entityId is required. This matches
+  // the AuditLog payload contract in `@growth/shared` (entityId.min(1)).
+  const profileForAudit = (await (prisma as any).accountProfile?.findUnique({
+    where: { tenantId },
+    select: { id: true },
+  })) as { id: string } | null;
+  const accountProfileId = profileForAudit?.id ?? null;
+  if (!accountProfileId) {
+    console.warn(
+      `[account-detect-handler] no AccountProfile for tenant ${tenantId} — lifecycle audit-log writes will be skipped this run (jobId=${jobId})`,
+    );
+  }
+
   // Mark in_progress at the top so the UI can poll detectStatus and
   // see the worker grabbed the task. Best-effort — if this update
   // fails (DB outage) we still try the scan; the row state lags but
@@ -166,6 +189,10 @@ accountDetectHandlerApp.post("/internal/account-detect-handler", async (c) => {
   }
 
   await publishDetectProgress({ tenantId, jobId, phase: "fetching" });
+  fanoutDetectEvent(jobId, {
+    type: "progress",
+    data: { tenantId, jobId, phase: "fetching" },
+  });
 
   // Wrap the scan body in a Promise.race against the 30s hard timeout.
   // On timeout we publish detect_failed; Cloud Tasks will retry up to
@@ -180,16 +207,28 @@ accountDetectHandlerApp.post("/internal/account-detect-handler", async (c) => {
 
   try {
     const proposalCount = await Promise.race([
-      runDetectScan({ tenantId, jobId, websiteUrl }),
+      runDetectScan({ tenantId, jobId, websiteUrl, accountProfileId }),
       timeoutPromise,
     ]);
     if (timeoutHandle) clearTimeout(timeoutHandle);
 
+    await writeDetectLifecycleAudit({
+      tenantId,
+      accountProfileId,
+      actionType: "account_detect_completed",
+      jobId,
+      websiteUrl,
+      proposalCount,
+    });
     await publishDetectCompleted({
       tenantId,
       jobId,
       proposalCount,
       durationMs: Date.now() - startedAt,
+    });
+    fanoutDetectEvent(jobId, {
+      type: "completed",
+      data: { tenantId, jobId, proposalCount, durationMs: Date.now() - startedAt },
     });
     return c.json({ ok: true, proposalCount });
   } catch (err) {
@@ -214,6 +253,15 @@ accountDetectHandlerApp.post("/internal/account-detect-handler", async (c) => {
       /* swallow — already in failure path */
     }
 
+    await writeDetectLifecycleAudit({
+      tenantId,
+      accountProfileId,
+      actionType: "account_detect_failed",
+      jobId,
+      websiteUrl,
+      errorCode,
+      errorMessage: message,
+    });
     await publishDetectFailed({
       tenantId,
       jobId,
@@ -221,11 +269,25 @@ accountDetectHandlerApp.post("/internal/account-detect-handler", async (c) => {
       errorMessage: message,
       attempt,
     });
+    fanoutDetectEvent(jobId, {
+      type: "failed",
+      data: { tenantId, jobId, errorCode, errorMessage: message, attempt },
+    });
 
     // Final-attempt failure → publish dead-letter for Cohort 6 audit
     // subscriber. Cloud Tasks doesn't have native dead-lettering, so
     // we explicitly publish on the dlq topic from the handler itself.
     if (attempt >= MAX_ATTEMPTS) {
+      await writeDetectLifecycleAudit({
+        tenantId,
+        accountProfileId,
+        actionType: "account_detect_dead_letter",
+        jobId,
+        websiteUrl,
+        errorCode,
+        errorMessage: message,
+        retryCount: attempt,
+      });
       await publishDetectDeadLetter({
         tenantId,
         jobId,
@@ -255,13 +317,19 @@ accountDetectHandlerApp.post("/internal/account-detect-handler", async (c) => {
  * Inner scan loop — separated from the timeout/error wrapper so the
  * handler stays narrow + the test surface is the scan steps not the
  * HTTP plumbing.
+ *
+ * `accountProfileId` is looked up by the handler before the scan runs;
+ * `null` means the AccountProfile row is missing for the tenant (setup
+ * bug). The scan throws FETCH_FAILED in that case so the handler still
+ * publishes detect_failed + skips the lifecycle audit row gracefully.
  */
 async function runDetectScan(input: {
   tenantId: string;
   jobId: string;
   websiteUrl: string;
+  accountProfileId: string | null;
 }): Promise<number> {
-  const { tenantId, jobId, websiteUrl } = input;
+  const { tenantId, jobId, websiteUrl, accountProfileId } = input;
 
   // 1. Page discovery + fetch
   const discovery = await discoverAndFetchPages(websiteUrl);
@@ -278,6 +346,10 @@ async function runDetectScan(input: {
     phase: "extracting",
     notes: discovery.notes,
   });
+  fanoutDetectEvent(jobId, {
+    type: "progress",
+    data: { tenantId, jobId, phase: "extracting", notes: discovery.notes },
+  });
 
   // 3. Sonnet extraction
   let extraction;
@@ -291,12 +363,9 @@ async function runDetectScan(input: {
     throw new Error(`LLM_ERROR: ${m}`);
   }
 
-  // 4. Find AccountProfile.id for FK + tenant scope
-  const profile = (await (prisma as any).accountProfile?.findUnique({
-    where: { tenantId },
-    select: { id: true },
-  })) as { id: string } | null;
-  if (!profile) {
+  // 4. Tenant scope — accountProfileId was looked up by the handler.
+  //    Missing → handler-side log already fired; throw to land detect_failed.
+  if (!accountProfileId) {
     throw new Error(`FETCH_FAILED: AccountProfile not provisioned for tenant ${tenantId}`);
   }
 
@@ -305,7 +374,7 @@ async function runDetectScan(input: {
     try {
       await (prisma as any).accountFieldDetection?.create({
         data: {
-          accountProfileId: profile.id,
+          accountProfileId,
           fieldPath: p.fieldName,
           proposedValue: p.proposedValue,
           confidence: p.confidence,
@@ -335,4 +404,57 @@ async function runDetectScan(input: {
   }
 
   return extraction.validProposals.length;
+}
+
+/**
+ * Inline AuditLog write for the detect-lifecycle terminal events
+ * (completed / failed / dead_letter). Per Fred's locked Decision 2
+ * Path C, the handler writes these rows directly — there's no
+ * universal subscriber for the Cohort 6 timeline.
+ *
+ * Contract: see `@growth/shared/account-audit-payload` — entityId is
+ * the AccountProfile row id; if missing (setup bug) we skip the write.
+ *
+ * Best-effort: a DB failure here MUST NOT mask the underlying scan
+ * outcome. Log loudly + return.
+ */
+async function writeDetectLifecycleAudit(input: {
+  tenantId: string;
+  accountProfileId: string | null;
+  actionType:
+    | "account_detect_completed"
+    | "account_detect_failed"
+    | "account_detect_dead_letter";
+  jobId: string;
+  websiteUrl: string;
+  proposalCount?: number;
+  errorCode?: string;
+  errorMessage?: string;
+  retryCount?: number;
+}): Promise<void> {
+  if (!input.accountProfileId) return;
+  try {
+    const payload = buildAccountDetectLifecycleAuditPayload({
+      accountProfileId: input.accountProfileId,
+      jobId: input.jobId,
+      websiteUrl: input.websiteUrl,
+      proposalCount: input.proposalCount ?? null,
+      errorCode: input.errorCode ?? null,
+      errorMessage: input.errorMessage ?? null,
+      retryCount: input.retryCount ?? null,
+    });
+    await (prisma as any).auditLog?.create({
+      data: {
+        tenantId: input.tenantId,
+        actor: "ai:account-detect",
+        actionType: input.actionType,
+        payload: payload as unknown as Record<string, unknown>,
+      },
+    });
+  } catch (err) {
+    console.error(
+      `[account-detect-handler] AuditLog write failed for ${input.actionType} jobId=${input.jobId}:`,
+      err,
+    );
+  }
 }
