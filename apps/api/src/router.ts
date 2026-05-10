@@ -3670,8 +3670,18 @@ async function _applyAccountUpdate(
         // Fire-and-forget: failures must NOT roll back the row update — the
         // user's save is the canonical action; the audit-log event is
         // best-effort. Cohort 6 wires retry/dead-letter at the subscriber.
-        await pub.publishAccountFieldUpdated(event).catch(() => {
-          /* swallow — audit event is best-effort by design */
+        //
+        // KAN-876: log the error rather than swallowing it silently. The
+        // original `.catch(() => {})` hid a TypeError from a client-API
+        // mismatch in the publisher for the entire Cohort 6 close-out
+        // window. Best-effort posture preserved (no rethrow, save still
+        // succeeds); visibility added so a future drift surfaces in
+        // logs instead of vanishing into the void.
+        await pub.publishAccountFieldUpdated(event).catch((err) => {
+          console.error(
+            `[account.field_updated] publish failed for fieldPath=${c.path} tenantId=${tenantId}:`,
+            err,
+          );
         });
       }
     }

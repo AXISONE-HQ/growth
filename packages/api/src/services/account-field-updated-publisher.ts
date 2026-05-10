@@ -45,6 +45,18 @@ export async function publishAccountFieldUpdated(
   if (!accountEventsEnabled()) {
     return { skipped: true };
   }
+  // KAN-876: must call the wrapper's `.publish(topic, data, attributes)`
+  // method — NOT the raw `@google-cloud/pubsub` `.topic(name).publishMessage()`
+  // shape. `getPubSubClient()` returns the PubSubClient interface (declared
+  // in `services/action-decided-publisher.ts`), whose only public method is
+  // `publish()`. Before this fix, the publisher silently failed with a
+  // TypeError (`client.topic is not a function`) on every save, swallowed
+  // by the `.catch(() => {})` wrapper at the router call site. Live since
+  // KAN-852 deploy; only surfaced when ACCOUNT_EVENTS_ENABLED flipped at
+  // KAN-866 close-out and Cowork drove an authed save end-to-end.
+  //
+  // KAN-877 follow-up: `knowledge-source-ingest-publisher.ts` ships the
+  // same bug shape (same wrong client API). Verify + fix separately.
   const client = getPubSubClient();
   const data = Buffer.from(JSON.stringify(event));
   const attributes: Record<string, string> = {
@@ -53,8 +65,10 @@ export async function publishAccountFieldUpdated(
     fieldPath: event.fieldPath,
     source: event.source,
   };
-  const messageId = await client
-    .topic(ACCOUNT_FIELD_UPDATED_TOPIC)
-    .publishMessage({ data, attributes });
+  const messageId = await client.publish(
+    ACCOUNT_FIELD_UPDATED_TOPIC,
+    data,
+    attributes,
+  );
   return { messageId, skipped: false };
 }
