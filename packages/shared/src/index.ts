@@ -12,3 +12,7 @@ export * from "./action-types.js";
 export * from "./lead-received.js";
 export * from "./account-field-updated.js";
 export * from "./account-validation.js";
+// KAN-866 — canonical AuditLog payload contract for account.* events.
+// Single source of truth for both Cohort 6 producer sites + the KAN-830
+// AIActionCard consumer.
+export * from "./account-audit-payload.js";

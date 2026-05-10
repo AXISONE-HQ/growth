@@ -35,6 +35,20 @@ import {
   ServiceAreaPicker,
   type ServiceAreaType,
 } from "../_components/service-area-picker";
+import {
+  DetectionAffordances,
+  type DetectionRow,
+} from "../_components/detection-affordances";
+import {
+  LastUpdatedCaption,
+  type LastUpdatedEntry,
+} from "../_components/last-updated-caption";
+
+const CONTACT_DETECTION_FIELDS = [
+  "primaryPhone",
+  "primaryEmail",
+  "physicalAddress",
+] as const;
 
 interface AccountProfile {
   primaryPhone: string | null;
@@ -122,11 +136,36 @@ function diffPatch(
   return patch;
 }
 
+interface ProposalsResponse {
+  proposals: DetectionRow[];
+}
+
+function pickDetection(
+  proposals: DetectionRow[],
+  fieldPath: string,
+): DetectionRow | null {
+  return proposals.find((p) => p.fieldPath === fieldPath) ?? null;
+}
+
 export default function ContactTabPage(): React.ReactElement {
   const queryClient = useQueryClient();
   const accountQuery = useQuery<AccountProfile>({
     queryKey: ["account", "get"],
     queryFn: () => trpcQuery<AccountProfile>("account.get"),
+  });
+
+  const proposalsQuery = useQuery<ProposalsResponse>({
+    queryKey: ["account", "detection-proposals"],
+    queryFn: () => trpcQuery<ProposalsResponse>("account.getDetectionProposals"),
+  });
+
+  const lastUpdatedQuery = useQuery<Record<string, LastUpdatedEntry | null>>({
+    queryKey: ["account", "fields-last-updated", CONTACT_DETECTION_FIELDS],
+    queryFn: () =>
+      trpcQuery<Record<string, LastUpdatedEntry | null>>(
+        "account.getFieldsLastUpdated",
+        { fieldPaths: [...CONTACT_DETECTION_FIELDS] },
+      ),
   });
 
   const [form, setForm] = React.useState<ContactFormState | null>(null);
@@ -208,6 +247,8 @@ export default function ContactTabPage(): React.ReactElement {
   const patch = diffPatch(snapshot, form);
   const isDirty = Object.keys(patch).length > 0;
   const canSave = isDirty && !saveMutation.isPending;
+  const proposals = proposalsQuery.data?.proposals ?? [];
+  const lastUpdated = lastUpdatedQuery.data ?? {};
 
   return (
     <Card className="mt-6">
@@ -234,6 +275,8 @@ export default function ContactTabPage(): React.ReactElement {
               AI quotes this when contacts ask how to reach you. Use country
               code, e.g., +1 555 123 4567.
             </p>
+            <LastUpdatedCaption entry={lastUpdated["primaryPhone"] ?? null} />
+            <DetectionAffordances detection={pickDetection(proposals, "primaryPhone")} />
           </div>
           <div className="flex flex-col gap-2">
             <Label htmlFor="support-phone">Support phone</Label>
@@ -256,6 +299,8 @@ export default function ContactTabPage(): React.ReactElement {
               placeholder="hello@yourcompany.com"
               autoComplete="email"
             />
+            <LastUpdatedCaption entry={lastUpdated["primaryEmail"] ?? null} />
+            <DetectionAffordances detection={pickDetection(proposals, "primaryEmail")} />
           </div>
           <div className="flex flex-col gap-2">
             <Label htmlFor="support-email">Support email</Label>
@@ -283,6 +328,8 @@ export default function ContactTabPage(): React.ReactElement {
           <p className="text-xs" style={{ color: "var(--ds-ink-tertiary)" }}>
             AI cites this when contacts ask where you are located.
           </p>
+          <LastUpdatedCaption entry={lastUpdated["physicalAddress"] ?? null} />
+          <DetectionAffordances detection={pickDetection(proposals, "physicalAddress")} />
         </div>
 
         <MailingAddressFields

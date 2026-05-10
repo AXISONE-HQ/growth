@@ -34,6 +34,20 @@ import {
   AfterHoursBehaviorPicker,
   type AfterHoursBehavior,
 } from "../_components/after-hours-behavior-picker";
+import {
+  DetectionAffordances,
+  type DetectionRow,
+} from "../_components/detection-affordances";
+import {
+  LastUpdatedCaption,
+  type LastUpdatedEntry,
+} from "../_components/last-updated-caption";
+
+const HOURS_DETECTION_FIELDS = ["weeklyHours"] as const;
+
+interface ProposalsResponse {
+  proposals: DetectionRow[];
+}
 
 interface AccountProfile {
   timeZone: string;
@@ -78,6 +92,20 @@ export default function HoursTabPage(): React.ReactElement {
   const accountQuery = useQuery<AccountProfile>({
     queryKey: ["account", "get"],
     queryFn: () => trpcQuery<AccountProfile>("account.get"),
+  });
+
+  const proposalsQuery = useQuery<ProposalsResponse>({
+    queryKey: ["account", "detection-proposals"],
+    queryFn: () => trpcQuery<ProposalsResponse>("account.getDetectionProposals"),
+  });
+
+  const lastUpdatedQuery = useQuery<Record<string, LastUpdatedEntry | null>>({
+    queryKey: ["account", "fields-last-updated", HOURS_DETECTION_FIELDS],
+    queryFn: () =>
+      trpcQuery<Record<string, LastUpdatedEntry | null>>(
+        "account.getFieldsLastUpdated",
+        { fieldPaths: [...HOURS_DETECTION_FIELDS] },
+      ),
   });
 
   const [form, setForm] = React.useState<HoursFormState | null>(null);
@@ -160,6 +188,10 @@ export default function HoursTabPage(): React.ReactElement {
   const isDirty = Object.keys(patch).length > 0;
   const canSave = isDirty && !saveMutation.isPending;
   const profile = accountQuery.data!;
+  const proposals = proposalsQuery.data?.proposals ?? [];
+  const lastUpdated = lastUpdatedQuery.data ?? {};
+  const weeklyHoursDetection =
+    proposals.find((p) => p.fieldPath === "weeklyHours") ?? null;
 
   return (
     <Card className="mt-6">
@@ -184,10 +216,14 @@ export default function HoursTabPage(): React.ReactElement {
         </div>
 
         {/* Weekly hours */}
-        <WeeklyHoursEditor
-          value={form.weeklyHours}
-          onChange={(next) => setForm({ ...form, weeklyHours: next })}
-        />
+        <div className="flex flex-col gap-2">
+          <WeeklyHoursEditor
+            value={form.weeklyHours}
+            onChange={(next) => setForm({ ...form, weeklyHours: next })}
+          />
+          <LastUpdatedCaption entry={lastUpdated["weeklyHours"] ?? null} />
+          <DetectionAffordances detection={weeklyHoursDetection} />
+        </div>
 
         {/* Holidays — its own mutation flow, not in the Save patch */}
         <section className="flex flex-col gap-2">
