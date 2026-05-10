@@ -3721,8 +3721,24 @@ export const accountRouter = router({
     // KAN-859 — resolve Blueprint defaults for the Legal tab. Falls
     // back to the bundled GENERIC_BLUEPRINT when no active BrainSnapshot
     // exists for the tenant (new tenants pre-Cohort 5 detection).
+    //
+    // Defense-in-depth try/catch: the loadBlueprintLoader path crosses
+    // a Prisma boundary (BrainSnapshot lookup). A schema/code drift
+    // there must NOT 500 the entire account.get response — the Legal
+    // tab gracefully falls back to GENERIC_BLUEPRINT. Captured the
+    // same class of bug surfaced by the BrainSnapshot.status drift
+    // (~ "fix/account-get-brainsnapshot-drift" PR).
     const bp = await loadBlueprintLoader();
-    const blueprint = (await bp.getBlueprintForTenant(tenantId)) ?? bp.GENERIC_BLUEPRINT;
+    let blueprint;
+    try {
+      blueprint = (await bp.getBlueprintForTenant(tenantId)) ?? bp.GENERIC_BLUEPRINT;
+    } catch (err) {
+      console.warn(
+        "[account.get] getBlueprintForTenant threw; falling back to GENERIC_BLUEPRINT",
+        err,
+      );
+      blueprint = bp.GENERIC_BLUEPRINT;
+    }
     const legalDefaults = bp.resolveLegalDefaults({
       accountProfile: {
         optOutLanguage: row?.optOutLanguage ?? null,
