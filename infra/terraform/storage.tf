@@ -79,6 +79,30 @@ resource "google_storage_bucket" "growth_tenant_assets" {
     app   = "growth"
     owner = "axisone-team"
   }
+
+  # ─── CORS — browser-direct PUT for the V4 signed-URL upload flow ───
+  # Without this block, the browser preflight (OPTIONS) and the body
+  # PUT both fail with "Failed to fetch" because the bucket doesn't
+  # return Access-Control-Allow-Origin matching the growth-web origin.
+  # KAN-875 caught this at Cohort 2 logo-upload Chrome-MCP verification —
+  # server-side mock-based unit tests don't exercise real browser CORS.
+  #
+  # Allowed methods restricted to PUT + OPTIONS (the V4 signed-URL
+  # upload flow); GETs come back through API-issued read URLs and don't
+  # cross the bucket boundary from the browser.
+  #
+  # When a custom domain (e.g., app.axisone.ca, growth.axisone.ca) is
+  # mapped to the growth-web service, add it to the origin list. Until
+  # then, both run.app URLs cover all reachable origins.
+  cors {
+    origin = [
+      "https://growth-web-1086551891973.us-central1.run.app",
+      "https://growth-web-biut5gfhuq-uc.a.run.app",
+    ]
+    method          = ["PUT", "OPTIONS"]
+    response_header = ["Content-Type", "x-goog-meta-*"]
+    max_age_seconds = 3600
+  }
 }
 
 # ─── IAM — API runtime SA can read/write objects ─────────────────────
