@@ -33,6 +33,7 @@
 import { Hono } from "hono";
 import { prisma } from "../prisma.js";
 import { verifyPubsubOidc } from "../lib/oidc-pubsub-verify.js";
+import { getRedisClient } from "../services/redis-client.js";
 import {
   discoverAndFetchPages,
   buildCombinedTextForLLM,
@@ -49,6 +50,9 @@ export const accountDetectHandlerApp = new Hono();
 
 const HARD_TIMEOUT_MS = 30000; // 30s end-to-end
 const MAX_ATTEMPTS = 3; // matches Cloud Tasks queue retry config
+const IDEMP_KEY_TTL_SECONDS = 86400; // 24h — covers the worst-case retry window
+                                     // (Cloud Tasks max_retry_duration = 1800s)
+                                     // by ~48× without unbounded growth.
 
 interface TaskBody {
   tenantId: string;
@@ -96,6 +100,55 @@ accountDetectHandlerApp.post("/internal/account-detect-handler", async (c) => {
   // 3+ would mean the queue config is misaligned with our handler.
   const retryCountHeader = c.req.header("x-cloudtasks-taskretrycount") ?? "0";
   const attempt = Number.parseInt(retryCountHeader, 10) + 1;
+
+  // ─────────────────────────────────────────────────────────────
+  // Idempotency check — at-least-once Cloud Tasks delivery WILL fire
+  // duplicate handlers in production. SETNX `idemp:account-detect:{jobId}`
+  // claims the job for the FIRST handler; any subsequent handler with
+  // the same jobId returns 200 immediately as a no-op (no AccountFieldDetection
+  // writes, no LLM call, no detect_completed publish).
+  //
+  // Why this matters: without it, a duplicate scan creates duplicate
+  // AccountFieldDetection rows + double-charges LLM cost (~$0.015/scan)
+  // + double-fires detect_completed (which Cohort 6's audit-log subscriber
+  // will eventually consume).
+  //
+  // Retry semantics: the SAME jobId across attempts (Cloud Tasks retries
+  // the same task) deliberately blocks here on attempts 2+ if attempt 1
+  // succeeded. Handler failure attempts get a different "claim" because
+  // the FIRST attempt's setNX succeeded but the handler then errored —
+  // we DON'T release the claim on failure, so retries are no-op'd. That's
+  // the right posture: a partial-success scan shouldn't be re-run; the
+  // user will retry by clicking Detect again, which generates a fresh
+  // jobId via randomUUID() in detectFromWebsite mutation.
+  //
+  // Fail-open posture matches the rate-limit helper (KAN-742 precedent):
+  // a Redis outage shouldn't wedge tenants out of detect.
+  const idempKey = `idemp:account-detect:${jobId}`;
+  let claimed = true;
+  try {
+    // ioredis SETNX-style: returns "OK" on set, null on already-exists
+    const result = await getRedisClient().set(
+      idempKey,
+      `claimed-at:${new Date().toISOString()}`,
+      "EX",
+      IDEMP_KEY_TTL_SECONDS,
+      "NX",
+    );
+    claimed = result === "OK";
+  } catch (err) {
+    console.warn(
+      "[account-detect-handler] idempotency Redis check failed — fail-open:",
+      err,
+    );
+    // claimed stays true → proceed with scan
+  }
+  if (!claimed) {
+    console.log(
+      `[account-detect-handler] duplicate delivery for jobId=${jobId} (Cloud Tasks at-least-once) — no-op return 200`,
+    );
+    return c.json({ ok: true, idempotent: true, jobId });
+  }
 
   const startedAt = Date.now();
 
@@ -177,8 +230,10 @@ accountDetectHandlerApp.post("/internal/account-detect-handler", async (c) => {
         tenantId,
         jobId,
         websiteUrl,
-        finalErrorCode: errorCode,
-        finalErrorMessage: message,
+        errorCode,
+        errorMessage: message,
+        retryCount: attempt,
+        originalTimestamp: new Date(startedAt).toISOString(),
       });
     }
 

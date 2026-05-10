@@ -71,8 +71,17 @@ export interface DetectDeadLetterEvent {
   tenantId: string;
   jobId: string;
   websiteUrl: string;
-  finalErrorCode: string;
-  finalErrorMessage: string;
+  errorCode: string;
+  errorMessage: string;
+  /** Cloud Tasks attempt count when the handler finally gave up. Equal
+   * to MAX_ATTEMPTS (3) at dead-letter time. */
+  retryCount: number;
+  /** ISO timestamp of the handler invocation that triggered the
+   * dead-letter publish. Best approximation of "when did the scan die"
+   * available to the handler — Cloud Tasks doesn't pass the original
+   * task-enqueue timestamp through retries. Cohort 6 audit subscriber
+   * can read this for the audit-log entry. */
+  originalTimestamp: string;
 }
 
 async function publish<T>(topic: string, payload: T): Promise<void> {

@@ -104,12 +104,14 @@ vi.mock(
 );
 // Cloud Tasks client mock — return a deterministic taskName.
 vi.mock("../services/account-detect-tasks-client.js", () => ({
-  enqueueAccountDetectTask: (body: unknown) => enqueueTaskMock(body),
+  enqueueAccountDetectTask: (...args: unknown[]) =>
+    (enqueueTaskMock as (...a: unknown[]) => unknown)(...args),
   __setTasksClientForTest: vi.fn(),
 }));
 // Pub/Sub publishers mock — count + capture publish calls.
 vi.mock("../services/account-detect-publishers.js", () => ({
-  publishDetectStarted: (event: unknown) => publishStartedMock(event),
+  publishDetectStarted: (...args: unknown[]) =>
+    (publishStartedMock as (...a: unknown[]) => unknown)(...args),
   publishDetectProgress: vi.fn(async () => undefined),
   publishDetectCompleted: vi.fn(async () => undefined),
   publishDetectFailed: vi.fn(async () => undefined),
@@ -376,7 +378,7 @@ describe("KAN-862 — detectFromWebsite mutation", () => {
     expect(result.jobId.length).toBeGreaterThan(10);
     expect(result.estimatedSeconds).toBe(12);
     expect(enqueueTaskMock).toHaveBeenCalledTimes(1);
-    const taskArg = enqueueTaskMock.mock.calls[0]?.[0] as {
+    const taskArg = (enqueueTaskMock.mock.calls as unknown as unknown[][])[0]?.[0] as {
       tenantId: string;
       jobId: string;
       websiteUrl: string;
@@ -385,7 +387,7 @@ describe("KAN-862 — detectFromWebsite mutation", () => {
     expect(taskArg.websiteUrl).toBe("https://acme.example.com");
     expect(taskArg.jobId).toBe(result.jobId);
     expect(publishStartedMock).toHaveBeenCalledTimes(1);
-    const publishArg = publishStartedMock.mock.calls[0]?.[0] as {
+    const publishArg = (publishStartedMock.mock.calls as unknown as unknown[][])[0]?.[0] as {
       tenantId: string;
       jobId: string;
     };
@@ -417,7 +419,7 @@ describe("KAN-862 — getDetectionProposals query", () => {
     ]);
     const result = await buildCaller().getDetectionProposals();
     expect(result.proposals.length).toBe(2);
-    const findManyCall = accountFieldDetectionFindManyMock.mock.calls[0]?.[0] as {
+    const findManyCall = (accountFieldDetectionFindManyMock.mock.calls as unknown as unknown[][])[0]?.[0] as {
       where: { accountProfileId: string; status: string };
       orderBy: { createdAt: string };
     };
