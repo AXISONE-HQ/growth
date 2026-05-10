@@ -36,6 +36,7 @@ import { knowledgeSourcesApp } from "./routes/knowledge-sources.js";
 import { faqEntriesApp } from "./routes/faq-entries.js";
 import { servicesApp } from "./routes/services.js";
 import { cronDeferredSendApp } from "./internal/cron-deferred-send.js";
+import { accountDetectHandlerApp } from "./internal/account-detect-handler.js";
 import { getPubSubClient } from "../../../packages/api/src/lib/pubsub-client.js";
 import { setLLMCostPublisher } from "../../../packages/api/src/services/llm-client.js";
 
@@ -103,6 +104,12 @@ app.route("/pubsub", knowledgeSourceIngestedPushApp);
 // /internal/cron/deferred-send-evaluator. OIDC-protected (reuses
 // verifyPubsubOidc — works for Cloud Scheduler tokens too).
 app.route("/internal", cronDeferredSendApp);
+
+// KAN-862 — Cloud Tasks push handler for the detect-from-website
+// pipeline. Mounted at /internal/account-detect-handler. OIDC-protected
+// (Cloud Tasks Service Agent mints the token impersonating pubsub-invoker
+// per infra/terraform/account-detect.tf).
+app.route("/internal", accountDetectHandlerApp);
 
 // ============================================================================
 // PUBLIC LEAD API (KAN-742) — API-key authenticated, rate-limited, idempotent

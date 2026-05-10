@@ -3897,6 +3897,219 @@ export const accountRouter = router({
     }),
 
   // ─────────────────────────────────────────────
+  // KAN-862 — Detect-from-website mutations (spec §5)
+  // ─────────────────────────────────────────────
+  // 5 mutations cover the full UI surface for Cohort 6:
+  //   detectFromWebsite       — kicks off a scan (rate-limited, enqueues Cloud Task)
+  //   getDetectionProposals   — list status='proposed' rows for current tenant
+  //   acceptDetection         — write proposed value to AccountProfile + mark accepted
+  //   rejectDetection         — mark rejected (no AccountProfile write)
+  //   acceptAllDetections     — bulk accept everything still 'proposed'
+  //
+  // Tenant scope is enforced via _applyAccountUpdate helper (for accept) +
+  // FK-transitive deleteMany shape (for reject). The Cloud Task body
+  // contains tenantId from ctx; the worker re-validates tenant scope when
+  // it loads the AccountProfile by tenantId.
+  //
+  // Rate limit (1/tenant/60s) lives in account-detect-rate-limit.ts —
+  // sibling helper to KAN-742's api-rate-limit.ts. Fail-open posture
+  // matches.
+  //
+  // Cloud Tasks enqueue + OIDC dispatch chain provisioned via
+  // infra/terraform/account-detect.tf (sibling Terraform PR landed
+  // pre-code).
+  detectFromWebsite: protectedProcedure
+    .input(z.object({ websiteUrl: z.string().url() }))
+    .mutation(async ({ ctx, input }) => {
+      const tenantId = ctx.tenantId;
+      if (!tenantId) {
+        throw new TRPCError({ code: "UNAUTHORIZED", message: "Missing tenant context" });
+      }
+      // Dynamic-import the rate-limit + tasks-client + publisher modules
+      // so the cross-rootDir TS6059 cohort hygiene holds. Same pattern
+      // as the publisher loader at the top of this file.
+      const rateLimitMod = (await import("./services/account-detect-rate-limit.js")) as {
+        checkAccountDetectRateLimit: (
+          tenantId: string,
+        ) => Promise<{ allowed: boolean; resetAt: number; limit: number }>;
+      };
+      const limit = await rateLimitMod.checkAccountDetectRateLimit(tenantId);
+      if (!limit.allowed) {
+        throw new TRPCError({
+          code: "TOO_MANY_REQUESTS",
+          message: `Rate limit exceeded. Try again after ${new Date(limit.resetAt * 1000).toISOString()}.`,
+        });
+      }
+      const tasksMod = (await import("./services/account-detect-tasks-client.js")) as {
+        enqueueAccountDetectTask: (body: {
+          tenantId: string;
+          jobId: string;
+          websiteUrl: string;
+        }) => Promise<{ taskName: string }>;
+      };
+      const publishMod = (await import("./services/account-detect-publishers.js")) as {
+        publishDetectStarted: (event: {
+          tenantId: string;
+          jobId: string;
+          websiteUrl: string;
+          enqueuedAt: string;
+        }) => Promise<void>;
+      };
+      const jobId = randomUUID();
+      const enqueuedAt = new Date().toISOString();
+      await tasksMod.enqueueAccountDetectTask({
+        tenantId,
+        jobId,
+        websiteUrl: input.websiteUrl,
+      });
+      await publishMod.publishDetectStarted({
+        tenantId,
+        jobId,
+        websiteUrl: input.websiteUrl,
+        enqueuedAt,
+      });
+      return { jobId, estimatedSeconds: 12 };
+    }),
+
+  getDetectionProposals: protectedProcedure.query(async ({ ctx }) => {
+    const tenantId = ctx.tenantId;
+    if (!tenantId) {
+      throw new TRPCError({ code: "UNAUTHORIZED", message: "Missing tenant context" });
+    }
+    const profile = (await (ctx.prisma as any).accountProfile?.findUnique({
+      where: { tenantId },
+      select: { id: true },
+    })) as { id: string } | null;
+    if (!profile) return { proposals: [] };
+    const rows = (await (ctx.prisma as any).accountFieldDetection?.findMany({
+      where: { accountProfileId: profile.id, status: "proposed" },
+      orderBy: { createdAt: "asc" },
+    })) as Array<{
+      id: string;
+      fieldPath: string;
+      proposedValue: string;
+      confidence: number;
+      sourceUrl: string | null;
+      sourceSnippet: string | null;
+      createdAt: Date;
+    }>;
+    return { proposals: rows };
+  }),
+
+  acceptDetection: protectedProcedure
+    .input(z.object({ detectionId: z.string().min(1) }))
+    .mutation(async ({ ctx, input }) => {
+      const tenantId = ctx.tenantId;
+      if (!tenantId) {
+        throw new TRPCError({ code: "UNAUTHORIZED", message: "Missing tenant context" });
+      }
+      // Tenant-scope check via FK-transitive include
+      const detection = (await (ctx.prisma as any).accountFieldDetection?.findFirst({
+        where: {
+          id: input.detectionId,
+          status: "proposed",
+          accountProfile: { tenantId },
+        },
+      })) as {
+        id: string;
+        fieldPath: string;
+        proposedValue: string;
+        accountProfileId: string;
+      } | null;
+      if (!detection) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Detection not found" });
+      }
+      // Decode the JSON-stringified value back to its native shape and
+      // route through _applyAccountUpdate so the audit-event publisher
+      // fires for the same field-path the detection wrote.
+      let parsedValue: unknown;
+      try {
+        parsedValue = JSON.parse(detection.proposedValue);
+      } catch {
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Stored proposedValue is not valid JSON — cannot accept",
+        });
+      }
+      await _applyAccountUpdate(ctx, { [detection.fieldPath]: parsedValue });
+      // Mark the detection accepted with audit metadata
+      await (ctx.prisma as any).accountFieldDetection?.update({
+        where: { id: detection.id },
+        data: {
+          status: "accepted",
+          decidedAt: new Date(),
+          decidedBy: ctx.firebaseUser?.uid ?? null,
+        },
+      });
+      return { ok: true };
+    }),
+
+  rejectDetection: protectedProcedure
+    .input(z.object({ detectionId: z.string().min(1) }))
+    .mutation(async ({ ctx, input }) => {
+      const tenantId = ctx.tenantId;
+      if (!tenantId) {
+        throw new TRPCError({ code: "UNAUTHORIZED", message: "Missing tenant context" });
+      }
+      const result = (await (ctx.prisma as any).accountFieldDetection?.updateMany({
+        where: {
+          id: input.detectionId,
+          status: "proposed",
+          accountProfile: { tenantId },
+        },
+        data: {
+          status: "rejected",
+          decidedAt: new Date(),
+          decidedBy: ctx.firebaseUser?.uid ?? null,
+        },
+      })) as { count: number } | null;
+      if (!result || result.count === 0) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Detection not found" });
+      }
+      return { ok: true };
+    }),
+
+  acceptAllDetections: protectedProcedure.mutation(async ({ ctx }) => {
+    const tenantId = ctx.tenantId;
+    if (!tenantId) {
+      throw new TRPCError({ code: "UNAUTHORIZED", message: "Missing tenant context" });
+    }
+    const profile = (await (ctx.prisma as any).accountProfile?.findUnique({
+      where: { tenantId },
+      select: { id: true },
+    })) as { id: string } | null;
+    if (!profile) return { acceptedCount: 0 };
+    const proposals = (await (ctx.prisma as any).accountFieldDetection?.findMany({
+      where: { accountProfileId: profile.id, status: "proposed" },
+      select: { id: true, fieldPath: true, proposedValue: true },
+    })) as Array<{ id: string; fieldPath: string; proposedValue: string }>;
+    let acceptedCount = 0;
+    for (const p of proposals) {
+      let parsedValue: unknown;
+      try {
+        parsedValue = JSON.parse(p.proposedValue);
+      } catch {
+        continue; // skip malformed rows; per-row failure doesn't abort batch
+      }
+      try {
+        await _applyAccountUpdate(ctx, { [p.fieldPath]: parsedValue });
+        await (ctx.prisma as any).accountFieldDetection?.update({
+          where: { id: p.id },
+          data: {
+            status: "accepted",
+            decidedAt: new Date(),
+            decidedBy: ctx.firebaseUser?.uid ?? null,
+          },
+        });
+        acceptedCount++;
+      } catch (err) {
+        console.warn(`[acceptAllDetections] field ${p.fieldPath} write failed:`, err);
+      }
+    }
+    return { acceptedCount };
+  }),
+
+  // ─────────────────────────────────────────────
   // KAN-855 — logo upload (signed-URL flow)
   // ─────────────────────────────────────────────
   // Three-step flow:
