@@ -1150,18 +1150,44 @@ async function loadBlueprintForTenant(
 
 /**
  * Get the currently loaded Blueprint for a tenant.
+ *
+ * **Currently always returns null** — pending the BrainSnapshot
+ * persistence rearchitecture (omnibus follow-up ticket).
+ *
+ * Pre-rewrite this function called
+ *   prisma.brainSnapshot.findFirst({ where: { tenantId, status: 'active' }, ... })
+ * and returned `snapshot.blueprintData` cast to Blueprint. Both
+ * `BrainSnapshot.status` and `BrainSnapshot.blueprintData` were never
+ * fields of the actual Prisma model — verified across the entire git
+ * history of both `packages/db/prisma/schema.prisma` (canonical) and
+ * the deleted legacy `apps/api/prisma/schema.prisma`. The actual
+ * BrainSnapshot fields are `id, tenantId, companyTruth, behavioralModel,
+ * outcomeModel, version, createdAt`.
+ *
+ * The function therefore threw `PrismaClientValidationError: Unknown
+ * argument 'status'` on every call. Pre-KAN-859 the function was
+ * effectively dead code (only called from orphan HTTP handlers in this
+ * file that are not mounted on any live route). KAN-859 (Cohort 4)
+ * wired `account.get` into this function via the `legalDefaults`
+ * resolver, surfacing the bug as a 500 on every authenticated
+ * `account.get` fetch in PROD.
+ *
+ * Returning `null` triggers each consumer's null-fallback path. For
+ * `account.get` that's `?? GENERIC_BLUEPRINT`. Other consumers in this
+ * file's HTTP handlers return 404 on null — semantically correct for
+ * "no Blueprint loaded for this tenant" responses.
+ *
+ * Per-tenant Blueprint persistence (the actual feature this function
+ * was meant to enable) is tracked in the omnibus follow-up. The
+ * answer there is one of:
+ *   1. Add the missing columns (`status`, `blueprintData`) via migration
+ *   2. Derive the Blueprint at read time from `companyTruth /
+ *      behavioralModel / outcomeModel` (existing Json columns)
+ *   3. Drop the per-tenant persistence dimension entirely; every tenant
+ *      uses GENERIC_BLUEPRINT until vertical-specific blueprints ship
  */
-async function getBlueprintForTenant(tenantId: string): Promise<Blueprint | null> {
-  const snapshot = await prisma.brainSnapshot.findFirst({
-    where: {
-      tenantId,
-      status: 'active',
-    },
-    orderBy: { version: 'desc' },
-  });
-
-  if (!snapshot?.blueprintData) return null;
-  return snapshot.blueprintData as unknown as Blueprint;
+async function getBlueprintForTenant(_tenantId: string): Promise<Blueprint | null> {
+  return null;
 }
 
 // ── API Routes ─────────────────────────────────────────────────────────────────
