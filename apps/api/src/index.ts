@@ -115,10 +115,15 @@ app.route("/internal", accountDetectHandlerApp);
 
 // KAN-866 — Cohort 6 push subscriber consuming `account.field_updated`
 // (sibling to KAN-862 detect handler). Writes one AuditLog row per
-// changed field, idempotent on eventId. Mounted at
-// /internal/account-field-updated-subscriber. OIDC-protected via the
-// canonical pubsub-invoker SA per infra/terraform/account-field-updated.tf.
-app.route("/internal", accountFieldUpdatedSubscriberApp);
+// changed field, idempotent on eventId. The inner Hono app declares
+// the FULL path `/internal/account-field-updated-subscriber`, so the
+// outer mount must be `/` to avoid the double-prefix bug that caught
+// the smoke gate at PR #128 close-out (Pub/Sub Terraform push_endpoint
+// targets the single-prefix URL — a `/internal` mount here would land
+// the live URL at `/internal/internal/...`, 404'ing every push).
+// Convention cleanup tracked in the sibling follow-up ticket; cron
+// + KAN-862 mounts left as-is for that audit.
+app.route("/", accountFieldUpdatedSubscriberApp);
 
 // KAN-866 — Cohort 6 SSE channel for live detection-progress updates.
 // First SSE endpoint in the codebase; pattern documented inline in the
