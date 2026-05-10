@@ -127,7 +127,17 @@ vi.mock("../services/account-detect-publishers.js", () => ({
   },
 }));
 
+import { Hono } from "hono";
 import { accountDetectHandlerApp } from "../internal/account-detect-handler.js";
+
+// KAN-872 — mount the handler under `/internal` to mirror PROD composition
+// (apps/api/src/index.ts mounts accountDetectHandlerApp at the same prefix).
+// Pre-KAN-872 the inner declared its own `/internal/...` so `fetch()`-ing
+// the inner app directly worked; post-fix the inner declares the bare
+// `/account-detect-handler`, so the wrapper restores the full live URL
+// `/internal/account-detect-handler` that the test requests target.
+const detectHandlerHostApp = new Hono();
+detectHandlerHostApp.route("/internal", accountDetectHandlerApp);
 
 const TENANT_A = "11111111-1111-4111-8111-111111111111";
 const JOB_ID_1 = "job-aaaa-bbbb-cccc-dddd-eeee";
@@ -191,7 +201,7 @@ describe("KAN-862 handler — idempotency (Cloud Tasks at-least-once)", () => {
     const req = buildRequest({
       body: { tenantId: TENANT_A, jobId: JOB_ID_1, websiteUrl: "https://acme.example.com" },
     });
-    const res = await accountDetectHandlerApp.fetch(req);
+    const res = await detectHandlerHostApp.fetch(req);
     const body = (await res.json()) as { ok: boolean; proposalCount?: number; idempotent?: boolean };
 
     expect(res.status).toBe(200);
@@ -217,7 +227,7 @@ describe("KAN-862 handler — idempotency (Cloud Tasks at-least-once)", () => {
     const req = buildRequest({
       body: { tenantId: TENANT_A, jobId: JOB_ID_1, websiteUrl: "https://acme.example.com" },
     });
-    const res = await accountDetectHandlerApp.fetch(req);
+    const res = await detectHandlerHostApp.fetch(req);
     const body = (await res.json()) as { ok: boolean; idempotent?: boolean; jobId?: string };
 
     expect(res.status).toBe(200);
@@ -241,7 +251,7 @@ describe("KAN-862 handler — idempotency (Cloud Tasks at-least-once)", () => {
     const req = buildRequest({
       body: { tenantId: TENANT_A, jobId: JOB_ID_1, websiteUrl: "https://acme.example.com" },
     });
-    const res = await accountDetectHandlerApp.fetch(req);
+    const res = await detectHandlerHostApp.fetch(req);
     const body = (await res.json()) as { ok: boolean; proposalCount?: number };
 
     expect(res.status).toBe(200);
@@ -257,7 +267,7 @@ describe("KAN-862 handler — idempotency (Cloud Tasks at-least-once)", () => {
     const req = buildRequest({
       body: { tenantId: TENANT_A, jobId: JOB_ID_1, websiteUrl: "https://acme.example.com" },
     });
-    const res = await accountDetectHandlerApp.fetch(req);
+    const res = await detectHandlerHostApp.fetch(req);
     expect(res.status).toBe(401);
     expect(redisSetMock).not.toHaveBeenCalled();
     expect(extractAccountFieldsFromPagesMock).not.toHaveBeenCalled();
@@ -284,7 +294,7 @@ describe("KAN-862 handler — dead-letter publish on retryCount >= 2 (3rd attemp
       body: { tenantId: TENANT_A, jobId: JOB_ID_1, websiteUrl: "https://acme.example.com" },
       retryCount: 2, // 0-indexed → this is attempt 3
     });
-    const res = await accountDetectHandlerApp.fetch(req);
+    const res = await detectHandlerHostApp.fetch(req);
     expect(res.status).toBe(200); // permanent error path returns 200 to stop further retries
 
     // Failed event always fires (regardless of attempt count)
@@ -332,7 +342,7 @@ describe("KAN-862 handler — dead-letter publish on retryCount >= 2 (3rd attemp
       body: { tenantId: TENANT_A, jobId: JOB_ID_1, websiteUrl: "https://acme.example.com" },
       retryCount: 0, // attempt 1
     });
-    await accountDetectHandlerApp.fetch(req);
+    await detectHandlerHostApp.fetch(req);
 
     expect(publishDetectFailedMock).toHaveBeenCalledTimes(1);
     expect(publishDetectDeadLetterMock).not.toHaveBeenCalled();
@@ -348,7 +358,7 @@ describe("KAN-862 handler — dead-letter publish on retryCount >= 2 (3rd attemp
       body: { tenantId: TENANT_A, jobId: JOB_ID_1, websiteUrl: "https://acme.example.com" },
       retryCount: 1, // attempt 2
     });
-    await accountDetectHandlerApp.fetch(req);
+    await detectHandlerHostApp.fetch(req);
 
     expect(publishDetectFailedMock).toHaveBeenCalledTimes(1);
     expect(publishDetectDeadLetterMock).not.toHaveBeenCalled();
@@ -364,7 +374,7 @@ describe("KAN-862 handler — dead-letter publish on retryCount >= 2 (3rd attemp
       body: { tenantId: TENANT_A, jobId: JOB_ID_1, websiteUrl: "https://acme.example.com" },
       // no retryCount header
     });
-    await accountDetectHandlerApp.fetch(req);
+    await detectHandlerHostApp.fetch(req);
 
     const failedArg = (publishDetectFailedMock.mock.calls as unknown as unknown[][])[0]?.[0] as { attempt: number };
     expect(failedArg.attempt).toBe(1);
