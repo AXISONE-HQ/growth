@@ -11,6 +11,7 @@ import {
   Users,
   FileText,
   BookOpen,
+  Building2,
   Settings,
   Search,
   Pause,
@@ -36,12 +37,19 @@ import { AIStatusIndicator } from '@/components/growth/ai-status-indicator';
 //   - /competitors (broken imports, no API) → deleted
 //   - /conversations (V1+ feature, no backend) → demoOnly flag; visible in
 //     dev/staging for sales demos, hidden in prod
+// KAN-878 — `activePrefix` lets an item's sidebar-highlight scope differ
+// from its href. Account points at /settings/account/identity (the first
+// tab) but should light up on every /settings/account/* sub-tab. Resolution
+// is longest-prefix-wins via `findActiveHref` below, so the broader
+// Settings item correctly yields to Account (and to Knowledge Center) when
+// the path lives under their respective prefixes.
 const navItems: Array<{
   href: string;
   label: string;
   icon: typeof LayoutDashboard;
   badge?: number;
   demoOnly?: boolean;
+  activePrefix?: string;
 }> = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/opportunities', label: 'Opportunities', icon: Target },
@@ -49,10 +57,39 @@ const navItems: Array<{
   { href: '/escalations', label: 'Escalations', icon: AlertTriangle },
   { href: '/customers', label: 'Customers', icon: Users },
   { href: '/audit', label: 'Audit Log', icon: FileText },
-  { href: '/knowledge', label: 'Knowledge Center', icon: BookOpen },
+  { href: '/settings/knowledge', label: 'Knowledge Center', icon: BookOpen },
+  {
+    href: '/settings/account/identity',
+    label: 'Account',
+    icon: Building2,
+    activePrefix: '/settings/account',
+  },
   { href: '/settings', label: 'Settings', icon: Settings },
 ];
 
+// Pick the single nav item to highlight for the current pathname.
+// Longest matching prefix wins, so `/settings/account/contact` activates
+// "Account" rather than the broader "Settings" entry.
+function findActiveHref(pathname: string): string | null {
+  let bestHref: string | null = null;
+  let bestLen = -1;
+  for (const item of navItems) {
+    const prefix = item.activePrefix ?? item.href;
+    if (pathname === prefix || pathname.startsWith(prefix + '/')) {
+      if (prefix.length > bestLen) {
+        bestHref = item.href;
+        bestLen = prefix.length;
+      }
+    }
+  }
+  return bestHref;
+}
+
+// KAN-878 follow-ups: sub-tab titles (e.g. /settings/account/contact)
+// fall through to the default "Dashboard" because this is exact-match.
+// Route-aware page heading is tracked in task #83 (Topbar DS v1 alignment).
+// `/knowledge` legacy entry kept — Fred deferred deletion (sales objections
+// data still consumes the route).
 const pageTitle: Record<string, string> = {
   '/dashboard': 'Dashboard',
   '/opportunities': 'Opportunities',
@@ -61,6 +98,8 @@ const pageTitle: Record<string, string> = {
   '/customers': 'Customers',
   '/audit': 'Audit Log',
   '/knowledge': 'Knowledge Center',
+  '/settings/knowledge': 'Knowledge Center',
+  '/settings/account/identity': 'Account',
   '/settings': 'Settings',
 };
 
@@ -120,9 +159,11 @@ function AppShell({ children }: { children: React.ReactNode }) {
 
         {/* Navigation */}
         <div className="flex-1 p-3 flex flex-col gap-0.5">
-          {navItems.map((item) => {
-            const Icon = item.icon;
-            const isActive = pathname === item.href || pathname.startsWith(item.href + '/');
+          {(() => {
+            const activeHref = findActiveHref(pathname);
+            return navItems.map((item) => {
+              const Icon = item.icon;
+              const isActive = activeHref === item.href;
 
             // KAN-718: hide demo-only routes when DEMO_MODE is off (prod default).
             if (item.demoOnly && !isDemoMode()) {
@@ -153,7 +194,8 @@ function AppShell({ children }: { children: React.ReactNode }) {
                 )}
               </Link>
             );
-          })}
+            });
+          })()}
         </div>
 
         {/* User Footer */}
