@@ -31,6 +31,13 @@ interface FakeContact {
   lifecycleStage: string;
   source: string | null;
   dataQualityScore: number;
+  // KAN-883 — read-layer extension fields
+  companyId: string | null;
+  companyName: string | null;
+  addressLine1: string | null;
+  city: string | null;
+  region: string | null;
+  country: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -47,6 +54,12 @@ function contact(overrides: Partial<FakeContact> = {}): FakeContact {
     lifecycleStage: "lead",
     source: "web_form",
     dataQualityScore: 0,
+    companyId: null,
+    companyName: null,
+    addressLine1: null,
+    city: null,
+    region: null,
+    country: null,
     createdAt: new Date("2026-04-29T18:00:00Z"),
     updatedAt: new Date("2026-04-29T18:00:00Z"),
     ...overrides,
@@ -56,6 +69,9 @@ function contact(overrides: Partial<FakeContact> = {}): FakeContact {
 function whereMatches(c: FakeContact, where: Record<string, unknown>): boolean {
   if (where.tenantId && c.tenantId !== where.tenantId) return false;
   if (where.lifecycleStage && c.lifecycleStage !== where.lifecycleStage) return false;
+  // KAN-883 read-layer filters
+  if (where.source && c.source !== where.source) return false;
+  if (where.companyId && c.companyId !== where.companyId) return false;
   const or = where.OR as Array<Record<string, { contains: string }>> | undefined;
   if (or) {
     const anyMatch = or.some((cond) => {
@@ -146,6 +162,48 @@ describe("KAN-718 Day 10 — listContacts", () => {
     const result = await listContacts(prisma, TENANT_A, { search: "sarah" });
     // a (firstName match), b (lastName match), c (email match) — d excluded
     expect(result.items.map((i) => i.id).sort()).toEqual(["a", "b", "c"]);
+  });
+
+  // KAN-883 — read-layer filter coverage
+  it("KAN-883: filters by source enum value", async () => {
+    const data = [
+      contact({ id: "a", source: "email_inbox" }),
+      contact({ id: "b", source: "web_form" }),
+      contact({ id: "c", source: "email_inbox" }),
+      contact({ id: "d", source: null }),
+    ];
+    const prisma = makePrisma(data);
+    const result = await listContacts(prisma, TENANT_A, { source: "email_inbox" });
+    expect(result.items.map((i) => i.id).sort()).toEqual(["a", "c"]);
+  });
+
+  it("KAN-883: filters by companyId — scope to a Company badge", async () => {
+    const COMPANY_X = "11111111-1111-1111-1111-aaaaaaaaaaaa";
+    const COMPANY_Y = "22222222-2222-2222-2222-bbbbbbbbbbbb";
+    const data = [
+      contact({ id: "a", companyId: COMPANY_X }),
+      contact({ id: "b", companyId: COMPANY_Y }),
+      contact({ id: "c", companyId: COMPANY_X }),
+      contact({ id: "d", companyId: null }),
+    ];
+    const prisma = makePrisma(data);
+    const result = await listContacts(prisma, TENANT_A, { companyId: COMPANY_X });
+    expect(result.items.map((i) => i.id).sort()).toEqual(["a", "c"]);
+  });
+
+  it("KAN-883: source + companyId compose as AND, not OR", async () => {
+    const COMPANY_X = "11111111-1111-1111-1111-aaaaaaaaaaaa";
+    const data = [
+      contact({ id: "a", source: "email_inbox", companyId: COMPANY_X }),
+      contact({ id: "b", source: "email_inbox", companyId: null }),
+      contact({ id: "c", source: "web_form", companyId: COMPANY_X }),
+    ];
+    const prisma = makePrisma(data);
+    const result = await listContacts(prisma, TENANT_A, {
+      source: "email_inbox",
+      companyId: COMPANY_X,
+    });
+    expect(result.items.map((i) => i.id)).toEqual(["a"]);
   });
 
   it("paginates via limit + offset", async () => {
