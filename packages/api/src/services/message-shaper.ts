@@ -381,7 +381,7 @@ interface PromptContact {
   email: string | null;
   firstName: string | null;
   lastName: string | null;
-  company: string | null;
+  companyName: string | null;
 }
 
 interface PromptPipeline {
@@ -453,7 +453,7 @@ export function buildShapePrompt(input: {
     [contact.firstName, contact.lastName].filter((p) => !!p && p.trim().length > 0).join(' ') ||
     contact.email ||
     '(unknown contact)';
-  const company = contact.company ?? '(unknown company)';
+  const company = contact.companyName ?? '(unknown company)';
 
   const recentOutboundBlock =
     recentOutbound.length === 0

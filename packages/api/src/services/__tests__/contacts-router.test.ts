@@ -44,8 +44,8 @@ function contact(overrides: Partial<FakeContact> = {}): FakeContact {
     firstName: "Alice",
     lastName: "Test",
     segment: "smb",
-    lifecycleStage: "new",
-    source: "form_fill",
+    lifecycleStage: "lead",
+    source: "web_form",
     dataQualityScore: 0,
     createdAt: new Date("2026-04-29T18:00:00Z"),
     updatedAt: new Date("2026-04-29T18:00:00Z"),
@@ -126,12 +126,12 @@ describe("KAN-718 Day 10 — listContacts", () => {
 
   it("filters by lifecycleStage", async () => {
     const data = [
-      contact({ id: "a", lifecycleStage: "qualified" }),
-      contact({ id: "b", lifecycleStage: "new" }),
-      contact({ id: "c", lifecycleStage: "qualified" }),
+      contact({ id: "a", lifecycleStage: "sql" }),
+      contact({ id: "b", lifecycleStage: "lead" }),
+      contact({ id: "c", lifecycleStage: "sql" }),
     ];
     const prisma = makePrisma(data);
-    const result = await listContacts(prisma, TENANT_A, { lifecycleStage: "qualified" });
+    const result = await listContacts(prisma, TENANT_A, { lifecycleStage: "sql" });
     expect(result.items.map((i) => i.id).sort()).toEqual(["a", "c"]);
   });
 
@@ -187,22 +187,22 @@ describe("KAN-718 Day 10 — createContact", () => {
       email: "new@example.com",
       firstName: "First",
       lastName: "Last",
-      lifecycleStage: "qualified",
+      lifecycleStage: "sql",
     });
 
     expect(data).toHaveLength(1);
     expect(data[0].email).toBe("new@example.com");
     expect(data[0].firstName).toBe("First");
     expect(data[0].lastName).toBe("Last");
-    expect(data[0].lifecycleStage).toBe("qualified");
+    expect(data[0].lifecycleStage).toBe("sql");
     expect(data[0].tenantId).toBe(TENANT_A);
   });
 
-  it("defaults lifecycleStage to 'new' when not provided", async () => {
+  it("defaults lifecycleStage to 'lead' when not provided", async () => {
     const data: FakeContact[] = [];
     const prisma = makePrisma(data);
     await createContact(prisma, TENANT_A, { email: "default@example.com" });
-    expect(data[0].lifecycleStage).toBe("new");
+    expect(data[0].lifecycleStage).toBe("lead");
   });
 });
 

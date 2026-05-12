@@ -185,7 +185,7 @@ async function processLead(
       phone: mapped.phone,
       firstName: mapped.firstName,
       lastName: mapped.lastName,
-      company: mapped.company,
+      companyName: mapped.companyName,
       segment: mapped.segment,
       lifecycleStage: "lead",
       dataQualityScore: mapped.dataQualityScore,
@@ -196,7 +196,7 @@ async function processLead(
       ...(mapped.phone && { phone: mapped.phone }),
       ...(mapped.firstName && { firstName: mapped.firstName }),
       ...(mapped.lastName && { lastName: mapped.lastName }),
-      ...(mapped.company && { company: mapped.company }),
+      ...(mapped.companyName && { companyName: mapped.companyName }),
       // Always update external IDs to capture latest lead metadata
       externalIds: mapped.externalIds as any,
       // Bump data quality score if the new one is higher

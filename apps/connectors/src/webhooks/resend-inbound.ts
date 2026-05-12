@@ -385,7 +385,7 @@ resendInboundWebhookApp.post(
     eventId: `evt_${randomUUID()}`,
     tenantId: tenant.id,
     contactId: contact.id,
-    source: "inbox_email",
+    source: "email_inbox",
     metadata: {
       fromAddress: fromParsed.email,
       subject: subject ?? undefined,
