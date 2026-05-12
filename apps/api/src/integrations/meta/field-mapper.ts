@@ -10,7 +10,7 @@ export interface MappedContact {
   phone?: string;
   firstName?: string;
   lastName?: string;
-  company?: string;
+  companyName?: string;
   segment: string;
   dataQualityScore: number;
   externalIds: {
@@ -101,7 +101,7 @@ export function mapMetaFieldsToContact(
     knownFieldCount++;
   }
   if (fields["company_name"] || fields["company"]) {
-    contact.company = fields["company_name"] || fields["company"];
+    contact.companyName = fields["company_name"] || fields["company"];
     knownFieldCount++;
   }
 

@@ -138,7 +138,7 @@ export async function createContact(
       firstName: input.firstName ?? null,
       lastName: input.lastName ?? null,
       segment: input.segment ?? null,
-      lifecycleStage: input.lifecycleStage ?? 'new',
+      lifecycleStage: input.lifecycleStage ?? 'lead',
       source: input.source ?? null,
     },
   });

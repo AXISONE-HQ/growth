@@ -32,7 +32,7 @@ export const LEAD_RECEIVED_DEADLETTER_TOPIC = "lead.received.deadletter";
  * worker (KAN-705) for posture defaults.
  */
 export const LeadSourceEnum = z.enum([
-  "inbox_email",
+  "email_inbox",
   "lead_api",
   "form_fill",
   "import",
@@ -56,9 +56,9 @@ export const LeadReceivedEventSchema = z.object({
   contactId: z.string().uuid(),
   source: LeadSourceEnum,
   metadata: z.object({
-    /** Sender email address (for inbox_email source) or originator identifier. */
+    /** Sender email address (for email_inbox source) or originator identifier. */
     fromAddress: z.string().optional(),
-    /** Email subject line — only set for inbox_email source. */
+    /** Email subject line — only set for email_inbox source. */
     subject: z.string().optional(),
     /** First N chars of body for routing context. Full body lives on the Contact's notes. */
     bodyPreview: z.string().optional(),

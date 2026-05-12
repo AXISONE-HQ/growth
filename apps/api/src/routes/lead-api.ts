@@ -196,7 +196,7 @@ async function upsertContact(
       firstName: input.firstName ?? null,
       lastName: input.lastName ?? null,
       source: "lead_api",
-      lifecycleStage: "new",
+      lifecycleStage: "lead",
     },
   });
   return created.id;

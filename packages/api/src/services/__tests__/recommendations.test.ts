@@ -95,7 +95,7 @@ function makePrisma(rows: FakeRow[], opts: { auditFails?: boolean } = {}) {
         if (!r) return null;
         return {
           ...r,
-          contact: { id: r.contactId, firstName: "A", lastName: "B", email: "a@b.c", phone: null, lifecycleStage: "new" },
+          contact: { id: r.contactId, firstName: "A", lastName: "B", email: "a@b.c", phone: null, lifecycleStage: "lead" },
           decision: r.decisionId
             ? {
                 id: r.decisionId,

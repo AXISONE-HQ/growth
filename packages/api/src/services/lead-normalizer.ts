@@ -89,7 +89,7 @@ export interface PreParsedLead {
 export interface ExtractedFields {
   firstName: string | null;
   lastName: string | null;
-  company: string | null;
+  companyName: string | null;
   phone: string | null;
   /** 1-sentence summary of the lead's stated intent (max ~140 chars). */
   intentSummary: string | null;
@@ -240,7 +240,7 @@ Return ONLY a JSON object matching this exact shape (no other text):
 {
   "firstName": string | null,
   "lastName": string | null,
-  "company": string | null,
+  "companyName": string | null,
   "phone": string | null,
   "intentSummary": string | null,
   "qualificationSignals": string[]
@@ -248,17 +248,17 @@ Return ONLY a JSON object matching this exact shape (no other text):
 
 Rules:
 - firstName/lastName: extract from sender's display name, signature, or body greeting. null if not found.
-- company: extract from email domain (if not free webmail), signature, or body mention. null if not found.
+- companyName: extract from email domain (if not free webmail), signature, or body mention. null if not found.
 - phone: only if the sender mentions one in the body. null otherwise (don't fabricate).
 - intentSummary: ≤140 chars, 1 sentence. Capture WHAT they want (pricing, demo, complaint, etc.).
 - qualificationSignals: short tags like "asking about pricing", "demo request", "complaint", "enterprise tier", "urgent". 0-5 items. Empty array if no clear signals.
-- Free-webmail domains (gmail.com, hotmail.com, outlook.com, yahoo.com, icloud.com, etc.) → company = null
+- Free-webmail domains (gmail.com, hotmail.com, outlook.com, yahoo.com, icloud.com, etc.) → companyName = null
 - Be conservative: prefer null over guessing. Wrong data is worse than missing data.`;
 
 interface RawExtraction {
   firstName?: unknown;
   lastName?: unknown;
-  company?: unknown;
+  companyName?: unknown;
   phone?: unknown;
   intentSummary?: unknown;
   qualificationSignals?: unknown;
@@ -334,7 +334,7 @@ function emptyExtractedFields(): ExtractedFields {
   return {
     firstName: null,
     lastName: null,
-    company: null,
+    companyName: null,
     phone: null,
     intentSummary: null,
     qualificationSignals: [],
@@ -345,7 +345,7 @@ function sanitizeExtraction(raw: RawExtraction): ExtractedFields {
   return {
     firstName: typeof raw.firstName === 'string' && raw.firstName.trim() ? raw.firstName.trim() : null,
     lastName: typeof raw.lastName === 'string' && raw.lastName.trim() ? raw.lastName.trim() : null,
-    company: typeof raw.company === 'string' && raw.company.trim() ? raw.company.trim() : null,
+    companyName: typeof raw.companyName === 'string' && raw.companyName.trim() ? raw.companyName.trim() : null,
     phone: typeof raw.phone === 'string' && raw.phone.trim() ? raw.phone.trim() : null,
     intentSummary:
       typeof raw.intentSummary === 'string' && raw.intentSummary.trim()
@@ -364,11 +364,11 @@ function classifyConfidence(extracted: ExtractedFields): ExtractionConfidence {
   const populatedFields = [
     extracted.firstName,
     extracted.lastName,
-    extracted.company,
+    extracted.companyName,
     extracted.intentSummary,
   ].filter((v) => v !== null).length;
 
-  // 'high' = 3-4 of the canonical fields populated (firstName, lastName, company, intentSummary)
+  // 'high' = 3-4 of the canonical fields populated (firstName, lastName, companyName, intentSummary)
   // 'medium' = 1-2 populated (some signal, but partial)
   // 'low' = 0 populated (handled separately by caller for failure paths;
   //         this branch is reached when LLM returned valid JSON but with all nulls)

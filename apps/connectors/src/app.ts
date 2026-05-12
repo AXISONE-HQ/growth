@@ -60,8 +60,8 @@ export function buildApp(): Hono {
           email,
           firstName,
           lastName,
-          source: 'inbox_email',
-          lifecycleStage: 'new',
+          source: 'email_inbox',
+          lifecycleStage: 'lead',
         },
       });
       return { id: created.id };

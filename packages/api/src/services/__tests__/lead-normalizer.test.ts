@@ -133,7 +133,7 @@ describe('normalizeInboundEmail — AI extraction happy paths', () => {
       JSON.stringify({
         firstName: 'Maria',
         lastName: 'Lopez',
-        company: 'Acme Corp',
+        companyName: 'Acme Corp',
         phone: null,
         intentSummary: 'Wants a 30-min product demo for their team.',
         qualificationSignals: ['demo request', 'team adoption'],
@@ -151,7 +151,7 @@ describe('normalizeInboundEmail — AI extraction happy paths', () => {
     expect(result.extractionError).toBeNull();
     expect(result.extracted.firstName).toBe('Maria');
     expect(result.extracted.lastName).toBe('Lopez');
-    expect(result.extracted.company).toBe('Acme Corp');
+    expect(result.extracted.companyName).toBe('Acme Corp');
     expect(result.extracted.intentSummary).toContain('demo');
     expect(result.extracted.qualificationSignals).toEqual(['demo request', 'team adoption']);
     expect(result.preParsed.senderEmail).toBe('maria@acmecorp.com');
@@ -170,7 +170,7 @@ describe('normalizeInboundEmail — AI extraction happy paths', () => {
       JSON.stringify({
         firstName: 'Anonymous',
         lastName: null,
-        company: null,
+        companyName: null,
         phone: null,
         intentSummary: 'Generic pricing question.',
         qualificationSignals: ['asking about pricing'],
@@ -186,7 +186,7 @@ describe('normalizeInboundEmail — AI extraction happy paths', () => {
     // 2 populated (firstName + intentSummary) → 'medium' per classifyConfidence
     expect(result.extractionConfidence).toBe('medium');
     expect(result.extracted.firstName).toBe('Anonymous');
-    expect(result.extracted.company).toBeNull();
+    expect(result.extracted.companyName).toBeNull();
   });
 
   it('caps qualificationSignals at 5 items + filters non-strings', async () => {
@@ -194,7 +194,7 @@ describe('normalizeInboundEmail — AI extraction happy paths', () => {
       JSON.stringify({
         firstName: 'Tom',
         lastName: 'Test',
-        company: 'TestCo',
+        companyName: 'TestCo',
         intentSummary: 'Many signals',
         qualificationSignals: [
           'signal 1',
@@ -233,7 +233,7 @@ describe('normalizeInboundEmail — AI extraction happy paths', () => {
       JSON.stringify({
         firstName: 'X',
         lastName: 'Y',
-        company: 'Z',
+        companyName: 'Z',
         intentSummary: longText,
         qualificationSignals: [],
       }),
@@ -310,7 +310,7 @@ describe('normalizeInboundEmail — failure isolation (PRD §4 spec d)', () => {
       JSON.stringify({
         firstName: null,
         lastName: null,
-        company: null,
+        companyName: null,
         phone: null,
         intentSummary: null,
         qualificationSignals: [],
@@ -340,7 +340,7 @@ describe('normalizeInbound — source dispatch (V1 supports email only)', () => 
       JSON.stringify({
         firstName: 'Routed',
         lastName: 'OK',
-        company: 'Co',
+        companyName: 'Co',
         phone: null,
         intentSummary: 'Checking dispatch.',
         qualificationSignals: [],
@@ -405,7 +405,7 @@ describe('normalizeInbound — end-to-end NormalizedLead shape', () => {
       JSON.stringify({
         firstName: 'Alice',
         lastName: 'Founder',
-        company: 'StartupXYZ',
+        companyName: 'StartupXYZ',
         phone: '+1-555-0142',
         intentSummary: 'Wants enterprise pricing for their growing team.',
         qualificationSignals: ['asking about pricing', 'enterprise tier', 'growth stage'],
@@ -437,7 +437,7 @@ describe('normalizeInbound — end-to-end NormalizedLead shape', () => {
       extracted: {
         firstName: 'Alice',
         lastName: 'Founder',
-        company: 'StartupXYZ',
+        companyName: 'StartupXYZ',
         phone: '+1-555-0142',
         intentSummary: 'Wants enterprise pricing for their growing team.',
         qualificationSignals: ['asking about pricing', 'enterprise tier', 'growth stage'],

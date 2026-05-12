@@ -194,7 +194,7 @@ describe("inbound webhook — happy path", () => {
     expect(ctx.auditRows[0].status).toBe("accepted");
     expect(ctx.auditRows[0].tenantId).toBe(TENANT_A);
     expect(ctx.publishedEvents).toHaveLength(1);
-    expect(ctx.publishedEvents[0].source).toBe("inbox_email");
+    expect(ctx.publishedEvents[0].source).toBe("email_inbox");
     expect(ctx.publishedEvents[0].tenantId).toBe(TENANT_A);
     expect(ctx.publishedEvents[0].metadata.fromAddress).toBe("alice@customer.example");
   });
@@ -402,7 +402,7 @@ describe("inbound webhook — published event payload shape", () => {
     expect(event).toBeDefined();
     expect(event.eventType).toBe("lead.received");
     expect(event.version).toBe("1.0");
-    expect(event.source).toBe("inbox_email");
+    expect(event.source).toBe("email_inbox");
     expect(event.metadata.subject).toBe("Pricing inquiry");
     expect(event.metadata.attachmentCount).toBe(0);
     expect(typeof event.eventId).toBe("string");

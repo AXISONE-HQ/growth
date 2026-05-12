@@ -95,6 +95,9 @@ model Tenant {
   deferredSends          DeferredSend[]
   // KAN-852 — Account Page Cohort 1. 1:1 by AccountProfile.tenantId @unique.
   accountProfile         AccountProfile?
+  // KAN-879 — CRM Core Schema
+  companies              Company[]
+  orders                 Order[]
 
   //   tenantSettings  TenantSettings[]  // commented out for smoke build (model missing on main)
   channelConnections ChannelConnection[]
@@ -175,28 +178,42 @@ model BrainSnapshot {
 // ─────────────────────────────────────────────
 
 model Contact {
-  id                String    @id @default(uuid())
-  tenantId          String    @map("tenant_id")
+  id                String          @id @default(uuid())
+  tenantId          String          @map("tenant_id")
   email             String?
   phone             String?
-  firstName         String?   @map("first_name")
-  lastName          String?   @map("last_name")
-  externalIds       Json      @default("{}") @map("external_ids")
-  dataQualityScore  Float     @default(0) @map("data_quality_score")
+  firstName         String?         @map("first_name")
+  lastName          String?         @map("last_name")
+  externalIds       Json            @default("{}") @map("external_ids")
+  dataQualityScore  Float           @default(0) @map("data_quality_score")
   segment           String?
-  lifecycleStage    String    @default("new") @map("lifecycle_stage")
-  source            String?
+  // KAN-879 — String → enum coercion via migration CASE WHEN
+  // (legacy 'new' rows → 'lead').
+  lifecycleStage    LifecycleStage  @default(lead) @map("lifecycle_stage")
+  // KAN-879 — String? → enum? coercion via migration CASE WHEN
+  // (legacy 'inbox_email' → 'email_inbox', unknowns → 'other').
+  source            ContactSource?
+  // KAN-879 — CRM Core Schema additions
+  companyId         String?         @map("company_id")
+  companyName       String?         @map("company_name")
+  addressLine1      String?         @map("address_line_1")
+  addressLine2      String?         @map("address_line_2")
+  city              String?
+  region            String?
+  postalCode        String?         @map("postal_code")
+  /// ISO 3166-1 alpha-2.
+  country           String?
   // KAN-700 + KAN-791: pipeline-aware lead state.
   // currentPipelineId + currentStageId DEPRECATED in Phase 1 (read-shim during
   // transition); drop in Phase 2 cleanup once readers migrate to Deal-side
   // (per PRD §5 reader-migration deferral list).
   // microObjectiveProgress DROPPED by KAN-791 — moved to Deal.microObjectiveProgress
   // (pre-flight #4 verified 0 prod contacts had non-default values).
-  currentPipelineId String?   @map("current_pipeline_id")
-  currentStageId    String?   @map("current_stage_id")
-  enteredStageAt    DateTime? @map("entered_stage_at")
-  createdAt         DateTime  @default(now()) @map("created_at")
-  updatedAt         DateTime  @updatedAt @map("updated_at")
+  currentPipelineId String?         @map("current_pipeline_id")
+  currentStageId    String?         @map("current_stage_id")
+  enteredStageAt    DateTime?       @map("entered_stage_at")
+  createdAt         DateTime        @default(now()) @map("created_at")
+  updatedAt         DateTime        @updatedAt @map("updated_at")
 
   tenant          Tenant         @relation(fields: [tenantId], references: [id])
   contactStates   ContactState[]
@@ -212,6 +229,9 @@ model Contact {
   deals           Deal[]
   engagements     Engagement[]
   deferredSends   DeferredSend[]
+  // KAN-879
+  company         Company?       @relation(fields: [companyId], references: [id])
+  orders          Order[]
 
   @@index([tenantId])
   @@index([tenantId, email])
@@ -221,6 +241,8 @@ model Contact {
   @@index([tenantId, source])
   @@index([tenantId, currentPipelineId])
   @@index([tenantId, currentStageId])
+  @@index([tenantId, companyId])
+  @@index([tenantId, country, region])
   @@map("contacts")
 }
 
@@ -1299,24 +1321,48 @@ model LlmCostRollup {
 // ─────────────────────────────────────────────
 
 /// Phase 1 (KAN-791) — Deal as the lifecycle entity
+/// KAN-879 — CRM Core Schema extensions (status / name / closedAt / lost reason /
+/// products / ownership / Company relation / extension columns).
 model Deal {
-  id                     String   @id @default(cuid())
-  tenantId               String   @map("tenant_id")
-  contactId              String   @map("contact_id")
-  correlationId          String?  @unique @map("correlation_id")
+  id                     String           @id @default(cuid())
+  tenantId               String           @map("tenant_id")
+  contactId              String           @map("contact_id")
+  correlationId          String?          @unique @map("correlation_id")
   // KAN-791 — pipeline + stage state (moved from Contact)
-  pipelineId             String   @map("pipeline_id")
-  currentStageId         String   @map("current_stage_id")
-  enteredStageAt         DateTime @default(now()) @map("entered_stage_at")
+  pipelineId             String           @map("pipeline_id")
+  currentStageId         String           @map("current_stage_id")
+  enteredStageAt         DateTime         @default(now()) @map("entered_stage_at")
   // KAN-791 — per-Deal MO progress (moved from Contact.microObjectiveProgress;
   // pre-flight #4 verified 0 prod contacts had non-default values, no backfill)
-  microObjectiveProgress Json     @default("{}") @map("micro_objective_progress")
+  microObjectiveProgress Json             @default("{}") @map("micro_objective_progress")
   // KAN-791 — value defaults to 0 (was Decimal?). KAN-790 deferred enrichment.
-  value                  Decimal  @default(0) @db.Decimal(12, 2)
-  currency               String   @default("USD") @db.VarChar(3)
-  metadata               Json     @default("{}")
-  createdAt              DateTime @default(now()) @map("created_at")
-  updatedAt              DateTime @updatedAt @map("updated_at")
+  value                  Decimal          @default(0) @db.Decimal(12, 2)
+  currency               String           @default("USD") @db.VarChar(3)
+  metadata               Json             @default("{}")
+  // KAN-879 — CRM Core Schema additions
+  name                   String           @default("Untitled deal")
+  /// Derived from currentStage.outcomeType via migration backfill; future
+  /// transitions should keep this in sync (next cohort wires the engine).
+  status                 DealStatus       @default(open)
+  /// 0-100 (kept loose as Int; no constraint here — UI / API validate).
+  probability            Int?
+  expectedCloseDate      DateTime?        @db.Date @map("expected_close_date")
+  /// Set when status transitions to won/lost. Migration backfills from
+  /// DealStageHistory terminal transitions.
+  closedAt               DateTime?        @map("closed_at")
+  lostReason             DealLostReason?  @map("lost_reason")
+  lostReasonDetail       String?          @map("lost_reason_detail")
+  wonProductSummary      String?          @map("won_product_summary")
+  /// Line-item shape determined by next cohort; opaque Json today.
+  products               Json             @default("[]")
+  ownerId                String?          @map("owner_id")
+  assignedAgentId        String?          @map("assigned_agent_id")
+  companyId              String?          @map("company_id")
+  externalIds            Json             @default("{}") @map("external_ids")
+  customFields           Json             @default("{}") @map("custom_fields")
+  aiContext              Json             @default("{}") @map("ai_context")
+  createdAt              DateTime         @default(now()) @map("created_at")
+  updatedAt              DateTime         @updatedAt @map("updated_at")
 
   tenant        Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   contact       Contact            @relation(fields: [contactId], references: [id], onDelete: Cascade)
@@ -1325,10 +1371,16 @@ model Deal {
   engagements   Engagement[]
   stageHistory  DealStageHistory[]
   deferredSends DeferredSend[]
+  // KAN-879
+  company       Company?           @relation(fields: [companyId], references: [id])
+  orders        Order[]
 
   @@index([tenantId, currentStageId])
   @@index([tenantId, pipelineId])
   @@index([tenantId, contactId])
+  @@index([tenantId, status])
+  @@index([tenantId, companyId, status])
+  @@index([tenantId, expectedCloseDate])
   @@map("deals")
 }
 
@@ -1619,4 +1671,262 @@ model AccountFieldDetection {
   @@index([accountProfileId, fieldPath])
   @@index([accountProfileId, status])
   @@map("account_field_detection")
+}
+
+// ─────────────────────────────────────────────
+// CRM CORE SCHEMA — KAN-879
+// Enums + Company model + Order model. Contact + Deal extensions live with
+// their parent models above. Schema-only cohort; no tRPC / UI / ingestion
+// surfaces ship here. The data migration coerces legacy Contact.lifecycleStage
+// (String) + Contact.source (String?) into the typed enums below.
+// ─────────────────────────────────────────────
+
+enum LifecycleStage {
+  lead
+  mql
+  sql
+  customer
+  lost
+
+  @@map("lifecycle_stage")
+}
+
+enum ContactSource {
+  email_inbox
+  web_form
+  meta_ad
+  manual
+  csv_import
+  api
+  hubspot
+  stripe
+  shopify
+  other
+
+  @@map("contact_source")
+}
+
+enum CompanyLifecycleStage {
+  prospect
+  customer
+  churned
+  partner
+  vendor
+
+  @@map("company_lifecycle_stage")
+}
+
+enum CompanySize {
+  range_1_10
+  range_11_50
+  range_51_200
+  range_201_1000
+  range_1001_5000
+  range_5000_plus
+
+  @@map("company_size")
+}
+
+enum TaxIdType {
+  ein
+  vat
+  gst
+  hst
+  qst
+  abn
+  other
+
+  @@map("tax_id_type")
+}
+
+enum DealStatus {
+  open
+  won
+  lost
+
+  @@map("deal_status")
+}
+
+enum DealLostReason {
+  price
+  timing
+  competitor
+  no_response
+  not_qualified
+  feature_gap
+  other
+
+  @@map("deal_lost_reason")
+}
+
+enum OrderStatus {
+  pending
+  paid
+  refunded
+  partially_refunded
+  cancelled
+  failed
+
+  @@map("order_status")
+}
+
+enum PaymentMethod {
+  card
+  ach
+  invoice
+  manual
+  other
+
+  @@map("payment_method")
+}
+
+enum PaymentProvider {
+  stripe
+  square
+  shopify
+  manual
+  other
+
+  @@map("payment_provider")
+}
+
+enum OrderSource {
+  stripe_webhook
+  shopify_webhook
+  manual
+  api
+  csv_import
+
+  @@map("order_source")
+}
+
+model Company {
+  id                         String                @id @default(cuid())
+  tenantId                   String                @map("tenant_id")
+  name                       String
+  legalName                  String?               @map("legal_name")
+  domain                     String?
+  website                    String?
+  industry                   String?
+  sizeRange                  CompanySize?          @map("size_range")
+  annualRevenue              Decimal?              @db.Decimal(15, 2) @map("annual_revenue")
+  phone                      String?
+  email                      String?
+  description                String?
+  lifecycleStage             CompanyLifecycleStage @default(prospect) @map("lifecycle_stage")
+
+  // Billing address
+  billingAddressLine1        String?               @map("billing_address_line_1")
+  billingAddressLine2        String?               @map("billing_address_line_2")
+  billingCity                String?               @map("billing_city")
+  billingRegion              String?               @map("billing_region")
+  billingPostalCode          String?               @map("billing_postal_code")
+  /// ISO 3166-1 alpha-2.
+  billingCountry             String?               @map("billing_country")
+
+  // Mailing address (defaults to billing if null at the API layer — coalesce in code).
+  mailingAddressLine1        String?               @map("mailing_address_line_1")
+  mailingAddressLine2        String?               @map("mailing_address_line_2")
+  mailingCity                String?               @map("mailing_city")
+  mailingRegion              String?               @map("mailing_region")
+  mailingPostalCode          String?               @map("mailing_postal_code")
+  mailingCountry             String?               @map("mailing_country")
+
+  // Tax & compliance
+  taxId                      String?               @map("tax_id")
+  taxIdType                  TaxIdType?            @map("tax_id_type")
+  businessRegistrationNumber String?               @map("business_registration_number")
+  incorporationJurisdiction  String?               @map("incorporation_jurisdiction")
+  isTaxExempt                Boolean               @default(false) @map("is_tax_exempt")
+  taxExemptionCertificate    String?               @map("tax_exemption_certificate")
+
+  // Ownership
+  ownerId                    String?               @map("owner_id")
+
+  // Extension
+  tags                       String[]              @default([])
+  linkedinUrl                String?               @map("linkedin_url")
+  externalIds                Json                  @default("{}") @map("external_ids")
+  customFields               Json                  @default("{}") @map("custom_fields")
+  aiContext                  Json                  @default("{}") @map("ai_context")
+
+  // Timestamps
+  createdAt                  DateTime              @default(now()) @map("created_at")
+  updatedAt                  DateTime              @updatedAt @map("updated_at")
+  deletedAt                  DateTime?             @map("deleted_at")
+
+  tenant                     Tenant                @relation(fields: [tenantId], references: [id])
+  contacts                   Contact[]
+  deals                      Deal[]
+  orders                     Order[]
+
+  @@index([tenantId, name])
+  @@index([tenantId, domain])
+  @@index([tenantId, lifecycleStage])
+  @@index([tenantId, ownerId])
+  @@map("companies")
+}
+
+model Order {
+  id                     String           @id @default(cuid())
+  tenantId               String           @map("tenant_id")
+  contactId              String           @map("contact_id")
+  companyId              String?          @map("company_id")
+  dealId                 String?          @map("deal_id")
+
+  orderNumber            String           @map("order_number")
+  status                 OrderStatus      @default(pending)
+
+  // Money
+  totalAmount            Decimal          @default(0) @db.Decimal(12, 2) @map("total_amount")
+  taxAmount              Decimal          @default(0) @db.Decimal(12, 2) @map("tax_amount")
+  discountAmount         Decimal          @default(0) @db.Decimal(12, 2) @map("discount_amount")
+  grandTotal             Decimal          @default(0) @db.Decimal(12, 2) @map("grand_total")
+  currency               String           @default("USD") @db.VarChar(3)
+
+  /// Line-item shape determined by next cohort; opaque Json today.
+  lineItems              Json             @default("[]") @map("line_items")
+
+  // Lifecycle
+  placedAt               DateTime         @default(now()) @map("placed_at")
+  paidAt                 DateTime?        @map("paid_at")
+  refundedAt             DateTime?        @map("refunded_at")
+  cancelledAt            DateTime?        @map("cancelled_at")
+
+  // Payment
+  paymentMethod          PaymentMethod?   @map("payment_method")
+  paymentProvider        PaymentProvider? @map("payment_provider")
+  providerOrderId        String?          @map("provider_order_id")
+  providerData           Json?            @map("provider_data")
+
+  // Origin
+  source                 OrderSource      @default(manual)
+  attributionFirstSource String?          @map("attribution_first_source")
+  attributionLastSource  String?          @map("attribution_last_source")
+
+  // Notes
+  customerNotes          String?          @map("customer_notes")
+  internalNotes          String?          @map("internal_notes")
+
+  // Extension
+  externalIds            Json             @default("{}") @map("external_ids")
+  customFields           Json             @default("{}") @map("custom_fields")
+  aiContext              Json             @default("{}") @map("ai_context")
+
+  correlationId          String?          @unique @map("correlation_id")
+  createdAt              DateTime         @default(now()) @map("created_at")
+  updatedAt              DateTime         @updatedAt @map("updated_at")
+
+  tenant                 Tenant           @relation(fields: [tenantId], references: [id])
+  contact                Contact          @relation(fields: [contactId], references: [id])
+  company                Company?         @relation(fields: [companyId], references: [id])
+  deal                   Deal?            @relation(fields: [dealId], references: [id])
+
+  @@unique([tenantId, orderNumber])
+  @@index([tenantId, contactId])
+  @@index([tenantId, companyId, placedAt(sort: Desc)])
+  @@index([tenantId, dealId])
+  @@index([tenantId, status])
+  @@index([tenantId, placedAt(sort: Desc)])
+  @@map("orders")
 }

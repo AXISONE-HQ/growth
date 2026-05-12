@@ -107,21 +107,21 @@ describe('Multi-Tenant Isolation', () => {
           email: 'alice@tenanta.com',
           firstName: 'Alice',
           lastName: 'Anderson',
-          lifecycleStage: 'active',
+          lifecycleStage: 'customer',
         },
         {
           tenantId: TENANT_A_ID,
           email: 'bob@tenanta.com',
           firstName: 'Bob',
           lastName: 'Baker',
-          lifecycleStage: 'new',
+          lifecycleStage: 'lead',
         },
         {
           tenantId: TENANT_B_ID,
           email: 'charlie@tenantb.com',
           firstName: 'Charlie',
           lastName: 'Clark',
-          lifecycleStage: 'active',
+          lifecycleStage: 'customer',
         },
       ],
     });
@@ -164,7 +164,7 @@ describe('Multi-Tenant Isolation', () => {
         model: 'Contact',
         action: 'findMany',
         args: {
-          where: { lifecycleStage: 'active' },
+          where: { lifecycleStage: 'customer' },
         },
       };
 
@@ -177,7 +177,7 @@ describe('Multi-Tenant Isolation', () => {
       await middleware(params, next);
 
       expect(capturedParams.args.where.tenantId).toBe(TENANT_A_ID);
-      expect(capturedParams.args.where.lifecycleStage).toBe('active');
+      expect(capturedParams.args.where.lifecycleStage).toBe('customer');
     });
 
     it('should inject tenantId on createMany operations', async () => {
@@ -302,7 +302,7 @@ describe('Multi-Tenant Isolation', () => {
       try {
         // Try to update all contacts — should only affect Tenant B's
         const result = await tenantBPrisma.contact.updateMany({
-          where: { lifecycleStage: 'active' },
+          where: { lifecycleStage: 'customer' },
           data: { segment: 'attempted-cross-tenant-update' },
         });
 

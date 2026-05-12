@@ -111,7 +111,7 @@ import { LeadReceivedEventSchema, LeadSourceEnum } from "../lead-received.js";
 describe("LeadReceivedEvent schema regression (KAN-741)", () => {
   const CANONICAL_SAMPLES = [
     {
-      name: "inbox_email source — happy path with attachments",
+      name: "email_inbox source — happy path with attachments",
       payload: {
         eventId: "evt_aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
         eventType: "lead.received",
@@ -119,7 +119,7 @@ describe("LeadReceivedEvent schema regression (KAN-741)", () => {
         publishedAt: "2026-04-29T01:00:00.000Z",
         tenantId: "11111111-1111-1111-1111-111111111111",
         contactId: "22222222-2222-2222-2222-222222222222",
-        source: "inbox_email",
+        source: "email_inbox",
         metadata: {
           fromAddress: "alice@customer.example",
           subject: "Re: pricing inquiry",
@@ -160,9 +160,9 @@ describe("LeadReceivedEvent schema regression (KAN-741)", () => {
   it("LeadSourceEnum covers the documented producer set", () => {
     expect([...LeadSourceEnum.options].sort()).toEqual([
       "crm_sync",
+      "email_inbox",
       "form_fill",
       "import",
-      "inbox_email",
       "lead_api",
     ]);
   });

@@ -58,10 +58,7 @@ export function detectSignalsForContact(
 
   // unworked_lead — lead with no outbound action in 48h+ since creation
   const ageHours = daysSince(contact.createdAt) * 24;
-  if (
-    (contact.lifecycleStage === 'lead' || contact.lifecycleStage === 'Lead') &&
-    ageHours >= 48
-  ) {
+  if (contact.lifecycleStage === 'lead' && ageHours >= 48) {
     signals.push({
       type: 'unworked_lead',
       entityId: contact.id,

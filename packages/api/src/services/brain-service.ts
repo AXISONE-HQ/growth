@@ -544,7 +544,7 @@ export function buildEvaluationPrompt(input: {
     [contact.firstName, contact.lastName].filter((p) => !!p && p.trim().length > 0).join(' ') ||
     contact.email ||
     '(unknown contact)';
-  const company = contact.company ?? '(unknown company)';
+  const company = contact.companyName ?? '(unknown company)';
 
   const engagementsBlock =
     recentEngagements.length === 0

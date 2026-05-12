@@ -138,7 +138,7 @@ function buildLeadReceivedEvent(overrides: Partial<Record<string, unknown>> = {}
     publishedAt: now,
     tenantId: TENANT_A,
     contactId: CONTACT_A,
-    source: "inbox_email" as const,
+    source: "email_inbox" as const,
     metadata: {
       fromAddress: "test@example.com",
       subject: "Pricing inquiry",
@@ -195,7 +195,7 @@ function setupHappyPathMocks(opts: {
     extracted: {
       firstName: null,
       lastName: null,
-      company: null,
+      companyName: null,
       phone: null,
       intentSummary: "Asking about pricing",
       qualificationSignals: ["pricing"],
@@ -450,7 +450,7 @@ describe("KAN-793 — happy path (rule mode)", () => {
       extracted: {
         firstName: null,
         lastName: null,
-        company: null,
+        companyName: null,
         phone: null,
         intentSummary: "Asking about feature X",
         qualificationSignals: ["feature_inquiry"],

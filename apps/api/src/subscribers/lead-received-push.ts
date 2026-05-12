@@ -154,7 +154,7 @@ interface NormalizerModule {
     extracted: {
       firstName: string | null;
       lastName: string | null;
-      company: string | null;
+      companyName: string | null;
       phone: string | null;
       intentSummary: string | null;
       qualificationSignals: string[];
