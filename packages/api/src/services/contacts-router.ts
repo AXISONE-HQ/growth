@@ -24,6 +24,10 @@ import type { PrismaClient } from '@prisma/client';
 export interface ListInput {
   search?: string;
   lifecycleStage?: string;
+  // KAN-883 — Read-layer extensions (filters added to the existing
+  // offset/limit shape; convergence to cursor pagination tracked in KAN-882).
+  source?: string;
+  companyId?: string;
   limit?: number;
   offset?: number;
 }
@@ -69,6 +73,12 @@ export async function listContacts(
   if (input.lifecycleStage) {
     where.lifecycleStage = input.lifecycleStage;
   }
+  if (input.source) {
+    where.source = input.source;
+  }
+  if (input.companyId) {
+    where.companyId = input.companyId;
+  }
   if (input.search) {
     // Search OR across firstName / lastName / email — `name` doesn't exist
     // in the schema, so we expand to all human-identifying fields.
@@ -95,8 +105,20 @@ export async function listContacts(
         lifecycleStage: true,
         source: true,
         dataQualityScore: true,
+        // KAN-883 — Company FK + denormalized name + address columns surfaced
+        // for the read layer. `company` include hydrates the FK target so the
+        // UI doesn't need a second roundtrip for the company badge.
+        companyId: true,
+        companyName: true,
+        addressLine1: true,
+        city: true,
+        region: true,
+        country: true,
         createdAt: true,
         updatedAt: true,
+        company: {
+          select: { id: true, name: true },
+        },
       },
     }),
     prisma.contact.count({ where }),
@@ -117,6 +139,14 @@ export async function getContactById(
 ) {
   const row = await prisma.contact.findFirst({
     where: { id, tenantId },
+    include: {
+      // KAN-883 — hydrate Company badge for the read-layer detail view.
+      // Other relations stay lazy (engagement/decision/order joins are heavy
+      // and the detail page will fetch them via their own routes).
+      company: {
+        select: { id: true, name: true, domain: true },
+      },
+    },
   });
   if (!row) {
     // Cross-tenant access lands here too — neutral NOT_FOUND, no leak.

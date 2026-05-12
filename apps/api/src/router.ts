@@ -264,7 +264,16 @@ interface ContactsRouterModule {
   listContacts: (
     prisma: unknown,
     tenantId: string,
-    input: { search?: string; lifecycleStage?: string; limit?: number; offset?: number },
+    input: {
+      search?: string;
+      lifecycleStage?: string;
+      // KAN-883 — read-layer filter extensions. Source + companyId added so
+      // the Customers UI can scope to a Company badge or filter by source.
+      source?: string;
+      companyId?: string;
+      limit?: number;
+      offset?: number;
+    },
   ) => Promise<unknown>;
   getContactById: (prisma: unknown, tenantId: string, id: string) => Promise<unknown>;
   createContact: (
@@ -309,6 +318,12 @@ const contactsRouter = router({
       z.object({
         search: z.string().optional(),
         lifecycleStage: z.string().optional(),
+        // KAN-883 — read-layer filter extensions. Loose `z.string()` (not
+        // `z.nativeEnum`) keeps the API tolerant to legacy values the UI
+        // may still send during the transition; service-level Prisma will
+        // reject anything truly invalid.
+        source: z.string().optional(),
+        companyId: z.string().uuid().optional(),
         limit: z.number().min(1).max(200).default(50),
         offset: z.number().min(0).default(0),
       }),
@@ -358,6 +373,180 @@ const contactsRouter = router({
     .mutation(async ({ ctx, input }) => {
       const { updateContact } = await loadContactsModule();
       return updateContact(ctx.prisma, ctx.tenantId, input);
+    }),
+});
+
+// ============================================================================
+// COMPANIES ROUTER — KAN-883 (CRM read-layer cohort 1, PR 1 of 3)
+// ============================================================================
+//
+// Thin tRPC layer over packages/api/src/services/companies-router.ts. Same
+// variable-specifier dynamic-import pattern as contacts (TS6059 cohort).
+// All read-only; mutations land in cohort 4.
+interface CompaniesRouterModule {
+  listCompanies: (
+    prisma: unknown,
+    tenantId: string,
+    input: {
+      search?: string;
+      lifecycleStage?: string;
+      ownerId?: string;
+      limit: number;
+      cursor?: string;
+    },
+  ) => Promise<unknown>;
+  getCompanyById: (
+    prisma: unknown,
+    tenantId: string,
+    input: { id: string },
+  ) => Promise<unknown>;
+}
+let _companiesModule: CompaniesRouterModule | null = null;
+async function loadCompaniesModule(): Promise<CompaniesRouterModule> {
+  if (_companiesModule) return _companiesModule;
+  const spec = "../../../packages/api/src/services/companies-router.js";
+  _companiesModule = (await import(spec)) as CompaniesRouterModule;
+  return _companiesModule;
+}
+
+const companiesRouter = router({
+  list: protectedProcedure
+    .input(
+      z.object({
+        search: z.string().optional(),
+        // Loose string here for the same reason as contacts.list — keeps
+        // the API tolerant to legacy values; Prisma rejects invalid enum
+        // values at query time.
+        lifecycleStage: z.string().optional(),
+        ownerId: z.string().optional(),
+        limit: z.number().int().min(1).max(200).default(50),
+        cursor: z.string().optional(),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      const { listCompanies } = await loadCompaniesModule();
+      return listCompanies(ctx.prisma, ctx.tenantId, input);
+    }),
+
+  get: protectedProcedure
+    .input(z.object({ id: z.string().uuid() }))
+    .query(async ({ ctx, input }) => {
+      const { getCompanyById } = await loadCompaniesModule();
+      return getCompanyById(ctx.prisma, ctx.tenantId, input);
+    }),
+});
+
+// ============================================================================
+// ORDERS ROUTER — KAN-883
+// ============================================================================
+interface OrdersRouterModule {
+  listOrders: (
+    prisma: unknown,
+    tenantId: string,
+    input: {
+      search?: string;
+      status?: string;
+      contactId?: string;
+      companyId?: string;
+      dealId?: string;
+      limit: number;
+      cursor?: string;
+    },
+  ) => Promise<unknown>;
+  getOrderById: (
+    prisma: unknown,
+    tenantId: string,
+    input: { id: string },
+  ) => Promise<unknown>;
+}
+let _ordersModule: OrdersRouterModule | null = null;
+async function loadOrdersModule(): Promise<OrdersRouterModule> {
+  if (_ordersModule) return _ordersModule;
+  const spec = "../../../packages/api/src/services/orders-router.js";
+  _ordersModule = (await import(spec)) as OrdersRouterModule;
+  return _ordersModule;
+}
+
+const ordersRouter = router({
+  list: protectedProcedure
+    .input(
+      z.object({
+        search: z.string().optional(),
+        status: z.string().optional(),
+        contactId: z.string().uuid().optional(),
+        companyId: z.string().uuid().optional(),
+        dealId: z.string().uuid().optional(),
+        limit: z.number().int().min(1).max(200).default(50),
+        cursor: z.string().optional(),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      const { listOrders } = await loadOrdersModule();
+      return listOrders(ctx.prisma, ctx.tenantId, input);
+    }),
+
+  get: protectedProcedure
+    .input(z.object({ id: z.string().uuid() }))
+    .query(async ({ ctx, input }) => {
+      const { getOrderById } = await loadOrdersModule();
+      return getOrderById(ctx.prisma, ctx.tenantId, input);
+    }),
+});
+
+// ============================================================================
+// DEALS ROUTER — KAN-883 (net-new — no prior Deal tRPC surface existed)
+// ============================================================================
+interface DealsRouterModule {
+  listDeals: (
+    prisma: unknown,
+    tenantId: string,
+    input: {
+      search?: string;
+      status?: string;
+      companyId?: string;
+      contactId?: string;
+      ownerId?: string;
+      limit: number;
+      cursor?: string;
+    },
+  ) => Promise<unknown>;
+  getDealById: (
+    prisma: unknown,
+    tenantId: string,
+    input: { id: string },
+  ) => Promise<unknown>;
+}
+let _dealsModule: DealsRouterModule | null = null;
+async function loadDealsModule(): Promise<DealsRouterModule> {
+  if (_dealsModule) return _dealsModule;
+  const spec = "../../../packages/api/src/services/deals-router.js";
+  _dealsModule = (await import(spec)) as DealsRouterModule;
+  return _dealsModule;
+}
+
+const dealsRouter = router({
+  list: protectedProcedure
+    .input(
+      z.object({
+        search: z.string().optional(),
+        status: z.string().optional(),
+        companyId: z.string().uuid().optional(),
+        contactId: z.string().uuid().optional(),
+        ownerId: z.string().optional(),
+        limit: z.number().int().min(1).max(200).default(50),
+        cursor: z.string().optional(),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      const { listDeals } = await loadDealsModule();
+      return listDeals(ctx.prisma, ctx.tenantId, input);
+    }),
+
+  get: protectedProcedure
+    .input(z.object({ id: z.string().uuid() }))
+    .query(async ({ ctx, input }) => {
+      const { getDealById } = await loadDealsModule();
+      return getDealById(ctx.prisma, ctx.tenantId, input);
     }),
 });
 
@@ -4401,6 +4590,10 @@ export const accountRouter = router({
 
 export const appRouter = router({
   contacts: contactsRouter,
+  // KAN-883 — CRM read-layer cohort 1 (PR 1 of 3). UI lands in PR 2-3.
+  companies: companiesRouter,
+  orders: ordersRouter,
+  deals: dealsRouter,
   pipelines: pipelinesRouter,
   stages: stagesRouter,
   targets: targetsRouter,
