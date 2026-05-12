@@ -323,7 +323,7 @@ const contactsRouter = router({
         // may still send during the transition; service-level Prisma will
         // reject anything truly invalid.
         source: z.string().optional(),
-        companyId: z.string().uuid().optional(),
+        companyId: z.string().cuid().optional(),
         limit: z.number().min(1).max(200).default(50),
         offset: z.number().min(0).default(0),
       }),
@@ -429,7 +429,7 @@ const companiesRouter = router({
     }),
 
   get: protectedProcedure
-    .input(z.object({ id: z.string().uuid() }))
+    .input(z.object({ id: z.string().cuid() }))
     .query(async ({ ctx, input }) => {
       const { getCompanyById } = await loadCompaniesModule();
       return getCompanyById(ctx.prisma, ctx.tenantId, input);
@@ -474,8 +474,8 @@ const ordersRouter = router({
         search: z.string().optional(),
         status: z.string().optional(),
         contactId: z.string().uuid().optional(),
-        companyId: z.string().uuid().optional(),
-        dealId: z.string().uuid().optional(),
+        companyId: z.string().cuid().optional(),
+        dealId: z.string().cuid().optional(),
         limit: z.number().int().min(1).max(200).default(50),
         cursor: z.string().optional(),
       }),
@@ -486,7 +486,7 @@ const ordersRouter = router({
     }),
 
   get: protectedProcedure
-    .input(z.object({ id: z.string().uuid() }))
+    .input(z.object({ id: z.string().cuid() }))
     .query(async ({ ctx, input }) => {
       const { getOrderById } = await loadOrdersModule();
       return getOrderById(ctx.prisma, ctx.tenantId, input);
@@ -530,7 +530,7 @@ const dealsRouter = router({
       z.object({
         search: z.string().optional(),
         status: z.string().optional(),
-        companyId: z.string().uuid().optional(),
+        companyId: z.string().cuid().optional(),
         contactId: z.string().uuid().optional(),
         ownerId: z.string().optional(),
         limit: z.number().int().min(1).max(200).default(50),
@@ -543,7 +543,7 @@ const dealsRouter = router({
     }),
 
   get: protectedProcedure
-    .input(z.object({ id: z.string().uuid() }))
+    .input(z.object({ id: z.string().cuid() }))
     .query(async ({ ctx, input }) => {
       const { getDealById } = await loadDealsModule();
       return getDealById(ctx.prisma, ctx.tenantId, input);

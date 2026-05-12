@@ -10,6 +10,7 @@
  *   - update only sets provided fields (doesn't clobber unspecified to null)
  */
 import { describe, it, expect } from "vitest";
+import { z } from "zod";
 import {
   listContacts,
   getContactById,
@@ -295,5 +296,25 @@ describe("KAN-718 Day 10 — updateContact", () => {
     await expect(
       updateContact(prisma, TENANT_A, { id: "c-1", firstName: "X" }),
     ).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// KAN-893 — tRPC validator regression: CUID-shaped FK filter accepted.
+//
+// Mirrors `companyId: z.string().cuid().optional()` at
+// apps/api/src/router.ts:326. Pre-KAN-893, this was `.uuid()` which
+// rejected every real PROD Company.id (Company uses @default(cuid())).
+// If a future change reverts the router validator, this test pins the
+// contract: a CUID-shaped companyId MUST validate.
+// ─────────────────────────────────────────────────────────────────────
+describe("KAN-893 — contacts.list?companyId tRPC input validator", () => {
+  const inputSchema = z.object({
+    companyId: z.string().cuid().optional(),
+  });
+
+  it("accepts CUID-shaped companyId (e.g. PROD Company.id format)", () => {
+    const result = inputSchema.safeParse({ id: undefined, companyId: "cmou3yc2o0002a9tnt34f5q81" });
+    expect(result.success).toBe(true);
   });
 });

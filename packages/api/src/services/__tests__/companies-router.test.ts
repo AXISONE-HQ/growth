@@ -12,6 +12,7 @@
  *   - _count aggregation passes through from Prisma
  */
 import { describe, it, expect } from "vitest";
+import { z } from "zod";
 import { listCompanies, getCompanyById } from "../companies-router.js";
 import { decodeCursor } from "../_pagination.js";
 
@@ -379,5 +380,22 @@ describe("KAN-883 — getCompanyById", () => {
     await expect(
       getCompanyById(prisma, TENANT_A, { id: "co_missing" }),
     ).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// KAN-893 — tRPC validator regression: CUID-shaped id accepted.
+//
+// Mirrors `id: z.string().cuid()` at apps/api/src/router.ts:432. Pre-
+// KAN-893, this was `.uuid()` which rejected every real PROD Company.id
+// (Company uses @default(cuid()) — KAN-879 schema). Pins the contract
+// against a future revert.
+// ─────────────────────────────────────────────────────────────────────
+describe("KAN-893 — companies.get tRPC input validator", () => {
+  const inputSchema = z.object({ id: z.string().cuid() });
+
+  it("accepts CUID-shaped id (e.g. PROD Company.id format)", () => {
+    const result = inputSchema.safeParse({ id: "cmou3yc2o0002a9tnt34f5q81" });
+    expect(result.success).toBe(true);
   });
 });
