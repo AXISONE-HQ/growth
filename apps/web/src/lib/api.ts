@@ -781,6 +781,17 @@ export interface ContactListItem {
   lifecycleStage: string;
   source: string | null;
   dataQualityScore: number;
+  // KAN-883 — read-layer extension fields. Backend now returns these on
+  // every contacts.list / contacts.get response. Client types catch up
+  // here (KAN-884) so /customers, /companies, /orders pages can rely on
+  // them without `as any` casts.
+  companyId: string | null;
+  companyName: string | null;
+  addressLine1: string | null;
+  city: string | null;
+  region: string | null;
+  country: string | null;
+  company: { id: string; name: string } | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -789,6 +800,8 @@ export const contactsApi = {
   list: (input?: {
     search?: string;
     lifecycleStage?: string;
+    source?: string;
+    companyId?: string;
     limit?: number;
     offset?: number;
   }) =>
@@ -800,6 +813,226 @@ export const contactsApi = {
     }>('contacts.list', input ?? {}),
   getById: (id: string) =>
     trpcQuery<ContactListItem>('contacts.getById', { id }),
+};
+
+// ─────────────────────────────────────────────────────────────────────────
+// KAN-884 — Companies + Orders + Deals read-layer clients.
+//
+// Backend: apps/api/src/router.ts → companiesRouter / ordersRouter /
+//   dealsRouter, delegating to packages/api/src/services/{...}-router.ts
+//   (all read-only, all cursor-paginated, all tenant-scoped).
+//
+// Cursor pagination: server returns `{ items, nextCursor, totalCount }`.
+// `nextCursor` is an opaque base64 token — client treats as a black box.
+// Pass it back as `cursor: <token>` to fetch the next page. `null` =
+// last page.
+// ─────────────────────────────────────────────────────────────────────────
+
+export interface CompanyListItem {
+  id: string;
+  name: string;
+  legalName: string | null;
+  domain: string | null;
+  website: string | null;
+  industry: string | null;
+  sizeRange: string | null;
+  lifecycleStage: string;
+  billingCity: string | null;
+  billingRegion: string | null;
+  billingCountry: string | null;
+  taxId: string | null;
+  taxIdType: string | null;
+  isTaxExempt: boolean;
+  ownerId: string | null;
+  tags: string[];
+  _count: { contacts: number; deals: number; orders: number };
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CompanyDetail extends CompanyListItem {
+  website: string | null;
+  phone: string | null;
+  email: string | null;
+  description: string | null;
+  annualRevenue: string | null;
+  billingAddressLine1: string | null;
+  billingAddressLine2: string | null;
+  billingPostalCode: string | null;
+  mailingAddressLine1: string | null;
+  mailingAddressLine2: string | null;
+  mailingCity: string | null;
+  mailingRegion: string | null;
+  mailingPostalCode: string | null;
+  mailingCountry: string | null;
+  businessRegistrationNumber: string | null;
+  incorporationJurisdiction: string | null;
+  taxExemptionCertificate: string | null;
+  linkedinUrl: string | null;
+  externalIds: Record<string, unknown>;
+  customFields: Record<string, unknown>;
+  aiContext: Record<string, unknown>;
+  deletedAt: string | null;
+  // Hydrated relations (from companies.get include — first 20 each)
+  contacts: Array<{
+    id: string;
+    email: string | null;
+    firstName: string | null;
+    lastName: string | null;
+    lifecycleStage: string;
+  }>;
+  deals: Array<{
+    id: string;
+    name: string;
+    status: string;
+    value: string;
+    currency: string;
+  }>;
+  orders: Array<{
+    id: string;
+    orderNumber: string;
+    status: string;
+    grandTotal: string;
+    currency: string;
+    placedAt: string;
+  }>;
+}
+
+export interface CursorPage<T> {
+  items: T[];
+  nextCursor: string | null;
+  totalCount: number;
+}
+
+export const companiesApi = {
+  list: (input?: {
+    search?: string;
+    lifecycleStage?: string;
+    ownerId?: string;
+    limit?: number;
+    cursor?: string;
+  }) =>
+    trpcQuery<CursorPage<CompanyListItem>>('companies.list', input ?? { limit: 50 }),
+  get: (id: string) =>
+    trpcQuery<CompanyDetail>('companies.get', { id }),
+};
+
+export interface OrderListItem {
+  id: string;
+  orderNumber: string;
+  status: string;
+  totalAmount: string;
+  grandTotal: string;
+  currency: string;
+  placedAt: string;
+  paidAt: string | null;
+  paymentMethod: string | null;
+  paymentProvider: string | null;
+  source: string;
+  createdAt: string;
+  updatedAt: string;
+  contact: {
+    id: string;
+    email: string | null;
+    firstName: string | null;
+    lastName: string | null;
+  };
+  company: { id: string; name: string } | null;
+  deal: { id: string; name: string } | null;
+}
+
+export interface OrderDetail extends Omit<OrderListItem, "company" | "deal"> {
+  contactId: string;
+  companyId: string | null;
+  dealId: string | null;
+  taxAmount: string;
+  discountAmount: string;
+  lineItems: unknown;
+  refundedAt: string | null;
+  cancelledAt: string | null;
+  providerOrderId: string | null;
+  providerData: unknown;
+  attributionFirstSource: string | null;
+  attributionLastSource: string | null;
+  customerNotes: string | null;
+  internalNotes: string | null;
+  externalIds: Record<string, unknown>;
+  customFields: Record<string, unknown>;
+  aiContext: Record<string, unknown>;
+  correlationId: string | null;
+  contact: {
+    id: string;
+    email: string | null;
+    firstName: string | null;
+    lastName: string | null;
+    companyId: string | null;
+    companyName: string | null;
+  };
+  company: CompanyDetail | null;
+  deal: {
+    id: string;
+    name: string;
+    status: string;
+    value: string;
+    currency: string;
+  } | null;
+}
+
+export const ordersApi = {
+  list: (input?: {
+    search?: string;
+    status?: string;
+    contactId?: string;
+    companyId?: string;
+    dealId?: string;
+    limit?: number;
+    cursor?: string;
+  }) =>
+    trpcQuery<CursorPage<OrderListItem>>('orders.list', input ?? { limit: 50 }),
+  get: (id: string) =>
+    trpcQuery<OrderDetail>('orders.get', { id }),
+};
+
+export interface DealListItem {
+  id: string;
+  name: string;
+  status: string;
+  probability: number | null;
+  expectedCloseDate: string | null;
+  closedAt: string | null;
+  lostReason: string | null;
+  ownerId: string | null;
+  assignedAgentId: string | null;
+  companyId: string | null;
+  value: string;
+  currency: string;
+  currentStageId: string;
+  contactId: string;
+  pipelineId: string;
+  createdAt: string;
+  updatedAt: string;
+  contact: {
+    id: string;
+    email: string | null;
+    firstName: string | null;
+    lastName: string | null;
+  };
+  company: { id: string; name: string } | null;
+}
+
+export const dealsApi = {
+  list: (input?: {
+    search?: string;
+    status?: string;
+    companyId?: string;
+    contactId?: string;
+    ownerId?: string;
+    limit?: number;
+    cursor?: string;
+  }) =>
+    trpcQuery<CursorPage<DealListItem>>('deals.list', input ?? { limit: 50 }),
+  get: (id: string) =>
+    trpcQuery<DealListItem>('deals.get', { id }),
 };
 
 export const recommendationsApi = {
