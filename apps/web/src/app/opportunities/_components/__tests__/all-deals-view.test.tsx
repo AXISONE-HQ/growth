@@ -25,6 +25,13 @@ vi.mock("@/lib/api", () => ({
   },
 }));
 
+// KAN-888 — AllDealsView now uses useRouter() for row-click nav to
+// /opportunities/[id]. Stub it so the test environment doesn't fall through
+// to Next's app-router invariant.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: vi.fn() }),
+}));
+
 beforeEach(() => {
   dealsListMock.mockReset();
 });

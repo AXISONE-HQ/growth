@@ -135,6 +135,7 @@ export async function getDealById(
           email: true,
           firstName: true,
           lastName: true,
+          lifecycleStage: true,
           companyId: true,
           companyName: true,
         },
@@ -149,6 +150,21 @@ export async function getDealById(
           outcomeType: true,
         },
       },
+      // KAN-888 — pipeline + stage history for the Deal detail page.
+      pipeline: {
+        select: { id: true, name: true },
+      },
+      stageHistory: {
+        take: 20,
+        orderBy: { transitionedAt: "desc" },
+        include: {
+          fromStage: { select: { name: true } },
+          toStage: { select: { name: true } },
+          decision: {
+            select: { id: true, actionType: true, strategySelected: true },
+          },
+        },
+      },
     },
   });
 
@@ -156,5 +172,17 @@ export async function getDealById(
     throw new TRPCError({ code: "NOT_FOUND", message: "Deal not found" });
   }
 
-  return deal;
+  // KAN-888 — Manual owner hydration. Deal.ownerId is a String? with no
+  // Prisma @relation to User (memory: feedback_phase_1_pivot_kan_786...).
+  // Future cleanup tracked in the User-relations follow-up — once that
+  // migration lands, this becomes an `include: { owner: ... }`.
+  let owner: { id: string; name: string | null; email: string } | null = null;
+  if (deal.ownerId) {
+    owner = await prisma.user.findFirst({
+      where: { id: deal.ownerId, tenantId },
+      select: { id: true, name: true, email: true },
+    });
+  }
+
+  return { ...deal, owner };
 }

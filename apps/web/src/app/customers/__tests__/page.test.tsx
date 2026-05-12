@@ -26,6 +26,13 @@ vi.mock("@/lib/api", () => ({
   },
 }));
 
+// KAN-887 — CustomersPage now uses useRouter() for row-click nav to
+// /customers/[id]. Stub it so the test env doesn't fall through to
+// Next's app-router invariant.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: vi.fn() }),
+}));
+
 beforeEach(() => {
   contactsListMock.mockReset();
 });

@@ -10,12 +10,13 @@
  *
  * 6-column read-only table. Cursor-paginated via Load More button.
  * Status filter chips (All/Open/Won/Lost). Search by deal name.
- * Row click is intentionally a no-op for V1 — Deal detail page deferred
- * (KAN-888 / Cohort 1 follow-up).
+ * Row click navigates to /opportunities/[id] (KAN-888). Company link
+ * inside the row stopPropagation so it doesn't trigger row nav.
  */
 
 import { Loader2, RefreshCw, Search, Target } from 'lucide-react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { dealsApi, type DealListItem, type CursorPage } from '@/lib/api';
@@ -40,6 +41,7 @@ function fmtDate(iso: string | null): string {
 }
 
 export function AllDealsView() {
+  const router = useRouter();
   const [searchInput, setSearchInput] = useState('');
   const [searchDebounced, setSearchDebounced] = useState('');
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
@@ -173,7 +175,16 @@ export function AllDealsView() {
               </thead>
               <tbody className="divide-y divide-gray-200">
                 {accumulatedItems.map((d) => (
-                  <tr key={d.id} className="hover:bg-gray-50">
+                  <tr
+                    key={d.id}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => router.push(`/opportunities/${d.id}`)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') router.push(`/opportunities/${d.id}`);
+                    }}
+                    className="hover:bg-gray-50 cursor-pointer"
+                  >
                     <td className="px-4 py-3 font-medium text-gray-900">{d.name}</td>
                     <td className="px-4 py-3">
                       <StatusBadge kind="deal-status" value={d.status} />
@@ -184,7 +195,11 @@ export function AllDealsView() {
                     <td className="px-4 py-3 text-gray-700">{contactName(d.contact)}</td>
                     <td className="px-4 py-3 text-gray-700">
                       {d.company ? (
-                        <Link href={`/companies/${d.company.id}`} className="text-indigo-600 hover:underline">
+                        <Link
+                          href={`/companies/${d.company.id}`}
+                          onClick={(e) => e.stopPropagation()}
+                          className="text-indigo-600 hover:underline"
+                        >
                           {d.company.name}
                         </Link>
                       ) : (

@@ -788,12 +788,71 @@ export interface ContactListItem {
   companyId: string | null;
   companyName: string | null;
   addressLine1: string | null;
+  // KAN-887 — addressLine2 + postalCode were missed by KAN-883's LIST_SELECT.
+  // Surfaced now so detail pages render the full mailing block.
+  addressLine2: string | null;
   city: string | null;
   region: string | null;
+  postalCode: string | null;
   country: string | null;
   company: { id: string; name: string } | null;
   createdAt: string;
   updatedAt: string;
+}
+
+// KAN-887 — Contact detail (one-roundtrip include of all relations the
+// /customers/[id] page renders). Bounded takes: 10-20 per relation.
+export interface ContactDetail extends ContactListItem {
+  externalIds: Record<string, unknown>;
+  customFields: Record<string, unknown>;
+  deletedAt: string | null;
+  company: { id: string; name: string; domain: string | null } | null;
+  customer: {
+    mrr: number;
+    ltv: number;
+    healthScore: number;
+    status: string;
+    since: string;
+    plan: string | null;
+  } | null;
+  deals: Array<{
+    id: string;
+    name: string;
+    status: string;
+    value: string;
+    currency: string;
+    expectedCloseDate: string | null;
+  }>;
+  engagements: Array<{
+    id: string;
+    engagementType: string;
+    signalClass: string;
+    channel: string | null;
+    occurredAt: string;
+    metadata: Record<string, unknown>;
+  }>;
+  outcomes: Array<{
+    id: string;
+    result: string;
+    reasonCategory: string | null;
+    recordedAt: string;
+    objectiveId: string;
+  }>;
+  decisions: Array<{
+    id: string;
+    actionType: string;
+    strategySelected: string;
+    confidence: number;
+    createdAt: string;
+  }>;
+  escalations: Array<{
+    id: string;
+    triggerType: string;
+    triggerReason: string | null;
+    status: string;
+    severity: string;
+    createdAt: string;
+  }>;
 }
 
 export const contactsApi = {
@@ -812,7 +871,7 @@ export const contactsApi = {
       offset: number;
     }>('contacts.list', input ?? {}),
   getById: (id: string) =>
-    trpcQuery<ContactListItem>('contacts.getById', { id }),
+    trpcQuery<ContactDetail>('contacts.getById', { id }),
 };
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1020,6 +1079,66 @@ export interface DealListItem {
   company: { id: string; name: string } | null;
 }
 
+// KAN-888 — Deal detail (one roundtrip incl. pipeline + currentStage +
+// stageHistory + manually-hydrated owner). Surfaces every Deal scalar plus
+// the relations the /opportunities/[id] page renders.
+export interface DealStageTransition {
+  id: string;
+  fromStageId: string | null;
+  toStageId: string;
+  fromStage: { name: string } | null;
+  toStage: { name: string };
+  transitionedAt: string;
+  triggeredBy: string; // 'normalizer' | 'agent' | 'human' | 'system' | 'rule'
+  decisionId: string | null;
+  decision: {
+    id: string;
+    actionType: string;
+    strategySelected: string;
+  } | null;
+  metadata: Record<string, unknown>;
+}
+
+export interface DealDetail extends Omit<DealListItem, 'contact' | 'company'> {
+  lostReasonDetail: string | null;
+  wonProductSummary: string | null;
+  products: unknown;
+  microObjectiveProgress: Record<string, unknown>;
+  aiContext: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+  customFields: Record<string, unknown>;
+  externalIds: Record<string, unknown>;
+  correlationId: string | null;
+  enteredStageAt: string;
+  contact: {
+    id: string;
+    email: string | null;
+    firstName: string | null;
+    lastName: string | null;
+    lifecycleStage: string;
+    companyId: string | null;
+    companyName: string | null;
+  };
+  company: {
+    id: string;
+    name: string;
+    domain: string | null;
+    industry: string | null;
+  } | null;
+  currentStage: {
+    id: string;
+    name: string;
+    outcomeType: string;
+  };
+  pipeline: { id: string; name: string };
+  stageHistory: DealStageTransition[];
+  owner: {
+    id: string;
+    name: string | null;
+    email: string;
+  } | null;
+}
+
 export const dealsApi = {
   list: (input?: {
     search?: string;
@@ -1032,7 +1151,7 @@ export const dealsApi = {
   }) =>
     trpcQuery<CursorPage<DealListItem>>('deals.list', input ?? { limit: 50 }),
   get: (id: string) =>
-    trpcQuery<DealListItem>('deals.get', { id }),
+    trpcQuery<DealDetail>('deals.get', { id }),
 };
 
 export const recommendationsApi = {
