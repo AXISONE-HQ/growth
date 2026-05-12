@@ -1,26 +1,48 @@
 'use client';
 
 /**
- * KAN-718 Day 10 — /customers wired to real contacts.list endpoint.
+ * KAN-886 — /customers DS v1 redesign (Cohort 1 PR 3 of 3).
  *
- * Replaces 314 LoC of mock-data UI. Schema split: `name` → firstName +
- * lastName (rendered via null-safe concatenation). `company` field doesn't
- * exist in the canonical Contact schema — removed from V1 UI; ticket-time
- * follow-up if tenants want it back.
+ * Replaces the KAN-718 card-grid layout with a 7-column sortable table.
+ * Migrates from useState+useEffect to TanStack Query useQuery (matches
+ * KAN-884 pattern). Drops the inline LIFECYCLE_COLORS map in favor of
+ * the shared StatusBadge primitive (KAN-884) + enum-labels source.
  *
- * Empty state: directional hint pointing operators to the lead inbox / API
- * sources that produce contacts.
+ * Consumes the extended `contactsApi.list` shape from KAN-883/884:
+ * `companyId`, `companyName`, `company` relation, address fields. The
+ * Company column links into /companies/[id] when companyId is populated.
+ *
+ * Row click is intentionally a no-op for V1 — Contact detail page
+ * deferred (KAN-887 / Cohort 1 follow-up). Cell content is still
+ * clickable where it makes sense (mailto links, company link).
+ *
+ * Pagination stays on offset/limit — convergence to cursor is KAN-882.
  */
 
-import {
-  Users,
-  RefreshCw,
-  Loader2,
-  Search,
-  Sparkles,
-} from 'lucide-react';
-import { useEffect, useState, useCallback } from 'react';
+import { Loader2, RefreshCw, Search, Users } from 'lucide-react';
+import Link from 'next/link';
+import { useEffect, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { contactsApi, type ContactListItem } from '@/lib/api';
+import { EmptyState } from '@/components/ui/empty-state';
+import { StatusBadge } from '@/components/ui/status-badge';
+import {
+  CONTACT_SOURCE_LABELS,
+  LIFECYCLE_STAGE_LABELS,
+} from '@/lib/enum-labels';
+
+const SECTION_HEADER_STYLE = { color: 'var(--ds-ink-primary)' } as const;
+const MUTED_STYLE = { color: 'var(--ds-ink-tertiary)' } as const;
+
+const LIFECYCLE_FILTER_OPTIONS: Array<{ value: string | null; label: string }> = [
+  { value: null, label: 'All' },
+  ...Object.entries(LIFECYCLE_STAGE_LABELS).map(([value, label]) => ({ value, label })),
+];
+
+const SOURCE_FILTER_OPTIONS: Array<{ value: string | null; label: string }> = [
+  { value: null, label: 'All' },
+  ...Object.entries(CONTACT_SOURCE_LABELS).map(([value, label]) => ({ value, label })),
+];
 
 function displayName(c: ContactListItem): string {
   const name = [c.firstName, c.lastName].filter(Boolean).join(' ').trim();
@@ -47,157 +69,256 @@ function relativeTime(iso: string): string {
   return `${d}d ago`;
 }
 
-const LIFECYCLE_COLORS: Record<string, { bg: string; text: string }> = {
-  new: { bg: 'bg-gray-100', text: 'text-gray-600' },
-  qualified: { bg: 'bg-indigo-50', text: 'text-indigo-700' },
-  opportunity: { bg: 'bg-emerald-50', text: 'text-emerald-700' },
-  proposal: { bg: 'bg-amber-50', text: 'text-amber-700' },
-  negotiation: { bg: 'bg-orange-50', text: 'text-orange-700' },
-  customer: { bg: 'bg-emerald-100', text: 'text-emerald-800' },
-  at_risk: { bg: 'bg-red-50', text: 'text-red-700' },
-};
-
 export default function CustomersPage() {
-  const [contacts, setContacts] = useState<ContactListItem[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [searchQuery, setSearchQuery] = useState('');
+  const [searchInput, setSearchInput] = useState('');
   const [searchDebounced, setSearchDebounced] = useState('');
+  const [lifecycleFilter, setLifecycleFilter] = useState<string | null>(null);
+  const [sourceFilter, setSourceFilter] = useState<string | null>(null);
 
-  // Debounce the search to avoid hammering the backend on every keystroke.
+  // Debounce search to avoid hammering the backend on every keystroke.
+  // Phone is intentionally not in the OR clause server-side (KAN-889
+  // follow-up filed); placeholder reflects that.
   useEffect(() => {
-    const t = setTimeout(() => setSearchDebounced(searchQuery.trim()), 300);
+    const t = setTimeout(() => setSearchDebounced(searchInput.trim()), 300);
     return () => clearTimeout(t);
-  }, [searchQuery]);
+  }, [searchInput]);
 
-  const reload = useCallback(async () => {
-    try {
-      setError(null);
-      const result = await contactsApi.list({
-        search: searchDebounced || undefined,
-        limit: 50,
-      });
-      setContacts(result.items);
-    } catch (e) {
-      setError((e as Error).message);
-      setContacts([]);
-    }
-  }, [searchDebounced]);
+  const queryInput: Parameters<typeof contactsApi.list>[0] = {
+    limit: 50,
+    ...(searchDebounced ? { search: searchDebounced } : {}),
+    ...(lifecycleFilter ? { lifecycleStage: lifecycleFilter } : {}),
+    ...(sourceFilter ? { source: sourceFilter } : {}),
+  };
 
-  useEffect(() => {
-    void reload();
-  }, [reload]);
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery<{
+    items: ContactListItem[];
+    total: number;
+    limit: number;
+    offset: number;
+  }>({
+    queryKey: ['contacts', 'list', queryInput],
+    queryFn: () => contactsApi.list(queryInput),
+  });
+
+  const items = data?.items ?? [];
+  const total = data?.total ?? 0;
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      <div className="max-w-6xl mx-auto px-6 py-8">
-        <div className="flex items-center justify-between mb-6">
-          <div>
-            <h1 className="text-2xl font-semibold text-gray-900 flex items-center gap-2">
-              <Users className="w-6 h-6 text-gray-500" />
-              Customers
-            </h1>
-            <p className="text-sm text-gray-500 mt-1">
-              Contacts the AI is working with — leads, qualified prospects, customers.
-            </p>
-          </div>
-          <button
-            onClick={() => void reload()}
-            className="px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-100 rounded-lg flex items-center gap-1.5"
-          >
-            <RefreshCw className="w-4 h-4" /> Refresh
+    <div className="max-w-6xl mx-auto px-6 py-8">
+      {/* Header */}
+      <div className="flex items-center justify-between mb-6">
+        <div>
+          <h1 className="text-2xl font-semibold flex items-center gap-2" style={SECTION_HEADER_STYLE}>
+            <Users className="w-6 h-6 text-gray-500" />
+            Customers
+          </h1>
+          <p className="text-sm mt-1" style={MUTED_STYLE}>
+            Contacts the AI is working with — leads, qualified prospects, customers.
+          </p>
+        </div>
+        <button
+          onClick={() => void refetch()}
+          disabled={isFetching}
+          className="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-md border disabled:opacity-50"
+          style={{
+            backgroundColor: 'var(--ds-surface-default)',
+            borderColor: 'var(--ds-border-default)',
+            color: 'var(--ds-ink-secondary)',
+          }}
+        >
+          {isFetching ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+          Refresh
+        </button>
+      </div>
+
+      {/* Search */}
+      <div className="mb-4 relative max-w-md">
+        <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2" style={MUTED_STYLE} />
+        <input
+          type="text"
+          value={searchInput}
+          onChange={(e) => setSearchInput(e.target.value)}
+          placeholder="Search by name or email..."
+          className="w-full pl-9 pr-3 py-2 text-sm rounded-md border focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          style={{
+            backgroundColor: 'var(--ds-surface-default)',
+            borderColor: 'var(--ds-border-default)',
+            color: 'var(--ds-ink-primary)',
+          }}
+        />
+      </div>
+
+      {/* Lifecycle chips */}
+      <div className="mb-3">
+        <div className="text-xs uppercase tracking-wide mb-2" style={MUTED_STYLE}>
+          Filter by lifecycle
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {LIFECYCLE_FILTER_OPTIONS.map((opt) => {
+            const active = lifecycleFilter === opt.value;
+            return (
+              <button
+                key={`lifecycle-${opt.value ?? 'all'}`}
+                onClick={() => setLifecycleFilter(opt.value)}
+                aria-label={`Lifecycle: ${opt.label}`}
+                className={`px-3 py-1.5 text-xs font-medium rounded-full border transition-colors ${
+                  active
+                    ? 'bg-indigo-600 text-white border-indigo-600'
+                    : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                }`}
+              >
+                {opt.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Source chips */}
+      <div className="mb-6">
+        <div className="text-xs uppercase tracking-wide mb-2" style={MUTED_STYLE}>
+          Filter by source
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {SOURCE_FILTER_OPTIONS.map((opt) => {
+            const active = sourceFilter === opt.value;
+            return (
+              <button
+                key={`source-${opt.value ?? 'all'}`}
+                onClick={() => setSourceFilter(opt.value)}
+                aria-label={`Source: ${opt.label}`}
+                className={`px-3 py-1.5 text-xs font-medium rounded-full border transition-colors ${
+                  active
+                    ? 'bg-indigo-600 text-white border-indigo-600'
+                    : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                }`}
+              >
+                {opt.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* States */}
+      {isError ? (
+        <div className="bg-red-50 border border-red-200 rounded-md p-4 text-sm">
+          <p className="font-medium text-red-800">Failed to load contacts</p>
+          <p className="text-red-700 mt-1">{(error as Error)?.message ?? 'Unknown error'}</p>
+          <button onClick={() => void refetch()} className="mt-2 text-red-700 underline text-xs">
+            Retry
           </button>
         </div>
-
-        <div className="mb-4">
-          <div className="flex items-center gap-2 px-3.5 py-2 rounded-lg border border-gray-200 bg-white max-w-md focus-within:border-indigo-500 focus-within:ring-[3px] focus-within:ring-indigo-500/10 transition-all">
-            <Search className="w-4 h-4 text-gray-400 flex-shrink-0" />
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search by name or email..."
-              className="border-none bg-transparent outline-none text-sm font-[inherit] text-gray-900 w-full placeholder:text-gray-400"
-            />
-          </div>
-        </div>
-
-        {error && (
-          <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
-            {error}
-          </div>
-        )}
-
-        {contacts === null && !error && (
-          <div className="flex items-center gap-2 text-gray-500 py-12">
-            <Loader2 className="w-4 h-4 animate-spin" />
-            Loading contacts…
-          </div>
-        )}
-
-        {/* Empty state — directional hint per KAN-718 reinforcement #4 */}
-        {contacts !== null && contacts.length === 0 && !searchDebounced && (
-          <div className="bg-white border border-gray-200 rounded-xl p-12 text-center">
-            <div className="w-12 h-12 mx-auto mb-4 rounded-full bg-gray-100 flex items-center justify-center">
-              <Sparkles className="w-6 h-6 text-gray-400" />
-            </div>
-            <h3 className="text-base font-semibold text-gray-900 mb-1">
-              No contacts yet
-            </h3>
-            <p className="text-sm text-gray-500 max-w-md mx-auto">
-              Contacts arrive from the lead inbox (forward leads to your tenant
-              inbox address from <code className="text-xs">/settings/leads/inbox</code>) or via the public Lead API
-              (configure keys at <code className="text-xs">/settings/leads/api</code>). They'll appear here as soon
-              as they land.
-            </p>
-          </div>
-        )}
-
-        {/* Empty state — search returned no results */}
-        {contacts !== null && contacts.length === 0 && searchDebounced && (
-          <div className="bg-white border border-gray-200 rounded-xl p-8 text-center">
-            <p className="text-sm text-gray-500">
-              No contacts match "<span className="font-medium text-gray-700">{searchDebounced}</span>".
-            </p>
-          </div>
-        )}
-
-        {contacts !== null && contacts.length > 0 && (
-          <div className="bg-white border border-gray-200 rounded-xl divide-y divide-gray-100">
-            {contacts.map((c) => {
-              const lc = LIFECYCLE_COLORS[c.lifecycleStage] ?? LIFECYCLE_COLORS.new;
-              return (
-                <div key={c.id} className="px-5 py-4 flex items-center gap-3">
-                  <div className="w-9 h-9 rounded-full bg-indigo-50 text-indigo-700 flex items-center justify-center text-xs font-semibold flex-shrink-0">
-                    {avatarFor(c)}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm font-semibold text-gray-900 truncate">
-                      {displayName(c)}
-                    </div>
-                    <div className="text-xs text-gray-500 truncate">
-                      {c.email ?? 'no email'}
-                      {c.phone && ` · ${c.phone}`}
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2 flex-shrink-0">
-                    {c.segment && (
-                      <span className="text-[11px] bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">
-                        {c.segment}
-                      </span>
-                    )}
-                    <span className={`text-[11px] px-2 py-0.5 rounded-full ${lc.bg} ${lc.text}`}>
-                      {c.lifecycleStage}
-                    </span>
-                    <span className="text-[11px] text-gray-400 hidden sm:inline">
+      ) : isLoading ? (
+        <SkeletonTable />
+      ) : items.length === 0 ? (
+        <EmptyState
+          icon={Users}
+          heading="No contacts yet"
+          body="Contacts will appear here as they come in via email inbox, forms, or ingestion."
+        />
+      ) : (
+        <>
+          <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-gray-50 border-b border-gray-200">
+                <tr className="text-left text-xs font-medium uppercase tracking-wider" style={MUTED_STYLE}>
+                  <th className="px-4 py-3">Contact</th>
+                  <th className="px-4 py-3">Email</th>
+                  <th className="px-4 py-3">Phone</th>
+                  <th className="px-4 py-3">Company</th>
+                  <th className="px-4 py-3">Lifecycle</th>
+                  <th className="px-4 py-3">Source</th>
+                  <th className="px-4 py-3">Created</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-200">
+                {items.map((c) => (
+                  <tr key={c.id} className="hover:bg-gray-50">
+                    {/* Contact (initials + name) */}
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-3">
+                        <div className="w-8 h-8 rounded-full bg-indigo-50 text-indigo-700 flex items-center justify-center text-xs font-semibold flex-shrink-0">
+                          {avatarFor(c)}
+                        </div>
+                        <span className="font-medium text-gray-900">{displayName(c)}</span>
+                      </div>
+                    </td>
+                    {/* Email */}
+                    <td className="px-4 py-3 text-gray-700">
+                      {c.email ? (
+                        <a href={`mailto:${c.email}`} className="text-indigo-600 hover:underline">
+                          {c.email}
+                        </a>
+                      ) : (
+                        <span className="text-gray-400">—</span>
+                      )}
+                    </td>
+                    {/* Phone */}
+                    <td className="px-4 py-3 text-xs" style={MUTED_STYLE}>
+                      {c.phone || '—'}
+                    </td>
+                    {/* Company */}
+                    <td className="px-4 py-3">
+                      {c.company ? (
+                        <Link href={`/companies/${c.company.id}`} className="text-indigo-600 hover:underline">
+                          {c.company.name}
+                        </Link>
+                      ) : c.companyName ? (
+                        <span className="text-gray-700">{c.companyName}</span>
+                      ) : (
+                        <span className="text-gray-400">—</span>
+                      )}
+                    </td>
+                    {/* Lifecycle */}
+                    <td className="px-4 py-3">
+                      <StatusBadge kind="contact-lifecycle" value={c.lifecycleStage} />
+                    </td>
+                    {/* Source */}
+                    <td className="px-4 py-3">
+                      {c.source ? (
+                        <span className="inline-flex items-center px-2.5 py-0.5 text-xs font-medium rounded-full bg-gray-100 text-gray-700 border border-gray-200">
+                          {CONTACT_SOURCE_LABELS[c.source] ?? c.source}
+                        </span>
+                      ) : (
+                        <span className="text-gray-400">—</span>
+                      )}
+                    </td>
+                    {/* Created */}
+                    <td className="px-4 py-3 text-xs" style={MUTED_STYLE}>
                       {relativeTime(c.createdAt)}
-                    </span>
-                  </div>
-                </div>
-              );
-            })}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-        )}
-      </div>
+
+          <div className="mt-4">
+            <p className="text-xs" style={MUTED_STYLE}>
+              Showing {items.length} of {total}
+            </p>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function SkeletonTable() {
+  return (
+    <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+      {[0, 1, 2, 3, 4].map((i) => (
+        <div key={i} className="px-4 py-4 border-b border-gray-100 last:border-b-0 flex items-center gap-4">
+          <div className="w-8 h-8 bg-gray-200 rounded-full animate-pulse" />
+          <div className="h-4 w-40 bg-gray-200 rounded animate-pulse" />
+          <div className="h-4 w-32 bg-gray-100 rounded animate-pulse" />
+          <div className="h-4 w-20 bg-gray-100 rounded animate-pulse" />
+          <div className="h-4 w-16 bg-gray-200 rounded-full animate-pulse ml-auto" />
+          <div className="h-4 w-16 bg-gray-200 rounded animate-pulse" />
+          <div className="h-3 w-16 bg-gray-200 rounded animate-pulse" />
+        </div>
+      ))}
     </div>
   );
 }
