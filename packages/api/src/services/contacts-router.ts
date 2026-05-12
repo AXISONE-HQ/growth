@@ -111,8 +111,13 @@ export async function listContacts(
         companyId: true,
         companyName: true,
         addressLine1: true,
+        // KAN-887: addressLine2 was missed by KAN-883's LIST_SELECT. Surfacing
+        // now so detail pages can render the full mailing block without a
+        // second roundtrip.
+        addressLine2: true,
         city: true,
         region: true,
+        postalCode: true,
         country: true,
         createdAt: true,
         updatedAt: true,
@@ -140,11 +145,72 @@ export async function getContactById(
   const row = await prisma.contact.findFirst({
     where: { id, tenantId },
     include: {
-      // KAN-883 — hydrate Company badge for the read-layer detail view.
-      // Other relations stay lazy (engagement/decision/order joins are heavy
-      // and the detail page will fetch them via their own routes).
+      // KAN-887 — Contact detail page. Hydrates all relations the new
+      // /customers/[id] page needs in one roundtrip. Takes are bounded
+      // (10-20) so payloads stay small even for high-activity contacts.
       company: {
         select: { id: true, name: true, domain: true },
+      },
+      customer: {
+        select: { mrr: true, ltv: true, healthScore: true, status: true, since: true, plan: true },
+      },
+      deals: {
+        take: 20,
+        orderBy: { createdAt: 'desc' },
+        select: {
+          id: true,
+          name: true,
+          status: true,
+          value: true,
+          currency: true,
+          expectedCloseDate: true,
+        },
+      },
+      engagements: {
+        take: 20,
+        orderBy: { occurredAt: 'desc' },
+        select: {
+          id: true,
+          engagementType: true,
+          signalClass: true,
+          channel: true,
+          occurredAt: true,
+          metadata: true,
+        },
+      },
+      outcomes: {
+        take: 20,
+        orderBy: { recordedAt: 'desc' },
+        select: {
+          id: true,
+          result: true,
+          reasonCategory: true,
+          recordedAt: true,
+          objectiveId: true,
+        },
+      },
+      decisions: {
+        take: 10,
+        orderBy: { createdAt: 'desc' },
+        select: {
+          id: true,
+          actionType: true,
+          strategySelected: true,
+          confidence: true,
+          createdAt: true,
+        },
+      },
+      escalations: {
+        take: 10,
+        orderBy: { createdAt: 'desc' },
+        select: {
+          id: true,
+          triggerType: true,
+          triggerReason: true,
+          status: true,
+          severity: true,
+          createdAt: true,
+        },
       },
     },
   });

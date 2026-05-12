@@ -111,7 +111,14 @@ function evalWhere(d: FakeDeal, where: Record<string, unknown>): boolean {
   return true;
 }
 
-function makePrisma(rows: FakeDeal[]) {
+interface FakeUser {
+  id: string;
+  tenantId: string;
+  name: string | null;
+  email: string;
+}
+
+function makePrisma(rows: FakeDeal[], users: FakeUser[] = []) {
   return {
     deal: {
       findMany: async ({
@@ -138,6 +145,29 @@ function makePrisma(rows: FakeDeal[]) {
         where: { id: string; tenantId: string };
       }) =>
         rows.find((r) => r.id === where.id && r.tenantId === where.tenantId) ?? null,
+    },
+    // KAN-888 — manual owner hydration calls prisma.user.findFirst with
+    // tenantId scoping + a `select` clause. Fake mirrors both: tenantId
+    // filter for multi-tenant isolation, and `select` projection so the
+    // returned shape matches what real Prisma would return (id/name/email
+    // only, not the full FakeUser including tenantId).
+    user: {
+      findFirst: async ({
+        where,
+        select,
+      }: {
+        where: { id: string; tenantId: string };
+        select?: Record<string, true>;
+      }) => {
+        const u = users.find(
+          (u) => u.id === where.id && u.tenantId === where.tenantId,
+        );
+        if (!u) return null;
+        if (!select) return u;
+        const out: Record<string, unknown> = {};
+        for (const k of Object.keys(select)) out[k] = (u as Record<string, unknown>)[k];
+        return out;
+      },
     },
   } as never;
 }
@@ -268,5 +298,55 @@ describe("KAN-883 — getDealById", () => {
     await expect(
       getDealById(prisma, TENANT_A, { id: "dl_missing" }),
     ).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+});
+
+// KAN-888 — owner hydration coverage. Deal.ownerId has no Prisma @relation
+// to User; the route does a manual `prisma.user.findFirst` post-fetch,
+// scoped to the same tenant. These tests pin all three legs:
+//   null ownerId → owner: null
+//   matching tenant user → owner populated
+//   cross-tenant user → owner: null (multi-tenant isolation on the user query)
+describe("KAN-888 — getDealById owner hydration", () => {
+  it("ownerId null → owner: null", async () => {
+    const prisma = makePrisma([deal({ id: "dl_1", ownerId: null })], []);
+    const result = (await getDealById(prisma, TENANT_A, { id: "dl_1" })) as {
+      owner: unknown;
+    };
+    expect(result.owner).toBeNull();
+  });
+
+  it("ownerId set + user in same tenant → owner populated", async () => {
+    const prisma = makePrisma(
+      [deal({ id: "dl_1", ownerId: "u_1" })],
+      [{ id: "u_1", tenantId: TENANT_A, name: "Alice", email: "alice@a.com" }],
+    );
+    const result = (await getDealById(prisma, TENANT_A, { id: "dl_1" })) as {
+      owner: unknown;
+    };
+    expect(result.owner).toEqual({
+      id: "u_1",
+      name: "Alice",
+      email: "alice@a.com",
+    });
+  });
+
+  it("ownerId set + user in different tenant → owner: null (cross-tenant scoping)", async () => {
+    const prisma = makePrisma(
+      [deal({ id: "dl_1", ownerId: "u_1" })],
+      [{ id: "u_1", tenantId: TENANT_B, name: "Spy", email: "spy@b.com" }],
+    );
+    const result = (await getDealById(prisma, TENANT_A, { id: "dl_1" })) as {
+      owner: unknown;
+    };
+    expect(result.owner).toBeNull();
+  });
+
+  it("ownerId set + user nonexistent → owner: null", async () => {
+    const prisma = makePrisma([deal({ id: "dl_1", ownerId: "u_missing" })], []);
+    const result = (await getDealById(prisma, TENANT_A, { id: "dl_1" })) as {
+      owner: unknown;
+    };
+    expect(result.owner).toBeNull();
   });
 });

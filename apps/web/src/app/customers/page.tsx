@@ -12,15 +12,16 @@
  * `companyId`, `companyName`, `company` relation, address fields. The
  * Company column links into /companies/[id] when companyId is populated.
  *
- * Row click is intentionally a no-op for V1 — Contact detail page
- * deferred (KAN-887 / Cohort 1 follow-up). Cell content is still
- * clickable where it makes sense (mailto links, company link).
+ * Row click navigates to /customers/[id] (KAN-887). mailto + company
+ * link inside the row stopPropagation so cell-level interactions don't
+ * trigger the row nav.
  *
  * Pagination stays on offset/limit — convergence to cursor is KAN-882.
  */
 
 import { Loader2, RefreshCw, Search, Users } from 'lucide-react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { contactsApi, type ContactListItem } from '@/lib/api';
@@ -70,6 +71,7 @@ function relativeTime(iso: string): string {
 }
 
 export default function CustomersPage() {
+  const router = useRouter();
   const [searchInput, setSearchInput] = useState('');
   const [searchDebounced, setSearchDebounced] = useState('');
   const [lifecycleFilter, setLifecycleFilter] = useState<string | null>(null);
@@ -234,7 +236,16 @@ export default function CustomersPage() {
               </thead>
               <tbody className="divide-y divide-gray-200">
                 {items.map((c) => (
-                  <tr key={c.id} className="hover:bg-gray-50">
+                  <tr
+                    key={c.id}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => router.push(`/customers/${c.id}`)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') router.push(`/customers/${c.id}`);
+                    }}
+                    className="hover:bg-gray-50 cursor-pointer"
+                  >
                     {/* Contact (initials + name) */}
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-3">
@@ -247,7 +258,11 @@ export default function CustomersPage() {
                     {/* Email */}
                     <td className="px-4 py-3 text-gray-700">
                       {c.email ? (
-                        <a href={`mailto:${c.email}`} className="text-indigo-600 hover:underline">
+                        <a
+                          href={`mailto:${c.email}`}
+                          onClick={(e) => e.stopPropagation()}
+                          className="text-indigo-600 hover:underline"
+                        >
                           {c.email}
                         </a>
                       ) : (
@@ -261,7 +276,11 @@ export default function CustomersPage() {
                     {/* Company */}
                     <td className="px-4 py-3">
                       {c.company ? (
-                        <Link href={`/companies/${c.company.id}`} className="text-indigo-600 hover:underline">
+                        <Link
+                          href={`/companies/${c.company.id}`}
+                          onClick={(e) => e.stopPropagation()}
+                          className="text-indigo-600 hover:underline"
+                        >
                           {c.company.name}
                         </Link>
                       ) : c.companyName ? (
