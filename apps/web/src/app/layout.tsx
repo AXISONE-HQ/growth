@@ -20,6 +20,7 @@ import {
   Shield,
   ChevronDown,
   Target,
+  Receipt,
 } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
 import { AuthProvider, useAuth } from '@/lib/AuthContext';
@@ -54,8 +55,15 @@ const navItems: Array<{
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/opportunities', label: 'Opportunities', icon: Target },
   { href: '/conversations', label: 'Conversations', icon: MessageSquare, demoOnly: true },
-  { href: '/escalations', label: 'Escalations', icon: AlertTriangle },
+  // KAN-884 — CRM cohort 1 PR 2. /companies sits between Opportunities and
+  // Customers (orgs → people they belong to); /orders sits after Customers
+  // and before Escalations (transactional outcomes from those people).
+  // activePrefix lets /companies/abc + /orders/xyz keep their parent entry
+  // highlighted via the existing KAN-878 longest-prefix-wins resolver.
+  { href: '/companies', label: 'Companies', icon: Building2, activePrefix: '/companies' },
   { href: '/customers', label: 'Customers', icon: Users },
+  { href: '/orders', label: 'Orders', icon: Receipt, activePrefix: '/orders' },
+  { href: '/escalations', label: 'Escalations', icon: AlertTriangle },
   { href: '/audit', label: 'Audit Log', icon: FileText },
   { href: '/settings/knowledge', label: 'Knowledge Center', icon: BookOpen },
   {
@@ -95,7 +103,9 @@ const pageTitle: Record<string, string> = {
   '/opportunities': 'Opportunities',
   '/conversations': 'Conversations',
   '/escalations': 'Escalations',
+  '/companies': 'Companies',
   '/customers': 'Customers',
+  '/orders': 'Orders',
   '/audit': 'Audit Log',
   '/knowledge': 'Knowledge Center',
   '/settings/knowledge': 'Knowledge Center',
