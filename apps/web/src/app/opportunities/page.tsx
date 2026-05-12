@@ -29,7 +29,7 @@ import { AllDealsView } from './_components/all-deals-view';
 type TabValue = 'ai-segments' | 'all-deals';
 
 export default function OpportunitiesPage() {
-  const [tab, setTab] = useState<TabValue>('ai-segments');
+  const [tab, setTab] = useState<TabValue>('all-deals');
 
   return (
     <div>
@@ -40,14 +40,14 @@ export default function OpportunitiesPage() {
       <div className="bg-white border-b border-gray-200 px-6 py-3">
         <Tabs value={tab} onValueChange={(v) => setTab(v as TabValue)}>
           <TabsList>
-            <TabsTrigger value="ai-segments">AI Segments</TabsTrigger>
             <TabsTrigger value="all-deals">All Deals</TabsTrigger>
+            <TabsTrigger value="ai-segments">AI Segments</TabsTrigger>
           </TabsList>
-          <TabsContent value="ai-segments">
-            <AiSegmentsView />
-          </TabsContent>
           <TabsContent value="all-deals">
             <AllDealsView />
+          </TabsContent>
+          <TabsContent value="ai-segments">
+            <AiSegmentsView />
           </TabsContent>
         </Tabs>
       </div>
