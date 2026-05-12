@@ -9,8 +9,15 @@
 --      legacy 'inbox_email' → 'email_inbox' per Phase 1 audit).
 --   3. Deal.status / Deal.closed_at backfilled from currentStage.outcome_type +
 --      DealStageHistory.transitioned_at for terminal deals.
---   4. `DROP INDEX knowledge_chunk_embedding_hnsw_idx` stripped (Prisma vector-
+--   4. Deal.name backfilled from Contact firstName/lastName (or email) +
+--      deal id so existing rows get human-readable names. NEW INSERTs continue
+--      to use the column DEFAULT 'Untitled deal'.
+--   5. `DROP INDEX knowledge_chunk_embedding_hnsw_idx` stripped (Prisma vector-
 --      index silent-drop drift per the KAN-786 → KAN-787 memory entry).
+--   6. Unrelated catalog-only drift (services TEXT[] DROP DEFAULT,
+--      llm_cost_rollups index rename) split out into a sibling migration
+--      `20260512121915_drift_cleanup_services_llm_cost_rollups` so KAN-879
+--      stays scoped to CRM core schema only.
 --
 -- ─────────────────────────────────────────────────────────────────────────────
 -- 1. CreateEnum (11 new enums for CRM core)
@@ -142,18 +149,29 @@ SET
 FROM "stages" s
 WHERE s."id" = d."current_stage_id";
 
--- ─────────────────────────────────────────────────────────────────────────────
--- 4. AlterTable services — drift cleanup (schema says no DEFAULT on these
---    NOT NULL TEXT[] cols; existing migration created them with DEFAULT).
---    Harmless; pre-existing drift outside KAN-879 scope but bundled here so
---    future migrate diff does not keep re-surfacing it.
--- ─────────────────────────────────────────────────────────────────────────────
-ALTER TABLE "services"
-  ALTER COLUMN "included_items" DROP DEFAULT,
-  ALTER COLUMN "excluded_items" DROP DEFAULT;
+-- 3b. Backfill deal.name from the linked Contact (firstName+lastName, or
+--     firstName, or lastName, or email — first non-empty wins) plus a short
+--     deal-id suffix. New rows post-migration get the column DEFAULT
+--     'Untitled deal'; downstream UI is expected to overwrite via the brain-
+--     driven naming pipeline (KAN-797a successors).
+UPDATE "deals" AS d
+SET "name" = CASE
+    WHEN c."first_name" IS NOT NULL AND c."first_name" <> ''
+     AND c."last_name"  IS NOT NULL AND c."last_name"  <> ''
+        THEN c."first_name" || ' ' || c."last_name" || ' — ' || d."id"
+    WHEN c."first_name" IS NOT NULL AND c."first_name" <> ''
+        THEN c."first_name" || ' — ' || d."id"
+    WHEN c."last_name"  IS NOT NULL AND c."last_name"  <> ''
+        THEN c."last_name"  || ' — ' || d."id"
+    WHEN c."email"      IS NOT NULL AND c."email"      <> ''
+        THEN c."email"      || ' — ' || d."id"
+    ELSE 'Untitled deal — ' || d."id"
+END
+FROM "contacts" c
+WHERE c."id" = d."contact_id";
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- 5. CreateTable companies
+-- 4. CreateTable companies
 -- ─────────────────────────────────────────────────────────────────────────────
 CREATE TABLE "companies" (
     "id" TEXT NOT NULL,
@@ -201,7 +219,7 @@ CREATE TABLE "companies" (
 );
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- 6. CreateTable orders
+-- 5. CreateTable orders
 -- ─────────────────────────────────────────────────────────────────────────────
 CREATE TABLE "orders" (
     "id" TEXT NOT NULL,
@@ -241,7 +259,7 @@ CREATE TABLE "orders" (
 );
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- 7. CreateIndex (companies + orders + contacts + deals)
+-- 6. CreateIndex (companies + orders + contacts + deals)
 -- ─────────────────────────────────────────────────────────────────────────────
 CREATE INDEX "companies_tenant_id_name_idx"            ON "companies"("tenant_id", "name");
 CREATE INDEX "companies_tenant_id_domain_idx"          ON "companies"("tenant_id", "domain");
@@ -266,7 +284,7 @@ CREATE INDEX "deals_tenant_id_company_id_status_idx"    ON "deals"("tenant_id", 
 CREATE INDEX "deals_tenant_id_expected_close_date_idx"  ON "deals"("tenant_id", "expected_close_date");
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- 8. AddForeignKey
+-- 7. AddForeignKey
 -- ─────────────────────────────────────────────────────────────────────────────
 ALTER TABLE "contacts"  ADD CONSTRAINT "contacts_company_id_fkey"  FOREIGN KEY ("company_id") REFERENCES "companies"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 ALTER TABLE "deals"     ADD CONSTRAINT "deals_company_id_fkey"     FOREIGN KEY ("company_id") REFERENCES "companies"("id") ON DELETE SET NULL ON UPDATE CASCADE;
@@ -275,10 +293,3 @@ ALTER TABLE "orders"    ADD CONSTRAINT "orders_tenant_id_fkey"     FOREIGN KEY (
 ALTER TABLE "orders"    ADD CONSTRAINT "orders_contact_id_fkey"    FOREIGN KEY ("contact_id") REFERENCES "contacts"("id")  ON DELETE RESTRICT ON UPDATE CASCADE;
 ALTER TABLE "orders"    ADD CONSTRAINT "orders_company_id_fkey"    FOREIGN KEY ("company_id") REFERENCES "companies"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 ALTER TABLE "orders"    ADD CONSTRAINT "orders_deal_id_fkey"       FOREIGN KEY ("deal_id")    REFERENCES "deals"("id")     ON DELETE SET NULL ON UPDATE CASCADE;
-
--- ─────────────────────────────────────────────────────────────────────────────
--- 9. RenameIndex — pre-existing drift on llm_cost_rollups (truncation rename).
---    Bundled in this migration so future `migrate diff` runs stay clean.
--- ─────────────────────────────────────────────────────────────────────────────
-ALTER INDEX "llm_cost_rollups_tenant_id_hour_bucket_caller_tag_prefix_pri_ke"
-  RENAME TO "llm_cost_rollups_tenant_id_hour_bucket_caller_tag_prefix_pr_key";
