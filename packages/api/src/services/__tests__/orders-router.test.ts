@@ -9,6 +9,7 @@
  *   - getOrderById returns NOT_FOUND on cross-tenant + nonexistent id
  */
 import { describe, it, expect } from "vitest";
+import { z } from "zod";
 import { listOrders, getOrderById } from "../orders-router.js";
 import { decodeCursor } from "../_pagination.js";
 
@@ -254,5 +255,43 @@ describe("KAN-883 — getOrderById", () => {
     await expect(
       getOrderById(prisma, TENANT_A, { id: "ord_missing" }),
     ).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// KAN-893 — tRPC validator regression: CUID-shaped ids + FK filters
+// accepted. Mirrors apps/api/src/router.ts:489 (orders.get),
+// router.ts:477 (companyId filter), and router.ts:478 (dealId filter).
+// Pre-KAN-893, all three were `.uuid()` which rejected every real PROD
+// Order/Company/Deal id (all three use @default(cuid()) — KAN-879).
+// ─────────────────────────────────────────────────────────────────────
+describe("KAN-893 — orders.get tRPC input validator", () => {
+  const inputSchema = z.object({ id: z.string().cuid() });
+
+  it("accepts CUID-shaped id (e.g. PROD Order.id format)", () => {
+    const result = inputSchema.safeParse({ id: "cmou3yc2o0002a9tnt34f5q81" });
+    expect(result.success).toBe(true);
+  });
+});
+
+describe("KAN-893 — orders.list?companyId tRPC input validator", () => {
+  const inputSchema = z.object({
+    companyId: z.string().cuid().optional(),
+  });
+
+  it("accepts CUID-shaped companyId filter", () => {
+    const result = inputSchema.safeParse({ companyId: "cmou3yc2o0002a9tnt34f5q81" });
+    expect(result.success).toBe(true);
+  });
+});
+
+describe("KAN-893 — orders.list?dealId tRPC input validator", () => {
+  const inputSchema = z.object({
+    dealId: z.string().cuid().optional(),
+  });
+
+  it("accepts CUID-shaped dealId filter", () => {
+    const result = inputSchema.safeParse({ dealId: "cmou3yc2o0002a9tnt34f5q81" });
+    expect(result.success).toBe(true);
   });
 });

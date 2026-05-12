@@ -10,6 +10,7 @@
  *   - Cursor + search compose via AND (regression for OR-clobber bug)
  */
 import { describe, it, expect } from "vitest";
+import { z } from "zod";
 import { listDeals, getDealById } from "../deals-router.js";
 
 const TENANT_A = "11111111-1111-1111-1111-111111111111";
@@ -348,5 +349,31 @@ describe("KAN-888 — getDealById owner hydration", () => {
       owner: unknown;
     };
     expect(result.owner).toBeNull();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// KAN-893 — tRPC validator regression: CUID-shaped id + FK filter
+// accepted. Mirrors apps/api/src/router.ts:546 (deals.get) and
+// router.ts:533 (companyId filter). Pre-KAN-893 both were `.uuid()`
+// which rejected every real PROD Deal/Company id.
+// ─────────────────────────────────────────────────────────────────────
+describe("KAN-893 — deals.get tRPC input validator", () => {
+  const inputSchema = z.object({ id: z.string().cuid() });
+
+  it("accepts CUID-shaped id (e.g. PROD Deal.id format)", () => {
+    const result = inputSchema.safeParse({ id: "cmou3yc2o0002a9tnt34f5q81" });
+    expect(result.success).toBe(true);
+  });
+});
+
+describe("KAN-893 — deals.list?companyId tRPC input validator", () => {
+  const inputSchema = z.object({
+    companyId: z.string().cuid().optional(),
+  });
+
+  it("accepts CUID-shaped companyId filter", () => {
+    const result = inputSchema.safeParse({ companyId: "cmou3yc2o0002a9tnt34f5q81" });
+    expect(result.success).toBe(true);
   });
 });
