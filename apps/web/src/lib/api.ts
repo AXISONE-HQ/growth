@@ -1205,6 +1205,15 @@ export type ImportStatus =
   | 'failed';
 export type ImportFileType = 'csv' | 'xlsx' | 'unknown';
 
+// KAN-904 — Cohort 2.2. AI-detected entity type (mirrors Prisma enum).
+export type DetectedEntityType =
+  | 'contacts'
+  | 'companies'
+  | 'deals'
+  | 'orders'
+  | 'mixed'
+  | 'unknown';
+
 export interface ImportJobListItem {
   id: string;
   fileName: string;
@@ -1232,6 +1241,17 @@ export interface ImportJobDetail extends ImportJobListItem {
   errorAt: string | null;
   inspectionStartedAt: string | null;
   tenantId: string;
+  // KAN-904 — Cohort 2.2 AI entity detection fields.
+  detectedEntityType: DetectedEntityType | null;
+  detectionConfidence: number | null;
+  detectionReasoning: string | null;
+  detectionStartedAt: string | null;
+  detectionCompletedAt: string | null;
+  detectionError: string | null;
+  detectionErrorAt: string | null;
+  detectionInputTokens: number | null;
+  detectionOutputTokens: number | null;
+  detectionLlmModel: string | null;
 }
 
 export interface CreateUploadUrlResult {
@@ -1259,4 +1279,8 @@ export const importJobsApi = {
       input ?? { limit: 50 },
     ),
   get: (id: string) => trpcQuery<ImportJobDetail>('importJobs.get', { id }),
+  // KAN-904 — AI entity detection. Mutation: blocks until Haiku
+  // responds (typical 1-3s) and returns the updated ImportJob.
+  runDetection: (importJobId: string) =>
+    trpcMutation<ImportJobDetail>('importJobs.runDetection', { importJobId }),
 };

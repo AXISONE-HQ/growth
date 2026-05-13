@@ -1,0 +1,6 @@
+deal_name,amount,currency,stage,expected_close_date,owner_email
+Acme Annual Renewal,48000,USD,negotiation,2026-06-30,sarah.lee@growth.io
+Nordic Supply Expansion,72000,EUR,proposal,2026-07-15,marcus.kelly@growth.io
+Hexa Robotics POC,15000,USD,discovery,2026-05-31,sarah.lee@growth.io
+BrightStack Pilot,9500,USD,closed_won,2026-04-22,marcus.kelly@growth.io
+Vela Logistics Multi-Year,210000,USD,negotiation,2026-09-30,sarah.lee@growth.io

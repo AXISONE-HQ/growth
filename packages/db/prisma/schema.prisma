@@ -1986,6 +1986,22 @@ enum ImportFileType {
   @@map("import_file_type")
 }
 
+// KAN-904 — Ingestion Cohort 2.2. AI-detected entity type for an
+// uploaded file. `unknown` is the conservative coercion when the LLM
+// confidence is below the 50% threshold — the LLM's preferred type
+// is preserved in `detectionReasoning` text for the operator to
+// review manually.
+enum DetectedEntityType {
+  contacts
+  companies
+  deals
+  orders
+  mixed
+  unknown
+
+  @@map("detected_entity_type")
+}
+
 model ImportJob {
   id              String @id @default(cuid())
   tenantId        String @map("tenant_id")
@@ -2015,6 +2031,37 @@ model ImportJob {
   /// Array<Record<string, unknown>> — first 5 data rows.
   sampleRows          Json?           @map("sample_rows")
 
+  // KAN-904 — Ingestion Cohort 2.2. AI entity detection (Haiku via
+  // llm-client tier='cheap'). Populated by `runEntityDetection`
+  // service when the user clicks "Run detection" on the file detail
+  // page. Detection is gated on status='inspected' but does not change
+  // status — it's an additive enrichment of an already-inspected job.
+  //
+  // NOTE: detectionInputTokens / detectionOutputTokens / detectionLlmModel
+  // are denormalized snapshots for fast UI display. The canonical cost
+  // source is the `llm.call` Pub/Sub topic emitted by
+  // llm-client.complete() (KAN-734/745). These three values come from
+  // the same complete() response — they MUST NOT diverge.
+  detectedEntityType    DetectedEntityType? @map("detected_entity_type")
+  /// 0-100 (loose Int; service validates 0..100 before write).
+  detectionConfidence   Int?                @map("detection_confidence")
+  /// 2-3 sentences from the LLM explaining the classification. When
+  /// confidence < 50 and we coerce detectedEntityType to 'unknown',
+  /// the LLM's original preferred type is preserved in this text.
+  detectionReasoning    String?             @map("detection_reasoning")
+  detectionStartedAt    DateTime?           @map("detection_started_at")
+  /// Set on success only.
+  detectionCompletedAt  DateTime?           @map("detection_completed_at")
+  detectionError        String?             @map("detection_error")
+  /// Mirrors the inspection.errorAt convention — set on failure only.
+  detectionErrorAt      DateTime?           @map("detection_error_at")
+  detectionInputTokens  Int?                @map("detection_input_tokens")
+  detectionOutputTokens Int?                @map("detection_output_tokens")
+  /// Verbatim `response.model` from llm-client.complete() — e.g.
+  /// "claude-haiku-4-5-20251001". Stored as-is so the UI footer can
+  /// surface exactly which model produced the classification.
+  detectionLlmModel     String?             @map("detection_llm_model")
+
   // Error tracking.
   errorMessage String?   @map("error_message")
   errorAt      DateTime? @map("error_at")
@@ -2039,6 +2086,9 @@ model ImportJob {
   @@index([tenantId, status])
   @@index([tenantId, createdAt(sort: Desc)])
   @@index([createdByUserId])
+  // KAN-904 — filter jobs by detection state for the future cohort
+  // dashboard ("show me all unknown classifications for retraining").
+  @@index([tenantId, detectedEntityType])
   @@map("import_jobs")
 }
 

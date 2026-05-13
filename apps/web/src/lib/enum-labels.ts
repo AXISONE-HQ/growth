@@ -148,6 +148,16 @@ export const IMPORT_FILE_TYPE_LABELS: Record<string, string> = {
   unknown: "Unknown",
 };
 
+// KAN-904 — Cohort 2.2. AI entity-detection result label.
+export const DETECTED_ENTITY_TYPE_LABELS: Record<string, string> = {
+  contacts: "Contacts",
+  companies: "Companies",
+  deals: "Deals",
+  orders: "Orders",
+  mixed: "Mixed (multiple entity types)",
+  unknown: "Unknown",
+};
+
 // ─────────────────────────────────────────────────────────────────────────
 // Safe lookup helper
 // ─────────────────────────────────────────────────────────────────────────

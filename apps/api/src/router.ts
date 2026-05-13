@@ -602,6 +602,12 @@ interface ImportJobsRouterModule {
     tenantId: string,
     input: { id: string },
   ) => Promise<unknown>;
+  // KAN-904 — Cohort 2.2 AI entity detection.
+  runEntityDetection: (
+    prisma: unknown,
+    importJobId: string,
+    tenantId: string,
+  ) => Promise<unknown>;
 }
 let _importJobsModule: ImportJobsRouterModule | null = null;
 async function loadImportJobsModule(): Promise<ImportJobsRouterModule> {
@@ -704,6 +710,17 @@ const importJobsRouter = router({
     .query(async ({ ctx, input }) => {
       const { getImportJobById } = await loadImportJobsModule();
       return getImportJobById(ctx.prisma, ctx.tenantId, input);
+    }),
+
+  // KAN-904 — Cohort 2.2 AI entity detection. Runs Haiku-via-llm-client
+  // on the file's headers + sample rows. Idempotent: re-running on a
+  // job that already has detection results clears the previous fields
+  // before writing fresh ones.
+  runDetection: protectedProcedure
+    .input(z.object({ importJobId: z.string().cuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const { runEntityDetection } = await loadImportJobsModule();
+      return runEntityDetection(ctx.prisma, input.importJobId, ctx.tenantId);
     }),
 });
 
