@@ -31,6 +31,7 @@ import {
   FileText,
   Loader2,
   ListChecks,
+  Scan,
   Sparkles,
   Upload,
   XCircle,
@@ -371,7 +372,12 @@ export default function ImportDetailPage() {
         <MappingCard job={job} />
       ) : null}
 
-      {/* Card 6 — Timestamps */}
+      {/* Card 6 — Duplicate Detection (KAN-911) — gated on field mapping confirmation */}
+      {showInspection && job.detectedEntityType && job.fieldMappingConfirmedAt ? (
+        <DuplicateDetectionCard job={job} />
+      ) : null}
+
+      {/* Card 7 — Timestamps */}
       <section className="bg-white border rounded-lg p-6">
         <h2 className="text-sm font-semibold mb-3" style={SECTION_HEADER_STYLE}>
           Timestamps
@@ -483,11 +489,27 @@ export default function ImportDetailPage() {
                 <strong>
                   {enumLabel(DETECTED_ENTITY_TYPE_LABELS, job.detectedEntityType)}
                 </strong>
-                . Complete column mapping (Card 4) before continuing to staging.
+                . Complete column mapping (Card 5) before continuing to staging.
               </p>
               <Button disabled variant="outline" title="Complete and save column mapping first">
                 Continue to staging
               </Button>
+            </div>
+          ) : !job.dedupConfirmedAt ? (
+            <div className="space-y-2">
+              <p className="text-sm" style={LABEL_STYLE}>
+                File classified as{' '}
+                <strong>
+                  {enumLabel(DETECTED_ENTITY_TYPE_LABELS, job.detectedEntityType)}
+                </strong>
+                . Review and confirm duplicate detection (Card 6) before continuing
+                to commit.
+              </p>
+              <Link href={`/imports/${job.id}/duplicates`}>
+                <Button variant="default">
+                  <Scan className="w-4 h-4 mr-1.5" aria-hidden /> Review duplicates
+                </Button>
+              </Link>
             </div>
           ) : (
             <div className="space-y-2">
@@ -496,11 +518,11 @@ export default function ImportDetailPage() {
                 <strong>
                   {enumLabel(DETECTED_ENTITY_TYPE_LABELS, job.detectedEntityType)}
                 </strong>
-                {' '}and column mappings are saved. The next phase — staging — ships in
-                a later release.
+                , column mappings are saved, and duplicates are resolved. The final
+                phase — commit — ships in a later release.
               </p>
               <Button disabled variant="outline">
-                Continue to staging (coming in next release)
+                Commit import (coming in next release)
               </Button>
             </div>
           )
@@ -1160,6 +1182,232 @@ function RowClassificationCard({
       <Button onClick={onRun} variant="default">
         <ListChecks className="w-4 h-4 mr-1.5" aria-hidden /> Classify rows
       </Button>
+    </section>
+  );
+}
+
+// ─────────────────────────────────────────────
+// KAN-911 — Duplicate Detection card subcomponent.
+//
+// Four states (mutually exclusive):
+//   (a) idle      — never run AND no error → "Scan for duplicates" CTA
+//   (b) running   — handled by the page on the duplicates sub-route; this
+//                   card never shows a spinner (the mutation lives there).
+//                   Here, dedupStartedAt without dedupCompletedAt would
+//                   only appear briefly during a re-run on the parent page,
+//                   which we don't support yet — so we render it as
+//                   "scanning…" without a button.
+//   (c) reviewed  — dedupCompletedAt populated, no confirmation yet →
+//                   summary counts + "Review duplicates" CTA
+//   (d) confirmed — dedupConfirmedAt populated → green check + summary +
+//                   "Review again" (read-only) CTA
+//   (e) error     — dedupError populated AND no dedupCompletedAt → red
+//                   panel + Retry (link to /duplicates which shows the
+//                   retry button)
+// ─────────────────────────────────────────────
+
+function DuplicateDetectionCard({ job }: { job: ImportJobDetail }) {
+  const counts = job.dedupCounts;
+  const isConfirmed = !!job.dedupConfirmedAt;
+  const hasCompleted = !!job.dedupCompletedAt;
+  const isRunning = !!job.dedupStartedAt && !hasCompleted && !job.dedupError;
+  const hasError = !!job.dedupError && !hasCompleted;
+
+  if (isRunning) {
+    return (
+      <section className="bg-white border rounded-lg p-6">
+        <h2 className="text-sm font-semibold mb-3" style={SECTION_HEADER_STYLE}>
+          Duplicate Detection
+        </h2>
+        <div className="flex items-center gap-2 text-sm" style={LABEL_STYLE}>
+          <Loader2 className="w-4 h-4 animate-spin" aria-hidden />
+          Scanning for duplicates…
+        </div>
+      </section>
+    );
+  }
+
+  // (e) Error.
+  if (hasError) {
+    return (
+      <section className="bg-red-50 border border-red-200 rounded-lg p-6">
+        <div className="flex items-start gap-3">
+          <XCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" aria-hidden />
+          <div className="flex-1 min-w-0">
+            <h2 className="text-sm font-semibold text-red-800">
+              Duplicate Detection — Failed
+            </h2>
+            <p className="text-sm mt-1 text-red-700 whitespace-pre-wrap break-words">
+              {job.dedupError}
+            </p>
+            <p
+              className="text-xs mt-2"
+              style={MUTED_STYLE}
+              title={fmtDateTime(job.dedupErrorAt)}
+            >
+              Failed {relativeTime(job.dedupErrorAt)}
+            </p>
+            <div className="mt-3">
+              <Link href={`/imports/${job.id}/duplicates`}>
+                <Button variant="default">
+                  <Scan className="w-4 h-4 mr-1.5" aria-hidden /> Retry
+                </Button>
+              </Link>
+            </div>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  // (c) + (d) — reviewed / confirmed.
+  if (hasCompleted && counts) {
+    const totalRows =
+      counts.byEntity.contacts.total +
+      counts.byEntity.companies.total +
+      counts.byEntity.deals.total +
+      counts.byEntity.orders.total;
+    const totalNeedsReview =
+      counts.byEntity.contacts.needsReview +
+      counts.byEntity.companies.needsReview +
+      counts.byEntity.deals.needsReview +
+      counts.byEntity.orders.needsReview;
+    const totalExact =
+      counts.byEntity.contacts.exactMatches +
+      counts.byEntity.companies.exactMatches +
+      counts.byEntity.deals.exactMatches +
+      counts.byEntity.orders.exactMatches;
+    const totalFuzzy =
+      counts.byEntity.contacts.fuzzyMatches +
+      counts.byEntity.companies.fuzzyMatches +
+      counts.byEntity.deals.fuzzyMatches +
+      counts.byEntity.orders.fuzzyMatches;
+    const totalInsert =
+      counts.byEntity.contacts.insertOnly +
+      counts.byEntity.companies.insertOnly +
+      counts.byEntity.deals.insertOnly +
+      counts.byEntity.orders.insertOnly;
+    const candidatesScanned =
+      counts.candidatesScanned.contacts +
+      counts.candidatesScanned.companies +
+      counts.candidatesScanned.deals +
+      counts.candidatesScanned.orders;
+    const startedMs = job.dedupStartedAt
+      ? new Date(job.dedupStartedAt).getTime()
+      : null;
+    const completedMs = job.dedupCompletedAt
+      ? new Date(job.dedupCompletedAt).getTime()
+      : null;
+    const durationSec =
+      startedMs != null && completedMs != null
+        ? ((completedMs - startedMs) / 1000).toFixed(1)
+        : null;
+
+    return (
+      <section className="bg-white border rounded-lg p-6">
+        <div className="flex items-start justify-between mb-3 gap-3 flex-wrap">
+          <div className="flex items-center gap-2">
+            {isConfirmed ? (
+              <CheckCircle2 className="w-5 h-5 text-emerald-600" aria-hidden />
+            ) : null}
+            <h2 className="text-sm font-semibold" style={SECTION_HEADER_STYLE}>
+              Duplicate Detection{isConfirmed ? ' (confirmed)' : ''}
+            </h2>
+          </div>
+          <Link href={`/imports/${job.id}/duplicates`}>
+            <Button variant={isConfirmed ? 'outline' : 'default'} size="sm">
+              <Scan className="w-3.5 h-3.5 mr-1.5" aria-hidden />
+              {isConfirmed ? 'Review again' : 'Review duplicates'}
+            </Button>
+          </Link>
+        </div>
+
+        <p className="text-sm mb-3" style={LABEL_STYLE}>
+          Scanned <strong>{totalRows.toLocaleString()}</strong> staged row
+          {totalRows === 1 ? '' : 's'} against{' '}
+          <strong>{candidatesScanned.toLocaleString()}</strong> existing record
+          {candidatesScanned === 1 ? '' : 's'}.
+        </p>
+
+        <div className="flex flex-wrap gap-2 mb-3">
+          {totalExact > 0 ? (
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 text-sm font-medium rounded-full border bg-emerald-50 text-emerald-700 border-emerald-200">
+              <strong>{totalExact.toLocaleString()}</strong>
+              <span>exact</span>
+            </span>
+          ) : null}
+          {totalFuzzy > 0 ? (
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 text-sm font-medium rounded-full border bg-amber-50 text-amber-700 border-amber-200">
+              <strong>{totalFuzzy.toLocaleString()}</strong>
+              <span>fuzzy</span>
+            </span>
+          ) : null}
+          {totalNeedsReview > 0 ? (
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 text-sm font-medium rounded-full border bg-orange-50 text-orange-700 border-orange-200">
+              <strong>{totalNeedsReview.toLocaleString()}</strong>
+              <span>need review</span>
+            </span>
+          ) : null}
+          {totalInsert > 0 ? (
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 text-sm font-medium rounded-full border bg-gray-100 text-gray-700 border-gray-200">
+              <strong>{totalInsert.toLocaleString()}</strong>
+              <span>insert as new</span>
+            </span>
+          ) : null}
+        </div>
+
+        {totalNeedsReview > 0 && !isConfirmed ? (
+          <div
+            className="flex items-center gap-2 text-xs px-3 py-1.5 rounded-md border"
+            style={{
+              backgroundColor: 'var(--ds-warning-soft)',
+              color: 'var(--ds-warning-text)',
+              borderColor: 'var(--ds-warning)',
+            }}
+          >
+            <AlertTriangle className="w-3.5 h-3.5" aria-hidden />
+            <span>
+              <strong>{totalNeedsReview.toLocaleString()}</strong> row
+              {totalNeedsReview === 1 ? '' : 's'} need an explicit decision before
+              you can confirm.
+            </span>
+          </div>
+        ) : null}
+
+        {isConfirmed ? (
+          <p
+            className="text-xs mt-3"
+            style={MUTED_STYLE}
+            title={fmtDateTime(job.dedupConfirmedAt)}
+          >
+            Confirmed {relativeTime(job.dedupConfirmedAt)}
+          </p>
+        ) : null}
+
+        <div className="text-xs mt-3 pt-3 border-t border-gray-100" style={MUTED_STYLE}>
+          Rule-based + Levenshtein (no LLM)
+          {durationSec != null ? ` · Duration: ${durationSec}s` : null}
+        </div>
+      </section>
+    );
+  }
+
+  // (a) Idle.
+  return (
+    <section className="bg-white border rounded-lg p-6">
+      <h2 className="text-sm font-semibold mb-2" style={SECTION_HEADER_STYLE}>
+        Scan for duplicates
+      </h2>
+      <p className="text-sm mb-4" style={LABEL_STYLE}>
+        Compare each staged row against your existing contacts, companies, deals,
+        and orders to flag potential duplicates. Rule-based + fuzzy name matching,
+        no AI — fully deterministic.
+      </p>
+      <Link href={`/imports/${job.id}/duplicates`}>
+        <Button variant="default">
+          <Scan className="w-4 h-4 mr-1.5" aria-hidden /> Scan for duplicates
+        </Button>
+      </Link>
     </section>
   );
 }

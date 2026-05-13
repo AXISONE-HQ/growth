@@ -1,0 +1,124 @@
+{
+  "comment": "KAN-911 — Staged rows representing the user's just-uploaded import. Each row exercises a distinct matcher path. Pair this with existing-tenant-data.json for end-to-end matcher validation.",
+  "contacts": [
+    {
+      "sourceRowIndex": 0,
+      "comment": "Exact email match → score 100, suggestedAction='update', signal=email_exact.",
+      "email": "ALICE@example.com",
+      "firstName": "Alice",
+      "lastName": "Anderson",
+      "phone": null,
+      "companyName": "Acme Corporation"
+    },
+    {
+      "sourceRowIndex": 1,
+      "comment": "Phone NANP fallback → score 95 (existing has +1-415-..., staging has 10-digit only).",
+      "email": null,
+      "phone": "4155550142",
+      "firstName": "Alice",
+      "lastName": "Anderson",
+      "companyName": null
+    },
+    {
+      "sourceRowIndex": 2,
+      "comment": "Fuzzy name + same company → score ≥ 85, signal=name_fuzzy.",
+      "email": "alicia.a@unknown-domain.com",
+      "firstName": "Alyce",
+      "lastName": "Anderson",
+      "phone": null,
+      "companyName": "ACME corp."
+    },
+    {
+      "sourceRowIndex": 3,
+      "comment": "No overlap (Zulu starts with z, all existing start with a/b/é) → empty candidates, suggestedAction='insert'.",
+      "email": "zoe@zulu.io",
+      "firstName": "Zoe",
+      "lastName": "Zhou",
+      "phone": null,
+      "companyName": "Zulu Co"
+    }
+  ],
+  "companies": [
+    {
+      "sourceRowIndex": 0,
+      "comment": "Exact domain match → score 100 (existing 'Acme.COM' vs 'acme.com').",
+      "name": "Acme",
+      "domain": "acme.com"
+    },
+    {
+      "sourceRowIndex": 1,
+      "comment": "Name typo → fuzzy name match, score ≤ 94.",
+      "name": "Acme Corp",
+      "domain": null
+    },
+    {
+      "sourceRowIndex": 2,
+      "comment": "Legal-name match → signal=legal_name_fuzzy.",
+      "name": "Acme Holdings",
+      "domain": null
+    },
+    {
+      "sourceRowIndex": 3,
+      "comment": "No match.",
+      "name": "Zulu Industries",
+      "domain": "zulu.io"
+    }
+  ],
+  "deals": [
+    {
+      "sourceRowIndex": 0,
+      "comment": "Name + email + 30-day window → score 90.",
+      "name": "Acme Renewal Q1",
+      "contactEmail": "alice@example.com",
+      "expectedCloseDate": "2026-06-15"
+    },
+    {
+      "sourceRowIndex": 1,
+      "comment": "Name + email, out of window → score ≤ 85.",
+      "name": "Acme Renewal Q1",
+      "contactEmail": "alice@example.com",
+      "expectedCloseDate": "2027-01-01"
+    },
+    {
+      "sourceRowIndex": 2,
+      "comment": "Same name, different contactEmail → no match (conservative).",
+      "name": "Acme Renewal Q1",
+      "contactEmail": "other@example.com",
+      "expectedCloseDate": "2026-06-15"
+    }
+  ],
+  "orders": [
+    {
+      "sourceRowIndex": 0,
+      "comment": "Same providerOrderId → score 100, signal=provider_order_id_exact.",
+      "orderNumber": "ORD-7777",
+      "providerOrderId": "shopify_999",
+      "contactEmail": null,
+      "placedAt": null
+    },
+    {
+      "sourceRowIndex": 1,
+      "comment": "Same orderNumber + same email + within 24h → score 90.",
+      "orderNumber": "ORD-1234",
+      "providerOrderId": null,
+      "contactEmail": "alice@example.com",
+      "placedAt": "2026-05-13T18:00:00Z"
+    },
+    {
+      "sourceRowIndex": 2,
+      "comment": "Same orderNumber, different email → score 95 (orderNumber alone).",
+      "orderNumber": "ORD-1234",
+      "providerOrderId": null,
+      "contactEmail": "other@example.com",
+      "placedAt": "2026-05-13T18:00:00Z"
+    },
+    {
+      "sourceRowIndex": 3,
+      "comment": "Unknown orderNumber + unknown providerOrderId → no match.",
+      "orderNumber": "ORD-NEW-001",
+      "providerOrderId": "stripe_pi_xyz",
+      "contactEmail": "newperson@example.com",
+      "placedAt": "2026-05-13T10:00:00Z"
+    }
+  ]
+}

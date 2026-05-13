@@ -388,3 +388,42 @@ export {
   type RowClassificationCounts,
   type ClassifiedEntity,
 } from "./import-row-classification.js";
+
+// ─────────────────────────────────────────────
+// KAN-911 — Ingestion Cohort 2.6. Duplicate detection (rule-based +
+// Levenshtein, no LLM). Same thin-re-export pattern.
+// ─────────────────────────────────────────────
+
+export interface RunDuplicateDetectionInput {
+  importJobId: string;
+}
+
+export interface GetStagingForReviewInput {
+  importJobId: string;
+  entityType: "contacts" | "companies" | "deals" | "orders";
+  filterAction?: "update" | "needs_review" | "insert" | "skip";
+}
+
+export interface OverrideStagingDecisionInput {
+  stagingId: string;
+  entityType: "contacts" | "companies" | "deals" | "orders";
+  newAction: "update" | "needs_review" | "insert" | "skip";
+  chosenCandidateId?: string;
+}
+
+export interface ConfirmDuplicateResolutionInput {
+  importJobId: string;
+}
+
+export {
+  runDuplicateDetection,
+  overrideStagingDecision,
+  confirmDuplicateResolution,
+  getStagingForReview,
+  type EntityType as DedupEntityType,
+  type SuggestedAction as DedupSuggestedAction,
+  type SignalName as DedupSignalName,
+  type MatchCandidate as DedupMatchCandidate,
+  type MatchDecision as DedupMatchDecision,
+  type DedupCounts,
+} from "./import-dedup.js";
