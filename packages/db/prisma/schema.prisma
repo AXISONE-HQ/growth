@@ -100,6 +100,13 @@ model Tenant {
   orders                 Order[]
   // KAN-896 — Ingestion Cohort 2.1a (upload backend)
   imports                ImportJob[]
+  // KAN-903 — Ingestion Cohort 2.5 (staging tables). Tenant-scoped so
+  // staging-status dashboards + cross-table aggregate queries can join
+  // by tenant without going through ImportJob.
+  stagingContacts        ImportStagingContact[]
+  stagingCompanies       ImportStagingCompany[]
+  stagingDeals           ImportStagingDeal[]
+  stagingOrders          ImportStagingOrder[]
 
   //   tenantSettings  TenantSettings[]  // commented out for smoke build (model missing on main)
   channelConnections ChannelConnection[]
@@ -182,29 +189,29 @@ model BrainSnapshot {
 // ─────────────────────────────────────────────
 
 model Contact {
-  id                String          @id @default(uuid())
-  tenantId          String          @map("tenant_id")
+  id                String         @id @default(uuid())
+  tenantId          String         @map("tenant_id")
   email             String?
   phone             String?
-  firstName         String?         @map("first_name")
-  lastName          String?         @map("last_name")
-  externalIds       Json            @default("{}") @map("external_ids")
-  dataQualityScore  Float           @default(0) @map("data_quality_score")
+  firstName         String?        @map("first_name")
+  lastName          String?        @map("last_name")
+  externalIds       Json           @default("{}") @map("external_ids")
+  dataQualityScore  Float          @default(0) @map("data_quality_score")
   segment           String?
   // KAN-879 — String → enum coercion via migration CASE WHEN
   // (legacy 'new' rows → 'lead').
-  lifecycleStage    LifecycleStage  @default(lead) @map("lifecycle_stage")
+  lifecycleStage    LifecycleStage @default(lead) @map("lifecycle_stage")
   // KAN-879 — String? → enum? coercion via migration CASE WHEN
   // (legacy 'inbox_email' → 'email_inbox', unknowns → 'other').
   source            ContactSource?
   // KAN-879 — CRM Core Schema additions
-  companyId         String?         @map("company_id")
-  companyName       String?         @map("company_name")
-  addressLine1      String?         @map("address_line_1")
-  addressLine2      String?         @map("address_line_2")
+  companyId         String?        @map("company_id")
+  companyName       String?        @map("company_name")
+  addressLine1      String?        @map("address_line_1")
+  addressLine2      String?        @map("address_line_2")
   city              String?
   region            String?
-  postalCode        String?         @map("postal_code")
+  postalCode        String?        @map("postal_code")
   /// ISO 3166-1 alpha-2.
   country           String?
   // KAN-700 + KAN-791: pipeline-aware lead state.
@@ -213,11 +220,11 @@ model Contact {
   // (per PRD §5 reader-migration deferral list).
   // microObjectiveProgress DROPPED by KAN-791 — moved to Deal.microObjectiveProgress
   // (pre-flight #4 verified 0 prod contacts had non-default values).
-  currentPipelineId String?         @map("current_pipeline_id")
-  currentStageId    String?         @map("current_stage_id")
-  enteredStageAt    DateTime?       @map("entered_stage_at")
-  createdAt         DateTime        @default(now()) @map("created_at")
-  updatedAt         DateTime        @updatedAt @map("updated_at")
+  currentPipelineId String?        @map("current_pipeline_id")
+  currentStageId    String?        @map("current_stage_id")
+  enteredStageAt    DateTime?      @map("entered_stage_at")
+  createdAt         DateTime       @default(now()) @map("created_at")
+  updatedAt         DateTime       @updatedAt @map("updated_at")
 
   tenant          Tenant         @relation(fields: [tenantId], references: [id])
   contactStates   ContactState[]
@@ -1185,34 +1192,34 @@ model FaqEntry {
 //   queued → embedding → ready  (success path)
 //   queued → embedding → error  (terminal failure with errorDetail)
 model Service {
-  id                String           @id @default(uuid())
-  tenantId          String           @map("tenant_id")
-  title             String
-  description       String           @db.Text
+  id               String           @id @default(uuid())
+  tenantId         String           @map("tenant_id")
+  title            String
+  description      String           @db.Text
   /// Nullable when priceUnit=CUSTOM (operator typed a free-form label
   /// like "Contact for quote" instead of a numeric price). Otherwise the
   /// numeric value paired with the priceUnit (e.g., 50.00 + PER_HOUR =
   /// "$50 per hour").
-  price             Decimal?         @db.Decimal(10, 2)
-  priceUnit         ServicePriceUnit @map("price_unit")
+  price            Decimal?         @db.Decimal(10, 2)
+  priceUnit        ServicePriceUnit @map("price_unit")
   /// Required when priceUnit=CUSTOM; otherwise null. App layer validates;
   /// no DB CHECK because Prisma can't natively express "required iff X".
-  priceCustomLabel  String?          @map("price_custom_label")
+  priceCustomLabel String?          @map("price_custom_label")
   /// Availability window. Both nullable; null+null = "Ongoing" rendering.
   /// Stored as Date (no time component) per Decision F.
-  startDate         DateTime?        @map("start_date") @db.Date
-  endDate           DateTime?        @map("end_date") @db.Date
+  startDate        DateTime?        @map("start_date") @db.Date
+  endDate          DateTime?        @map("end_date") @db.Date
   /// Bullet-point arrays. Postgres native text[] via Prisma String[].
   /// Empty arrays = "skip the section" in the rendered embed text.
-  includedItems     String[]         @map("included_items")
-  excludedItems     String[]         @map("excluded_items")
+  includedItems    String[]         @map("included_items")
+  excludedItems    String[]         @map("excluded_items")
   /// 'queued' | 'embedding' | 'ready' | 'error'. Mirrors FaqEntry pattern.
-  status            String           @default("queued")
-  errorDetail       String?          @map("error_detail")
+  status           String           @default("queued")
+  errorDetail      String?          @map("error_detail")
   /// Set by soft-delete. Hourly cron hard-deletes after 30 days.
-  deletedAt         DateTime?        @map("deleted_at")
-  createdAt         DateTime         @default(now()) @map("created_at")
-  updatedAt         DateTime         @updatedAt @map("updated_at")
+  deletedAt        DateTime?        @map("deleted_at")
+  createdAt        DateTime         @default(now()) @map("created_at")
+  updatedAt        DateTime         @updatedAt @map("updated_at")
 
   tenant Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   chunks KnowledgeChunk[]
@@ -1328,45 +1335,45 @@ model LlmCostRollup {
 /// KAN-879 — CRM Core Schema extensions (status / name / closedAt / lost reason /
 /// products / ownership / Company relation / extension columns).
 model Deal {
-  id                     String           @id @default(cuid())
-  tenantId               String           @map("tenant_id")
-  contactId              String           @map("contact_id")
-  correlationId          String?          @unique @map("correlation_id")
+  id                     String          @id @default(cuid())
+  tenantId               String          @map("tenant_id")
+  contactId              String          @map("contact_id")
+  correlationId          String?         @unique @map("correlation_id")
   // KAN-791 — pipeline + stage state (moved from Contact)
-  pipelineId             String           @map("pipeline_id")
-  currentStageId         String           @map("current_stage_id")
-  enteredStageAt         DateTime         @default(now()) @map("entered_stage_at")
+  pipelineId             String          @map("pipeline_id")
+  currentStageId         String          @map("current_stage_id")
+  enteredStageAt         DateTime        @default(now()) @map("entered_stage_at")
   // KAN-791 — per-Deal MO progress (moved from Contact.microObjectiveProgress;
   // pre-flight #4 verified 0 prod contacts had non-default values, no backfill)
-  microObjectiveProgress Json             @default("{}") @map("micro_objective_progress")
+  microObjectiveProgress Json            @default("{}") @map("micro_objective_progress")
   // KAN-791 — value defaults to 0 (was Decimal?). KAN-790 deferred enrichment.
-  value                  Decimal          @default(0) @db.Decimal(12, 2)
-  currency               String           @default("USD") @db.VarChar(3)
-  metadata               Json             @default("{}")
+  value                  Decimal         @default(0) @db.Decimal(12, 2)
+  currency               String          @default("USD") @db.VarChar(3)
+  metadata               Json            @default("{}")
   // KAN-879 — CRM Core Schema additions
-  name                   String           @default("Untitled deal")
+  name                   String          @default("Untitled deal")
   /// Derived from currentStage.outcomeType via migration backfill; future
   /// transitions should keep this in sync (next cohort wires the engine).
-  status                 DealStatus       @default(open)
+  status                 DealStatus      @default(open)
   /// 0-100 (kept loose as Int; no constraint here — UI / API validate).
   probability            Int?
-  expectedCloseDate      DateTime?        @db.Date @map("expected_close_date")
+  expectedCloseDate      DateTime?       @map("expected_close_date") @db.Date
   /// Set when status transitions to won/lost. Migration backfills from
   /// DealStageHistory terminal transitions.
-  closedAt               DateTime?        @map("closed_at")
-  lostReason             DealLostReason?  @map("lost_reason")
-  lostReasonDetail       String?          @map("lost_reason_detail")
-  wonProductSummary      String?          @map("won_product_summary")
+  closedAt               DateTime?       @map("closed_at")
+  lostReason             DealLostReason? @map("lost_reason")
+  lostReasonDetail       String?         @map("lost_reason_detail")
+  wonProductSummary      String?         @map("won_product_summary")
   /// Line-item shape determined by next cohort; opaque Json today.
-  products               Json             @default("[]")
-  ownerId                String?          @map("owner_id")
-  assignedAgentId        String?          @map("assigned_agent_id")
-  companyId              String?          @map("company_id")
-  externalIds            Json             @default("{}") @map("external_ids")
-  customFields           Json             @default("{}") @map("custom_fields")
-  aiContext              Json             @default("{}") @map("ai_context")
-  createdAt              DateTime         @default(now()) @map("created_at")
-  updatedAt              DateTime         @updatedAt @map("updated_at")
+  products               Json            @default("[]")
+  ownerId                String?         @map("owner_id")
+  assignedAgentId        String?         @map("assigned_agent_id")
+  companyId              String?         @map("company_id")
+  externalIds            Json            @default("{}") @map("external_ids")
+  customFields           Json            @default("{}") @map("custom_fields")
+  aiContext              Json            @default("{}") @map("ai_context")
+  createdAt              DateTime        @default(now()) @map("created_at")
+  updatedAt              DateTime        @updatedAt @map("updated_at")
 
   tenant        Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   contact       Contact            @relation(fields: [contactId], references: [id], onDelete: Cascade)
@@ -1520,57 +1527,57 @@ enum SignalClass {
 // ─────────────────────────────────────────────
 
 model AccountProfile {
-  id                    String   @id @default(cuid())
-  tenantId              String   @unique @map("tenant_id")
-  tenant                Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  id       String @id @default(cuid())
+  tenantId String @unique @map("tenant_id")
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   // Identity
-  legalName             String   @map("legal_name")
-  displayName           String?  @map("display_name")
-  logoUrl               String?  @map("logo_url")
-  logoVariants          Json?    @map("logo_variants")
-  websiteUrl            String?  @map("website_url")
-  oneLineDescription    String?  @db.VarChar(200) @map("one_line_description")
-  industry              String?
+  legalName          String  @map("legal_name")
+  displayName        String? @map("display_name")
+  logoUrl            String? @map("logo_url")
+  logoVariants       Json?   @map("logo_variants")
+  websiteUrl         String? @map("website_url")
+  oneLineDescription String? @map("one_line_description") @db.VarChar(200)
+  industry           String?
 
   // Contact
-  primaryPhone          String?  @map("primary_phone")
-  supportPhone          String?  @map("support_phone")
-  primaryEmail          String?  @map("primary_email")
-  supportEmail          String?  @map("support_email")
-  physicalAddress       String?  @db.Text @map("physical_address")
-  mailingAddress        String?  @db.Text @map("mailing_address")
-  mailingSameAsPhysical Boolean  @default(true) @map("mailing_same_as_physical")
+  primaryPhone          String? @map("primary_phone")
+  supportPhone          String? @map("support_phone")
+  primaryEmail          String? @map("primary_email")
+  supportEmail          String? @map("support_email")
+  physicalAddress       String? @map("physical_address") @db.Text
+  mailingAddress        String? @map("mailing_address") @db.Text
+  mailingSameAsPhysical Boolean @default(true) @map("mailing_same_as_physical")
 
   // Address structured (AI-populated, optional)
-  addressStreet         String?  @map("address_street")
-  addressCity           String?  @map("address_city")
-  addressRegion         String?  @map("address_region")
-  addressPostal         String?  @map("address_postal")
-  addressCountry        String?  @map("address_country")
+  addressStreet  String? @map("address_street")
+  addressCity    String? @map("address_city")
+  addressRegion  String? @map("address_region")
+  addressPostal  String? @map("address_postal")
+  addressCountry String? @map("address_country")
 
   // Service area
-  serviceAreaType       String   @default("local") @map("service_area_type")
-  serviceAreaRadiusKm   Int?     @map("service_area_radius_km")
-  serviceAreaRegions    Json?    @map("service_area_regions")
+  serviceAreaType     String @default("local") @map("service_area_type")
+  serviceAreaRadiusKm Int?   @map("service_area_radius_km")
+  serviceAreaRegions  Json?  @map("service_area_regions")
 
   // Hours
-  timeZone              String   @default("America/Toronto") @map("time_zone")
-  weeklyHours           Json     @default("{}") @map("weekly_hours")
-  afterHoursBehavior    String   @default("send_anyway") @map("after_hours_behavior")
+  timeZone           String @default("America/Toronto") @map("time_zone")
+  weeklyHours        Json   @default("{}") @map("weekly_hours")
+  afterHoursBehavior String @default("send_anyway") @map("after_hours_behavior")
 
   // Payments
-  defaultCurrency       String   @default("USD") @map("default_currency")
-  additionalCurrencies  String[] @default([]) @map("additional_currencies")
+  defaultCurrency        String   @default("USD") @map("default_currency")
+  additionalCurrencies   String[] @default([]) @map("additional_currencies")
   acceptedPaymentMethods String[] @default([]) @map("accepted_payment_methods")
-  depositRequired       Boolean  @default(false) @map("deposit_required")
-  depositType           String?  @map("deposit_type")
-  depositValue          Decimal? @db.Decimal(10, 2) @map("deposit_value")
-  refundWindowDays      Int?     @map("refund_window_days")
+  depositRequired        Boolean  @default(false) @map("deposit_required")
+  depositType            String?  @map("deposit_type")
+  depositValue           Decimal? @map("deposit_value") @db.Decimal(10, 2)
+  refundWindowDays       Int?     @map("refund_window_days")
 
   // Legal
-  taxId                 String?  @map("tax_id")
-  businessRegNumber     String?  @map("business_reg_number")
+  taxId                 String? @map("tax_id")
+  businessRegNumber     String? @map("business_reg_number")
   jurisdiction          String?
   // KAN-852 — flat tenant override columns. Stored as raw strings (not
   // keyed by language) so most tenants — who operate in one language at
@@ -1584,25 +1591,25 @@ model AccountProfile {
   // blueprint-loader.ts. Cohort 4 design open question (tracked on
   // Confluence spec §2): per-language override columns vs. flat-with-
   // stale-warning vs. auto-translate.
-  optOutLanguage        String?  @db.Text @map("opt_out_language")
-  emailFooterDisclosure String?  @db.Text @map("email_footer_disclosure")
+  optOutLanguage        String? @map("opt_out_language") @db.Text
+  emailFooterDisclosure String? @map("email_footer_disclosure") @db.Text
 
   // Locale
-  defaultLanguage       String   @default("en") @map("default_language")
-  supportedLanguages    String[] @default(["en"]) @map("supported_languages")
+  defaultLanguage    String   @default("en") @map("default_language")
+  supportedLanguages String[] @default(["en"]) @map("supported_languages")
 
   // Detect-from-website state (Cohort 5 wires the worker; columns ship now)
-  lastDetectAt          DateTime? @map("last_detect_at")
-  lastDetectSource      String?   @map("last_detect_source")
-  detectStatus          String?   @map("detect_status")
+  lastDetectAt     DateTime? @map("last_detect_at")
+  lastDetectSource String?   @map("last_detect_source")
+  detectStatus     String?   @map("detect_status")
 
-  createdAt             DateTime @default(now()) @map("created_at")
-  updatedAt             DateTime @updatedAt @map("updated_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
-  socialProfiles        SocialProfile[]
-  observedHolidays      ObservedHoliday[]
-  industryDisclosures   IndustryDisclosure[]
-  fieldDetections       AccountFieldDetection[]
+  socialProfiles      SocialProfile[]
+  observedHolidays    ObservedHoliday[]
+  industryDisclosures IndustryDisclosure[]
+  fieldDetections     AccountFieldDetection[]
 
   @@index([tenantId])
   @@map("account_profile")
@@ -1616,10 +1623,10 @@ model SocialProfile {
   accountProfileId String         @map("account_profile_id")
   accountProfile   AccountProfile @relation(fields: [accountProfileId], references: [id], onDelete: Cascade)
 
-  platform         String
-  url              String
-  handle           String?
-  position         Int            @default(0)
+  platform String
+  url      String
+  handle   String?
+  position Int     @default(0)
 
   @@index([accountProfileId])
   @@map("social_profile")
@@ -1631,9 +1638,9 @@ model ObservedHoliday {
   accountProfileId String         @map("account_profile_id")
   accountProfile   AccountProfile @relation(fields: [accountProfileId], references: [id], onDelete: Cascade)
 
-  name             String
-  date             DateTime       @db.Date
-  recurring        Boolean        @default(false)
+  name      String
+  date      DateTime @db.Date
+  recurring Boolean  @default(false)
 
   @@index([accountProfileId, date])
   @@map("observed_holiday")
@@ -1641,14 +1648,14 @@ model ObservedHoliday {
 
 // FK-transitive tenant scope — see ChunkEffectiveness precedent.
 model IndustryDisclosure {
-  id                String         @id @default(cuid())
-  accountProfileId  String         @map("account_profile_id")
-  accountProfile    AccountProfile @relation(fields: [accountProfileId], references: [id], onDelete: Cascade)
+  id               String         @id @default(cuid())
+  accountProfileId String         @map("account_profile_id")
+  accountProfile   AccountProfile @relation(fields: [accountProfileId], references: [id], onDelete: Cascade)
 
   label             String
-  body              String         @db.Text
-  appliesToChannels String[]       @default([]) @map("applies_to_channels")
-  position          Int            @default(0)
+  body              String   @db.Text
+  appliesToChannels String[] @default([]) @map("applies_to_channels")
+  position          Int      @default(0)
 
   @@index([accountProfileId])
   @@map("industry_disclosure")
@@ -1662,15 +1669,15 @@ model AccountFieldDetection {
   accountProfileId String         @map("account_profile_id")
   accountProfile   AccountProfile @relation(fields: [accountProfileId], references: [id], onDelete: Cascade)
 
-  fieldPath        String         @map("field_path")
-  proposedValue    String         @db.Text @map("proposed_value")
-  confidence       Float
-  sourceUrl        String?        @map("source_url")
-  sourceSnippet    String?        @db.Text @map("source_snippet")
-  status           String         @default("proposed")
-  decidedAt        DateTime?      @map("decided_at")
-  decidedBy        String?        @map("decided_by")
-  createdAt        DateTime       @default(now()) @map("created_at")
+  fieldPath     String    @map("field_path")
+  proposedValue String    @map("proposed_value") @db.Text
+  confidence    Float
+  sourceUrl     String?   @map("source_url")
+  sourceSnippet String?   @map("source_snippet") @db.Text
+  status        String    @default("proposed")
+  decidedAt     DateTime? @map("decided_at")
+  decidedBy     String?   @map("decided_by")
+  createdAt     DateTime  @default(now()) @map("created_at")
 
   @@index([accountProfileId, fieldPath])
   @@index([accountProfileId, status])
@@ -1805,64 +1812,64 @@ enum OrderSource {
 }
 
 model Company {
-  id                         String                @id @default(cuid())
-  tenantId                   String                @map("tenant_id")
-  name                       String
-  legalName                  String?               @map("legal_name")
-  domain                     String?
-  website                    String?
-  industry                   String?
-  sizeRange                  CompanySize?          @map("size_range")
-  annualRevenue              Decimal?              @db.Decimal(15, 2) @map("annual_revenue")
-  phone                      String?
-  email                      String?
-  description                String?
-  lifecycleStage             CompanyLifecycleStage @default(prospect) @map("lifecycle_stage")
+  id             String                @id @default(cuid())
+  tenantId       String                @map("tenant_id")
+  name           String
+  legalName      String?               @map("legal_name")
+  domain         String?
+  website        String?
+  industry       String?
+  sizeRange      CompanySize?          @map("size_range")
+  annualRevenue  Decimal?              @map("annual_revenue") @db.Decimal(15, 2)
+  phone          String?
+  email          String?
+  description    String?
+  lifecycleStage CompanyLifecycleStage @default(prospect) @map("lifecycle_stage")
 
   // Billing address
-  billingAddressLine1        String?               @map("billing_address_line_1")
-  billingAddressLine2        String?               @map("billing_address_line_2")
-  billingCity                String?               @map("billing_city")
-  billingRegion              String?               @map("billing_region")
-  billingPostalCode          String?               @map("billing_postal_code")
+  billingAddressLine1 String? @map("billing_address_line_1")
+  billingAddressLine2 String? @map("billing_address_line_2")
+  billingCity         String? @map("billing_city")
+  billingRegion       String? @map("billing_region")
+  billingPostalCode   String? @map("billing_postal_code")
   /// ISO 3166-1 alpha-2.
-  billingCountry             String?               @map("billing_country")
+  billingCountry      String? @map("billing_country")
 
   // Mailing address (defaults to billing if null at the API layer — coalesce in code).
-  mailingAddressLine1        String?               @map("mailing_address_line_1")
-  mailingAddressLine2        String?               @map("mailing_address_line_2")
-  mailingCity                String?               @map("mailing_city")
-  mailingRegion              String?               @map("mailing_region")
-  mailingPostalCode          String?               @map("mailing_postal_code")
-  mailingCountry             String?               @map("mailing_country")
+  mailingAddressLine1 String? @map("mailing_address_line_1")
+  mailingAddressLine2 String? @map("mailing_address_line_2")
+  mailingCity         String? @map("mailing_city")
+  mailingRegion       String? @map("mailing_region")
+  mailingPostalCode   String? @map("mailing_postal_code")
+  mailingCountry      String? @map("mailing_country")
 
   // Tax & compliance
-  taxId                      String?               @map("tax_id")
-  taxIdType                  TaxIdType?            @map("tax_id_type")
-  businessRegistrationNumber String?               @map("business_registration_number")
-  incorporationJurisdiction  String?               @map("incorporation_jurisdiction")
-  isTaxExempt                Boolean               @default(false) @map("is_tax_exempt")
-  taxExemptionCertificate    String?               @map("tax_exemption_certificate")
+  taxId                      String?    @map("tax_id")
+  taxIdType                  TaxIdType? @map("tax_id_type")
+  businessRegistrationNumber String?    @map("business_registration_number")
+  incorporationJurisdiction  String?    @map("incorporation_jurisdiction")
+  isTaxExempt                Boolean    @default(false) @map("is_tax_exempt")
+  taxExemptionCertificate    String?    @map("tax_exemption_certificate")
 
   // Ownership
-  ownerId                    String?               @map("owner_id")
+  ownerId String? @map("owner_id")
 
   // Extension
-  tags                       String[]              @default([])
-  linkedinUrl                String?               @map("linkedin_url")
-  externalIds                Json                  @default("{}") @map("external_ids")
-  customFields               Json                  @default("{}") @map("custom_fields")
-  aiContext                  Json                  @default("{}") @map("ai_context")
+  tags         String[] @default([])
+  linkedinUrl  String?  @map("linkedin_url")
+  externalIds  Json     @default("{}") @map("external_ids")
+  customFields Json     @default("{}") @map("custom_fields")
+  aiContext    Json     @default("{}") @map("ai_context")
 
   // Timestamps
-  createdAt                  DateTime              @default(now()) @map("created_at")
-  updatedAt                  DateTime              @updatedAt @map("updated_at")
-  deletedAt                  DateTime?             @map("deleted_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
 
-  tenant                     Tenant                @relation(fields: [tenantId], references: [id])
-  contacts                   Contact[]
-  deals                      Deal[]
-  orders                     Order[]
+  tenant   Tenant    @relation(fields: [tenantId], references: [id])
+  contacts Contact[]
+  deals    Deal[]
+  orders   Order[]
 
   @@index([tenantId, name])
   @@index([tenantId, domain])
@@ -1872,59 +1879,59 @@ model Company {
 }
 
 model Order {
-  id                     String           @id @default(cuid())
-  tenantId               String           @map("tenant_id")
-  contactId              String           @map("contact_id")
-  companyId              String?          @map("company_id")
-  dealId                 String?          @map("deal_id")
+  id        String  @id @default(cuid())
+  tenantId  String  @map("tenant_id")
+  contactId String  @map("contact_id")
+  companyId String? @map("company_id")
+  dealId    String? @map("deal_id")
 
-  orderNumber            String           @map("order_number")
-  status                 OrderStatus      @default(pending)
+  orderNumber String      @map("order_number")
+  status      OrderStatus @default(pending)
 
   // Money
-  totalAmount            Decimal          @default(0) @db.Decimal(12, 2) @map("total_amount")
-  taxAmount              Decimal          @default(0) @db.Decimal(12, 2) @map("tax_amount")
-  discountAmount         Decimal          @default(0) @db.Decimal(12, 2) @map("discount_amount")
-  grandTotal             Decimal          @default(0) @db.Decimal(12, 2) @map("grand_total")
-  currency               String           @default("USD") @db.VarChar(3)
+  totalAmount    Decimal @default(0) @map("total_amount") @db.Decimal(12, 2)
+  taxAmount      Decimal @default(0) @map("tax_amount") @db.Decimal(12, 2)
+  discountAmount Decimal @default(0) @map("discount_amount") @db.Decimal(12, 2)
+  grandTotal     Decimal @default(0) @map("grand_total") @db.Decimal(12, 2)
+  currency       String  @default("USD") @db.VarChar(3)
 
   /// Line-item shape determined by next cohort; opaque Json today.
-  lineItems              Json             @default("[]") @map("line_items")
+  lineItems Json @default("[]") @map("line_items")
 
   // Lifecycle
-  placedAt               DateTime         @default(now()) @map("placed_at")
-  paidAt                 DateTime?        @map("paid_at")
-  refundedAt             DateTime?        @map("refunded_at")
-  cancelledAt            DateTime?        @map("cancelled_at")
+  placedAt    DateTime  @default(now()) @map("placed_at")
+  paidAt      DateTime? @map("paid_at")
+  refundedAt  DateTime? @map("refunded_at")
+  cancelledAt DateTime? @map("cancelled_at")
 
   // Payment
-  paymentMethod          PaymentMethod?   @map("payment_method")
-  paymentProvider        PaymentProvider? @map("payment_provider")
-  providerOrderId        String?          @map("provider_order_id")
-  providerData           Json?            @map("provider_data")
+  paymentMethod   PaymentMethod?   @map("payment_method")
+  paymentProvider PaymentProvider? @map("payment_provider")
+  providerOrderId String?          @map("provider_order_id")
+  providerData    Json?            @map("provider_data")
 
   // Origin
-  source                 OrderSource      @default(manual)
-  attributionFirstSource String?          @map("attribution_first_source")
-  attributionLastSource  String?          @map("attribution_last_source")
+  source                 OrderSource @default(manual)
+  attributionFirstSource String?     @map("attribution_first_source")
+  attributionLastSource  String?     @map("attribution_last_source")
 
   // Notes
-  customerNotes          String?          @map("customer_notes")
-  internalNotes          String?          @map("internal_notes")
+  customerNotes String? @map("customer_notes")
+  internalNotes String? @map("internal_notes")
 
   // Extension
-  externalIds            Json             @default("{}") @map("external_ids")
-  customFields           Json             @default("{}") @map("custom_fields")
-  aiContext              Json             @default("{}") @map("ai_context")
+  externalIds  Json @default("{}") @map("external_ids")
+  customFields Json @default("{}") @map("custom_fields")
+  aiContext    Json @default("{}") @map("ai_context")
 
-  correlationId          String?          @unique @map("correlation_id")
-  createdAt              DateTime         @default(now()) @map("created_at")
-  updatedAt              DateTime         @updatedAt @map("updated_at")
+  correlationId String?  @unique @map("correlation_id")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
 
-  tenant                 Tenant           @relation(fields: [tenantId], references: [id])
-  contact                Contact          @relation(fields: [contactId], references: [id])
-  company                Company?         @relation(fields: [companyId], references: [id])
-  deal                   Deal?            @relation(fields: [dealId], references: [id])
+  tenant  Tenant   @relation(fields: [tenantId], references: [id])
+  contact Contact  @relation(fields: [contactId], references: [id])
+  company Company? @relation(fields: [companyId], references: [id])
+  deal    Deal?    @relation(fields: [dealId], references: [id])
 
   @@unique([tenantId, orderNumber])
   @@index([tenantId, contactId])
@@ -1980,51 +1987,243 @@ enum ImportFileType {
 }
 
 model ImportJob {
-  id                    String          @id @default(cuid())
-  tenantId              String          @map("tenant_id")
-  createdByUserId       String          @map("created_by_user_id")
+  id              String @id @default(cuid())
+  tenantId        String @map("tenant_id")
+  createdByUserId String @map("created_by_user_id")
 
   // Upload metadata (captured at createUploadUrl).
-  fileName              String          @map("file_name")
-  fileSize              Int             @map("file_size")
-  fileMimeType          String          @map("file_mime_type")
+  fileName      String @map("file_name")
+  fileSize      Int    @map("file_size")
+  fileMimeType  String @map("file_mime_type")
   /// `tenants/{tenantId}/imports/{importJobId}/{filename}` —
   /// tenant-scope check (`startsWith`) enforced before any GCS op.
-  gcsObjectPath         String          @map("gcs_object_path")
+  gcsObjectPath String @map("gcs_object_path")
 
   // Mode flag — honored by the future commit cohort (PR 8); captured here
   // so the choice is durable from the moment of upload.
-  mode                  ImportMode      @default(update_add)
+  mode ImportMode @default(update_add)
 
   // Status state machine.
-  status                ImportStatus    @default(awaiting_upload)
+  status ImportStatus @default(awaiting_upload)
 
   // Inspection results (populated by inspect logic; null until inspected).
-  detectedFileType      ImportFileType? @map("detected_file_type")
-  detectedRowCount      Int?            @map("detected_row_count")
-  detectedColumnCount   Int?            @map("detected_column_count")
+  detectedFileType    ImportFileType? @map("detected_file_type")
+  detectedRowCount    Int?            @map("detected_row_count")
+  detectedColumnCount Int?            @map("detected_column_count")
   /// Array<string> — populated by inspect logic.
-  detectedHeaders       Json?           @map("detected_headers")
+  detectedHeaders     Json?           @map("detected_headers")
   /// Array<Record<string, unknown>> — first 5 data rows.
-  sampleRows            Json?           @map("sample_rows")
+  sampleRows          Json?           @map("sample_rows")
 
   // Error tracking.
-  errorMessage          String?         @map("error_message")
-  errorAt               DateTime?       @map("error_at")
+  errorMessage String?   @map("error_message")
+  errorAt      DateTime? @map("error_at")
 
   // Timestamps.
-  createdAt             DateTime        @default(now()) @map("created_at")
-  updatedAt             DateTime        @updatedAt @map("updated_at")
-  uploadConfirmedAt     DateTime?       @map("upload_confirmed_at")
-  inspectionStartedAt   DateTime?       @map("inspection_started_at")
-  inspectionCompletedAt DateTime?       @map("inspection_completed_at")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
+  uploadConfirmedAt     DateTime? @map("upload_confirmed_at")
+  inspectionStartedAt   DateTime? @map("inspection_started_at")
+  inspectionCompletedAt DateTime? @map("inspection_completed_at")
 
   // Relations.
-  tenant                Tenant          @relation(fields: [tenantId], references: [id])
-  createdBy             User            @relation(fields: [createdByUserId], references: [id])
+  tenant           Tenant                 @relation(fields: [tenantId], references: [id])
+  createdBy        User                   @relation(fields: [createdByUserId], references: [id])
+  // KAN-903 — Ingestion Cohort 2.5 (staging tables). CASCADE on the
+  // staging side: deleting an ImportJob drops its staging rows.
+  stagingContacts  ImportStagingContact[]
+  stagingCompanies ImportStagingCompany[]
+  stagingDeals     ImportStagingDeal[]
+  stagingOrders    ImportStagingOrder[]
 
   @@index([tenantId, status])
   @@index([tenantId, createdAt(sort: Desc)])
   @@index([createdByUserId])
   @@map("import_jobs")
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// INGESTION STAGING — KAN-903 Cohort 2.5 (staging tables)
+//
+// PR 3 of 8 in the Cohort 2 ingestion pipeline. Pure schema work.
+// The mapping (PR 5), dedup (PR 6), and commit (PR 8) cohorts will
+// write + read these tables; this PR just lays them down.
+//
+// Each staging table mirrors a canonical CRM entity (Contact / Company
+// / Deal / Order) with the LEAN MIRROR shape: enough strongly-typed
+// columns for the review UI to display rows + dedup heuristics to key
+// on, plus a `sourceRowData Json` blob carrying the full original CSV /
+// XLSX row. PR 8 commit projects from `sourceRowData` to the canonical
+// entity — staging is NOT required to be shape-identical to the target.
+//
+// Lifecycle (StagingStatus enum):
+//   pending → mapping_error          (PR 5 mapping failed)
+//           → dedup_error            (PR 6 dedup failed)
+//           → ready → committed      (PR 8 wrote canonical row)
+//                   → skipped        (user chose skip during dedup)
+//
+// Resolution strategy: pipelineName / stageName / contactEmail are
+// stored as raw strings on staging Deal + Order rows. Resolution to
+// canonical pipelineId / currentStageId / contactId happens at commit
+// time (PR 8). NOT FK constraints — staging rows can land before the
+// canonical entity exists.
+// ─────────────────────────────────────────────────────────────────────
+
+enum StagingStatus {
+  pending
+  mapping_error
+  dedup_error
+  ready
+  committed
+  skipped
+
+  @@map("staging_status")
+}
+
+model ImportStagingContact {
+  id              String        @id @default(cuid())
+  importJobId     String        @map("import_job_id")
+  tenantId        String        @map("tenant_id")
+  sourceRowIndex  Int           @map("source_row_index")
+  /// Full-fidelity raw row from the parsed CSV / XLSX. Commit cohort
+  /// projects from here to the canonical Contact at write time.
+  sourceRowData   Json          @map("source_row_data")
+  stagingStatus   StagingStatus @default(pending) @map("staging_status")
+  /// Populated by Cohort 2.6 dedup with match candidates + chosen action.
+  matchDecision   Json?         @map("match_decision")
+  mappingError    String?       @map("mapping_error")
+  dedupError      String?       @map("dedup_error")
+  /// Nullable — populated at commit when canonical row exists. Not a FK
+  /// (resolution can lag; canonical row may not yet exist at staging time).
+  targetContactId String?       @map("target_contact_id")
+  createdAt       DateTime      @default(now()) @map("created_at")
+  updatedAt       DateTime      @updatedAt @map("updated_at")
+
+  // Mirror columns — review UI display + dedup keys only.
+  email          String?
+  phone          String?
+  firstName      String?         @map("first_name")
+  lastName       String?         @map("last_name")
+  companyName    String?         @map("company_name")
+  lifecycleStage LifecycleStage? @map("lifecycle_stage")
+  source         ContactSource?
+
+  importJob ImportJob @relation(fields: [importJobId], references: [id], onDelete: Cascade)
+  tenant    Tenant    @relation(fields: [tenantId], references: [id])
+
+  @@unique([importJobId, sourceRowIndex])
+  @@index([importJobId, stagingStatus])
+  @@index([tenantId, email])
+  @@index([tenantId, phone])
+  @@index([targetContactId])
+  @@map("import_staging_contacts")
+}
+
+model ImportStagingCompany {
+  id              String        @id @default(cuid())
+  importJobId     String        @map("import_job_id")
+  tenantId        String        @map("tenant_id")
+  sourceRowIndex  Int           @map("source_row_index")
+  sourceRowData   Json          @map("source_row_data")
+  stagingStatus   StagingStatus @default(pending) @map("staging_status")
+  matchDecision   Json?         @map("match_decision")
+  mappingError    String?       @map("mapping_error")
+  dedupError      String?       @map("dedup_error")
+  targetCompanyId String?       @map("target_company_id")
+  createdAt       DateTime      @default(now()) @map("created_at")
+  updatedAt       DateTime      @updatedAt @map("updated_at")
+
+  // Mirror columns — review UI display + dedup keys only.
+  name           String?
+  domain         String?
+  industry       String?
+  billingCity    String? @map("billing_city")
+  billingCountry String? @map("billing_country")
+
+  importJob ImportJob @relation(fields: [importJobId], references: [id], onDelete: Cascade)
+  tenant    Tenant    @relation(fields: [tenantId], references: [id])
+
+  @@unique([importJobId, sourceRowIndex])
+  @@index([importJobId, stagingStatus])
+  @@index([tenantId, domain])
+  @@index([tenantId, name])
+  @@index([targetCompanyId])
+  @@map("import_staging_companies")
+}
+
+model ImportStagingDeal {
+  id             String        @id @default(cuid())
+  importJobId    String        @map("import_job_id")
+  tenantId       String        @map("tenant_id")
+  sourceRowIndex Int           @map("source_row_index")
+  sourceRowData  Json          @map("source_row_data")
+  stagingStatus  StagingStatus @default(pending) @map("staging_status")
+  matchDecision  Json?         @map("match_decision")
+  mappingError   String?       @map("mapping_error")
+  dedupError     String?       @map("dedup_error")
+  targetDealId   String?       @map("target_deal_id")
+  createdAt      DateTime      @default(now()) @map("created_at")
+  updatedAt      DateTime      @updatedAt @map("updated_at")
+
+  // Mirror columns — review UI display + dedup keys only.
+  name              String?
+  value             Decimal?    @db.Decimal(12, 2)
+  currency          String?     @db.VarChar(3)
+  status            DealStatus?
+  expectedCloseDate DateTime?   @map("expected_close_date") @db.Date
+  /// Raw — resolved to Contact.id at commit-time. NOT a FK.
+  contactEmail      String?     @map("contact_email")
+  /// Raw — resolved to Company.id at commit-time. NOT a FK.
+  companyName       String?     @map("company_name")
+  /// Raw — resolved to Pipeline.id at commit-time. NOT a FK.
+  pipelineName      String?     @map("pipeline_name")
+  /// Raw — resolved to Stage.id at commit-time. NOT a FK.
+  stageName         String?     @map("stage_name")
+
+  importJob ImportJob @relation(fields: [importJobId], references: [id], onDelete: Cascade)
+  tenant    Tenant    @relation(fields: [tenantId], references: [id])
+
+  @@unique([importJobId, sourceRowIndex])
+  @@index([importJobId, stagingStatus])
+  @@index([tenantId, contactEmail])
+  @@index([tenantId, name])
+  @@index([targetDealId])
+  @@map("import_staging_deals")
+}
+
+model ImportStagingOrder {
+  id             String        @id @default(cuid())
+  importJobId    String        @map("import_job_id")
+  tenantId       String        @map("tenant_id")
+  sourceRowIndex Int           @map("source_row_index")
+  sourceRowData  Json          @map("source_row_data")
+  stagingStatus  StagingStatus @default(pending) @map("staging_status")
+  matchDecision  Json?         @map("match_decision")
+  mappingError   String?       @map("mapping_error")
+  dedupError     String?       @map("dedup_error")
+  targetOrderId  String?       @map("target_order_id")
+  createdAt      DateTime      @default(now()) @map("created_at")
+  updatedAt      DateTime      @updatedAt @map("updated_at")
+
+  // Mirror columns — review UI display + dedup keys only.
+  orderNumber     String?      @map("order_number")
+  providerOrderId String?      @map("provider_order_id")
+  status          OrderStatus?
+  grandTotal      Decimal?     @map("grand_total") @db.Decimal(12, 2)
+  currency        String?      @db.VarChar(3)
+  placedAt        DateTime?    @map("placed_at")
+  /// Raw — resolved to Contact.id at commit-time. NOT a FK.
+  contactEmail    String?      @map("contact_email")
+  /// Raw — resolved to Company.id at commit-time. NOT a FK.
+  companyName     String?      @map("company_name")
+
+  importJob ImportJob @relation(fields: [importJobId], references: [id], onDelete: Cascade)
+  tenant    Tenant    @relation(fields: [tenantId], references: [id])
+
+  @@unique([importJobId, sourceRowIndex])
+  @@index([importJobId, stagingStatus])
+  @@index([tenantId, orderNumber])
+  @@index([tenantId, providerOrderId])
+  @@index([targetOrderId])
+  @@map("import_staging_orders")
 }
