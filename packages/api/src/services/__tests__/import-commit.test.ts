@@ -263,9 +263,50 @@ function makeOrchestratorPrismaMock(seed: {
     if (args.where.id && args.where.id !== currentJob.id) return null;
     return currentJob;
   });
+  // findFirstOrThrow mirrors findFirst but throws on null. Used by
+  // runCommit's post-claim re-fetch.
+  const findFirstOrThrowJob = vi.fn().mockImplementation(async (args: {
+    where: { id?: string; tenantId?: string };
+  }) => {
+    const result = await findFirstJob(args);
+    if (!result) throw new Error("findFirstOrThrow: no rows match");
+    return result;
+  });
   const updateJob = vi.fn().mockImplementation(async (args: { data: Partial<ImportJob> }) => {
     currentJob = { ...currentJob, ...args.data };
     return currentJob;
+  });
+  // Atomic claim simulator — mirrors the WHERE-filter check from the
+  // updateMany call site. count=1 only when every filter clause matches
+  // currentJob's state; count=0 otherwise. After a successful claim,
+  // currentJob's commitStatus transitions to 'running' (preventing a
+  // second sequential claim from succeeding — load-bearing for the
+  // concurrent-invocation test).
+  const updateManyJob = vi.fn().mockImplementation(async (args: {
+    where: {
+      id?: string;
+      tenantId?: string;
+      commitStatus?: ImportJob["commitStatus"];
+      dedupConfirmedAt?: { not: null };
+    };
+    data: Partial<ImportJob>;
+  }) => {
+    if (args.where.id && args.where.id !== currentJob.id) return { count: 0 };
+    if (args.where.tenantId && args.where.tenantId !== currentJob.tenantId) {
+      return { count: 0 };
+    }
+    if (
+      args.where.commitStatus &&
+      args.where.commitStatus !== currentJob.commitStatus
+    ) {
+      return { count: 0 };
+    }
+    if (args.where.dedupConfirmedAt?.not === null && !currentJob.dedupConfirmedAt) {
+      return { count: 0 };
+    }
+    // Match — apply the patch.
+    currentJob = { ...currentJob, ...args.data };
+    return { count: 1 };
   });
 
   // Per-row $transaction simulation. We run the callback with a `tx`
@@ -282,7 +323,12 @@ function makeOrchestratorPrismaMock(seed: {
   const nextId = (prefix: string) => `${prefix}_${++counter}`;
 
   const prismaProxy = {
-    importJob: { findFirst: findFirstJob, update: updateJob },
+    importJob: {
+      findFirst: findFirstJob,
+      findFirstOrThrow: findFirstOrThrowJob,
+      update: updateJob,
+      updateMany: updateManyJob,
+    },
     importStagingContact: {
       findMany: vi.fn().mockResolvedValue(stagingContacts),
       update: vi.fn().mockImplementation(async (args: {
@@ -586,6 +632,98 @@ describe("runCommit — Pub/Sub fanout", () => {
     expect(warnSpy).toHaveBeenCalled();
     warnSpy.mockRestore();
   });
+});
+
+// ─────────────────────────────────────────────
+// Idempotency — atomic optimistic-lock claim is the load-bearing
+// boundary against concurrent invocations (double-click on Commit,
+// tRPC retry while in-flight, two operators on the same job, etc.).
+// V1 also forbids re-running a partial/failed/succeeded commit — a
+// retry requires a new ImportJob. Tests here pin that behavior.
+// ─────────────────────────────────────────────
+
+describe("runCommit — idempotency claim", () => {
+  function makeStagingContact(): StagingContactRow {
+    return {
+      id: "sc1",
+      importJobId: JOB_ID,
+      tenantId: TENANT_A,
+      sourceRowIndex: 0,
+      sourceRowData: {} as unknown,
+      matchDecision: {
+        suggestedAction: "insert",
+        candidates: [],
+        confidence: 0,
+        suggestedReason: "",
+      } as unknown,
+      stagingStatus: "ready",
+      email: "alice@example.com",
+      phone: null,
+      firstName: "Alice",
+      lastName: "Anderson",
+      companyName: null,
+      lifecycleStage: null,
+      source: null,
+      targetContactId: null,
+    };
+  }
+
+  it("rejects concurrent invocations atomically", async () => {
+    // The harness uses a fully-mocked Prisma. The atomic claim is
+    // simulated via the updateMany mock: the first call observing
+    // `commitStatus='pending'` flips it to 'running' synchronously
+    // and returns count=1; any subsequent updateMany sees
+    // `commitStatus='running'` and returns count=0. That's the load-
+    // bearing assertion — the claim is the atomic boundary, the
+    // staging loop is downstream of it.
+    //
+    // In real Postgres this is enforced by the row-level write lock
+    // an UPDATE acquires; the test simulates the same single-winner
+    // outcome at the mock layer.
+    const { prisma, getJob } = makeOrchestratorPrismaMock({
+      job: makeJob(),
+      stagingContacts: [makeStagingContact()],
+    });
+
+    const [resultA, resultB] = await Promise.allSettled([
+      runCommit(prisma, JOB_ID, TENANT_A),
+      runCommit(prisma, JOB_ID, TENANT_A),
+    ]);
+
+    // Exactly one resolves, exactly one rejects.
+    const fulfilled = [resultA, resultB].filter((r) => r.status === "fulfilled");
+    const rejected = [resultA, resultB].filter((r) => r.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+
+    // The rejection is a CONFLICT with the "already running" diagnostic.
+    const reason = (rejected[0] as PromiseRejectedResult).reason as {
+      code?: string;
+      message?: string;
+    };
+    expect(reason.code).toBe("CONFLICT");
+    expect(reason.message ?? "").toMatch(/already running/i);
+
+    // Canonical-write count: exactly 1 commit (NOT 2× the staging row).
+    expect(getJob().committedRowCount).toBe(1);
+  });
+
+  it.each([
+    ["succeeded" as const, /already succeeded/i],
+    ["partial" as const, /already partial/i],
+    ["failed" as const, /already failed/i],
+  ])(
+    "rejects re-invocation after a %s commit",
+    async (terminalStatus, messageRegex) => {
+      const { prisma } = makeOrchestratorPrismaMock({
+        job: makeJob({ commitStatus: terminalStatus }),
+      });
+      await expect(runCommit(prisma, JOB_ID, TENANT_A)).rejects.toMatchObject({
+        code: "CONFLICT",
+        message: expect.stringMatching(messageRegex),
+      });
+    },
+  );
 });
 
 // ─────────────────────────────────────────────

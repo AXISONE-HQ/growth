@@ -756,27 +756,73 @@ export async function runCommit(
   importJobId: string,
   tenantId: string,
 ): Promise<ImportJob> {
-  const job = await prisma.importJob.findFirst({
-    where: { id: importJobId, tenantId },
+  // Atomic claim: race-free transition from pending → running.
+  // Only one caller's updateMany returns count=1; concurrent callers see
+  // count=0 and get an informative CONFLICT / BAD_REQUEST / NOT_FOUND from
+  // the re-fetch branch below. The `commitStatus: 'pending'` filter is
+  // load-bearing — partial / failed / succeeded commits cannot be re-run
+  // in V1. Retry-after-failure semantics deferred (filed as a follow-up).
+  const claim = await prisma.importJob.updateMany({
+    where: {
+      id: importJobId,
+      tenantId,
+      commitStatus: "pending",
+      dedupConfirmedAt: { not: null },
+    },
+    data: {
+      commitStatus: "running",
+      commitStartedAt: new Date(),
+      commitCompletedAt: null,
+      committedRowCount: 0,
+      failedRowCount: 0,
+      commitErrors: [],
+    },
   });
-  if (!job) {
-    throw new TRPCError({
-      code: "NOT_FOUND",
-      message: `Import job not found: ${importJobId}`,
+
+  if (claim.count === 0) {
+    // Diagnose why the claim failed and return an informative error.
+    const current = await prisma.importJob.findFirst({
+      where: { id: importJobId, tenantId },
     });
-  }
-  if (!job.dedupConfirmedAt) {
-    throw new TRPCError({
-      code: "BAD_REQUEST",
-      message: "Duplicate detection must be confirmed before running commit",
-    });
-  }
-  if (job.commitStatus === "running") {
+    if (!current) {
+      throw new TRPCError({
+        code: "NOT_FOUND",
+        message: `Import job not found: ${importJobId}`,
+      });
+    }
+    if (!current.dedupConfirmedAt) {
+      throw new TRPCError({
+        code: "BAD_REQUEST",
+        message: "Duplicate detection must be confirmed before running commit",
+      });
+    }
+    if (current.commitStatus === "running") {
+      throw new TRPCError({
+        code: "CONFLICT",
+        message: "Commit is already running for this import job",
+      });
+    }
+    if (
+      current.commitStatus === "succeeded" ||
+      current.commitStatus === "partial" ||
+      current.commitStatus === "failed"
+    ) {
+      throw new TRPCError({
+        code: "CONFLICT",
+        message: `Commit already ${current.commitStatus}; cannot re-run. File a new import job to retry.`,
+      });
+    }
+    // Fallback — shouldn't be reachable given the cases above.
     throw new TRPCError({
       code: "CONFLICT",
-      message: "Commit is already running for this import job",
+      message: "Import job cannot be committed in its current state",
     });
   }
+
+  // Re-fetch the now-claimed job for createdByUserId + fileName + other reads.
+  const job = await prisma.importJob.findFirstOrThrow({
+    where: { id: importJobId, tenantId },
+  });
 
   // Resolve actor — `user:${createdByUserId}` with fallback to 'system'.
   let actor: string;
@@ -789,21 +835,6 @@ export async function runCommit(
       `[import-commit] ImportJob ${importJobId} has null createdByUserId; falling back to actor='system'`,
     );
   }
-
-  // Mark commit as running (atomic guard against concurrent runs;
-  // single-step update for now — caller's CONFLICT check above is the
-  // primary defense).
-  await prisma.importJob.update({
-    where: { id: importJobId },
-    data: {
-      commitStatus: "running",
-      commitStartedAt: new Date(),
-      commitCompletedAt: null,
-      committedRowCount: 0,
-      failedRowCount: 0,
-      commitErrors: [],
-    },
-  });
 
   const errors: CommitErrorEntry[] = [];
   let committedCount = 0;
