@@ -427,3 +427,23 @@ export {
   type MatchDecision as DedupMatchDecision,
   type DedupCounts,
 } from "./import-dedup.js";
+
+// ─────────────────────────────────────────────
+// KAN-913 — Ingestion Cohort 2.7. Commit + audit + Pub/Sub fanout.
+// Same thin-re-export pattern as siblings. Real logic in import-commit.ts.
+// ─────────────────────────────────────────────
+
+export interface RunCommitInput {
+  importJobId: string;
+}
+
+export interface DownloadCommitErrorsInput {
+  importJobId: string;
+}
+
+export {
+  runCommit,
+  downloadCommitErrors,
+  type CommitErrorEntry,
+  type CommitErrorReason,
+} from "./import-commit.js";

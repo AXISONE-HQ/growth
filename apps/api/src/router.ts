@@ -674,6 +674,17 @@ interface ImportJobsRouterModule {
     importJobId: string,
     tenantId: string,
   ) => Promise<unknown>;
+  // KAN-913 — Cohort 2.7 commit + audit + Pub/Sub fanout.
+  runCommit: (
+    prisma: unknown,
+    importJobId: string,
+    tenantId: string,
+  ) => Promise<unknown>;
+  downloadCommitErrors: (
+    prisma: unknown,
+    importJobId: string,
+    tenantId: string,
+  ) => Promise<unknown>;
 }
 let _importJobsModule: ImportJobsRouterModule | null = null;
 async function loadImportJobsModule(): Promise<ImportJobsRouterModule> {
@@ -914,6 +925,33 @@ const importJobsRouter = router({
     .mutation(async ({ ctx, input }) => {
       const { confirmDuplicateResolution } = await loadImportJobsModule();
       return confirmDuplicateResolution(ctx.prisma, input.importJobId, ctx.tenantId);
+    }),
+
+  // KAN-913 — Cohort 2.7 commit + audit + Pub/Sub fanout. Iterates
+  // staging rows in pending/ready state and applies the canonical
+  // INSERT or UPDATE per row's KAN-911 matchDecision. Per-row
+  // $transaction wraps canonical write + staging status update + audit
+  // log entry. Pub/Sub fires AFTER the per-row tx commits (env-flag
+  // gated IMPORT_EVENTS_ENABLED). Gated on dedupConfirmedAt IS NOT NULL
+  // — preserves the KAN-907/911 *ConfirmedAt convention. Synchronous
+  // for V1; ~30-60s typical for 10K rows. Async Cloud Run job is a
+  // follow-up ticket.
+  runCommit: protectedProcedure
+    .input(z.object({ importJobId: z.string().cuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const { runCommit } = await loadImportJobsModule();
+      return runCommit(ctx.prisma, input.importJobId, ctx.tenantId);
+    }),
+
+  // KAN-913 — on-demand CSV download of commitErrors JSON. Returns
+  // { csvContent, rowCount } — the UI wires this to a Blob download.
+  // No GCS write at commit time; CSV generated from the JSON every
+  // call (small, simple, no cleanup burden).
+  downloadCommitErrors: protectedProcedure
+    .input(z.object({ importJobId: z.string().cuid() }))
+    .query(async ({ ctx, input }) => {
+      const { downloadCommitErrors } = await loadImportJobsModule();
+      return downloadCommitErrors(ctx.prisma, input.importJobId, ctx.tenantId);
     }),
 });
 

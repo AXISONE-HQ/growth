@@ -27,10 +27,12 @@ import {
   ArrowLeft,
   CheckCircle2,
   Columns3,
+  Download,
   FileSpreadsheet,
   FileText,
   Loader2,
   ListChecks,
+  PlayCircle,
   Scan,
   Sparkles,
   Upload,
@@ -153,6 +155,35 @@ export default function ImportDetailPage() {
     },
     onError: (err) => {
       toast.error(err.message || 'Confirm failed');
+    },
+  });
+
+  // KAN-913 — Cohort 2.7 commit. Synchronous; blocks for up to 30-60s
+  // on 10K-row files in V1. Result state determines the Card 7 render.
+  const runCommitMutation = useMutation<ImportJobDetail, Error, string>({
+    mutationFn: (importJobId) => importJobsApi.runCommit(importJobId),
+    onSuccess: (updated) => {
+      queryClient.setQueryData(['importJobs', 'get', id], updated);
+      const ok = updated.committedRowCount;
+      const failed = updated.failedRowCount;
+      if (updated.commitStatus === 'succeeded') {
+        toast.success(`Commit complete — ${ok} row${ok === 1 ? '' : 's'} written.`);
+      } else if (updated.commitStatus === 'partial') {
+        toast.warning(
+          `Commit partial — ${ok} succeeded, ${failed} failed.`,
+          { description: 'Download the error CSV from Card 7 to triage.' },
+        );
+      } else {
+        toast.error(
+          `Commit failed — ${failed} row${failed === 1 ? '' : 's'} with errors.`,
+        );
+      }
+    },
+    onError: (err) => {
+      toast.error(err.message || 'Commit failed', {
+        description: 'See the Commit card for details.',
+      });
+      void queryClient.invalidateQueries({ queryKey: ['importJobs', 'get', id] });
     },
   });
 
@@ -377,7 +408,16 @@ export default function ImportDetailPage() {
         <DuplicateDetectionCard job={job} />
       ) : null}
 
-      {/* Card 7 — Timestamps */}
+      {/* Card 7 — Commit (KAN-913) — gated on dedup confirmation */}
+      {showInspection && job.detectedEntityType && job.dedupConfirmedAt ? (
+        <CommitCard
+          job={job}
+          isRunning={runCommitMutation.isPending}
+          onRun={() => runCommitMutation.mutate(job.id)}
+        />
+      ) : null}
+
+      {/* Card 8 — Timestamps */}
       <section className="bg-white border rounded-lg p-6">
         <h2 className="text-sm font-semibold mb-3" style={SECTION_HEADER_STYLE}>
           Timestamps
@@ -511,6 +551,41 @@ export default function ImportDetailPage() {
                 </Button>
               </Link>
             </div>
+          ) : job.commitStatus === 'succeeded' ? (
+            <div className="space-y-2">
+              <p className="text-sm" style={LABEL_STYLE}>
+                Import complete —{' '}
+                <strong>{job.committedRowCount.toLocaleString()}</strong> row
+                {job.committedRowCount === 1 ? '' : 's'} written to your canonical
+                tables.
+              </p>
+              <div className="flex gap-2">
+                <Link href="/contacts">
+                  <Button variant="outline" size="sm">View Contacts</Button>
+                </Link>
+                <Link href="/companies">
+                  <Button variant="outline" size="sm">View Companies</Button>
+                </Link>
+                <Link href="/imports">
+                  <Button variant="outline" size="sm">Back to Imports</Button>
+                </Link>
+              </div>
+            </div>
+          ) : job.commitStatus === 'partial' ? (
+            <div className="space-y-2">
+              <p className="text-sm" style={LABEL_STYLE}>
+                Commit partial —{' '}
+                <strong>{job.committedRowCount.toLocaleString()}</strong> succeeded,{' '}
+                <strong>{job.failedRowCount.toLocaleString()}</strong> failed.
+                Download the error CSV from Card 7 to fix and re-import.
+              </p>
+            </div>
+          ) : job.commitStatus === 'failed' ? (
+            <div className="space-y-2">
+              <p className="text-sm" style={LABEL_STYLE}>
+                Commit failed. See Card 7 for the per-row failure breakdown.
+              </p>
+            </div>
           ) : (
             <div className="space-y-2">
               <p className="text-sm" style={LABEL_STYLE}>
@@ -518,12 +593,9 @@ export default function ImportDetailPage() {
                 <strong>
                   {enumLabel(DETECTED_ENTITY_TYPE_LABELS, job.detectedEntityType)}
                 </strong>
-                , column mappings are saved, and duplicates are resolved. The final
-                phase — commit — ships in a later release.
+                , column mappings are saved, and duplicates are resolved. Click
+                Commit (Card 7) to write rows to your canonical tables.
               </p>
-              <Button disabled variant="outline">
-                Commit import (coming in next release)
-              </Button>
             </div>
           )
         ) : job.status === 'failed' ? (
@@ -1409,5 +1481,235 @@ function DuplicateDetectionCard({ job }: { job: ImportJobDetail }) {
         </Button>
       </Link>
     </section>
+  );
+}
+
+// ─────────────────────────────────────────────
+// KAN-913 — Commit card subcomponent (Card 7).
+//
+// State machine driven by `job.commitStatus`:
+//   pending   — never run → "Commit N rows" CTA + entity-type
+//               sub-counts pulled from rowClassificationCounts
+//   running   — should be transient (sync commit blocks the tRPC
+//               mutation thread); covered by the parent's isRunning
+//               prop on the spinner
+//   succeeded — green check + per-entity counts + links to canonical
+//               tables
+//   partial   — yellow warning + counts + Download Error CSV button +
+//               Retry button (re-runs commit on remaining pending/ready
+//               rows; KAN-913 V1 is best-effort idempotent)
+//   failed    — red panel + error counts + Download Error CSV +
+//               Retry button
+// ─────────────────────────────────────────────
+
+function CommitCard({
+  job,
+  isRunning,
+  onRun,
+}: {
+  job: ImportJobDetail;
+  isRunning: boolean;
+  onRun: () => void;
+}) {
+  const status = job.commitStatus;
+  const committed = job.committedRowCount;
+  const failed = job.failedRowCount;
+  const rowClassCounts = job.rowClassificationCounts;
+  const expectedTotalRows = rowClassCounts
+    ? rowClassCounts.byEntity.contacts +
+      rowClassCounts.byEntity.companies +
+      rowClassCounts.byEntity.deals +
+      rowClassCounts.byEntity.orders
+    : null;
+
+  if (isRunning || status === 'running') {
+    return (
+      <section className="bg-white border rounded-lg p-6">
+        <h2 className="text-sm font-semibold mb-3" style={SECTION_HEADER_STYLE}>
+          Commit
+        </h2>
+        <div className="flex items-center gap-2 text-sm" style={LABEL_STYLE}>
+          <Loader2 className="w-4 h-4 animate-spin" aria-hidden />
+          Writing rows to canonical tables…
+          {expectedTotalRows != null ? (
+            <span className="ml-1" style={MUTED_STYLE}>
+              ({expectedTotalRows.toLocaleString()} expected)
+            </span>
+          ) : null}
+        </div>
+        <p className="text-xs mt-3" style={MUTED_STYLE}>
+          Synchronous V1 — this may take up to 30-60s for 10K+ row files.
+        </p>
+      </section>
+    );
+  }
+
+  if (status === 'succeeded') {
+    return (
+      <section className="bg-white border rounded-lg p-6">
+        <div className="flex items-start justify-between mb-3 gap-3 flex-wrap">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="w-5 h-5 text-emerald-600" aria-hidden />
+            <h2 className="text-sm font-semibold" style={SECTION_HEADER_STYLE}>
+              Commit (succeeded)
+            </h2>
+          </div>
+        </div>
+        <p className="text-sm" style={LABEL_STYLE}>
+          <strong>{committed.toLocaleString()}</strong> row
+          {committed === 1 ? '' : 's'} written to your canonical tables.
+        </p>
+        <p
+          className="text-xs mt-1"
+          style={MUTED_STYLE}
+          title={fmtDateTime(job.commitCompletedAt)}
+        >
+          Committed {relativeTime(job.commitCompletedAt)}
+        </p>
+        <div className="text-xs mt-3 pt-3 border-t border-gray-100" style={MUTED_STYLE}>
+          AuditLog entries written · Pub/Sub fanout fired (env-flag gated)
+        </div>
+      </section>
+    );
+  }
+
+  if (status === 'partial' || status === 'failed') {
+    const tone =
+      status === 'partial'
+        ? { panel: 'bg-amber-50 border-amber-200', label: 'Commit (partial)' }
+        : { panel: 'bg-red-50 border-red-200', label: 'Commit (failed)' };
+    return (
+      <section className={`${tone.panel} border rounded-lg p-6`}>
+        <div className="flex items-start gap-3">
+          <AlertTriangle
+            className={`w-5 h-5 flex-shrink-0 mt-0.5 ${
+              status === 'partial' ? 'text-amber-700' : 'text-red-600'
+            }`}
+            aria-hidden
+          />
+          <div className="flex-1 min-w-0">
+            <h2
+              className={`text-sm font-semibold ${
+                status === 'partial' ? 'text-amber-900' : 'text-red-800'
+              }`}
+            >
+              {tone.label}
+            </h2>
+            <p className="text-sm mt-1" style={LABEL_STYLE}>
+              <strong>{committed.toLocaleString()}</strong> committed,{' '}
+              <strong>{failed.toLocaleString()}</strong> failed.
+            </p>
+            <p
+              className="text-xs mt-2"
+              style={MUTED_STYLE}
+              title={fmtDateTime(job.commitCompletedAt)}
+            >
+              Completed {relativeTime(job.commitCompletedAt)}
+            </p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <CommitErrorCsvButton importJobId={job.id} disabled={failed === 0} />
+              <Button onClick={onRun} variant="default" size="sm">
+                <PlayCircle className="w-4 h-4 mr-1.5" aria-hidden /> Retry commit
+              </Button>
+            </div>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  // status === 'pending' — ready to commit.
+  return (
+    <section className="bg-white border rounded-lg p-6">
+      <h2 className="text-sm font-semibold mb-2" style={SECTION_HEADER_STYLE}>
+        Commit to canonical tables
+      </h2>
+      <p className="text-sm mb-3" style={LABEL_STYLE}>
+        Write the staged rows to your canonical Contact / Company / Deal /
+        Order tables, honoring the duplicate-resolution decisions you confirmed.
+        {expectedTotalRows != null ? (
+          <>
+            {' '}
+            <strong>{expectedTotalRows.toLocaleString()}</strong> row
+            {expectedTotalRows === 1 ? '' : 's'} ready.
+          </>
+        ) : null}
+      </p>
+      <p className="text-xs mb-4" style={MUTED_STYLE}>
+        Sync write in V1 — the page will wait up to 30-60s on large files.
+        Each row gets its own transaction (canonical insert + staging update +
+        audit log all-or-nothing). Failed rows surface in the error CSV; they
+        don't roll back successful siblings.
+      </p>
+      <Button onClick={onRun} variant="default">
+        <PlayCircle className="w-4 h-4 mr-1.5" aria-hidden /> Commit{' '}
+        {expectedTotalRows != null
+          ? `${expectedTotalRows.toLocaleString()} row${expectedTotalRows === 1 ? '' : 's'}`
+          : 'rows'}
+      </Button>
+    </section>
+  );
+}
+
+// ─────────────────────────────────────────────
+// KAN-913 — error CSV download button. Fetches commitErrors JSON on
+// click, converts to CSV via the tRPC query (server-side papaparse),
+// and triggers a browser Blob download. No GCS write involved.
+// ─────────────────────────────────────────────
+
+function CommitErrorCsvButton({
+  importJobId,
+  disabled,
+}: {
+  importJobId: string;
+  disabled: boolean;
+}) {
+  const downloadMutation = useMutation<
+    { csvContent: string; rowCount: number },
+    Error,
+    string
+  >({
+    mutationFn: (id) => importJobsApi.downloadCommitErrors(id),
+    onSuccess: (data) => {
+      if (data.rowCount === 0 || !data.csvContent) {
+        toast.info('No commit errors to download.');
+        return;
+      }
+      const blob = new Blob([data.csvContent], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `commit-errors-${importJobId}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast.success(
+        `Downloaded ${data.rowCount} error row${data.rowCount === 1 ? '' : 's'}.`,
+      );
+    },
+    onError: (err) => {
+      toast.error(err.message || 'Download failed');
+    },
+  });
+
+  return (
+    <Button
+      variant="outline"
+      size="sm"
+      disabled={disabled || downloadMutation.isPending}
+      onClick={() => downloadMutation.mutate(importJobId)}
+    >
+      {downloadMutation.isPending ? (
+        <>
+          <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" aria-hidden />
+          Generating CSV…
+        </>
+      ) : (
+        <>
+          <Download className="w-3.5 h-3.5 mr-1.5" aria-hidden /> Download error CSV
+        </>
+      )}
+    </Button>
   );
 }
