@@ -126,6 +126,29 @@ export const ORDER_SOURCE_LABELS: Record<string, string> = {
 };
 
 // ─────────────────────────────────────────────────────────────────────────
+// Ingestion (KAN-896 — Cohort 2.1a backend; KAN-901 — Cohort 2.1b UI)
+// ─────────────────────────────────────────────────────────────────────────
+
+export const IMPORT_STATUS_LABELS: Record<string, string> = {
+  awaiting_upload: "Awaiting upload",
+  uploaded: "Uploaded",
+  inspecting: "Inspecting…",
+  inspected: "Ready",
+  failed: "Failed",
+};
+
+export const IMPORT_MODE_LABELS: Record<string, string> = {
+  replace_all: "Replace all",
+  update_add: "Update + add",
+};
+
+export const IMPORT_FILE_TYPE_LABELS: Record<string, string> = {
+  csv: "CSV",
+  xlsx: "XLSX",
+  unknown: "Unknown",
+};
+
+// ─────────────────────────────────────────────────────────────────────────
 // Safe lookup helper
 // ─────────────────────────────────────────────────────────────────────────
 

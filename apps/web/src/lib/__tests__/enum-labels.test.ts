@@ -14,6 +14,9 @@ import {
   COMPANY_SIZE_LABELS,
   DEAL_STATUS_LABELS,
   DEAL_LOST_REASON_LABELS,
+  IMPORT_FILE_TYPE_LABELS,
+  IMPORT_MODE_LABELS,
+  IMPORT_STATUS_LABELS,
   LIFECYCLE_STAGE_LABELS,
   ORDER_STATUS_LABELS,
   ORDER_SOURCE_LABELS,
@@ -113,6 +116,37 @@ describe("KAN-884 — enum-labels snapshot", () => {
         "partially_refunded": "Partial refund",
         "pending": "Pending",
         "refunded": "Refunded",
+      }
+    `);
+  });
+
+  it("KAN-901 — ImportStatus labels", () => {
+    expect(IMPORT_STATUS_LABELS).toMatchInlineSnapshot(`
+      {
+        "awaiting_upload": "Awaiting upload",
+        "failed": "Failed",
+        "inspected": "Ready",
+        "inspecting": "Inspecting…",
+        "uploaded": "Uploaded",
+      }
+    `);
+  });
+
+  it("KAN-901 — ImportMode labels", () => {
+    expect(IMPORT_MODE_LABELS).toMatchInlineSnapshot(`
+      {
+        "replace_all": "Replace all",
+        "update_add": "Update + add",
+      }
+    `);
+  });
+
+  it("KAN-901 — ImportFileType labels", () => {
+    expect(IMPORT_FILE_TYPE_LABELS).toMatchInlineSnapshot(`
+      {
+        "csv": "CSV",
+        "unknown": "Unknown",
+        "xlsx": "XLSX",
       }
     `);
   });

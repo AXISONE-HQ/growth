@@ -13,6 +13,7 @@ import { cn } from "@/lib/utils";
 import {
   COMPANY_LIFECYCLE_STAGE_LABELS,
   DEAL_STATUS_LABELS,
+  IMPORT_STATUS_LABELS,
   LIFECYCLE_STAGE_LABELS,
   ORDER_STATUS_LABELS,
   enumLabel,
@@ -61,11 +62,22 @@ const CONTACT_LIFECYCLE_TONES: Record<string, Tone> = {
   lost: "red",
 };
 
+// KAN-901 — Ingestion Cohort 2.1b. ImportStatus state machine:
+// awaiting_upload → uploaded → inspecting → inspected | failed.
+const IMPORT_STATUS_TONES: Record<string, Tone> = {
+  awaiting_upload: "grey",
+  uploaded: "blue",
+  inspecting: "blue",
+  inspected: "green",
+  failed: "red",
+};
+
 type StatusBadgeKind =
   | "order-status"
   | "deal-status"
   | "company-lifecycle"
-  | "contact-lifecycle";
+  | "contact-lifecycle"
+  | "import-status";
 
 interface StatusBadgeProps {
   kind: StatusBadgeKind;
@@ -84,6 +96,8 @@ function resolveTone(kind: StatusBadgeKind, value: string | null | undefined): T
       return COMPANY_LIFECYCLE_TONES[value] ?? "grey";
     case "contact-lifecycle":
       return CONTACT_LIFECYCLE_TONES[value] ?? "grey";
+    case "import-status":
+      return IMPORT_STATUS_TONES[value] ?? "grey";
   }
 }
 
@@ -97,17 +111,23 @@ function resolveLabel(kind: StatusBadgeKind, value: string | null | undefined): 
       return enumLabel(COMPANY_LIFECYCLE_STAGE_LABELS, value);
     case "contact-lifecycle":
       return enumLabel(LIFECYCLE_STAGE_LABELS, value);
+    case "import-status":
+      return enumLabel(IMPORT_STATUS_LABELS, value);
   }
 }
 
 export function StatusBadge({ kind, value, className }: StatusBadgeProps) {
   const tone = resolveTone(kind, value);
   const label = resolveLabel(kind, value);
+  // KAN-901 — animate-pulse on import-status=inspecting communicates the
+  // synchronous backend inspection is in flight. ~1-3s typical duration.
+  const animate = kind === "import-status" && value === "inspecting";
   return (
     <span
       className={cn(
         "inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium",
         TONE_CLASSES[tone],
+        animate && "animate-pulse",
         className,
       )}
     >
