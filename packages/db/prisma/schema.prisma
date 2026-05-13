@@ -2062,6 +2062,41 @@ model ImportJob {
   /// surface exactly which model produced the classification.
   detectionLlmModel     String?             @map("detection_llm_model")
 
+  // KAN-905 — Ingestion Cohort 2.4. AI-suggested column-to-field
+  // mapping. Populated by runFieldMapping after the user clicks
+  // "Run AI mapping" on /imports/[id]/mapping. Gated on
+  // detectedEntityType ∈ {contacts, companies, deals, orders};
+  // mixed + unknown return BAD_REQUEST in V1.
+  //
+  // Token + model snapshots follow the same denormalization rules as
+  // detection (see comment above) — canonical cost source remains
+  // the `llm.call` Pub/Sub topic.
+  //
+  // Shape of fieldMappings JSON:
+  //   [{ sourceColumn: string, targetField: string, confidence: number|null }, ...]
+  // where targetField is either a schema column name in the entity's
+  // field universe OR the sentinel 'skip'. confidence is 0-100 (null
+  // for 'skip' rows).
+  /// JSON array of { sourceColumn, targetField, confidence }.
+  fieldMappings            Json?     @map("field_mappings")
+  /// Average of non-skip confidences (0-100). NULL if all rows skipped.
+  fieldMappingConfidence   Int?      @map("field_mapping_confidence")
+  /// LLM's overall reasoning for the mapping suggestions.
+  fieldMappingReasoning    String?   @map("field_mapping_reasoning")
+  fieldMappingStartedAt    DateTime? @map("field_mapping_started_at")
+  /// Set on success only.
+  fieldMappingCompletedAt  DateTime? @map("field_mapping_completed_at")
+  fieldMappingError        String?   @map("field_mapping_error")
+  fieldMappingErrorAt      DateTime? @map("field_mapping_error_at")
+  fieldMappingInputTokens  Int?      @map("field_mapping_input_tokens")
+  fieldMappingOutputTokens Int?      @map("field_mapping_output_tokens")
+  fieldMappingLlmModel     String?   @map("field_mapping_llm_model")
+  /// Set when the operator clicks Save on the mapping review page.
+  /// Differs from fieldMappingCompletedAt (which is the AI-run
+  /// timestamp): a job can have AI-suggested mappings but no operator
+  /// confirmation yet.
+  fieldMappingConfirmedAt  DateTime? @map("field_mapping_confirmed_at")
+
   // Error tracking.
   errorMessage String?   @map("error_message")
   errorAt      DateTime? @map("error_at")
@@ -2089,6 +2124,9 @@ model ImportJob {
   // KAN-904 — filter jobs by detection state for the future cohort
   // dashboard ("show me all unknown classifications for retraining").
   @@index([tenantId, detectedEntityType])
+  // KAN-905 — filter jobs by mapping-confirmation state ("show me
+  // mapped-but-not-yet-committed imports").
+  @@index([tenantId, fieldMappingConfirmedAt])
   @@map("import_jobs")
 }
 
