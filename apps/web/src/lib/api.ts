@@ -1232,6 +1232,25 @@ export interface FieldMappingEntry {
   confidence: number | null;
 }
 
+// KAN-907 — Cohort 2.3. Row-classification result aggregates.
+export interface RowClassificationCounts {
+  total: number;
+  byEntity: {
+    contacts: number;
+    companies: number;
+    deals: number;
+    orders: number;
+    skipped: number;
+    unknown: number;
+  };
+  bySource: {
+    heuristic: number;
+    llm: number;
+  };
+  /** Count of rows flagged review_recommended (heuristic <85 or LLM <70). */
+  lowConfidenceFlags: number;
+}
+
 export interface ImportJobListItem {
   id: string;
   fileName: string;
@@ -1282,6 +1301,16 @@ export interface ImportJobDetail extends ImportJobListItem {
   fieldMappingOutputTokens: number | null;
   fieldMappingLlmModel: string | null;
   fieldMappingConfirmedAt: string | null;
+  // KAN-907 — Cohort 2.3 row-classification fields.
+  rowClassificationCounts: RowClassificationCounts | null;
+  rowClassificationStartedAt: string | null;
+  rowClassificationCompletedAt: string | null;
+  rowClassificationError: string | null;
+  rowClassificationErrorAt: string | null;
+  rowClassificationInputTokens: number | null;
+  rowClassificationOutputTokens: number | null;
+  rowClassificationLlmModel: string | null;
+  rowClassificationConfirmedAt: string | null;
 }
 
 export interface CreateUploadUrlResult {
@@ -1325,4 +1354,16 @@ export const importJobsApi = {
   // KAN-905 — field-universe dropdown options for the mapping UI.
   getFieldUniverse: (entityType: string) =>
     trpcQuery<TargetField[]>('importJobs.getFieldUniverse', { entityType }),
+  // KAN-907 — row-level classification. Hybrid heuristic + LLM batch
+  // pipeline. Synchronous; typical latency 5-30s for mixed files.
+  runRowClassification: (importJobId: string) =>
+    trpcMutation<ImportJobDetail>('importJobs.runRowClassification', {
+      importJobId,
+    }),
+  // KAN-907 — operator confirmation of classification results.
+  // Idempotent (re-confirming just updates the timestamp).
+  confirmRowClassification: (importJobId: string) =>
+    trpcMutation<ImportJobDetail>('importJobs.confirmRowClassification', {
+      importJobId,
+    }),
 };

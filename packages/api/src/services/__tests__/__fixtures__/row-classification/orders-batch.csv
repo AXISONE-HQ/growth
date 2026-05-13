@@ -1,0 +1,11 @@
+order_number,total,currency,placed_at,payment_method,customer_email
+INV-2026-00118,124.90,USD,2026-05-01T14:22:00Z,card,alice.morgan@acme.io
+INV-2026-00119,2840.00,EUR,2026-05-02T09:11:00Z,invoice,bjorn.kvist@nordic-supply.no
+INV-2026-00120,89.50,USD,2026-05-03T16:45:00Z,card,chika.tanaka@hexa.jp
+INV-2026-00121,15400.00,USD,2026-05-04T11:30:00Z,ach,darrell.huang@brightstack.io
+INV-2026-00122,640.75,MXN,2026-05-05T19:08:00Z,card,elena.rivera@vela.mx
+INV-2026-00123,210.00,USD,2026-05-06T08:50:00Z,card,felix.okafor@bluemark.ng
+INV-2026-00124,4250.00,SEK,2026-05-07T15:00:00Z,invoice,greta.lindqvist@orbital.se
+INV-2026-00125,890.00,AED,2026-05-08T12:34:00Z,card,hassan.al-rashid@cypressco.ae
+INV-2026-00126,178.20,EUR,2026-05-09T17:22:00Z,card,isabel.fontaine@madrigal.fr
+INV-2026-00127,9650.00,USD,2026-05-10T10:00:00Z,ach,jian.wei@horizon.cn
