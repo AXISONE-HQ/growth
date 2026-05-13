@@ -1251,6 +1251,76 @@ export interface RowClassificationCounts {
   lowConfidenceFlags: number;
 }
 
+// KAN-911 — Cohort 2.6. Duplicate-detection shapes (rule-based +
+// Levenshtein, no LLM). Mirrors the service-side types in
+// packages/api/src/services/import-dedup.ts so the UI can render
+// candidate cards + signal chips without a second source of truth.
+export type DedupEntityType = 'contacts' | 'companies' | 'deals' | 'orders';
+export type DedupSuggestedAction = 'update' | 'needs_review' | 'insert' | 'skip';
+/** Canonical signal names rendered as chips on the resolution UI. */
+export type DedupSignalName =
+  | 'email_exact'
+  | 'phone_exact'
+  | 'domain_exact'
+  | 'provider_order_id_exact'
+  | 'order_number_exact'
+  | 'name_fuzzy'
+  | 'legal_name_fuzzy'
+  | 'close_date_window'
+  | 'contact_email_exact'
+  | 'placed_at_window';
+
+export interface DedupMatchCandidate {
+  existingEntityId: string;
+  /** 0-100 confidence. 100 = exact signal; ≤94 = fuzzy. */
+  score: number;
+  matchedFields: DedupSignalName[];
+}
+
+export interface DedupMatchDecision {
+  candidates: DedupMatchCandidate[];
+  suggestedAction: DedupSuggestedAction;
+  /** Top candidate's score, or 0 if no candidates. */
+  confidence: number;
+  suggestedReason: string;
+  /** Set when the operator overrides the suggestion via the resolution UI. */
+  userChoice?: {
+    action: DedupSuggestedAction;
+    chosenCandidateId?: string;
+    overriddenAt: string;
+  };
+}
+
+interface DedupPerEntityCount {
+  total: number;
+  exactMatches: number;
+  fuzzyMatches: number;
+  needsReview: number;
+  insertOnly: number;
+}
+
+export interface DedupCounts {
+  byEntity: {
+    contacts: DedupPerEntityCount;
+    companies: DedupPerEntityCount;
+    deals: DedupPerEntityCount;
+    orders: DedupPerEntityCount;
+  };
+  candidatesScanned: {
+    contacts: number;
+    companies: number;
+    deals: number;
+    orders: number;
+  };
+}
+
+export interface DedupStagingRow {
+  id: string;
+  sourceRowIndex: number;
+  sourceRowData: Record<string, unknown> | null;
+  matchDecision: DedupMatchDecision | null;
+}
+
 export interface ImportJobListItem {
   id: string;
   fileName: string;
@@ -1311,6 +1381,14 @@ export interface ImportJobDetail extends ImportJobListItem {
   rowClassificationOutputTokens: number | null;
   rowClassificationLlmModel: string | null;
   rowClassificationConfirmedAt: string | null;
+  // KAN-911 — Cohort 2.6 duplicate-detection fields.
+  dedupStartedAt: string | null;
+  dedupCompletedAt: string | null;
+  dedupError: string | null;
+  dedupErrorAt: string | null;
+  dedupCounts: DedupCounts | null;
+  dedupCandidatesCount: number | null;
+  dedupConfirmedAt: string | null;
 }
 
 export interface CreateUploadUrlResult {
@@ -1364,6 +1442,44 @@ export const importJobsApi = {
   // Idempotent (re-confirming just updates the timestamp).
   confirmRowClassification: (importJobId: string) =>
     trpcMutation<ImportJobDetail>('importJobs.confirmRowClassification', {
+      importJobId,
+    }),
+  // KAN-911 — Cohort 2.6 duplicate detection. Rule-based +
+  // Levenshtein, no LLM. Synchronous; typical latency 2-5s with
+  // first-letter bucket pre-filter (decision E).
+  runDuplicateDetection: (importJobId: string) =>
+    trpcMutation<ImportJobDetail>('importJobs.runDuplicateDetection', {
+      importJobId,
+    }),
+  // KAN-911 — UI list query for the duplicates resolution table.
+  // Returns staging rows for one entity type, optionally filtered
+  // by suggested+overridden action.
+  getStagingForReview: (input: {
+    importJobId: string;
+    entityType: DedupEntityType;
+    filterAction?: DedupSuggestedAction;
+  }) =>
+    trpcQuery<{ rows: DedupStagingRow[]; count: number }>(
+      'importJobs.getStagingForReview',
+      input,
+    ),
+  // KAN-911 — operator per-row override. Sets MatchDecision.userChoice
+  // on the staging row. chosenCandidateId required when newAction is
+  // 'update'.
+  overrideStagingDecision: (input: {
+    stagingId: string;
+    entityType: DedupEntityType;
+    newAction: DedupSuggestedAction;
+    chosenCandidateId?: string;
+  }) =>
+    trpcMutation<{ ok: true }>(
+      'importJobs.overrideStagingDecision',
+      input,
+    ),
+  // KAN-911 — final gate before commit. Refuses if any needs_review
+  // row lacks an override. Sets dedupConfirmedAt.
+  confirmDuplicateResolution: (importJobId: string) =>
+    trpcMutation<ImportJobDetail>('importJobs.confirmDuplicateResolution', {
       importJobId,
     }),
 };

@@ -2129,6 +2129,35 @@ model ImportJob {
   /// Set when the operator clicks Confirm on Card 5.
   rowClassificationConfirmedAt  DateTime? @map("row_classification_confirmed_at")
 
+  // KAN-911 — Ingestion Cohort 2.6. Duplicate detection (rule-based +
+  // Levenshtein, no LLM). For each staging row, runDuplicateDetection
+  // finds candidate matches in the canonical entity tables and writes
+  // a MatchDecision JSON to ImportStaging{Contact|Company|Deal|Order}.
+  // matchDecision. Gated on rowClassificationConfirmedAt IS NOT NULL.
+  //
+  // Shape of dedupCounts JSON:
+  //   {
+  //     byEntity: {
+  //       contacts:  { total, exactMatches, fuzzyMatches, needsReview, insertOnly },
+  //       companies: { ... },
+  //       deals:     { ... },
+  //       orders:    { ... },
+  //     },
+  //     candidatesScanned: { contacts: N, companies: M, ... }
+  //   }
+  dedupStartedAt       DateTime? @map("dedup_started_at")
+  /// Set on success only.
+  dedupCompletedAt     DateTime? @map("dedup_completed_at")
+  dedupError           String?   @map("dedup_error")
+  dedupErrorAt         DateTime? @map("dedup_error_at")
+  /// Aggregate counts JSON (see comment above).
+  dedupCounts          Json?     @map("dedup_counts")
+  /// Total existing entities scanned across all 4 entity types.
+  dedupCandidatesCount Int?      @map("dedup_candidates_count")
+  /// Set when operator confirms duplicate resolution (all needs_review
+  /// rows overridden to a final action). Unblocks the commit cohort.
+  dedupConfirmedAt     DateTime? @map("dedup_confirmed_at")
+
   // Error tracking.
   errorMessage String?   @map("error_message")
   errorAt      DateTime? @map("error_at")
@@ -2162,6 +2191,9 @@ model ImportJob {
   // KAN-907 — filter jobs by row-classification-confirmation state
   // ("show me classified-but-not-yet-mapped imports").
   @@index([tenantId, rowClassificationConfirmedAt])
+  // KAN-911 — filter jobs by dedup-resolution state ("show me imports
+  // ready for commit").
+  @@index([tenantId, dedupConfirmedAt])
   @@map("import_jobs")
 }
 

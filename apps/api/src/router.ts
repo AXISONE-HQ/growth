@@ -644,6 +644,36 @@ interface ImportJobsRouterModule {
     importJobId: string,
     tenantId: string,
   ) => Promise<unknown>;
+  // KAN-911 — Cohort 2.6 duplicate detection.
+  runDuplicateDetection: (
+    prisma: unknown,
+    importJobId: string,
+    tenantId: string,
+  ) => Promise<unknown>;
+  getStagingForReview: (
+    prisma: unknown,
+    tenantId: string,
+    input: {
+      importJobId: string;
+      entityType: "contacts" | "companies" | "deals" | "orders";
+      filterAction?: "update" | "needs_review" | "insert" | "skip";
+    },
+  ) => Promise<unknown>;
+  overrideStagingDecision: (
+    prisma: unknown,
+    tenantId: string,
+    input: {
+      stagingId: string;
+      entityType: "contacts" | "companies" | "deals" | "orders";
+      newAction: "update" | "needs_review" | "insert" | "skip";
+      chosenCandidateId?: string;
+    },
+  ) => Promise<unknown>;
+  confirmDuplicateResolution: (
+    prisma: unknown,
+    importJobId: string,
+    tenantId: string,
+  ) => Promise<unknown>;
 }
 let _importJobsModule: ImportJobsRouterModule | null = null;
 async function loadImportJobsModule(): Promise<ImportJobsRouterModule> {
@@ -829,6 +859,61 @@ const importJobsRouter = router({
     .mutation(async ({ ctx, input }) => {
       const { confirmRowClassification } = await loadImportJobsModule();
       return confirmRowClassification(ctx.prisma, input.importJobId, ctx.tenantId);
+    }),
+
+  // KAN-911 — Cohort 2.6 duplicate detection. Pure rule-based +
+  // Levenshtein, no LLM. Gated on rowClassificationConfirmedAt being
+  // non-null. Writes a MatchDecision JSON onto every staging row + a
+  // DedupCounts aggregate onto the ImportJob.
+  runDuplicateDetection: protectedProcedure
+    .input(z.object({ importJobId: z.string().cuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const { runDuplicateDetection } = await loadImportJobsModule();
+      return runDuplicateDetection(ctx.prisma, input.importJobId, ctx.tenantId);
+    }),
+
+  // KAN-911 — UI list query for the duplicates resolution table.
+  // Returns staging rows grouped under one of the 4 entity types, with
+  // optional filter by suggestedAction (or userChoice action if set).
+  getStagingForReview: protectedProcedure
+    .input(
+      z.object({
+        importJobId: z.string().cuid(),
+        entityType: z.enum(["contacts", "companies", "deals", "orders"]),
+        filterAction: z
+          .enum(["update", "needs_review", "insert", "skip"])
+          .optional(),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      const { getStagingForReview } = await loadImportJobsModule();
+      return getStagingForReview(ctx.prisma, ctx.tenantId, input);
+    }),
+
+  // KAN-911 — operator per-row override. Sets MatchDecision.userChoice
+  // on the staging row. Requires chosenCandidateId when newAction is
+  // 'update' (so commit knows which canonical entity to merge into).
+  overrideStagingDecision: protectedProcedure
+    .input(
+      z.object({
+        stagingId: z.string().cuid(),
+        entityType: z.enum(["contacts", "companies", "deals", "orders"]),
+        newAction: z.enum(["update", "needs_review", "insert", "skip"]),
+        chosenCandidateId: z.string().optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const { overrideStagingDecision } = await loadImportJobsModule();
+      return overrideStagingDecision(ctx.prisma, ctx.tenantId, input);
+    }),
+
+  // KAN-911 — final gate before commit (PR 8). Refuses if any
+  // needs_review row hasn't been overridden. Sets dedupConfirmedAt.
+  confirmDuplicateResolution: protectedProcedure
+    .input(z.object({ importJobId: z.string().cuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const { confirmDuplicateResolution } = await loadImportJobsModule();
+      return confirmDuplicateResolution(ctx.prisma, input.importJobId, ctx.tenantId);
     }),
 });
 

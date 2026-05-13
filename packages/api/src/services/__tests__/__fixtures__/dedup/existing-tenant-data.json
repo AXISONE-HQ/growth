@@ -1,0 +1,73 @@
+{
+  "comment": "KAN-911 — Existing canonical entity snapshot for the test tenant. Reference data the dedup matchers compare staged rows against. Names chosen to exercise: exact-match (alice@example.com), NANP phone fallback (+1-415-555-0142), domain normalization (Acme.COM), legal-name match (Acme Holdings Inc), and bucket-skip (Zulu Co vs Alex).",
+  "contacts": [
+    {
+      "id": "ctc_existing_001",
+      "email": "alice@example.com",
+      "phone": "+1-415-555-0142",
+      "firstName": "Alice",
+      "lastName": "Anderson",
+      "companyName": "Acme Corporation"
+    },
+    {
+      "id": "ctc_existing_002",
+      "email": "bob.builder@example.org",
+      "phone": null,
+      "firstName": "Bob",
+      "lastName": "Builder",
+      "companyName": "Acme Corporation"
+    },
+    {
+      "id": "ctc_existing_003",
+      "email": null,
+      "phone": "+33 1 23 45 67 89",
+      "firstName": "Élise",
+      "lastName": "Martin",
+      "companyName": null
+    }
+  ],
+  "companies": [
+    {
+      "id": "co_existing_001",
+      "name": "Acme Corporation",
+      "legalName": "Acme Holdings Inc",
+      "domain": "Acme.COM"
+    },
+    {
+      "id": "co_existing_002",
+      "name": "Beta Industries",
+      "legalName": null,
+      "domain": "betaind.io"
+    }
+  ],
+  "deals": [
+    {
+      "id": "d_existing_001",
+      "name": "Acme Renewal Q1",
+      "expectedCloseDate": "2026-06-01",
+      "contact": { "email": "alice@example.com" }
+    },
+    {
+      "id": "d_existing_002",
+      "name": "Beta Expansion 2026",
+      "expectedCloseDate": "2026-09-15",
+      "contact": { "email": "bob.builder@example.org" }
+    }
+  ],
+  "orders": [
+    {
+      "id": "o_existing_001",
+      "orderNumber": "ORD-1234",
+      "providerOrderId": "shopify_999",
+      "placedAt": "2026-05-13T10:00:00Z",
+      "contact": { "email": "alice@example.com" }
+    },
+    {
+      "id": "o_existing_002",
+      "orderNumber": "ORD-9999",
+      "providerOrderId": null,
+      "placedAt": "2026-04-01T08:00:00Z",
+      "contact": { "email": "bob.builder@example.org" }
+    }
+  ]
+}
