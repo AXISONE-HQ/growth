@@ -98,6 +98,8 @@ model Tenant {
   // KAN-879 — CRM Core Schema
   companies              Company[]
   orders                 Order[]
+  // KAN-896 — Ingestion Cohort 2.1a (upload backend)
+  imports                ImportJob[]
 
   //   tenantSettings  TenantSettings[]  // commented out for smoke build (model missing on main)
   channelConnections ChannelConnection[]
@@ -116,6 +118,8 @@ model User {
 
   tenant              Tenant       @relation(fields: [tenantId], references: [id])
   resolvedEscalations Escalation[] @relation("ResolvedByUser")
+  // KAN-896 — Ingestion Cohort 2.1a (upload backend). Single relation, no name needed.
+  imports             ImportJob[]
 
   @@index([tenantId])
   @@map("users")
@@ -1929,4 +1933,98 @@ model Order {
   @@index([tenantId, status])
   @@index([tenantId, placedAt(sort: Desc)])
   @@map("orders")
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// INGESTION — KAN-896 Cohort 2.1a (upload backend)
+//
+// PR 1 of 8 in the Cohort 2 ingestion pipeline. Lands the upload +
+// inspection foundation. Future cohort PRs layer entity detection
+// (2.2), row-level classification (2.3), field mapping UI (2.4),
+// staging tables (2.5), duplicate detection (2.6), and commit + audit
+// + Pub/Sub fanout (2.7) on top of this model.
+//
+// Status state machine:
+//   awaiting_upload → uploaded → inspecting → inspected
+//                                          ↘ failed
+//
+// Inspection (sync in V1) populates detectedFileType + detectedHeaders +
+// sampleRows so the future field-mapping UI can drive the Haiku
+// column-to-schema mapping (csv-import-haiku-mapping.ts) without a
+// second roundtrip.
+// ─────────────────────────────────────────────────────────────────────
+
+enum ImportMode {
+  replace_all
+  update_add
+
+  @@map("import_mode")
+}
+
+enum ImportStatus {
+  awaiting_upload
+  uploaded
+  inspecting
+  inspected
+  failed
+
+  @@map("import_status")
+}
+
+enum ImportFileType {
+  csv
+  xlsx
+  unknown
+
+  @@map("import_file_type")
+}
+
+model ImportJob {
+  id                    String          @id @default(cuid())
+  tenantId              String          @map("tenant_id")
+  createdByUserId       String          @map("created_by_user_id")
+
+  // Upload metadata (captured at createUploadUrl).
+  fileName              String          @map("file_name")
+  fileSize              Int             @map("file_size")
+  fileMimeType          String          @map("file_mime_type")
+  /// `tenants/{tenantId}/imports/{importJobId}/{filename}` —
+  /// tenant-scope check (`startsWith`) enforced before any GCS op.
+  gcsObjectPath         String          @map("gcs_object_path")
+
+  // Mode flag — honored by the future commit cohort (PR 8); captured here
+  // so the choice is durable from the moment of upload.
+  mode                  ImportMode      @default(update_add)
+
+  // Status state machine.
+  status                ImportStatus    @default(awaiting_upload)
+
+  // Inspection results (populated by inspect logic; null until inspected).
+  detectedFileType      ImportFileType? @map("detected_file_type")
+  detectedRowCount      Int?            @map("detected_row_count")
+  detectedColumnCount   Int?            @map("detected_column_count")
+  /// Array<string> — populated by inspect logic.
+  detectedHeaders       Json?           @map("detected_headers")
+  /// Array<Record<string, unknown>> — first 5 data rows.
+  sampleRows            Json?           @map("sample_rows")
+
+  // Error tracking.
+  errorMessage          String?         @map("error_message")
+  errorAt               DateTime?       @map("error_at")
+
+  // Timestamps.
+  createdAt             DateTime        @default(now()) @map("created_at")
+  updatedAt             DateTime        @updatedAt @map("updated_at")
+  uploadConfirmedAt     DateTime?       @map("upload_confirmed_at")
+  inspectionStartedAt   DateTime?       @map("inspection_started_at")
+  inspectionCompletedAt DateTime?       @map("inspection_completed_at")
+
+  // Relations.
+  tenant                Tenant          @relation(fields: [tenantId], references: [id])
+  createdBy             User            @relation(fields: [createdByUserId], references: [id])
+
+  @@index([tenantId, status])
+  @@index([tenantId, createdAt(sort: Desc)])
+  @@index([createdByUserId])
+  @@map("import_jobs")
 }

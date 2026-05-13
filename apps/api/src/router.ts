@@ -551,6 +551,163 @@ const dealsRouter = router({
 });
 
 // ============================================================================
+// IMPORT JOBS ROUTER — KAN-896 Cohort 2.1a (upload backend)
+// ============================================================================
+//
+// 4 procedures: createUploadUrl, confirmUpload, list, get.
+// Service-layer in packages/api/src/services/import-jobs-router.ts.
+// Variable-specifier dynamic-import pattern (KAN-689 cohort) to keep the
+// services module out of apps/api's rootDir TS6059 graph.
+//
+// createdByUserId resolution: ctx.firebaseUser.email → User row in tenant.
+// Pre-launch single-tenant posture; KAN-714 (GoRush onboarding) will
+// replace this with proper TeamMember-based identity.
+
+interface ImportJobsRouterModule {
+  createUploadUrl: (
+    prisma: unknown,
+    tenantId: string,
+    createdByUserId: string,
+    input: {
+      filename: string;
+      fileSize: number;
+      fileMimeType:
+        | "text/csv"
+        | "application/vnd.ms-excel"
+        | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+      mode: "replace_all" | "update_add";
+    },
+  ) => Promise<unknown>;
+  confirmUpload: (
+    prisma: unknown,
+    tenantId: string,
+    input: { importJobId: string },
+  ) => Promise<unknown>;
+  listImportJobs: (
+    prisma: unknown,
+    tenantId: string,
+    input: {
+      status?:
+        | "awaiting_upload"
+        | "uploaded"
+        | "inspecting"
+        | "inspected"
+        | "failed";
+      limit: number;
+      cursor?: string;
+    },
+  ) => Promise<unknown>;
+  getImportJobById: (
+    prisma: unknown,
+    tenantId: string,
+    input: { id: string },
+  ) => Promise<unknown>;
+}
+let _importJobsModule: ImportJobsRouterModule | null = null;
+async function loadImportJobsModule(): Promise<ImportJobsRouterModule> {
+  if (_importJobsModule) return _importJobsModule;
+  const spec = "../../../packages/api/src/services/import-jobs-router.js";
+  _importJobsModule = (await import(spec)) as ImportJobsRouterModule;
+  return _importJobsModule;
+}
+
+/** Resolve the acting User.id from the Firebase auth context. Used by
+ *  createUploadUrl to set ImportJob.createdByUserId. Pre-launch single-
+ *  tenant posture: look up User by email within the tenant. Returns the
+ *  User.id or throws UNAUTHORIZED if no matching User row exists. */
+async function resolveCreatedByUserId(
+  prisma: typeof import("./prisma.js").prisma,
+  tenantId: string,
+  email: string | undefined,
+): Promise<string> {
+  if (!email) {
+    throw new TRPCError({
+      code: "UNAUTHORIZED",
+      message:
+        "Import upload requires a Firebase-authenticated user with email",
+    });
+  }
+  const user = await prisma.user.findFirst({
+    where: { email, tenantId },
+    select: { id: true },
+  });
+  if (!user) {
+    throw new TRPCError({
+      code: "UNAUTHORIZED",
+      message: `No User row found for email '${email}' in this tenant. Onboarding (KAN-714) will resolve this; for now, ensure a User row exists.`,
+    });
+  }
+  return user.id;
+}
+
+const importJobsRouter = router({
+  createUploadUrl: protectedProcedure
+    .input(
+      z.object({
+        filename: z.string().min(1).max(255),
+        // 20 MB cap. Surface area is bounded by the inspection cohort —
+        // larger files belong on an async pipeline (PR 4 / 2.2).
+        fileSize: z.number().int().min(1).max(20 * 1024 * 1024),
+        fileMimeType: z.enum([
+          "text/csv",
+          "application/vnd.ms-excel",
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ]),
+        mode: z.enum(["replace_all", "update_add"]),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const { createUploadUrl } = await loadImportJobsModule();
+      const createdByUserId = await resolveCreatedByUserId(
+        ctx.prisma,
+        ctx.tenantId,
+        ctx.firebaseUser?.email,
+      );
+      return createUploadUrl(
+        ctx.prisma,
+        ctx.tenantId,
+        createdByUserId,
+        input,
+      );
+    }),
+
+  confirmUpload: protectedProcedure
+    .input(z.object({ importJobId: z.string().cuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const { confirmUpload } = await loadImportJobsModule();
+      return confirmUpload(ctx.prisma, ctx.tenantId, input);
+    }),
+
+  list: protectedProcedure
+    .input(
+      z.object({
+        status: z
+          .enum([
+            "awaiting_upload",
+            "uploaded",
+            "inspecting",
+            "inspected",
+            "failed",
+          ])
+          .optional(),
+        limit: z.number().int().min(1).max(200).default(50),
+        cursor: z.string().optional(),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      const { listImportJobs } = await loadImportJobsModule();
+      return listImportJobs(ctx.prisma, ctx.tenantId, input);
+    }),
+
+  get: protectedProcedure
+    .input(z.object({ id: z.string().cuid() }))
+    .query(async ({ ctx, input }) => {
+      const { getImportJobById } = await loadImportJobsModule();
+      return getImportJobById(ctx.prisma, ctx.tenantId, input);
+    }),
+});
+
+// ============================================================================
 // DECISIONS ROUTER
 // ============================================================================
 
@@ -4594,6 +4751,8 @@ export const appRouter = router({
   companies: companiesRouter,
   orders: ordersRouter,
   deals: dealsRouter,
+  // KAN-896 — Ingestion Cohort 2.1a (upload backend). UI in PR 2 (2.1b).
+  importJobs: importJobsRouter,
   pipelines: pipelinesRouter,
   stages: stagesRouter,
   targets: targetsRouter,

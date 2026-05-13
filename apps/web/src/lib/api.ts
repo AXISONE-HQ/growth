@@ -1183,3 +1183,80 @@ export const recommendationsApi = {
       { id, reason },
     ),
 };
+
+/* ── Import Jobs API (KAN-896 — Cohort 2.1a) ──────────────────────────
+ * Backend: apps/api/src/router.ts → importJobsRouter, delegates to
+ * packages/api/src/services/import-jobs-router.ts.
+ *
+ * Upload flow (consumed by PR 2 / Cohort 2.1b UI):
+ *   1. createUploadUrl({ filename, fileSize, fileMimeType, mode })
+ *      → { importJobId, signedUploadUrl, gcsObjectPath, expiresAt }
+ *   2. Browser PUT file body to signedUploadUrl with Content-Type header
+ *   3. confirmUpload({ importJobId })
+ *      → ImportJobDetail with detectedHeaders + sampleRows populated
+ */
+
+export type ImportMode = 'replace_all' | 'update_add';
+export type ImportStatus =
+  | 'awaiting_upload'
+  | 'uploaded'
+  | 'inspecting'
+  | 'inspected'
+  | 'failed';
+export type ImportFileType = 'csv' | 'xlsx' | 'unknown';
+
+export interface ImportJobListItem {
+  id: string;
+  fileName: string;
+  fileSize: number;
+  fileMimeType: string;
+  mode: ImportMode;
+  status: ImportStatus;
+  detectedFileType: ImportFileType | null;
+  detectedRowCount: number | null;
+  detectedColumnCount: number | null;
+  errorMessage: string | null;
+  createdAt: string;
+  updatedAt: string;
+  uploadConfirmedAt: string | null;
+  inspectionCompletedAt: string | null;
+  createdByUserId: string;
+}
+
+export interface ImportJobDetail extends ImportJobListItem {
+  gcsObjectPath: string;
+  /** Array<string> — populated when status='inspected'. */
+  detectedHeaders: string[] | null;
+  /** Array<Record<string, unknown>> — first 5 data rows; populated when status='inspected'. */
+  sampleRows: Array<Record<string, unknown>> | null;
+  errorAt: string | null;
+  inspectionStartedAt: string | null;
+  tenantId: string;
+}
+
+export interface CreateUploadUrlResult {
+  importJobId: string;
+  signedUploadUrl: string;
+  gcsObjectPath: string;
+  expiresAt: string;
+}
+
+export const importJobsApi = {
+  createUploadUrl: (input: {
+    filename: string;
+    fileSize: number;
+    fileMimeType:
+      | 'text/csv'
+      | 'application/vnd.ms-excel'
+      | 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    mode: ImportMode;
+  }) => trpcMutation<CreateUploadUrlResult>('importJobs.createUploadUrl', input),
+  confirmUpload: (importJobId: string) =>
+    trpcMutation<ImportJobDetail>('importJobs.confirmUpload', { importJobId }),
+  list: (input?: { status?: ImportStatus; limit?: number; cursor?: string }) =>
+    trpcQuery<CursorPage<ImportJobListItem>>(
+      'importJobs.list',
+      input ?? { limit: 50 },
+    ),
+  get: (id: string) => trpcQuery<ImportJobDetail>('importJobs.get', { id }),
+};
