@@ -148,6 +148,28 @@ export default function MappingPage() {
 
   const [reRunOpen, setReRunOpen] = useState(false);
 
+  // Collision detection (live, per render).
+  // HOISTED above early returns so it runs unconditionally — React's
+  // rules-of-hooks forbids conditional Hook calls. The memo function
+  // tolerates null `localMappings` by returning an empty Map, so it's
+  // safe to compute even on loading/error/gate code paths.
+  const collisions = useMemo(() => {
+    if (!localMappings) return new Map<string, string[]>();
+    const seen = new Map<string, string[]>();
+    for (const m of localMappings) {
+      if (m.targetField === 'skip') continue;
+      const arr = seen.get(m.targetField) ?? [];
+      arr.push(m.sourceColumn);
+      seen.set(m.targetField, arr);
+    }
+    // Filter to entries with >1 source column.
+    const out = new Map<string, string[]>();
+    for (const [target, sources] of seen.entries()) {
+      if (sources.length > 1) out.set(target, sources);
+    }
+    return out;
+  }, [localMappings]);
+
   if (!id) return null;
   if (isLoading) return <MappingSkeleton />;
   if (isError) return <MappingErrorPanel message={(error as Error)?.message ?? 'Unknown error'} />;
@@ -183,24 +205,6 @@ export default function MappingPage() {
   const hasMappings = Array.isArray(localMappings) && localMappings.length > 0;
   const isRunning = runMappingMutation.isPending;
   const isSaving = saveMappingsMutation.isPending;
-
-  // Collision detection (live, per render).
-  const collisions = useMemo(() => {
-    if (!localMappings) return new Map<string, string[]>();
-    const seen = new Map<string, string[]>();
-    for (const m of localMappings) {
-      if (m.targetField === 'skip') continue;
-      const arr = seen.get(m.targetField) ?? [];
-      arr.push(m.sourceColumn);
-      seen.set(m.targetField, arr);
-    }
-    // Filter to entries with >1 source column.
-    const out = new Map<string, string[]>();
-    for (const [target, sources] of seen.entries()) {
-      if (sources.length > 1) out.set(target, sources);
-    }
-    return out;
-  }, [localMappings]);
 
   const hasCollisions = collisions.size > 0;
 
