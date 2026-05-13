@@ -24,6 +24,13 @@ COPY package.json package-lock.json turbo.json ./
 COPY apps/api/package.json ./apps/api/
 COPY apps/connectors/package.json ./apps/connectors/
 COPY apps/web/package.json ./apps/web/
+# KAN-899 hotfix — KAN-896 introduced papaparse + xlsx as packages/api
+# deps; without copying packages/api/package.json into the deps stage,
+# npm install doesn't treat it as a workspace member and skips the deps.
+# Result: ERR_MODULE_NOT_FOUND at runtime when importJobs.* tRPC routes
+# dynamically load packages/api/src/services/lib/file-parsers.ts. Same
+# class as memory feedback_dockerfile_workspace_dist_gap.
+COPY packages/api/package.json ./packages/api/
 COPY packages/connector-contracts/package.json ./packages/connector-contracts/
 COPY packages/db/package.json ./packages/db/
 COPY packages/llm-cost-tracking/package.json ./packages/llm-cost-tracking/
