@@ -1,0 +1,9 @@
+record_type,name,email,phone,company_name,domain,industry,employee_count
+contact,Alice Morgan,alice.morgan@acme.io,+1-415-555-0142,Acme Holdings,,,
+contact,Bjorn Kvist,bjorn.kvist@nordic-supply.no,+47-22-555-0118,Nordic Supply Co,,,
+company,Acme Holdings,,,,acme.io,SaaS,124
+contact,Chika Tanaka,chika.tanaka@hexa.jp,+81-3-5555-0193,Hexa Robotics KK,,,
+company,Nordic Supply Co,,,,nordic-supply.no,Manufacturing,52
+company,Hexa Robotics KK,,,,hexa.jp,Hardware,310
+contact,Darrell Huang,darrell.huang@brightstack.io,+1-650-555-0174,BrightStack Labs,,,
+company,BrightStack Labs,,,,brightstack.io,AI Tooling,28

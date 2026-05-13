@@ -329,3 +329,15 @@ export async function getImportJobById(
   }
   return job;
 }
+
+// ─────────────────────────────────────────────
+// KAN-904 — Ingestion Cohort 2.2. AI entity detection.
+// Thin re-export for the apps/api router layer; the real logic lives
+// in import-detection.ts so the test surface stays narrow.
+// ─────────────────────────────────────────────
+
+export interface RunDetectionInput {
+  importJobId: string;
+}
+
+export { runEntityDetection } from "./import-detection.js";

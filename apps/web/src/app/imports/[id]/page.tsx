@@ -2,35 +2,42 @@
 
 /**
  * KAN-901 — /imports/[id] ImportJob detail page (Ingestion Cohort 2.1b).
+ * KAN-904 — adds Card 3 (AI Detection) between Inspection + Timestamps.
  *
- * 5 stacked cards consuming the KAN-896 `importJobs.get` response:
+ * 6 stacked cards consuming the `importJobs.get` response:
  *   1. File info       (always)
  *   2. Inspection      (only when status='inspected')
- *   3. Timestamps      (always)
- *   4. Error           (only when status='failed')
- *   5. Next steps      (always — guides to mapping in PR 5)
+ *   3. AI Detection    (only when status='inspected'; 3-state: idle/done/error) — KAN-904
+ *   4. Timestamps      (always)
+ *   5. Error           (only when status='failed' — inspection-side)
+ *   6. Next steps      (always — gated on detection result)
  *
  * NOT_FOUND state renders a friendly error per KAN-895 finding (the
  * sibling KAN-887/888 pages were sitting in skeleton on NOT_FOUND
  * pre-KAN-895; this page does it right from day 1).
  */
 
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
+  AlertTriangle,
   ArrowLeft,
   FileSpreadsheet,
   FileText,
   Loader2,
+  Sparkles,
   Upload,
   XCircle,
 } from 'lucide-react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useEffect } from 'react';
+import { toast } from 'sonner';
 import { importJobsApi, type ImportJobDetail } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { StatusBadge } from '@/components/ui/status-badge';
+import { ConfidenceBadge } from '@/components/growth/confidence-badge';
 import {
+  DETECTED_ENTITY_TYPE_LABELS,
   IMPORT_FILE_TYPE_LABELS,
   IMPORT_MODE_LABELS,
   enumLabel,
@@ -79,6 +86,7 @@ function truncateCell(value: unknown, maxLen = 40): string {
 export default function ImportDetailPage() {
   const params = useParams<{ id: string }>();
   const id = params?.id;
+  const queryClient = useQueryClient();
 
   const { data: job, isLoading, isError, error } = useQuery<ImportJobDetail>({
     queryKey: ['importJobs', 'get', id],
@@ -91,6 +99,23 @@ export default function ImportDetailPage() {
       if (!data) return false;
       const terminal = data.status === 'inspected' || data.status === 'failed';
       return terminal ? false : 1500;
+    },
+  });
+
+  // KAN-904 — AI entity detection. Mutation blocks until Haiku responds
+  // (~1-3s typical). On success we refetch the ImportJob to re-render
+  // Card 3 (AI Detection) with the populated detectedEntityType +
+  // confidence + reasoning fields.
+  const detectionMutation = useMutation<ImportJobDetail, Error, string>({
+    mutationFn: (importJobId) => importJobsApi.runDetection(importJobId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['importJobs', 'get', id] });
+    },
+    onError: (err) => {
+      toast.error(err.message || 'Detection failed', {
+        description: 'See the AI Detection card for details.',
+      });
+      void queryClient.invalidateQueries({ queryKey: ['importJobs', 'get', id] });
     },
   });
 
@@ -285,7 +310,16 @@ export default function ImportDetailPage() {
         </section>
       ) : null}
 
-      {/* Card 3 — Timestamps */}
+      {/* Card 3 — AI Detection (KAN-904) — only when inspection done */}
+      {showInspection ? (
+        <DetectionCard
+          job={job}
+          isRunning={detectionMutation.isPending}
+          onRun={() => detectionMutation.mutate(job.id)}
+        />
+      ) : null}
+
+      {/* Card 4 — Timestamps */}
       <section className="bg-white border rounded-lg p-6">
         <h2 className="text-sm font-semibold mb-3" style={SECTION_HEADER_STYLE}>
           Timestamps
@@ -348,20 +382,57 @@ export default function ImportDetailPage() {
         </section>
       ) : null}
 
-      {/* Card 5 — Next steps (always) */}
+      {/* Card 6 — Next steps (always) — KAN-904 gates on detection */}
       <section className="bg-white border rounded-lg p-6">
         <h2 className="text-sm font-semibold mb-3" style={SECTION_HEADER_STYLE}>
           Next steps
         </h2>
         {job.status === 'inspected' ? (
-          <div className="space-y-2">
-            <p className="text-sm" style={LABEL_STYLE}>
-              File is ready. The next phase — field mapping — ships in a later release.
-            </p>
-            <Button disabled variant="outline">
-              Continue to mapping (coming soon)
-            </Button>
-          </div>
+          job.detectedEntityType == null ? (
+            <div className="space-y-2">
+              <p className="text-sm" style={LABEL_STYLE}>
+                File is ready. Run AI detection (Card 3) to classify what kind of data
+                this contains before continuing.
+              </p>
+              <Button disabled variant="outline" title="Run AI detection first">
+                Continue to mapping
+              </Button>
+            </div>
+          ) : job.detectedEntityType === 'unknown' ? (
+            <div className="space-y-2">
+              <p className="text-sm" style={LABEL_STYLE}>
+                AI classification confidence was low. Field mapping is available, but
+                please verify the data shape manually before committing.
+              </p>
+              <div
+                className="flex items-center gap-2 text-xs px-3 py-1.5 rounded-md border"
+                style={{
+                  backgroundColor: 'var(--ds-warning-soft)',
+                  color: 'var(--ds-warning-text)',
+                  borderColor: 'var(--ds-warning)',
+                }}
+              >
+                <AlertTriangle className="w-3.5 h-3.5" aria-hidden />
+                <span>Low confidence — please verify manually before committing.</span>
+              </div>
+              <Button disabled variant="outline">
+                Continue to mapping (coming in next release)
+              </Button>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <p className="text-sm" style={LABEL_STYLE}>
+                File classified as{' '}
+                <strong>
+                  {enumLabel(DETECTED_ENTITY_TYPE_LABELS, job.detectedEntityType)}
+                </strong>
+                . The next phase — field mapping — ships in a later release.
+              </p>
+              <Button disabled variant="outline">
+                Continue to mapping (coming in next release)
+              </Button>
+            </div>
+          )
         ) : job.status === 'failed' ? (
           <div className="space-y-2">
             <p className="text-sm" style={LABEL_STYLE}>
@@ -379,6 +450,156 @@ export default function ImportDetailPage() {
         )}
       </section>
     </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+// KAN-904 — AI Detection card subcomponent.
+//
+// Three mutually-exclusive states:
+//   (a) idle    — no detection run yet AND no prior error
+//   (b) done    — detectedEntityType populated (success path; coercion to
+//                 'unknown' for low-confidence is still a "done" state)
+//   (c) error   — detectionError populated AND detectedEntityType null
+//                 (either a fresh run that failed, or a prior failure
+//                  that hasn't been retried)
+// ─────────────────────────────────────────────
+
+function DetectionCard({
+  job,
+  isRunning,
+  onRun,
+}: {
+  job: ImportJobDetail;
+  isRunning: boolean;
+  onRun: () => void;
+}) {
+  if (isRunning) {
+    return (
+      <section className="bg-white border rounded-lg p-6">
+        <h2 className="text-sm font-semibold mb-3" style={SECTION_HEADER_STYLE}>
+          AI Detection
+        </h2>
+        <div className="flex items-center gap-2 text-sm" style={LABEL_STYLE}>
+          <Loader2 className="w-4 h-4 animate-spin" aria-hidden />
+          Analyzing your file…
+        </div>
+      </section>
+    );
+  }
+
+  // (c) Error state — prior run failed and hasn't been retried.
+  if (job.detectionError && job.detectedEntityType == null) {
+    return (
+      <section className="bg-red-50 border border-red-200 rounded-lg p-6">
+        <div className="flex items-start gap-3">
+          <XCircle
+            className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5"
+            aria-hidden
+          />
+          <div className="flex-1 min-w-0">
+            <h2 className="text-sm font-semibold text-red-800">
+              AI Detection — Failed
+            </h2>
+            <p className="text-sm mt-1 text-red-700 whitespace-pre-wrap break-words">
+              {job.detectionError}
+            </p>
+            <p
+              className="text-xs mt-2"
+              style={MUTED_STYLE}
+              title={fmtDateTime(job.detectionErrorAt)}
+            >
+              Failed {relativeTime(job.detectionErrorAt)}
+            </p>
+            <div className="mt-3">
+              <Button onClick={onRun} variant="default">
+                <Sparkles className="w-4 h-4 mr-1.5" aria-hidden /> Retry
+              </Button>
+            </div>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  // (b) Done state — detection result populated.
+  if (job.detectedEntityType != null) {
+    const startedMs = job.detectionStartedAt
+      ? new Date(job.detectionStartedAt).getTime()
+      : null;
+    const completedMs = job.detectionCompletedAt
+      ? new Date(job.detectionCompletedAt).getTime()
+      : null;
+    const durationSec =
+      startedMs != null && completedMs != null
+        ? ((completedMs - startedMs) / 1000).toFixed(1)
+        : null;
+    const inTok = job.detectionInputTokens ?? 0;
+    const outTok = job.detectionOutputTokens ?? 0;
+
+    return (
+      <section className="bg-white border rounded-lg p-6">
+        <div className="flex items-start justify-between mb-3">
+          <h2 className="text-sm font-semibold" style={SECTION_HEADER_STYLE}>
+            AI Detection
+          </h2>
+          <Button onClick={onRun} variant="outline" size="sm">
+            <Sparkles className="w-3.5 h-3.5 mr-1.5" aria-hidden /> Re-run detection
+          </Button>
+        </div>
+
+        {/* Hero row — entity type + confidence badge */}
+        <div className="flex flex-wrap items-center gap-3 mb-4">
+          <span className="text-lg font-semibold" style={SECTION_HEADER_STYLE}>
+            {enumLabel(DETECTED_ENTITY_TYPE_LABELS, job.detectedEntityType)}
+          </span>
+          {job.detectionConfidence != null ? (
+            <ConfidenceBadge value={job.detectionConfidence} />
+          ) : null}
+        </div>
+
+        {/* Reasoning — always visible */}
+        <div className="mb-3">
+          <div className="text-xs mb-1" style={MUTED_STYLE}>
+            Why?
+          </div>
+          <p
+            className="text-sm whitespace-pre-wrap break-words"
+            style={LABEL_STYLE}
+          >
+            {job.detectionReasoning ?? '—'}
+          </p>
+        </div>
+
+        {/* Footer — model + tokens + duration */}
+        <div className="text-xs mt-4 pt-3 border-t border-gray-100" style={MUTED_STYLE}>
+          {job.detectionLlmModel ? (
+            <>
+              Model: <span className="font-mono">{job.detectionLlmModel}</span>
+            </>
+          ) : null}
+          {job.detectionLlmModel ? ' · ' : null}
+          Tokens: {inTok.toLocaleString()}+{outTok.toLocaleString()}
+          {durationSec != null ? ` · Duration: ${durationSec}s` : null}
+        </div>
+      </section>
+    );
+  }
+
+  // (a) Idle state — never run.
+  return (
+    <section className="bg-white border rounded-lg p-6">
+      <h2 className="text-sm font-semibold mb-2" style={SECTION_HEADER_STYLE}>
+        Detect entity type
+      </h2>
+      <p className="text-sm mb-4" style={LABEL_STYLE}>
+        Use AI to identify what kind of data is in this file (Contacts, Companies,
+        Deals, Orders, or Mixed).
+      </p>
+      <Button onClick={onRun} variant="default">
+        <Sparkles className="w-4 h-4 mr-1.5" aria-hidden /> Run detection
+      </Button>
+    </section>
   );
 }
 
