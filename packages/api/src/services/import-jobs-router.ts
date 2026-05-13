@@ -341,3 +341,30 @@ export interface RunDetectionInput {
 }
 
 export { runEntityDetection } from "./import-detection.js";
+
+// ─────────────────────────────────────────────
+// KAN-905 — Ingestion Cohort 2.4. AI field mapping.
+// Same thin-re-export pattern as detection. Real logic lives in
+// import-mapping.ts.
+// ─────────────────────────────────────────────
+
+export interface RunMappingInput {
+  importJobId: string;
+}
+
+export interface SaveMappingsInput {
+  importJobId: string;
+  mappings: Array<{
+    sourceColumn: string;
+    targetField: string;
+    confidence: number | null;
+  }>;
+}
+
+export {
+  runFieldMapping,
+  saveFieldMappings,
+  FIELD_UNIVERSE_BY_ENTITY,
+  type TargetField,
+  type FieldMappingEntry,
+} from "./import-mapping.js";

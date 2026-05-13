@@ -1214,6 +1214,24 @@ export type DetectedEntityType =
   | 'mixed'
   | 'unknown';
 
+// KAN-905 — Cohort 2.4. Field mapping shapes.
+export type TargetFieldKind = 'canonical' | 'lookup';
+
+export interface TargetField {
+  name: string;
+  label: string;
+  description: string;
+  kind: TargetFieldKind;
+}
+
+export interface FieldMappingEntry {
+  sourceColumn: string;
+  /** Schema column name in the entity's universe, or the literal 'skip'. */
+  targetField: string;
+  /** 0-100 integer. null for 'skip' rows. */
+  confidence: number | null;
+}
+
 export interface ImportJobListItem {
   id: string;
   fileName: string;
@@ -1252,6 +1270,18 @@ export interface ImportJobDetail extends ImportJobListItem {
   detectionInputTokens: number | null;
   detectionOutputTokens: number | null;
   detectionLlmModel: string | null;
+  // KAN-905 — Cohort 2.4 AI field mapping fields.
+  fieldMappings: FieldMappingEntry[] | null;
+  fieldMappingConfidence: number | null;
+  fieldMappingReasoning: string | null;
+  fieldMappingStartedAt: string | null;
+  fieldMappingCompletedAt: string | null;
+  fieldMappingError: string | null;
+  fieldMappingErrorAt: string | null;
+  fieldMappingInputTokens: number | null;
+  fieldMappingOutputTokens: number | null;
+  fieldMappingLlmModel: string | null;
+  fieldMappingConfirmedAt: string | null;
 }
 
 export interface CreateUploadUrlResult {
@@ -1283,4 +1313,16 @@ export const importJobsApi = {
   // responds (typical 1-3s) and returns the updated ImportJob.
   runDetection: (importJobId: string) =>
     trpcMutation<ImportJobDetail>('importJobs.runDetection', { importJobId }),
+  // KAN-905 — AI field mapping. Suggests column→target mappings via
+  // Haiku. Blocks ~2-4s. Returns the updated ImportJob with
+  // fieldMappings populated.
+  runMapping: (importJobId: string) =>
+    trpcMutation<ImportJobDetail>('importJobs.runMapping', { importJobId }),
+  // KAN-905 — operator-confirmed mappings. Throws on collision or
+  // unknown source/target.
+  saveMappings: (input: { importJobId: string; mappings: FieldMappingEntry[] }) =>
+    trpcMutation<ImportJobDetail>('importJobs.saveMappings', input),
+  // KAN-905 — field-universe dropdown options for the mapping UI.
+  getFieldUniverse: (entityType: string) =>
+    trpcQuery<TargetField[]>('importJobs.getFieldUniverse', { entityType }),
 };

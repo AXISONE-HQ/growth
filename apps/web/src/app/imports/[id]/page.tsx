@@ -3,24 +3,26 @@
 /**
  * KAN-901 — /imports/[id] ImportJob detail page (Ingestion Cohort 2.1b).
  * KAN-904 — adds Card 3 (AI Detection) between Inspection + Timestamps.
+ * KAN-905 — adds Card 4 (Field Mapping) after AI Detection.
  *
- * 6 stacked cards consuming the `importJobs.get` response:
+ * 7 stacked cards consuming the `importJobs.get` response:
  *   1. File info       (always)
  *   2. Inspection      (only when status='inspected')
- *   3. AI Detection    (only when status='inspected'; 3-state: idle/done/error) — KAN-904
- *   4. Timestamps      (always)
- *   5. Error           (only when status='failed' — inspection-side)
- *   6. Next steps      (always — gated on detection result)
+ *   3. AI Detection    (only when status='inspected'; 3-state) — KAN-904
+ *   4. Field Mapping   (only when detectedEntityType supported; 4-state) — KAN-905
+ *   5. Timestamps      (always)
+ *   6. Error           (only when status='failed' — inspection-side)
+ *   7. Next steps      (always — gated on mapping confirmation)
  *
- * NOT_FOUND state renders a friendly error per KAN-895 finding (the
- * sibling KAN-887/888 pages were sitting in skeleton on NOT_FOUND
- * pre-KAN-895; this page does it right from day 1).
+ * NOT_FOUND state renders a friendly error per KAN-895 finding.
  */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   AlertTriangle,
   ArrowLeft,
+  CheckCircle2,
+  Columns3,
   FileSpreadsheet,
   FileText,
   Loader2,
@@ -319,7 +321,12 @@ export default function ImportDetailPage() {
         />
       ) : null}
 
-      {/* Card 4 — Timestamps */}
+      {/* Card 4 — Field Mapping (KAN-905) — only when detection complete */}
+      {showInspection && job.detectedEntityType ? (
+        <MappingCard job={job} />
+      ) : null}
+
+      {/* Card 5 — Timestamps */}
       <section className="bg-white border rounded-lg p-6">
         <h2 className="text-sm font-semibold mb-3" style={SECTION_HEADER_STYLE}>
           Timestamps
@@ -382,7 +389,7 @@ export default function ImportDetailPage() {
         </section>
       ) : null}
 
-      {/* Card 6 — Next steps (always) — KAN-904 gates on detection */}
+      {/* Card 7 — Next steps (always) — KAN-905 gates on mapping confirmation */}
       <section className="bg-white border rounded-lg p-6">
         <h2 className="text-sm font-semibold mb-3" style={SECTION_HEADER_STYLE}>
           Next steps
@@ -395,14 +402,15 @@ export default function ImportDetailPage() {
                 this contains before continuing.
               </p>
               <Button disabled variant="outline" title="Run AI detection first">
-                Continue to mapping
+                Continue to staging
               </Button>
             </div>
-          ) : job.detectedEntityType === 'unknown' ? (
+          ) : job.detectedEntityType === 'unknown' || job.detectedEntityType === 'mixed' ? (
             <div className="space-y-2">
               <p className="text-sm" style={LABEL_STYLE}>
-                AI classification confidence was low. Field mapping is available, but
-                please verify the data shape manually before committing.
+                {job.detectedEntityType === 'mixed'
+                  ? 'Mixed-entity files require row-level classification, which ships in a later release.'
+                  : 'AI classification confidence was low. Manual entity-type selection ships in a later release.'}
               </p>
               <div
                 className="flex items-center gap-2 text-xs px-3 py-1.5 rounded-md border"
@@ -413,10 +421,27 @@ export default function ImportDetailPage() {
                 }}
               >
                 <AlertTriangle className="w-3.5 h-3.5" aria-hidden />
-                <span>Low confidence — please verify manually before committing.</span>
+                <span>
+                  {job.detectedEntityType === 'mixed'
+                    ? 'Mixed-entity files not supported in this release.'
+                    : 'Low confidence — re-run detection or upload a single-entity file.'}
+                </span>
               </div>
               <Button disabled variant="outline">
-                Continue to mapping (coming in next release)
+                Continue to staging
+              </Button>
+            </div>
+          ) : !job.fieldMappingConfirmedAt ? (
+            <div className="space-y-2">
+              <p className="text-sm" style={LABEL_STYLE}>
+                File classified as{' '}
+                <strong>
+                  {enumLabel(DETECTED_ENTITY_TYPE_LABELS, job.detectedEntityType)}
+                </strong>
+                . Complete column mapping (Card 4) before continuing to staging.
+              </p>
+              <Button disabled variant="outline" title="Complete and save column mapping first">
+                Continue to staging
               </Button>
             </div>
           ) : (
@@ -426,10 +451,11 @@ export default function ImportDetailPage() {
                 <strong>
                   {enumLabel(DETECTED_ENTITY_TYPE_LABELS, job.detectedEntityType)}
                 </strong>
-                . The next phase — field mapping — ships in a later release.
+                {' '}and column mappings are saved. The next phase — staging — ships in
+                a later release.
               </p>
               <Button disabled variant="outline">
-                Continue to mapping (coming in next release)
+                Continue to staging (coming in next release)
               </Button>
             </div>
           )
@@ -599,6 +625,168 @@ function DetectionCard({
       <Button onClick={onRun} variant="default">
         <Sparkles className="w-4 h-4 mr-1.5" aria-hidden /> Run detection
       </Button>
+    </section>
+  );
+}
+
+// ─────────────────────────────────────────────
+// KAN-905 — Field Mapping card subcomponent.
+//
+// Five states (mutually exclusive):
+//   (a) detection not supported (entity = mixed/unknown) → muted CTA
+//       pointing to a future release
+//   (b) detection done + entity supported + fieldMappings null + no error
+//       → "Map columns" CTA → deep-link to /imports/[id]/mapping
+//   (c) fieldMappings present + fieldMappingConfirmedAt null
+//       → "AI mapped {N} columns. Review and save."
+//   (d) fieldMappingConfirmedAt populated → green check + summary +
+//       "Edit mappings"
+//   (e) fieldMappingError populated + no fieldMappings → error + retry
+//
+// Links to /imports/[id]/mapping for state changes; this card is
+// read-only (no mutations fire here).
+// ─────────────────────────────────────────────
+
+const MAPPING_SUPPORTED_ENTITIES = new Set([
+  'contacts',
+  'companies',
+  'deals',
+  'orders',
+]);
+
+function MappingCard({ job }: { job: ImportJobDetail }) {
+  const supported = job.detectedEntityType
+    ? MAPPING_SUPPORTED_ENTITIES.has(job.detectedEntityType)
+    : false;
+
+  // (a) Unsupported entity (mixed / unknown).
+  if (!supported) {
+    return (
+      <section className="bg-white border rounded-lg p-6">
+        <h2 className="text-sm font-semibold mb-2" style={SECTION_HEADER_STYLE}>
+          Field Mapping
+        </h2>
+        <p className="text-sm" style={LABEL_STYLE}>
+          AI field mapping is only available for single-entity files
+          (Contacts / Companies / Deals / Orders). Re-run detection or
+          upload a single-entity file.
+        </p>
+      </section>
+    );
+  }
+
+  const mappings = job.fieldMappings ?? [];
+  const totalCount = mappings.length;
+  const skippedCount = mappings.filter((m) => m.targetField === 'skip').length;
+  const mappedCount = totalCount - skippedCount;
+
+  // (e) Error state — only when no fieldMappings AND error is set.
+  if (job.fieldMappingError && totalCount === 0) {
+    return (
+      <section className="bg-red-50 border border-red-200 rounded-lg p-6">
+        <div className="flex items-start gap-3">
+          <XCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" aria-hidden />
+          <div className="flex-1 min-w-0">
+            <h2 className="text-sm font-semibold text-red-800">
+              Field Mapping — Failed
+            </h2>
+            <p className="text-sm mt-1 text-red-700 whitespace-pre-wrap break-words">
+              {job.fieldMappingError}
+            </p>
+            <p
+              className="text-xs mt-2"
+              style={MUTED_STYLE}
+              title={fmtDateTime(job.fieldMappingErrorAt)}
+            >
+              Failed {relativeTime(job.fieldMappingErrorAt)}
+            </p>
+            <div className="mt-3">
+              <Link href={`/imports/${job.id}/mapping`}>
+                <Button variant="default">
+                  <Sparkles className="w-4 h-4 mr-1.5" /> Retry mapping
+                </Button>
+              </Link>
+            </div>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  // (d) Confirmed state.
+  if (job.fieldMappingConfirmedAt) {
+    return (
+      <section className="bg-white border rounded-lg p-6">
+        <div className="flex items-start justify-between mb-3 gap-3">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="w-5 h-5 text-emerald-600" aria-hidden />
+            <h2 className="text-sm font-semibold" style={SECTION_HEADER_STYLE}>
+              Field Mapping
+            </h2>
+          </div>
+          <Link href={`/imports/${job.id}/mapping`}>
+            <Button variant="outline" size="sm">
+              <Columns3 className="w-3.5 h-3.5 mr-1.5" aria-hidden /> Edit mappings
+            </Button>
+          </Link>
+        </div>
+        <p className="text-sm" style={LABEL_STYLE}>
+          <strong>{mappedCount}</strong> column{mappedCount === 1 ? '' : 's'} mapped
+          {skippedCount > 0 ? <>, <strong>{skippedCount}</strong> skipped</> : null}.
+        </p>
+        <p
+          className="text-xs mt-1"
+          style={MUTED_STYLE}
+          title={fmtDateTime(job.fieldMappingConfirmedAt)}
+        >
+          Confirmed {relativeTime(job.fieldMappingConfirmedAt)}
+        </p>
+      </section>
+    );
+  }
+
+  // (c) AI mapping done, but not yet operator-confirmed.
+  if (totalCount > 0) {
+    return (
+      <section className="bg-white border rounded-lg p-6">
+        <div className="flex items-start justify-between mb-3 gap-3">
+          <h2 className="text-sm font-semibold" style={SECTION_HEADER_STYLE}>
+            Field Mapping
+          </h2>
+          <Link href={`/imports/${job.id}/mapping`}>
+            <Button variant="default" size="sm">
+              <Columns3 className="w-3.5 h-3.5 mr-1.5" aria-hidden /> Review mappings
+            </Button>
+          </Link>
+        </div>
+        <p className="text-sm" style={LABEL_STYLE}>
+          AI mapped <strong>{mappedCount}</strong> of <strong>{totalCount}</strong>{' '}
+          column{totalCount === 1 ? '' : 's'}. Review and save before continuing.
+        </p>
+        {job.fieldMappingConfidence != null ? (
+          <p className="text-xs mt-1" style={MUTED_STYLE}>
+            Overall confidence: {job.fieldMappingConfidence}%
+          </p>
+        ) : null}
+      </section>
+    );
+  }
+
+  // (b) Idle — never run.
+  return (
+    <section className="bg-white border rounded-lg p-6">
+      <h2 className="text-sm font-semibold mb-2" style={SECTION_HEADER_STYLE}>
+        Map columns
+      </h2>
+      <p className="text-sm mb-4" style={LABEL_STYLE}>
+        Use AI to suggest how each source column should map to a target field
+        on the canonical {enumLabel(DETECTED_ENTITY_TYPE_LABELS, job.detectedEntityType)} schema.
+      </p>
+      <Link href={`/imports/${job.id}/mapping`}>
+        <Button variant="default">
+          <Columns3 className="w-4 h-4 mr-1.5" aria-hidden /> Map columns
+        </Button>
+      </Link>
     </section>
   );
 }

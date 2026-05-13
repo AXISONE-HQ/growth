@@ -608,6 +608,31 @@ interface ImportJobsRouterModule {
     importJobId: string,
     tenantId: string,
   ) => Promise<unknown>;
+  // KAN-905 — Cohort 2.4 AI field mapping.
+  runFieldMapping: (
+    prisma: unknown,
+    importJobId: string,
+    tenantId: string,
+  ) => Promise<unknown>;
+  saveFieldMappings: (
+    prisma: unknown,
+    importJobId: string,
+    tenantId: string,
+    mappings: Array<{
+      sourceColumn: string;
+      targetField: string;
+      confidence: number | null;
+    }>,
+  ) => Promise<unknown>;
+  FIELD_UNIVERSE_BY_ENTITY: Record<
+    string,
+    Array<{
+      name: string;
+      label: string;
+      description: string;
+      kind: "canonical" | "lookup";
+    }>
+  >;
 }
 let _importJobsModule: ImportJobsRouterModule | null = null;
 async function loadImportJobsModule(): Promise<ImportJobsRouterModule> {
@@ -721,6 +746,57 @@ const importJobsRouter = router({
     .mutation(async ({ ctx, input }) => {
       const { runEntityDetection } = await loadImportJobsModule();
       return runEntityDetection(ctx.prisma, input.importJobId, ctx.tenantId);
+    }),
+
+  // KAN-905 — Cohort 2.4 AI field mapping. Suggests column-to-field
+  // mappings via Haiku. Gated on status='inspected' AND
+  // detectedEntityType ∈ {contacts, companies, deals, orders}.
+  // Returns BAD_REQUEST for mixed / unknown (V1 doesn't support
+  // those — mixed needs PR 6, unknown needs manual entity pick).
+  runMapping: protectedProcedure
+    .input(z.object({ importJobId: z.string().cuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const { runFieldMapping } = await loadImportJobsModule();
+      return runFieldMapping(ctx.prisma, input.importJobId, ctx.tenantId);
+    }),
+
+  // KAN-905 — operator-confirmed mappings. Stricter validation than
+  // runMapping: rejects collisions (two non-skip columns sharing the
+  // same target_field). Sets fieldMappingConfirmedAt to the write
+  // timestamp.
+  saveMappings: protectedProcedure
+    .input(
+      z.object({
+        importJobId: z.string().cuid(),
+        mappings: z.array(
+          z.object({
+            sourceColumn: z.string().min(1),
+            targetField: z.string().min(1),
+            confidence: z.number().int().min(0).max(100).nullable(),
+          }),
+        ),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const { saveFieldMappings } = await loadImportJobsModule();
+      return saveFieldMappings(
+        ctx.prisma,
+        input.importJobId,
+        ctx.tenantId,
+        input.mappings,
+      );
+    }),
+
+  // KAN-905 — UI dropdown options. Returns the entity's field universe
+  // (CONTACT_FIELDS / COMPANY_FIELDS / DEAL_FIELDS / ORDER_FIELDS) so
+  // the mapping page can render the target-field dropdown. Empty
+  // array for 'mixed' / 'unknown' (the UI never reaches this state
+  // anyway — Card 4 gates).
+  getFieldUniverse: protectedProcedure
+    .input(z.object({ entityType: z.string() }))
+    .query(async ({ input }) => {
+      const { FIELD_UNIVERSE_BY_ENTITY } = await loadImportJobsModule();
+      return FIELD_UNIVERSE_BY_ENTITY[input.entityType] ?? [];
     }),
 });
 
