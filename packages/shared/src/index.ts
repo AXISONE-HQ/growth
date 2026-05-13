@@ -16,3 +16,6 @@ export * from "./account-validation.js";
 // Single source of truth for both Cohort 6 producer sites + the KAN-830
 // AIActionCard consumer.
 export * from "./account-audit-payload.js";
+// KAN-913 — Cohort 2.7 commit fanout event. Topic constant + zod
+// payload schema + builder. Publisher is env-gated (IMPORT_EVENTS_ENABLED).
+export * from "./import-row-committed.js";

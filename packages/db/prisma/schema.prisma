@@ -2002,6 +2002,22 @@ enum DetectedEntityType {
   @@map("detected_entity_type")
 }
 
+// KAN-913 — Ingestion Cohort 2.7. Commit phase state machine.
+//   pending    — dedup confirmed, commit not yet started
+//   running    — runCommit is iterating staging rows
+//   succeeded  — all eligible rows committed; commitErrors == []
+//   partial    — some rows committed, some in commitErrors
+//   failed     — commit aborted (DB error, or 0 successful commits)
+enum ImportCommitStatus {
+  pending
+  running
+  succeeded
+  partial
+  failed
+
+  @@map("import_commit_status")
+}
+
 model ImportJob {
   id              String @id @default(cuid())
   tenantId        String @map("tenant_id")
@@ -2158,6 +2174,49 @@ model ImportJob {
   /// rows overridden to a final action). Unblocks the commit cohort.
   dedupConfirmedAt     DateTime? @map("dedup_confirmed_at")
 
+  // KAN-913 — Ingestion Cohort 2.7. Commit + audit + Pub/Sub fanout.
+  // For each staging row honoring its KAN-911 matchDecision, runCommit
+  // either INSERTs a new canonical entity, UPDATEs an existing one, or
+  // skips. Each row commit is wrapped in its own prisma.$transaction
+  // (canonical write + staging status update + audit log entry are
+  // all-or-nothing per row). Pub/Sub fanout fires AFTER the transaction
+  // commits (env-flag-gated via IMPORT_EVENTS_ENABLED, KAN-852 pattern).
+  // Gated on dedupConfirmedAt IS NOT NULL — preserves the *ConfirmedAt
+  // convention established by KAN-907/911.
+  //
+  // commitStatus state machine:
+  //   pending  → running    (runCommit called)
+  //   running  → succeeded  (all rows committed, zero in commitErrors)
+  //            → partial    (some committed, some in commitErrors)
+  //            → failed     (commit aborted entirely; e.g., DB error,
+  //                          OR ALL rows ended up in commitErrors)
+  //
+  // Shape of commitErrors JSON:
+  //   [
+  //     {
+  //       stagingRowId: string,
+  //       entityType: 'contact' | 'company' | 'deal' | 'order',
+  //       sourceRowIndex: number,
+  //       reason: 'contact_not_found' | 'pipeline_not_found'
+  //             | 'stage_not_found'   | 'order_number_duplicate'
+  //             | 'company_name_required' | 'needs_review_unresolved'
+  //             | 'update_target_missing' | 'unknown',
+  //       unresolvedKey?: string,    // the email / pipelineName / etc.
+  //       errorMessage: string,
+  //     },
+  //     ...
+  //   ]
+  commitStatus       ImportCommitStatus @default(pending) @map("commit_status")
+  commitStartedAt    DateTime?          @map("commit_started_at")
+  /// Set on terminal commitStatus (succeeded | partial | failed).
+  commitCompletedAt  DateTime?          @map("commit_completed_at")
+  /// Incremented in lockstep with each per-row $transaction success.
+  committedRowCount  Int                @default(0) @map("committed_row_count")
+  /// Incremented per row that lands in commitErrors.
+  failedRowCount     Int                @default(0) @map("failed_row_count")
+  /// JSON array of per-row error records (see comment above).
+  commitErrors       Json               @default("[]") @map("commit_errors")
+
   // Error tracking.
   errorMessage String?   @map("error_message")
   errorAt      DateTime? @map("error_at")
@@ -2194,6 +2253,9 @@ model ImportJob {
   // KAN-911 — filter jobs by dedup-resolution state ("show me imports
   // ready for commit").
   @@index([tenantId, dedupConfirmedAt])
+  // KAN-913 — filter jobs by commit state ("show me running / partial
+  // commits that need operator attention").
+  @@index([tenantId, commitStatus])
   @@map("import_jobs")
 }
 

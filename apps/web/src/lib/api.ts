@@ -1321,6 +1321,34 @@ export interface DedupStagingRow {
   matchDecision: DedupMatchDecision | null;
 }
 
+// KAN-913 — Cohort 2.7. Commit shape (no LLM; per-row $transaction
+// + AuditLog + Pub/Sub fanout).
+export type ImportCommitStatus =
+  | 'pending'
+  | 'running'
+  | 'succeeded'
+  | 'partial'
+  | 'failed';
+
+export type CommitErrorReason =
+  | 'contact_not_found'
+  | 'pipeline_not_found'
+  | 'stage_not_found'
+  | 'order_number_duplicate'
+  | 'company_name_required'
+  | 'needs_review_unresolved'
+  | 'update_target_missing'
+  | 'unknown';
+
+export interface CommitErrorEntry {
+  stagingRowId: string;
+  entityType: 'contact' | 'company' | 'deal' | 'order';
+  sourceRowIndex: number;
+  reason: CommitErrorReason;
+  unresolvedKey?: string;
+  errorMessage: string;
+}
+
 export interface ImportJobListItem {
   id: string;
   fileName: string;
@@ -1389,6 +1417,13 @@ export interface ImportJobDetail extends ImportJobListItem {
   dedupCounts: DedupCounts | null;
   dedupCandidatesCount: number | null;
   dedupConfirmedAt: string | null;
+  // KAN-913 — Cohort 2.7 commit fields.
+  commitStatus: ImportCommitStatus;
+  commitStartedAt: string | null;
+  commitCompletedAt: string | null;
+  committedRowCount: number;
+  failedRowCount: number;
+  commitErrors: CommitErrorEntry[];
 }
 
 export interface CreateUploadUrlResult {
@@ -1482,4 +1517,16 @@ export const importJobsApi = {
     trpcMutation<ImportJobDetail>('importJobs.confirmDuplicateResolution', {
       importJobId,
     }),
+  // KAN-913 — Cohort 2.7 commit. Iterates staging rows + applies
+  // canonical INSERT/UPDATE per matchDecision. Synchronous; ~30-60s
+  // for 10K rows in V1 (async Cloud Run job is a follow-up).
+  runCommit: (importJobId: string) =>
+    trpcMutation<ImportJobDetail>('importJobs.runCommit', { importJobId }),
+  // KAN-913 — on-demand CSV of commitErrors. Wired to a Blob download
+  // in the UI. No GCS write at commit time.
+  downloadCommitErrors: (importJobId: string) =>
+    trpcQuery<{ csvContent: string; rowCount: number }>(
+      'importJobs.downloadCommitErrors',
+      { importJobId },
+    ),
 };
