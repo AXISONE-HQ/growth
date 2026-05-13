@@ -21,6 +21,7 @@ import {
   ChevronDown,
   Target,
   Receipt,
+  Upload,
 } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
 import { AuthProvider, useAuth } from '@/lib/AuthContext';
@@ -63,6 +64,11 @@ const navItems: Array<{
   { href: '/companies', label: 'Companies', icon: Building2, activePrefix: '/companies' },
   { href: '/customers', label: 'Customers', icon: Users },
   { href: '/orders', label: 'Orders', icon: Receipt, activePrefix: '/orders' },
+  // KAN-901 — Ingestion Cohort 2.1b. /imports sits between Orders and
+  // Escalations: data flows in via Imports → transactional outcomes flow
+  // out via Orders/Escalations. activePrefix keeps /imports/[id] on the
+  // parent (longest-prefix-wins resolver).
+  { href: '/imports', label: 'Imports', icon: Upload, activePrefix: '/imports' },
   { href: '/escalations', label: 'Escalations', icon: AlertTriangle },
   { href: '/audit', label: 'Audit Log', icon: FileText },
   { href: '/settings/knowledge', label: 'Knowledge Center', icon: BookOpen },
@@ -106,6 +112,7 @@ const pageTitle: Record<string, string> = {
   '/companies': 'Companies',
   '/customers': 'Customers',
   '/orders': 'Orders',
+  '/imports': 'Data Imports',
   '/audit': 'Audit Log',
   '/knowledge': 'Knowledge Center',
   '/settings/knowledge': 'Knowledge Center',
