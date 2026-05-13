@@ -633,6 +633,17 @@ interface ImportJobsRouterModule {
       kind: "canonical" | "lookup";
     }>
   >;
+  // KAN-907 — Cohort 2.3 row-level classification.
+  runRowClassification: (
+    prisma: unknown,
+    importJobId: string,
+    tenantId: string,
+  ) => Promise<unknown>;
+  confirmRowClassification: (
+    prisma: unknown,
+    importJobId: string,
+    tenantId: string,
+  ) => Promise<unknown>;
 }
 let _importJobsModule: ImportJobsRouterModule | null = null;
 async function loadImportJobsModule(): Promise<ImportJobsRouterModule> {
@@ -797,6 +808,27 @@ const importJobsRouter = router({
     .query(async ({ input }) => {
       const { FIELD_UNIVERSE_BY_ENTITY } = await loadImportJobsModule();
       return FIELD_UNIVERSE_BY_ENTITY[input.entityType] ?? [];
+    }),
+
+  // KAN-907 — Cohort 2.3 row-level classification. Re-downloads the
+  // file from GCS, runs heuristic prefilter + LLM batch classifier,
+  // and writes staging rows. Gated on status='inspected' AND
+  // detectedEntityType IS NOT NULL AND IS NOT 'unknown'. Synchronous;
+  // typical latency 5-30s depending on row count.
+  runRowClassification: protectedProcedure
+    .input(z.object({ importJobId: z.string().cuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const { runRowClassification } = await loadImportJobsModule();
+      return runRowClassification(ctx.prisma, input.importJobId, ctx.tenantId);
+    }),
+
+  // KAN-907 — operator confirmation. Sets rowClassificationConfirmedAt
+  // to now() and unblocks the field-mapping card.
+  confirmRowClassification: protectedProcedure
+    .input(z.object({ importJobId: z.string().cuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const { confirmRowClassification } = await loadImportJobsModule();
+      return confirmRowClassification(ctx.prisma, input.importJobId, ctx.tenantId);
     }),
 });
 

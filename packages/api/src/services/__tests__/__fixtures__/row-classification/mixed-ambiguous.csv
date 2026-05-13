@@ -1,0 +1,11 @@
+name,email,phone,domain,industry,order_id,total,deal_title,amount,close_date
+Alice Morgan,alice.morgan@acme.io,+1-415-555-0142,,,,,,,
+Acme Holdings,,,acme.io,SaaS,,,,,
+,,,,,INV-2026-00118,124.90,,,
+,,,,,,,Acme Renewal,48000,2026-06-30
+Bjorn Kvist,bjorn.kvist@nordic-supply.no,+47-22-555-0118,,,,,,,
+Nordic Supply Co,,,nordic-supply.no,Manufacturing,,,,,
+,,,,,INV-2026-00119,2840.00,,,
+,,,,,,,Nordic Expansion,72000,2026-07-15
+Chika Tanaka,chika.tanaka@hexa.jp,+81-3-5555-0193,,,,,,,
+Hexa Robotics KK,,,hexa.jp,Hardware,,,,,

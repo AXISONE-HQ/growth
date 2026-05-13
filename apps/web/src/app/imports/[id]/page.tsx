@@ -4,15 +4,19 @@
  * KAN-901 — /imports/[id] ImportJob detail page (Ingestion Cohort 2.1b).
  * KAN-904 — adds Card 3 (AI Detection) between Inspection + Timestamps.
  * KAN-905 — adds Card 4 (Field Mapping) after AI Detection.
+ * KAN-907 — inserts Card 4 (Row Classification) between AI Detection
+ *           and Field Mapping; Field Mapping card becomes gated on
+ *           rowClassificationConfirmedAt.
  *
- * 7 stacked cards consuming the `importJobs.get` response:
- *   1. File info       (always)
- *   2. Inspection      (only when status='inspected')
- *   3. AI Detection    (only when status='inspected'; 3-state) — KAN-904
- *   4. Field Mapping   (only when detectedEntityType supported; 4-state) — KAN-905
- *   5. Timestamps      (always)
- *   6. Error           (only when status='failed' — inspection-side)
- *   7. Next steps      (always — gated on mapping confirmation)
+ * 8 stacked cards consuming the `importJobs.get` response:
+ *   1. File info            (always)
+ *   2. Inspection           (only when status='inspected')
+ *   3. AI Detection         (only when status='inspected'; 3-state) — KAN-904
+ *   4. Row Classification   (only when detection complete; 4-state) — KAN-907
+ *   5. Field Mapping        (gated on classification confirmation; 4-state) — KAN-905
+ *   6. Timestamps           (always)
+ *   7. Error                (only when status='failed' — inspection-side)
+ *   8. Next steps           (always — final CTA gating)
  *
  * NOT_FOUND state renders a friendly error per KAN-895 finding.
  */
@@ -26,6 +30,7 @@ import {
   FileSpreadsheet,
   FileText,
   Loader2,
+  ListChecks,
   Sparkles,
   Upload,
   XCircle,
@@ -118,6 +123,35 @@ export default function ImportDetailPage() {
         description: 'See the AI Detection card for details.',
       });
       void queryClient.invalidateQueries({ queryKey: ['importJobs', 'get', id] });
+    },
+  });
+
+  // KAN-907 — row-level classification. Hybrid heuristic + LLM pipeline.
+  // Latency 5-30s for mixed files (depends on row count); single-entity
+  // files are heuristic-only and complete in <1s.
+  const rowClassifyMutation = useMutation<ImportJobDetail, Error, string>({
+    mutationFn: (importJobId) => importJobsApi.runRowClassification(importJobId),
+    onSuccess: (updated) => {
+      queryClient.setQueryData(['importJobs', 'get', id], updated);
+    },
+    onError: (err) => {
+      toast.error(err.message || 'Row classification failed', {
+        description: 'See the Row Classification card for details.',
+      });
+      void queryClient.invalidateQueries({ queryKey: ['importJobs', 'get', id] });
+    },
+  });
+
+  // KAN-907 — operator confirmation. Idempotent; sets the
+  // confirmation timestamp + unblocks the Field Mapping card.
+  const confirmClassifyMutation = useMutation<ImportJobDetail, Error, string>({
+    mutationFn: (importJobId) => importJobsApi.confirmRowClassification(importJobId),
+    onSuccess: (updated) => {
+      queryClient.setQueryData(['importJobs', 'get', id], updated);
+      toast.success('Row classification confirmed.');
+    },
+    onError: (err) => {
+      toast.error(err.message || 'Confirm failed');
     },
   });
 
@@ -321,12 +355,23 @@ export default function ImportDetailPage() {
         />
       ) : null}
 
-      {/* Card 4 — Field Mapping (KAN-905) — only when detection complete */}
+      {/* Card 4 — Row Classification (KAN-907) — only when detection complete */}
+      {showInspection && job.detectedEntityType ? (
+        <RowClassificationCard
+          job={job}
+          isRunning={rowClassifyMutation.isPending}
+          isConfirming={confirmClassifyMutation.isPending}
+          onRun={() => rowClassifyMutation.mutate(job.id)}
+          onConfirm={() => confirmClassifyMutation.mutate(job.id)}
+        />
+      ) : null}
+
+      {/* Card 5 — Field Mapping (KAN-905) — gated on classification confirmation (KAN-907) */}
       {showInspection && job.detectedEntityType ? (
         <MappingCard job={job} />
       ) : null}
 
-      {/* Card 5 — Timestamps */}
+      {/* Card 6 — Timestamps */}
       <section className="bg-white border rounded-lg p-6">
         <h2 className="text-sm font-semibold mb-3" style={SECTION_HEADER_STYLE}>
           Timestamps
@@ -659,7 +704,30 @@ function MappingCard({ job }: { job: ImportJobDetail }) {
     ? MAPPING_SUPPORTED_ENTITIES.has(job.detectedEntityType)
     : false;
 
-  // (a) Unsupported entity (mixed / unknown).
+  // (a) Unsupported entity (mixed). KAN-907 follow-up #1 will add
+  // per-entity mapping for mixed files. For now, show explicit
+  // disabled state with a forward-looking tooltip.
+  if (job.detectedEntityType === 'mixed') {
+    return (
+      <section className="bg-white border rounded-lg p-6">
+        <h2 className="text-sm font-semibold mb-2" style={SECTION_HEADER_STYLE}>
+          Field Mapping
+        </h2>
+        <p className="text-sm mb-3" style={LABEL_STYLE}>
+          Mixed-entity files have rows split across multiple staging tables.
+          Per-entity field mapping ships in a follow-up cohort.
+        </p>
+        <Button
+          disabled
+          variant="outline"
+          title="Mixed-file mapping coming in a follow-up cohort"
+        >
+          Map columns (coming soon)
+        </Button>
+      </section>
+    );
+  }
+
   if (!supported) {
     return (
       <section className="bg-white border rounded-lg p-6">
@@ -671,6 +739,28 @@ function MappingCard({ job }: { job: ImportJobDetail }) {
           (Contacts / Companies / Deals / Orders). Re-run detection or
           upload a single-entity file.
         </p>
+      </section>
+    );
+  }
+
+  // KAN-907 — gate on classification confirmation. Field Mapping is
+  // unavailable until the operator clicks Confirm on Card 4.
+  if (!job.rowClassificationConfirmedAt) {
+    return (
+      <section className="bg-white border rounded-lg p-6">
+        <h2 className="text-sm font-semibold mb-2" style={SECTION_HEADER_STYLE}>
+          Field Mapping
+        </h2>
+        <p className="text-sm mb-3" style={LABEL_STYLE}>
+          Complete and confirm row classification (Card 4) before mapping columns.
+        </p>
+        <Button
+          disabled
+          variant="outline"
+          title="Confirm row classification first"
+        >
+          Map columns
+        </Button>
       </section>
     );
   }
@@ -822,5 +912,254 @@ function SkeletonCards() {
         </div>
       ))}
     </div>
+  );
+}
+
+// ─────────────────────────────────────────────
+// KAN-907 — Row Classification card subcomponent.
+//
+// Five states (mutually exclusive):
+//   (a) detection not yet complete (entity null/unknown) → muted gate
+//   (b) detection done + no counts + no error → "Classify rows" CTA
+//   (c) running → spinner + "Classifying N rows..."
+//   (d) counts populated + not yet confirmed → chips + Re-run + Confirm
+//   (e) confirmed → counts + confirmation footer + Re-run (secondary)
+//   (f) error → red panel + Retry
+// ─────────────────────────────────────────────
+
+const ENTITY_CHIP_TONES: Record<
+  string,
+  { bg: string; fg: string; border: string }
+> = {
+  contacts: { bg: 'bg-emerald-50', fg: 'text-emerald-700', border: 'border-emerald-200' },
+  companies: { bg: 'bg-violet-50', fg: 'text-violet-700', border: 'border-violet-200' },
+  deals: { bg: 'bg-amber-50', fg: 'text-amber-700', border: 'border-amber-200' },
+  orders: { bg: 'bg-blue-50', fg: 'text-blue-700', border: 'border-blue-200' },
+  skipped: { bg: 'bg-gray-100', fg: 'text-gray-600', border: 'border-gray-200' },
+  unknown: { bg: 'bg-red-50', fg: 'text-red-700', border: 'border-red-200' },
+};
+
+function EntityChip({ label, count, kind }: { label: string; count: number; kind: keyof typeof ENTITY_CHIP_TONES }) {
+  const t = ENTITY_CHIP_TONES[kind] ?? ENTITY_CHIP_TONES.unknown;
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-sm font-medium rounded-full border ${t.bg} ${t.fg} ${t.border}`}
+    >
+      <strong>{count.toLocaleString()}</strong>
+      <span>{label}</span>
+    </span>
+  );
+}
+
+function RowClassificationCard({
+  job,
+  isRunning,
+  isConfirming,
+  onRun,
+  onConfirm,
+}: {
+  job: ImportJobDetail;
+  isRunning: boolean;
+  isConfirming: boolean;
+  onRun: () => void;
+  onConfirm: () => void;
+}) {
+  const counts = job.rowClassificationCounts;
+  const hasCounts = counts != null;
+  const isConfirmed = !!job.rowClassificationConfirmedAt;
+  const hasError =
+    !!job.rowClassificationError && !job.rowClassificationCompletedAt;
+  const isMixed = job.detectedEntityType === 'mixed';
+
+  if (isRunning) {
+    return (
+      <section className="bg-white border rounded-lg p-6">
+        <h2 className="text-sm font-semibold mb-3" style={SECTION_HEADER_STYLE}>
+          Row Classification
+        </h2>
+        <div className="flex items-center gap-2 text-sm" style={LABEL_STYLE}>
+          <Loader2 className="w-4 h-4 animate-spin" aria-hidden />
+          {isMixed
+            ? 'Classifying rows… (mixed files run heuristic + AI batches)'
+            : 'Staging rows… (single-entity files complete quickly)'}
+        </div>
+      </section>
+    );
+  }
+
+  // (f) Error state.
+  if (hasError) {
+    return (
+      <section className="bg-red-50 border border-red-200 rounded-lg p-6">
+        <div className="flex items-start gap-3">
+          <XCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" aria-hidden />
+          <div className="flex-1 min-w-0">
+            <h2 className="text-sm font-semibold text-red-800">
+              Row Classification — Failed
+            </h2>
+            <p className="text-sm mt-1 text-red-700 whitespace-pre-wrap break-words">
+              {job.rowClassificationError}
+            </p>
+            <p
+              className="text-xs mt-2"
+              style={MUTED_STYLE}
+              title={fmtDateTime(job.rowClassificationErrorAt)}
+            >
+              Failed {relativeTime(job.rowClassificationErrorAt)}
+            </p>
+            <div className="mt-3">
+              <Button onClick={onRun} variant="default">
+                <ListChecks className="w-4 h-4 mr-1.5" aria-hidden /> Retry
+              </Button>
+            </div>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  // (d) + (e) — counts populated.
+  if (hasCounts) {
+    const inTok = job.rowClassificationInputTokens ?? 0;
+    const outTok = job.rowClassificationOutputTokens ?? 0;
+    const startedMs = job.rowClassificationStartedAt
+      ? new Date(job.rowClassificationStartedAt).getTime()
+      : null;
+    const completedMs = job.rowClassificationCompletedAt
+      ? new Date(job.rowClassificationCompletedAt).getTime()
+      : null;
+    const durationSec =
+      startedMs != null && completedMs != null
+        ? ((completedMs - startedMs) / 1000).toFixed(1)
+        : null;
+    const heuristicPct =
+      counts.total > 0
+        ? Math.round((counts.bySource.heuristic / counts.total) * 100)
+        : 0;
+    const llmPct =
+      counts.total > 0 ? Math.round((counts.bySource.llm / counts.total) * 100) : 0;
+
+    return (
+      <section className="bg-white border rounded-lg p-6">
+        <div className="flex items-start justify-between mb-3 gap-3 flex-wrap">
+          <div className="flex items-center gap-2">
+            {isConfirmed ? (
+              <CheckCircle2 className="w-5 h-5 text-emerald-600" aria-hidden />
+            ) : null}
+            <h2 className="text-sm font-semibold" style={SECTION_HEADER_STYLE}>
+              Row Classification{isConfirmed ? ' (confirmed)' : ''}
+            </h2>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button onClick={onRun} variant="outline" size="sm" disabled={isConfirming}>
+              <ListChecks className="w-3.5 h-3.5 mr-1.5" aria-hidden />
+              Re-run
+            </Button>
+            {!isConfirmed ? (
+              <Button onClick={onConfirm} variant="default" size="sm" disabled={isConfirming}>
+                {isConfirming ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> Confirming…
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle2 className="w-3.5 h-3.5 mr-1.5" /> Confirm & continue
+                  </>
+                )}
+              </Button>
+            ) : null}
+          </div>
+        </div>
+
+        <p className="text-sm mb-3" style={LABEL_STYLE}>
+          Classified <strong>{counts.total.toLocaleString()}</strong> row
+          {counts.total === 1 ? '' : 's'} into the matching staging tables.
+        </p>
+
+        <div className="flex flex-wrap gap-2 mb-3">
+          {counts.byEntity.contacts > 0 ? (
+            <EntityChip label="Contacts" count={counts.byEntity.contacts} kind="contacts" />
+          ) : null}
+          {counts.byEntity.companies > 0 ? (
+            <EntityChip label="Companies" count={counts.byEntity.companies} kind="companies" />
+          ) : null}
+          {counts.byEntity.deals > 0 ? (
+            <EntityChip label="Deals" count={counts.byEntity.deals} kind="deals" />
+          ) : null}
+          {counts.byEntity.orders > 0 ? (
+            <EntityChip label="Orders" count={counts.byEntity.orders} kind="orders" />
+          ) : null}
+          {counts.byEntity.skipped > 0 ? (
+            <EntityChip label="Skipped" count={counts.byEntity.skipped} kind="skipped" />
+          ) : null}
+          {counts.byEntity.unknown > 0 ? (
+            <EntityChip label="Unknown" count={counts.byEntity.unknown} kind="unknown" />
+          ) : null}
+        </div>
+
+        <p className="text-xs" style={MUTED_STYLE}>
+          {counts.bySource.heuristic.toLocaleString()} classified by rules ({heuristicPct}%)
+          {counts.bySource.llm > 0
+            ? ` · ${counts.bySource.llm.toLocaleString()} classified by AI (${llmPct}%)`
+            : null}
+        </p>
+
+        {counts.lowConfidenceFlags > 0 ? (
+          <div
+            className="flex items-center gap-2 mt-3 text-xs px-3 py-1.5 rounded-md border"
+            style={{
+              backgroundColor: 'var(--ds-warning-soft)',
+              color: 'var(--ds-warning-text)',
+              borderColor: 'var(--ds-warning)',
+            }}
+          >
+            <AlertTriangle className="w-3.5 h-3.5" aria-hidden />
+            <span>
+              <strong>{counts.lowConfidenceFlags.toLocaleString()}</strong>{' '}
+              row{counts.lowConfidenceFlags === 1 ? '' : 's'} flagged for review (low confidence)
+            </span>
+          </div>
+        ) : null}
+
+        {isConfirmed ? (
+          <p
+            className="text-xs mt-3"
+            style={MUTED_STYLE}
+            title={fmtDateTime(job.rowClassificationConfirmedAt)}
+          >
+            Confirmed {relativeTime(job.rowClassificationConfirmedAt)}
+          </p>
+        ) : null}
+
+        <div className="text-xs mt-3 pt-3 border-t border-gray-100" style={MUTED_STYLE}>
+          {job.rowClassificationLlmModel ? (
+            <>
+              Model: <span className="font-mono">{job.rowClassificationLlmModel}</span> ·{' '}
+            </>
+          ) : null}
+          {inTok > 0 || outTok > 0
+            ? `Tokens: ${inTok.toLocaleString()}+${outTok.toLocaleString()}`
+            : 'No LLM calls (heuristic-only)'}
+          {durationSec != null ? ` · Duration: ${durationSec}s` : null}
+        </div>
+      </section>
+    );
+  }
+
+  // (b) Idle — never run.
+  return (
+    <section className="bg-white border rounded-lg p-6">
+      <h2 className="text-sm font-semibold mb-2" style={SECTION_HEADER_STYLE}>
+        Classify rows
+      </h2>
+      <p className="text-sm mb-4" style={LABEL_STYLE}>
+        {isMixed
+          ? "Your file contains multiple entity types. We'll classify each row and stage them into the matching staging table. Heuristic-based pre-classification keeps cost low (~$0.25 per 10K rows for mixed files)."
+          : `We'll stage each row into the ${enumLabel(DETECTED_ENTITY_TYPE_LABELS, job.detectedEntityType)} staging table for the next phase. Single-entity files use heuristic-only classification (free).`}
+      </p>
+      <Button onClick={onRun} variant="default">
+        <ListChecks className="w-4 h-4 mr-1.5" aria-hidden /> Classify rows
+      </Button>
+    </section>
   );
 }

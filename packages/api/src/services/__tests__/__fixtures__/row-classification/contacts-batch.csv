@@ -1,0 +1,11 @@
+email,first_name,last_name,phone,lifecycle_stage
+alice.morgan@acme.io,Alice,Morgan,+1-415-555-0142,customer
+bjorn.kvist@nordic-supply.no,Bjorn,Kvist,+47-22-555-0118,mql
+chika.tanaka@hexa.jp,Chika,Tanaka,+81-3-5555-0193,lead
+darrell.huang@brightstack.io,Darrell,Huang,+1-650-555-0174,sql
+elena.rivera@vela.mx,Elena,Rivera,+52-55-5555-0102,customer
+felix.okafor@bluemark.ng,Felix,Okafor,+234-1-555-0167,lead
+greta.lindqvist@orbital.se,Greta,Lindqvist,+46-8-555-0123,mql
+hassan.al-rashid@cypressco.ae,Hassan,Al-Rashid,+971-4-555-0150,customer
+isabel.fontaine@madrigal.fr,Isabel,Fontaine,+33-1-5555-0186,lost
+jian.wei@horizon.cn,Jian,Wei,+86-21-5555-0119,sql

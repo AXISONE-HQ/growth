@@ -368,3 +368,23 @@ export {
   type TargetField,
   type FieldMappingEntry,
 } from "./import-mapping.js";
+
+// ─────────────────────────────────────────────
+// KAN-907 — Ingestion Cohort 2.3. Row-level classification (mixed files).
+// Same thin-re-export pattern.
+// ─────────────────────────────────────────────
+
+export interface RunRowClassificationInput {
+  importJobId: string;
+}
+
+export interface ConfirmRowClassificationInput {
+  importJobId: string;
+}
+
+export {
+  runRowClassification,
+  confirmRowClassification,
+  type RowClassificationCounts,
+  type ClassifiedEntity,
+} from "./import-row-classification.js";

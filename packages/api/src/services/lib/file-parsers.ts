@@ -124,3 +124,81 @@ export function parseXlsxHeadersAndSample(buffer: Buffer): ParsedFileSummary {
     rowCount: dataRows.length,
   };
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// KAN-907 — Ingestion Cohort 2.3 (row-level classification).
+//
+// Full-row variants of the sample helpers above. The Cohort 2.1a
+// inspector only needs 5 sample rows; row classification needs every
+// row to classify+stage. Sibling exports (rather than extending the
+// existing helpers) keep the inspection contract stable.
+// ─────────────────────────────────────────────────────────────────────
+
+export type RawRow = Record<string, string>;
+
+/**
+ * Parse a CSV buffer and return EVERY data row (no sample limit).
+ *
+ * Uses the same papaparse options as `parseCsvHeadersAndSample` so the
+ * parse semantics (string preservation, greedy empty-line skip) are
+ * identical — only the slice differs.
+ */
+export function parseAllCsvRows(buffer: Buffer): {
+  headers: string[];
+  rows: RawRow[];
+} {
+  const text = buffer.toString("utf-8");
+  const result = Papa.parse<RawRow>(text, {
+    header: true,
+    dynamicTyping: false,
+    skipEmptyLines: "greedy",
+  });
+  return {
+    headers: result.meta.fields ?? [],
+    rows: result.data,
+  };
+}
+
+/**
+ * Parse an XLSX buffer and return EVERY data row (no sample limit).
+ *
+ * Same SheetJS quirks as `parseXlsxHeadersAndSample`. Values are
+ * stringified via the cell's display format (raw:false) so dates +
+ * numbers round-trip through the classifier as strings — the row
+ * classifier compares text patterns, not native types.
+ */
+export function parseAllXlsxRows(buffer: Buffer): {
+  headers: string[];
+  rows: RawRow[];
+} {
+  const workbook = XLSX.read(buffer, { type: "buffer", cellDates: true });
+  const firstSheetName = workbook.SheetNames[0];
+  if (!firstSheetName) {
+    return { headers: [], rows: [] };
+  }
+  const sheet = workbook.Sheets[firstSheetName];
+  const aoa = XLSX.utils.sheet_to_json<unknown[]>(sheet, {
+    header: 1,
+    defval: null,
+    raw: false,
+  });
+  if (aoa.length === 0) {
+    return { headers: [], rows: [] };
+  }
+  const headerRow = aoa[0] ?? [];
+  const headers = headerRow.map((h) => (typeof h === "string" ? h : String(h ?? "")));
+  const dataRows = aoa.slice(1);
+
+  const rows: RawRow[] = dataRows.map((row) => {
+    const obj: RawRow = {};
+    headers.forEach((header, i) => {
+      const v = row[i];
+      // Stringify everything so the classifier sees uniform string input
+      // regardless of cell type. null becomes empty string.
+      obj[header] = v == null ? "" : String(v);
+    });
+    return obj;
+  });
+
+  return { headers, rows };
+}

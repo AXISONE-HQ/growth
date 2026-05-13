@@ -2097,6 +2097,38 @@ model ImportJob {
   /// confirmation yet.
   fieldMappingConfirmedAt  DateTime? @map("field_mapping_confirmed_at")
 
+  // KAN-907 — Ingestion Cohort 2.3. Row-level classification (hybrid
+  // heuristic + LLM batches). Writes to ImportStaging{Contact|Company|
+  // Deal|Order} tables. Populated by `runRowClassification` after the
+  // user clicks "Classify rows" on the file detail page. Gated on
+  // status='inspected' AND detectedEntityType IS NOT NULL.
+  //
+  // Token + model snapshots follow the same denormalization rules as
+  // detection + mapping (see comments above) — canonical cost source
+  // remains the `llm.call` Pub/Sub topic. Single-entity uploads
+  // (detectedEntityType != 'mixed') skip the LLM entirely; their
+  // *InputTokens / *OutputTokens / *LlmModel stay NULL.
+  //
+  // Shape of rowClassificationCounts JSON:
+  //   {
+  //     total: number,
+  //     byEntity: { contacts, companies, deals, orders, skipped, unknown },
+  //     bySource: { heuristic, llm },
+  //     lowConfidenceFlags: number
+  //   }
+  /// JSON aggregate counts (see comment above).
+  rowClassificationCounts       Json?     @map("row_classification_counts")
+  rowClassificationStartedAt    DateTime? @map("row_classification_started_at")
+  /// Set on success only.
+  rowClassificationCompletedAt  DateTime? @map("row_classification_completed_at")
+  rowClassificationError        String?   @map("row_classification_error")
+  rowClassificationErrorAt      DateTime? @map("row_classification_error_at")
+  rowClassificationInputTokens  Int?      @map("row_classification_input_tokens")
+  rowClassificationOutputTokens Int?      @map("row_classification_output_tokens")
+  rowClassificationLlmModel     String?   @map("row_classification_llm_model")
+  /// Set when the operator clicks Confirm on Card 5.
+  rowClassificationConfirmedAt  DateTime? @map("row_classification_confirmed_at")
+
   // Error tracking.
   errorMessage String?   @map("error_message")
   errorAt      DateTime? @map("error_at")
@@ -2127,6 +2159,9 @@ model ImportJob {
   // KAN-905 — filter jobs by mapping-confirmation state ("show me
   // mapped-but-not-yet-committed imports").
   @@index([tenantId, fieldMappingConfirmedAt])
+  // KAN-907 — filter jobs by row-classification-confirmation state
+  // ("show me classified-but-not-yet-mapped imports").
+  @@index([tenantId, rowClassificationConfirmedAt])
   @@map("import_jobs")
 }
 
