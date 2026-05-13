@@ -140,3 +140,95 @@ output "tenant_assets_bucket_name" {
   value       = google_storage_bucket.growth_tenant_assets.name
   description = "GCS bucket holding tenant logos + variants. KAN-854."
 }
+
+# ═══════════════════════════════════════════════════════════════════════
+# KAN-896 — Ingestion Cohort 2.1a (upload backend)
+#
+# Sibling bucket for tenant CSV/XLSX uploads. Same posture as
+# growth-tenant-assets: V4-signed PUT (15min) + GET (1hr) only, no
+# public access, CORS scoped to growth-web origins.
+#
+# Object layout: `tenants/{tenantId}/imports/{importJobId}/{filename}` —
+# tenant-scope prefix check enforced in import-storage.ts before any
+# mutation (mirrors isOwnedByTenant pattern from KAN-855 logos).
+#
+# Apply pattern (mirrors KAN-854):
+#   terraform plan -target=google_storage_bucket.growth_tenant_imports \
+#                  -target=google_storage_bucket_iam_member.api_object_admin_imports
+#   terraform apply -target=google_storage_bucket.growth_tenant_imports \
+#                   -target=google_storage_bucket_iam_member.api_object_admin_imports
+#
+# selfTokenCreator binding (api_self_token_creator above) covers signed-URL
+# generation for ALL buckets the default SA accesses — no per-bucket
+# duplication needed. Only the bucket-scoped objectAdmin grant is added
+# here.
+# ═══════════════════════════════════════════════════════════════════════
+
+resource "google_storage_bucket" "growth_tenant_imports" {
+  name          = "growth-tenant-imports"
+  location      = "us-central1"
+  project       = var.project_id
+  storage_class = "STANDARD"
+
+  # Lock down anonymous access; every read/write flows through the API's
+  # V4 signed-URL helpers (PUT 15m, GET 1h).
+  public_access_prevention    = "enforced"
+  uniform_bucket_level_access = true
+
+  versioning {
+    enabled = true
+  }
+
+  # 30-day reaper for archived (non-current) generations. Live import
+  # files are kept indefinitely so the future commit cohort (PR 8) can
+  # replay parse on demand; archived versions only reflect file
+  # replacements / re-uploads.
+  lifecycle_rule {
+    condition {
+      age        = 30
+      with_state = "ARCHIVED"
+    }
+    action {
+      type = "Delete"
+    }
+  }
+
+  labels = {
+    app   = "growth"
+    owner = "axisone-team"
+  }
+
+  # ─── CORS — browser-direct PUT for V4 signed-URL upload flow ──────
+  # Mirrors the growth-tenant-assets CORS block (KAN-875). Restricted to
+  # PUT + OPTIONS; reads come back through API-issued signed GET URLs.
+  cors {
+    origin = [
+      "https://growth-web-1086551891973.us-central1.run.app",
+      "https://growth-web-biut5gfhuq-uc.a.run.app",
+    ]
+    method          = ["PUT", "OPTIONS"]
+    response_header = ["Content-Type", "x-goog-meta-*"]
+    max_age_seconds = 3600
+  }
+}
+
+# ─── IAM — API runtime SA can read/write objects in imports bucket ────
+# objectAdmin (not just objectCreator) — the inspection helper downloads
+# the uploaded object to parse headers + sample rows, then writes the
+# detected metadata back to the ImportJob row (not GCS). Future
+# duplicate-detection + commit cohorts will also re-read uploaded files.
+
+resource "google_storage_bucket_iam_member" "api_object_admin_imports" {
+  bucket = google_storage_bucket.growth_tenant_imports.name
+  role   = "roles/storage.objectAdmin"
+  member = "serviceAccount:${data.google_compute_default_service_account.default.email}"
+}
+
+# selfTokenCreator binding NOT duplicated here — KAN-854's
+# api_self_token_creator covers V4 signed-URL generation for the default
+# SA across all buckets the SA accesses.
+
+output "tenant_imports_bucket_name" {
+  value       = google_storage_bucket.growth_tenant_imports.name
+  description = "GCS bucket holding tenant CSV/XLSX upload originals. KAN-896."
+}
