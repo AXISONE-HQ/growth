@@ -495,6 +495,31 @@ export async function runFieldMapping(
 // ─────────────────────────────────────────────
 
 /**
+ * KAN-922 — per-import match configuration payload. All fields nullable;
+ * undefined → leave the ImportJob column unchanged (so the UI can save
+ * partial configs across separate calls without nulling-out earlier
+ * choices). Caller passes `null` explicitly to clear a value.
+ */
+export interface MatchConfigInput {
+  dedupMatchField?: string | null;
+  externalSourceTag?: string | null;
+  customerLinkField?: string | null;
+  dealLinkField?: string | null;
+}
+
+// KAN-922 — Per-entity allow-lists for the dedupMatchField column. Mirror
+// the matcher's per-entity MatchKey types (import-dedup.ts).
+const DEDUP_MATCH_KEY_ALLOW_LIST: Record<string, readonly string[]> = {
+  contacts: ["email", "phone", "external_id"],
+  companies: ["domain", "external_id"],
+  deals: ["external_id"],
+  orders: ["orderNumber", "providerOrderId", "external_id"],
+};
+
+const CUSTOMER_LINK_FIELD_ALLOW_LIST = ["email", "phone", "external_id"];
+const DEAL_LINK_FIELD_ALLOW_LIST = ["external_id"];
+
+/**
  * Persist operator-reviewed mappings. Stricter than runFieldMapping's
  * validation: rejects collisions (two non-skip columns sharing the
  * same target_field), which the LLM is allowed to suggest but the
@@ -505,6 +530,7 @@ export async function saveFieldMappings(
   importJobId: string,
   tenantId: string,
   mappings: FieldMappingEntry[],
+  matchConfig?: MatchConfigInput,
 ): Promise<ImportJob> {
   const job = await prisma.importJob.findFirst({
     where: { id: importJobId, tenantId },
@@ -571,11 +597,93 @@ export async function saveFieldMappings(
     }
   }
 
+  // KAN-922 — validate match configuration (locked decision G3 allow-lists).
+  if (matchConfig) {
+    const entityAllowList = DEDUP_MATCH_KEY_ALLOW_LIST[job.detectedEntityType];
+    if (
+      matchConfig.dedupMatchField != null &&
+      entityAllowList &&
+      !entityAllowList.includes(matchConfig.dedupMatchField)
+    ) {
+      throw new TRPCError({
+        code: "BAD_REQUEST",
+        message: `dedupMatchField '${matchConfig.dedupMatchField}' is not valid for entity type '${job.detectedEntityType}'. Allowed: ${entityAllowList.join(", ")}.`,
+      });
+    }
+    if (
+      matchConfig.customerLinkField != null &&
+      !CUSTOMER_LINK_FIELD_ALLOW_LIST.includes(matchConfig.customerLinkField)
+    ) {
+      throw new TRPCError({
+        code: "BAD_REQUEST",
+        message: `customerLinkField '${matchConfig.customerLinkField}' is not valid. Allowed: ${CUSTOMER_LINK_FIELD_ALLOW_LIST.join(", ")}.`,
+      });
+    }
+    if (
+      matchConfig.dealLinkField != null &&
+      !DEAL_LINK_FIELD_ALLOW_LIST.includes(matchConfig.dealLinkField)
+    ) {
+      throw new TRPCError({
+        code: "BAD_REQUEST",
+        message: `dealLinkField '${matchConfig.dealLinkField}' is not valid. Allowed: ${DEAL_LINK_FIELD_ALLOW_LIST.join(", ")}.`,
+      });
+    }
+    // customerLinkField + dealLinkField only relevant on Deal/Order imports
+    if (
+      job.detectedEntityType !== "deals" &&
+      job.detectedEntityType !== "orders" &&
+      matchConfig.customerLinkField != null
+    ) {
+      throw new TRPCError({
+        code: "BAD_REQUEST",
+        message: `customerLinkField only applies to deal/order imports (this is '${job.detectedEntityType}').`,
+      });
+    }
+    if (
+      job.detectedEntityType !== "orders" &&
+      matchConfig.dealLinkField != null
+    ) {
+      throw new TRPCError({
+        code: "BAD_REQUEST",
+        message: `dealLinkField only applies to order imports (this is '${job.detectedEntityType}').`,
+      });
+    }
+    // Cross-field constraint: any field using external_id requires
+    // externalSourceTag. Locked validation per Phase 2 review.
+    const anyFieldUsesExternalId =
+      matchConfig.dedupMatchField === "external_id" ||
+      matchConfig.customerLinkField === "external_id" ||
+      matchConfig.dealLinkField === "external_id";
+    if (anyFieldUsesExternalId && !matchConfig.externalSourceTag) {
+      throw new TRPCError({
+        code: "BAD_REQUEST",
+        message: "externalSourceTag is required when any match field is set to external_id.",
+      });
+    }
+  }
+
+  // Build the update data. `undefined` keys preserve the existing column
+  // value; explicit `null` clears it (so the UI can null-out a previously-
+  // saved choice if the user changes their mind).
+  const updateData: Record<string, unknown> = {
+    fieldMappings: mappings as never,
+    fieldMappingConfirmedAt: new Date(),
+  };
+  if (matchConfig?.dedupMatchField !== undefined) {
+    updateData.dedupMatchField = matchConfig.dedupMatchField;
+  }
+  if (matchConfig?.externalSourceTag !== undefined) {
+    updateData.externalSourceTag = matchConfig.externalSourceTag;
+  }
+  if (matchConfig?.customerLinkField !== undefined) {
+    updateData.customerLinkField = matchConfig.customerLinkField;
+  }
+  if (matchConfig?.dealLinkField !== undefined) {
+    updateData.dealLinkField = matchConfig.dealLinkField;
+  }
+
   return prisma.importJob.update({
     where: { id: importJobId },
-    data: {
-      fieldMappings: mappings as never,
-      fieldMappingConfirmedAt: new Date(),
-    },
+    data: updateData,
   });
 }

@@ -623,6 +623,13 @@ interface ImportJobsRouterModule {
       targetField: string;
       confidence: number | null;
     }>,
+    // KAN-922 — optional per-import match configuration.
+    matchConfig?: {
+      dedupMatchField?: string | null;
+      externalSourceTag?: string | null;
+      customerLinkField?: string | null;
+      dealLinkField?: string | null;
+    },
   ) => Promise<unknown>;
   FIELD_UNIVERSE_BY_ENTITY: Record<
     string,
@@ -827,6 +834,12 @@ const importJobsRouter = router({
             confidence: z.number().int().min(0).max(100).nullable(),
           }),
         ),
+        // KAN-922 — per-import match configuration. All nullable;
+        // undefined leaves the column unchanged; null clears it.
+        dedupMatchField: z.string().nullable().optional(),
+        externalSourceTag: z.string().nullable().optional(),
+        customerLinkField: z.string().nullable().optional(),
+        dealLinkField: z.string().nullable().optional(),
       }),
     )
     .mutation(async ({ ctx, input }) => {
@@ -836,6 +849,12 @@ const importJobsRouter = router({
         input.importJobId,
         ctx.tenantId,
         input.mappings,
+        {
+          dedupMatchField: input.dedupMatchField,
+          externalSourceTag: input.externalSourceTag,
+          customerLinkField: input.customerLinkField,
+          dealLinkField: input.dealLinkField,
+        },
       );
     }),
 

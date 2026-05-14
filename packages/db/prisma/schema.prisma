@@ -2217,6 +2217,28 @@ model ImportJob {
   /// JSON array of per-row error records (see comment above).
   commitErrors       Json               @default("[]") @map("commit_errors")
 
+  // KAN-922 — Ingestion Cohort 2.5 (configurable field matching).
+  // Per-import dedup + FK link configuration. NULL falls back to the
+  // KAN-911 heuristic (email → phone → fuzzy). Eligible values per entity:
+  //   Contact: 'email' | 'phone' | 'external_id'
+  //   Company: 'domain' | 'external_id'
+  //   Deal:    'external_id'
+  //   Order:   'orderNumber' | 'providerOrderId' | 'external_id'
+  // dedupMatchField and customerLinkField are independent (separate
+  // ImportJob columns; locked decision G1).
+  dedupMatchField     String? @map("dedup_match_field")
+  /// Free-text source tag for externalIds JSON map. Suggested values:
+  /// stripe | hubspot | salesforce | shopify | pipedrive | manual.
+  /// Required when any *Field column above is set to 'external_id' —
+  /// validated at saveFieldMappings.
+  externalSourceTag   String? @map("external_source_tag")
+  /// Deal/Order imports only — which Contact canonical field the FK
+  /// resolves against. Same value-space as dedupMatchField for Contact.
+  customerLinkField   String? @map("customer_link_field")
+  /// Order imports only — which Deal canonical field the FK resolves
+  /// against. NULL leaves Order.dealId NULL (today's default behavior).
+  dealLinkField       String? @map("deal_link_field")
+
   // Error tracking.
   errorMessage String?   @map("error_message")
   errorAt      DateTime? @map("error_at")
@@ -2324,6 +2346,10 @@ model ImportStagingContact {
   companyName    String?         @map("company_name")
   lifecycleStage LifecycleStage? @map("lifecycle_stage")
   source         ContactSource?
+  /// KAN-922 — externalIds mirror column. Populated by KAN-915 back-fill
+  /// from sourceRowData × fieldMappings × ImportJob.externalSourceTag.
+  /// Shape: { [sourceTag]: idValue }.
+  externalIds    Json            @default("{}") @map("external_ids")
 
   importJob ImportJob @relation(fields: [importJobId], references: [id], onDelete: Cascade)
   tenant    Tenant    @relation(fields: [tenantId], references: [id])
@@ -2364,6 +2390,8 @@ model ImportStagingCompany {
   industry       String?
   billingCity    String? @map("billing_city")
   billingCountry String? @map("billing_country")
+  /// KAN-922 — externalIds mirror (see ImportStagingContact comment).
+  externalIds    Json    @default("{}") @map("external_ids")
 
   importJob ImportJob @relation(fields: [importJobId], references: [id], onDelete: Cascade)
   tenant    Tenant    @relation(fields: [tenantId], references: [id])
@@ -2407,6 +2435,8 @@ model ImportStagingDeal {
   pipelineName      String?     @map("pipeline_name")
   /// Raw — resolved to Stage.id at commit-time. NOT a FK.
   stageName         String?     @map("stage_name")
+  /// KAN-922 — externalIds mirror (see ImportStagingContact comment).
+  externalIds       Json        @default("{}") @map("external_ids")
 
   importJob ImportJob @relation(fields: [importJobId], references: [id], onDelete: Cascade)
   tenant    Tenant    @relation(fields: [tenantId], references: [id])
@@ -2447,6 +2477,8 @@ model ImportStagingOrder {
   contactEmail    String?      @map("contact_email")
   /// Raw — resolved to Company.id at commit-time. NOT a FK.
   companyName     String?      @map("company_name")
+  /// KAN-922 — externalIds mirror (see ImportStagingContact comment).
+  externalIds     Json         @default("{}") @map("external_ids")
 
   importJob ImportJob @relation(fields: [importJobId], references: [id], onDelete: Cascade)
   tenant    Tenant    @relation(fields: [tenantId], references: [id])
