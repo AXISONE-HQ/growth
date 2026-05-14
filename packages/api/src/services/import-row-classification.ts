@@ -44,6 +44,7 @@
 import { TRPCError } from "@trpc/server";
 import type { ImportJob, PrismaClient } from "@prisma/client";
 import { complete } from "./llm-client.js";
+import { parseJsonFromLlm } from "./lib/llm-json.js";
 import { downloadObject } from "./import-storage.js";
 import {
   parseAllCsvRows,
@@ -431,11 +432,13 @@ export function parseAndValidateBatchResponse(
   rawText: string,
   expectedIndices: Set<number>,
 ): LlmClassifiedEntry[] {
-  const jsonMatch = rawText.match(/\[[\s\S]*\]/);
-  if (!jsonMatch) throw new UnparseableBatchError(rawText);
+  // KAN-917 — strip markdown fences + tolerate leading explanation text.
   let parsed: unknown;
   try {
-    parsed = JSON.parse(jsonMatch[0]);
+    parsed = parseJsonFromLlm<unknown>(rawText, {
+      tolerateLeadingText: true,
+      expectedShape: "array",
+    });
   } catch {
     throw new UnparseableBatchError(rawText);
   }

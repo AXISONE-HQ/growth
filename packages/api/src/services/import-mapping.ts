@@ -29,6 +29,7 @@
 import { TRPCError } from "@trpc/server";
 import type { ImportJob, PrismaClient } from "@prisma/client";
 import { complete } from "./llm-client.js";
+import { parseJsonFromLlm } from "./lib/llm-json.js";
 
 // ─────────────────────────────────────────────
 // Target field universe per entity
@@ -269,13 +270,13 @@ export function parseAndValidateMappingResponse(
   sourceHeaders: string[],
   targetFields: TargetField[],
 ): FieldMappingEntry[] {
-  const jsonMatch = rawText.match(/\[[\s\S]*\]/);
-  if (!jsonMatch) {
-    throw new UnparseableMappingResponseError(rawText);
-  }
+  // KAN-917 — strip markdown fences + tolerate leading explanation text.
   let parsed: unknown;
   try {
-    parsed = JSON.parse(jsonMatch[0]);
+    parsed = parseJsonFromLlm<unknown>(rawText, {
+      tolerateLeadingText: true,
+      expectedShape: "array",
+    });
   } catch {
     throw new UnparseableMappingResponseError(rawText);
   }
@@ -442,7 +443,12 @@ export async function runFieldMapping(
       tier: "cheap",
       systemPrompt: MAPPING_SYSTEM_PROMPT,
       userPrompt,
-      maxTokens: 1500,
+      // KAN-917 — bumped from 1500 (HubSpot-shape import bit Fred 2026-05-14:
+      // 30 columns × ~150 chars/entry with reasoning ≈ 4500 chars ≈ ~1500
+      // tokens for JSON alone; with Haiku's prose reasoning easily 2-3K).
+      // Haiku 4.5 max output is 8192 — safe ceiling fits ~50-column CSVs
+      // with reasoning. Re-evaluate if Haiku output cap changes.
+      maxTokens: 8192,
       callerTag: "import-field-mapping",
     });
 

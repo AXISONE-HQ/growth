@@ -438,6 +438,36 @@ describe("KAN-905 — parseAndValidateMappingResponse", () => {
     expect(result.find((m) => m.sourceColumn === "first_name")?.confidence).toBeNull();
     expect(result.find((m) => m.sourceColumn === "last_name")?.confidence).toBeNull();
   });
+
+  // KAN-917 — Fred's PROD dogfood hit (HubSpot CSV, 2026-05-14). Haiku
+  // returned the JSON wrapped in ```json...``` fences despite the
+  // "JSON only" system prompt, and the prior regex-extract-then-parse
+  // path choked.
+  it("(20-KAN-917) parses ```json-fence-wrapped responses", () => {
+    const json = JSON.stringify([
+      { source_column: "email", target_field: "email", confidence: 99, reasoning: "x" },
+      { source_column: "first_name", target_field: "firstName", confidence: 95, reasoning: "x" },
+      { source_column: "last_name", target_field: "lastName", confidence: 95, reasoning: "x" },
+      { source_column: "phone", target_field: "phone", confidence: 92, reasoning: "x" },
+    ]);
+    const fenced = "```json\n" + json + "\n```";
+    const result = parseAndValidateMappingResponse(fenced, HEADERS, CONTACT_FIELDS);
+    expect(result).toHaveLength(4);
+    expect(result.find((m) => m.sourceColumn === "email")?.targetField).toBe("email");
+  });
+
+  it("(21-KAN-917) parses leading-explanation + fence-wrapped responses (lenient mode)", () => {
+    const json = JSON.stringify([
+      { source_column: "email", target_field: "email", confidence: 99, reasoning: "x" },
+      { source_column: "first_name", target_field: "firstName", confidence: 95, reasoning: "x" },
+      { source_column: "last_name", target_field: "lastName", confidence: 95, reasoning: "x" },
+      { source_column: "phone", target_field: "phone", confidence: 92, reasoning: "x" },
+    ]);
+    const messy = "Sure! Here is the mapping for your CSV:\n\n```json\n" + json + "\n```\n\nLet me know if you need adjustments.";
+    const result = parseAndValidateMappingResponse(messy, HEADERS, CONTACT_FIELDS);
+    expect(result).toHaveLength(4);
+    expect(result.find((m) => m.sourceColumn === "phone")?.targetField).toBe("phone");
+  });
 });
 
 describe("KAN-905 — buildMappingUserPrompt", () => {
