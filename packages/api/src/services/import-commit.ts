@@ -36,6 +36,14 @@ import {
   type ImportEntityType,
 } from "@growth/shared";
 import { publishImportRowCommitted } from "./lib/import-row-committed-publisher.js";
+import {
+  projectRow,
+  type FieldMappingEntryLike,
+  type ProjectedContact,
+  type ProjectedCompany,
+  type ProjectedDeal,
+  type ProjectedOrder,
+} from "./lib/row-projection.js";
 
 // ─────────────────────────────────────────────
 // Public shapes
@@ -52,6 +60,10 @@ export type CommitErrorReason =
   | "company_name_required"
   | "needs_review_unresolved"
   | "update_target_missing"
+  /** KAN-915 — staging row has null sourceRowData. Should not happen
+   *  (KAN-907 always writes it), but defended against here so we never
+   *  silently INSERT NULL-everywhere canonical rows again. */
+  | "source_row_data_missing"
   | "unknown";
 
 export interface CommitErrorEntry {
@@ -350,11 +362,29 @@ interface CommitOk {
 }
 type CommitResult = CommitOk | CommitErrorEntry;
 
+/** Shared projection error — returned when a staging row has null
+ *  sourceRowData and we can't project canonical data from it. */
+function sourceRowDataMissingError(
+  entityType: ImportEntityType,
+  staging: { id: string; sourceRowIndex: number },
+): CommitErrorEntry {
+  return {
+    stagingRowId: staging.id,
+    entityType,
+    sourceRowIndex: staging.sourceRowIndex,
+    reason: "source_row_data_missing",
+    errorMessage:
+      "Staging row has null source_row_data. Cannot project canonical fields. Re-run row classification.",
+  };
+}
+
 async function commitContact(
   tx: Prisma.TransactionClient,
   tenantId: string,
   staging: StagingContact,
   decision: EffectiveDecision,
+  fieldMappings: FieldMappingEntryLike[],
+  importJobId: string,
 ): Promise<CommitResult> {
   if (decision.action === "needs_review") {
     return {
@@ -366,17 +396,37 @@ async function commitContact(
         "Contact staging row reached commit with suggestedAction='needs_review' and no userChoice (KAN-911 confirm gate should have prevented this).",
     };
   }
+  if (staging.sourceRowData == null) {
+    return sourceRowDataMissingError("contact", staging);
+  }
+
+  // KAN-915 — project at commit time. Mirror columns are a cache; the
+  // canonical source of truth is sourceRowData + fieldMappings.
+  const projected = projectRow(
+    staging.sourceRowData as Record<string, unknown>,
+    fieldMappings,
+    "contacts",
+    { tenantId, importJobId, sourceRowIndex: staging.sourceRowIndex },
+  ) as ProjectedContact;
 
   const data = {
     tenantId,
-    email: staging.email,
-    phone: staging.phone,
-    firstName: staging.firstName,
-    lastName: staging.lastName,
-    companyName: staging.companyName,
+    email: projected.email,
+    phone: projected.phone,
+    firstName: projected.firstName,
+    lastName: projected.lastName,
+    companyName: projected.companyName,
     // lifecycleStage defaults to 'lead' (NOT NULL with default in
     // schema) — Prisma applies the default if we omit the key.
-    ...(staging.lifecycleStage ? { lifecycleStage: staging.lifecycleStage } : {}),
+    ...(projected.lifecycleStage ? { lifecycleStage: projected.lifecycleStage } : {}),
+    ...(projected.source ? { source: projected.source } : {}),
+    ...(projected.segment ? { segment: projected.segment } : {}),
+    ...(projected.addressLine1 ? { addressLine1: projected.addressLine1 } : {}),
+    ...(projected.addressLine2 ? { addressLine2: projected.addressLine2 } : {}),
+    ...(projected.city ? { city: projected.city } : {}),
+    ...(projected.region ? { region: projected.region } : {}),
+    ...(projected.postalCode ? { postalCode: projected.postalCode } : {}),
+    ...(projected.country ? { country: projected.country } : {}),
   };
 
   if (decision.action === "update") {
@@ -422,6 +472,8 @@ async function commitCompany(
   tenantId: string,
   staging: StagingCompany,
   decision: EffectiveDecision,
+  fieldMappings: FieldMappingEntryLike[],
+  importJobId: string,
 ): Promise<CommitResult> {
   if (decision.action === "needs_review") {
     return {
@@ -433,23 +485,59 @@ async function commitCompany(
         "Company staging row reached commit with suggestedAction='needs_review' and no userChoice.",
     };
   }
-  if (!staging.name || !staging.name.trim()) {
+  if (staging.sourceRowData == null) {
+    return sourceRowDataMissingError("company", staging);
+  }
+
+  const projected = projectRow(
+    staging.sourceRowData as Record<string, unknown>,
+    fieldMappings,
+    "companies",
+    { tenantId, importJobId, sourceRowIndex: staging.sourceRowIndex },
+  ) as ProjectedCompany;
+
+  if (!projected.name) {
     return {
       stagingRowId: staging.id,
       entityType: "company",
       sourceRowIndex: staging.sourceRowIndex,
       reason: "company_name_required",
-      errorMessage: "Company.name is NOT NULL with no default; staging row has no name.",
+      errorMessage: "Company.name is NOT NULL with no default; projected name is empty.",
     };
   }
 
   const data = {
     tenantId,
-    name: staging.name,
-    domain: staging.domain,
-    industry: staging.industry,
-    billingCity: staging.billingCity,
-    billingCountry: staging.billingCountry,
+    name: projected.name,
+    ...(projected.legalName ? { legalName: projected.legalName } : {}),
+    ...(projected.domain ? { domain: projected.domain } : {}),
+    ...(projected.website ? { website: projected.website } : {}),
+    ...(projected.industry ? { industry: projected.industry } : {}),
+    ...(projected.sizeRange ? { sizeRange: projected.sizeRange } : {}),
+    ...(projected.annualRevenue ? { annualRevenue: projected.annualRevenue } : {}),
+    ...(projected.phone ? { phone: projected.phone } : {}),
+    ...(projected.email ? { email: projected.email } : {}),
+    ...(projected.description ? { description: projected.description } : {}),
+    ...(projected.lifecycleStage ? { lifecycleStage: projected.lifecycleStage } : {}),
+    ...(projected.billingAddressLine1 ? { billingAddressLine1: projected.billingAddressLine1 } : {}),
+    ...(projected.billingAddressLine2 ? { billingAddressLine2: projected.billingAddressLine2 } : {}),
+    ...(projected.billingCity ? { billingCity: projected.billingCity } : {}),
+    ...(projected.billingRegion ? { billingRegion: projected.billingRegion } : {}),
+    ...(projected.billingPostalCode ? { billingPostalCode: projected.billingPostalCode } : {}),
+    ...(projected.billingCountry ? { billingCountry: projected.billingCountry } : {}),
+    ...(projected.mailingAddressLine1 ? { mailingAddressLine1: projected.mailingAddressLine1 } : {}),
+    ...(projected.mailingAddressLine2 ? { mailingAddressLine2: projected.mailingAddressLine2 } : {}),
+    ...(projected.mailingCity ? { mailingCity: projected.mailingCity } : {}),
+    ...(projected.mailingRegion ? { mailingRegion: projected.mailingRegion } : {}),
+    ...(projected.mailingPostalCode ? { mailingPostalCode: projected.mailingPostalCode } : {}),
+    ...(projected.mailingCountry ? { mailingCountry: projected.mailingCountry } : {}),
+    ...(projected.taxId ? { taxId: projected.taxId } : {}),
+    ...(projected.taxIdType ? { taxIdType: projected.taxIdType } : {}),
+    ...(projected.businessRegistrationNumber ? { businessRegistrationNumber: projected.businessRegistrationNumber } : {}),
+    ...(projected.incorporationJurisdiction ? { incorporationJurisdiction: projected.incorporationJurisdiction } : {}),
+    ...(projected.isTaxExempt != null ? { isTaxExempt: projected.isTaxExempt } : {}),
+    ...(projected.ownerId ? { ownerId: projected.ownerId } : {}),
+    ...(projected.linkedinUrl ? { linkedinUrl: projected.linkedinUrl } : {}),
   };
 
   if (decision.action === "update") {
@@ -493,6 +581,8 @@ async function commitDeal(
   tenantId: string,
   staging: StagingDeal,
   decision: EffectiveDecision,
+  fieldMappings: FieldMappingEntryLike[],
+  importJobId: string,
 ): Promise<CommitResult> {
   if (decision.action === "needs_review") {
     return {
@@ -504,12 +594,22 @@ async function commitDeal(
         "Deal staging row reached commit with suggestedAction='needs_review' and no userChoice.",
     };
   }
+  if (staging.sourceRowData == null) {
+    return sourceRowDataMissingError("deal", staging);
+  }
+
+  const projected = projectRow(
+    staging.sourceRowData as Record<string, unknown>,
+    fieldMappings,
+    "deals",
+    { tenantId, importJobId, sourceRowIndex: staging.sourceRowIndex },
+  ) as ProjectedDeal;
 
   // 1. Resolve contactId — required NOT NULL.
   const contact = await resolveContactByEmail(
     tx as unknown as PrismaClient,
     tenantId,
-    staging.contactEmail,
+    projected.contactEmail,
   );
   if (!contact) {
     return {
@@ -517,9 +617,9 @@ async function commitDeal(
       entityType: "deal",
       sourceRowIndex: staging.sourceRowIndex,
       reason: "contact_not_found",
-      unresolvedKey: staging.contactEmail ?? "",
-      errorMessage: staging.contactEmail
-        ? `No Contact with email '${staging.contactEmail}' found in tenant. Upload contacts first.`
+      unresolvedKey: projected.contactEmail ?? "",
+      errorMessage: projected.contactEmail
+        ? `No Contact with email '${projected.contactEmail}' found in tenant. Upload contacts first.`
         : "Deal staging row has no contactEmail — Deal.contactId is NOT NULL.",
     };
   }
@@ -528,7 +628,7 @@ async function commitDeal(
   const pipeline = await resolvePipelineByName(
     tx as unknown as PrismaClient,
     tenantId,
-    staging.pipelineName,
+    projected.pipelineName,
   );
   if (!pipeline) {
     return {
@@ -536,7 +636,7 @@ async function commitDeal(
       entityType: "deal",
       sourceRowIndex: staging.sourceRowIndex,
       reason: "pipeline_not_found",
-      unresolvedKey: staging.pipelineName ?? "(no default)",
+      unresolvedKey: projected.pipelineName ?? "(no default)",
       errorMessage:
         "No matching Pipeline + tenant has no default Pipeline. Run the Onboarding Wizard or create a Pipeline first.",
     };
@@ -546,7 +646,7 @@ async function commitDeal(
   const stage = await resolveStageByName(
     tx as unknown as PrismaClient,
     pipeline.id,
-    staging.stageName,
+    projected.stageName,
   );
   if (!stage) {
     return {
@@ -554,7 +654,7 @@ async function commitDeal(
       entityType: "deal",
       sourceRowIndex: staging.sourceRowIndex,
       reason: "stage_not_found",
-      unresolvedKey: staging.stageName ?? "(no initial stage)",
+      unresolvedKey: projected.stageName ?? "(no initial stage)",
       errorMessage: `Pipeline ${pipeline.id} has no matching Stage + no initial Stage. Pipeline configuration is broken.`,
     };
   }
@@ -563,7 +663,7 @@ async function commitDeal(
   const company = await resolveCompanyByName(
     tx as unknown as PrismaClient,
     tenantId,
-    staging.companyName,
+    projected.companyName,
   );
 
   const data: Prisma.DealUncheckedCreateInput = {
@@ -571,10 +671,17 @@ async function commitDeal(
     contactId: contact.id,
     pipelineId: pipeline.id,
     currentStageId: stage.id,
-    name: staging.name ?? "Untitled deal",
-    value: staging.value ?? new Prisma.Decimal(0),
-    currency: staging.currency ?? "USD",
-    expectedCloseDate: staging.expectedCloseDate,
+    name: projected.name ?? "Untitled deal",
+    value: projected.value ?? new Prisma.Decimal(0),
+    currency: projected.currency ?? "USD",
+    ...(projected.status ? { status: projected.status } : {}),
+    ...(projected.probability != null ? { probability: projected.probability } : {}),
+    ...(projected.expectedCloseDate ? { expectedCloseDate: projected.expectedCloseDate } : {}),
+    ...(projected.closedAt ? { closedAt: projected.closedAt } : {}),
+    ...(projected.lostReason ? { lostReason: projected.lostReason } : {}),
+    ...(projected.lostReasonDetail ? { lostReasonDetail: projected.lostReasonDetail } : {}),
+    ...(projected.wonProductSummary ? { wonProductSummary: projected.wonProductSummary } : {}),
+    ...(projected.ownerId ? { ownerId: projected.ownerId } : {}),
     ...(company ? { companyId: company.id } : {}),
   };
 
@@ -627,6 +734,8 @@ async function commitOrder(
   tenantId: string,
   staging: StagingOrder,
   decision: EffectiveDecision,
+  fieldMappings: FieldMappingEntryLike[],
+  importJobId: string,
 ): Promise<CommitResult> {
   if (decision.action === "needs_review") {
     return {
@@ -638,12 +747,22 @@ async function commitOrder(
         "Order staging row reached commit with suggestedAction='needs_review' and no userChoice.",
     };
   }
+  if (staging.sourceRowData == null) {
+    return sourceRowDataMissingError("order", staging);
+  }
+
+  const projected = projectRow(
+    staging.sourceRowData as Record<string, unknown>,
+    fieldMappings,
+    "orders",
+    { tenantId, importJobId, sourceRowIndex: staging.sourceRowIndex },
+  ) as ProjectedOrder;
 
   // 1. Resolve contactId — required NOT NULL.
   const contact = await resolveContactByEmail(
     tx as unknown as PrismaClient,
     tenantId,
-    staging.contactEmail,
+    projected.contactEmail,
   );
   if (!contact) {
     return {
@@ -651,20 +770,20 @@ async function commitOrder(
       entityType: "order",
       sourceRowIndex: staging.sourceRowIndex,
       reason: "contact_not_found",
-      unresolvedKey: staging.contactEmail ?? "",
-      errorMessage: staging.contactEmail
-        ? `No Contact with email '${staging.contactEmail}' found in tenant. Upload contacts first.`
+      unresolvedKey: projected.contactEmail ?? "",
+      errorMessage: projected.contactEmail
+        ? `No Contact with email '${projected.contactEmail}' found in tenant. Upload contacts first.`
         : "Order staging row has no contactEmail — Order.contactId is NOT NULL.",
     };
   }
 
-  if (!staging.orderNumber || !staging.orderNumber.trim()) {
+  if (!projected.orderNumber) {
     return {
       stagingRowId: staging.id,
       entityType: "order",
       sourceRowIndex: staging.sourceRowIndex,
       reason: "unknown",
-      errorMessage: "Order.orderNumber is NOT NULL; staging row has no orderNumber.",
+      errorMessage: "Order.orderNumber is NOT NULL; projected orderNumber is empty.",
     };
   }
 
@@ -672,17 +791,26 @@ async function commitOrder(
   const company = await resolveCompanyByName(
     tx as unknown as PrismaClient,
     tenantId,
-    staging.companyName,
+    projected.companyName,
   );
 
   const data: Prisma.OrderUncheckedCreateInput = {
     tenantId,
     contactId: contact.id,
-    orderNumber: staging.orderNumber,
-    providerOrderId: staging.providerOrderId,
-    grandTotal: staging.grandTotal ?? new Prisma.Decimal(0),
-    currency: staging.currency ?? "USD",
-    placedAt: staging.placedAt ?? new Date(),
+    orderNumber: projected.orderNumber,
+    ...(projected.providerOrderId ? { providerOrderId: projected.providerOrderId } : {}),
+    ...(projected.status ? { status: projected.status } : {}),
+    ...(projected.totalAmount ? { totalAmount: projected.totalAmount } : {}),
+    ...(projected.taxAmount ? { taxAmount: projected.taxAmount } : {}),
+    ...(projected.discountAmount ? { discountAmount: projected.discountAmount } : {}),
+    grandTotal: projected.grandTotal ?? new Prisma.Decimal(0),
+    currency: projected.currency ?? "USD",
+    placedAt: projected.placedAt ?? new Date(),
+    ...(projected.paidAt ? { paidAt: projected.paidAt } : {}),
+    ...(projected.refundedAt ? { refundedAt: projected.refundedAt } : {}),
+    ...(projected.paymentMethod ? { paymentMethod: projected.paymentMethod } : {}),
+    ...(projected.paymentProvider ? { paymentProvider: projected.paymentProvider } : {}),
+    ...(projected.customerNotes ? { customerNotes: projected.customerNotes } : {}),
     ...(company ? { companyId: company.id } : {}),
   };
 
@@ -739,8 +867,8 @@ async function commitOrder(
         entityType: "order",
         sourceRowIndex: staging.sourceRowIndex,
         reason: "order_number_duplicate",
-        unresolvedKey: staging.orderNumber,
-        errorMessage: `Order with orderNumber '${staging.orderNumber}' already exists in this tenant.`,
+        unresolvedKey: projected.orderNumber,
+        errorMessage: `Order with orderNumber '${projected.orderNumber}' already exists in this tenant.`,
       };
     }
     throw err;
@@ -823,6 +951,13 @@ export async function runCommit(
   const job = await prisma.importJob.findFirstOrThrow({
     where: { id: importJobId, tenantId },
   });
+
+  // KAN-915 — extract fieldMappings for the projection at commit time.
+  // Job.fieldMappings is Json | null; coerce loose here, validate at
+  // the projection layer (unknown source columns → null values).
+  const fieldMappings: FieldMappingEntryLike[] = Array.isArray(job.fieldMappings)
+    ? (job.fieldMappings as unknown as FieldMappingEntryLike[])
+    : [];
 
   // Resolve actor — `user:${createdByUserId}` with fallback to 'system'.
   let actor: string;
@@ -981,7 +1116,8 @@ export async function runCommit(
     await processBatch(
       stagingContacts,
       "contact",
-      (tx, staging, decision) => commitContact(tx, tenantId, staging, decision),
+      (tx, staging, decision) =>
+        commitContact(tx, tenantId, staging, decision, fieldMappings, importJobId),
       (tx, id, target, status) =>
         tx.importStagingContact
           .update({
@@ -997,7 +1133,8 @@ export async function runCommit(
     await processBatch(
       stagingCompanies,
       "company",
-      (tx, staging, decision) => commitCompany(tx, tenantId, staging, decision),
+      (tx, staging, decision) =>
+        commitCompany(tx, tenantId, staging, decision, fieldMappings, importJobId),
       (tx, id, target, status) =>
         tx.importStagingCompany
           .update({
@@ -1013,7 +1150,8 @@ export async function runCommit(
     await processBatch(
       stagingDeals,
       "deal",
-      (tx, staging, decision) => commitDeal(tx, tenantId, staging, decision),
+      (tx, staging, decision) =>
+        commitDeal(tx, tenantId, staging, decision, fieldMappings, importJobId),
       (tx, id, target, status) =>
         tx.importStagingDeal
           .update({
@@ -1029,7 +1167,8 @@ export async function runCommit(
     await processBatch(
       stagingOrders,
       "order",
-      (tx, staging, decision) => commitOrder(tx, tenantId, staging, decision),
+      (tx, staging, decision) =>
+        commitOrder(tx, tenantId, staging, decision, fieldMappings, importJobId),
       (tx, id, target, status) =>
         tx.importStagingOrder
           .update({

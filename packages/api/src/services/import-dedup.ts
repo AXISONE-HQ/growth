@@ -35,6 +35,18 @@ import {
   normalize,
   phonesMatch,
 } from "./lib/string-matching.js";
+import {
+  projectRow,
+  projectedContactMirrorColumns,
+  projectedCompanyMirrorColumns,
+  projectedDealMirrorColumns,
+  projectedOrderMirrorColumns,
+  type FieldMappingEntryLike,
+  type ProjectedContact,
+  type ProjectedCompany,
+  type ProjectedDeal,
+  type ProjectedOrder,
+} from "./lib/row-projection.js";
 
 // ─────────────────────────────────────────────
 // Public shapes
@@ -632,6 +644,109 @@ export async function runDuplicateDetection(
         },
       }),
     ]);
+
+    // 1.5 — KAN-915 mirror-column back-fill (LOAD-BEARING).
+    //
+    // Mirror columns on import_staging_* tables are a LAZY CACHE of the
+    // (sourceRowData × fieldMappings) projection. KAN-907 row-class
+    // intentionally leaves them NULL because mapping may happen after
+    // classification in the UI flow (Card 4 → Card 5). Dedup matchers
+    // read mirror columns directly — so we MUST project + persist them
+    // here, before the matcher loop runs.
+    //
+    // Without this back-fill, every matcher's `if (!staging.email)`
+    // short-circuit fires for every row → 100% false-negative dedup
+    // results (caught by KAN-913 PROD smoke 2026-05-13).
+    //
+    // Idempotent: writes the same projected values on every dedup run.
+    // Acceptable for V1 — Postgres no-op UPDATE cost is negligible at
+    // staging-table row counts.
+    const fieldMappings: FieldMappingEntryLike[] = Array.isArray(job.fieldMappings)
+      ? (job.fieldMappings as unknown as FieldMappingEntryLike[])
+      : [];
+
+    function projectionCtx(row: { sourceRowIndex: number }) {
+      return {
+        tenantId,
+        importJobId,
+        sourceRowIndex: row.sourceRowIndex,
+      };
+    }
+
+    // In-memory patching: matchers receive the staging objects directly
+    // from these arrays, so we MUST mutate them with the projected values
+    // alongside the DB UPDATEs (otherwise the in-memory rows still hold
+    // the NULL mirror cols and matchers continue to short-circuit).
+    const stagingContactUpdates = stagingContacts.map((s) => {
+      const projected = projectRow(
+        (s.sourceRowData ?? {}) as Record<string, unknown>,
+        fieldMappings,
+        "contacts",
+        projectionCtx(s),
+      ) as ProjectedContact;
+      const mirror = projectedContactMirrorColumns(projected);
+      Object.assign(s, mirror);
+      return prisma.importStagingContact.update({
+        where: { id: s.id },
+        data: mirror as never,
+      });
+    });
+    const stagingCompanyUpdates = stagingCompanies.map((s) => {
+      const projected = projectRow(
+        (s.sourceRowData ?? {}) as Record<string, unknown>,
+        fieldMappings,
+        "companies",
+        projectionCtx(s),
+      ) as ProjectedCompany;
+      const mirror = projectedCompanyMirrorColumns(projected);
+      Object.assign(s, mirror);
+      return prisma.importStagingCompany.update({
+        where: { id: s.id },
+        data: mirror as never,
+      });
+    });
+    const stagingDealUpdates = stagingDeals.map((s) => {
+      const projected = projectRow(
+        (s.sourceRowData ?? {}) as Record<string, unknown>,
+        fieldMappings,
+        "deals",
+        projectionCtx(s),
+      ) as ProjectedDeal;
+      const mirror = projectedDealMirrorColumns(projected);
+      Object.assign(s, mirror);
+      return prisma.importStagingDeal.update({
+        where: { id: s.id },
+        data: mirror as never,
+      });
+    });
+    const stagingOrderUpdates = stagingOrders.map((s) => {
+      const projected = projectRow(
+        (s.sourceRowData ?? {}) as Record<string, unknown>,
+        fieldMappings,
+        "orders",
+        projectionCtx(s),
+      ) as ProjectedOrder;
+      const mirror = projectedOrderMirrorColumns(projected);
+      Object.assign(s, mirror);
+      return prisma.importStagingOrder.update({
+        where: { id: s.id },
+        data: mirror as never,
+      });
+    });
+
+    if (
+      stagingContactUpdates.length > 0 ||
+      stagingCompanyUpdates.length > 0 ||
+      stagingDealUpdates.length > 0 ||
+      stagingOrderUpdates.length > 0
+    ) {
+      await prisma.$transaction([
+        ...stagingContactUpdates,
+        ...stagingCompanyUpdates,
+        ...stagingDealUpdates,
+        ...stagingOrderUpdates,
+      ]);
+    }
 
     // 2. Build buckets + exact-lookup maps.
     const contactNameBuckets = buildBuckets(existingContacts, (c) =>

@@ -2334,6 +2334,14 @@ model ImportStagingContact {
   @@index([tenantId, phone])
   @@index([targetContactId])
   @@map("import_staging_contacts")
+  // ─────────────────────────────────────────────
+  // KAN-915 — Mirror columns are a LAZY CACHE of source_row_data +
+  // field_mappings projection. Populated by runDuplicateDetection
+  // at dedup-pass start; consumed by dedup matchers and the review UI.
+  // Canonical source of truth is source_row_data + field_mappings —
+  // commit handlers re-project at write time.
+  // DO NOT read these fields anywhere upstream of runDuplicateDetection.
+  // ─────────────────────────────────────────────
 }
 
 model ImportStagingCompany {
@@ -2366,6 +2374,9 @@ model ImportStagingCompany {
   @@index([tenantId, name])
   @@index([targetCompanyId])
   @@map("import_staging_companies")
+  // KAN-915 — LAZY CACHE of source_row_data + field_mappings projection.
+  // Populated by runDuplicateDetection at dedup-pass start.
+  // DO NOT read these fields anywhere upstream of runDuplicateDetection.
 }
 
 model ImportStagingDeal {
@@ -2406,6 +2417,9 @@ model ImportStagingDeal {
   @@index([tenantId, name])
   @@index([targetDealId])
   @@map("import_staging_deals")
+  // KAN-915 — LAZY CACHE of source_row_data + field_mappings projection.
+  // Populated by runDuplicateDetection at dedup-pass start.
+  // DO NOT read these fields anywhere upstream of runDuplicateDetection.
 }
 
 model ImportStagingOrder {
@@ -2443,4 +2457,7 @@ model ImportStagingOrder {
   @@index([tenantId, providerOrderId])
   @@index([targetOrderId])
   @@map("import_staging_orders")
+  // KAN-915 — LAZY CACHE of source_row_data + field_mappings projection.
+  // Populated by runDuplicateDetection at dedup-pass start.
+  // DO NOT read these fields anywhere upstream of runDuplicateDetection.
 }
