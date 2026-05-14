@@ -1399,6 +1399,11 @@ export interface ImportJobDetail extends ImportJobListItem {
   fieldMappingOutputTokens: number | null;
   fieldMappingLlmModel: string | null;
   fieldMappingConfirmedAt: string | null;
+  // KAN-922 — per-import match configuration.
+  dedupMatchField: string | null;
+  externalSourceTag: string | null;
+  customerLinkField: string | null;
+  dealLinkField: string | null;
   // KAN-907 — Cohort 2.3 row-classification fields.
   rowClassificationCounts: RowClassificationCounts | null;
   rowClassificationStartedAt: string | null;
@@ -1462,8 +1467,15 @@ export const importJobsApi = {
     trpcMutation<ImportJobDetail>('importJobs.runMapping', { importJobId }),
   // KAN-905 — operator-confirmed mappings. Throws on collision or
   // unknown source/target.
-  saveMappings: (input: { importJobId: string; mappings: FieldMappingEntry[] }) =>
-    trpcMutation<ImportJobDetail>('importJobs.saveMappings', input),
+  saveMappings: (input: {
+    importJobId: string;
+    mappings: FieldMappingEntry[];
+    // KAN-922 — per-import match configuration. All nullable.
+    dedupMatchField?: string | null;
+    externalSourceTag?: string | null;
+    customerLinkField?: string | null;
+    dealLinkField?: string | null;
+  }) => trpcMutation<ImportJobDetail>('importJobs.saveMappings', input),
   // KAN-905 — field-universe dropdown options for the mapping UI.
   getFieldUniverse: (entityType: string) =>
     trpcQuery<TargetField[]>('importJobs.getFieldUniverse', { entityType }),

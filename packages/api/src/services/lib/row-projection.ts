@@ -113,6 +113,10 @@ export interface ProjectedContact {
   region: string | null;
   postalCode: string | null;
   country: string | null;
+  /** KAN-922 — source-tagged external id map. Populated when the user
+   *  mapped a CSV column to `external_id` AND set ImportJob.externalSourceTag.
+   *  Shape: `{ [sourceTag]: idValue }`. Empty when neither condition met. */
+  externalIds: Record<string, string>;
 }
 
 export interface ProjectedCompany {
@@ -146,6 +150,8 @@ export interface ProjectedCompany {
   isTaxExempt: boolean | null;
   ownerId: string | null;
   linkedinUrl: string | null;
+  /** KAN-922 — see ProjectedContact.externalIds. */
+  externalIds: Record<string, string>;
 }
 
 export interface ProjectedDeal {
@@ -165,6 +171,14 @@ export interface ProjectedDeal {
   companyName: string | null;
   pipelineName: string | null;
   stageName: string | null;
+  /** KAN-922 — see ProjectedContact.externalIds. Used for Deal dedup +
+   *  Order.dealId resolution when ImportJob.dealLinkField='external_id'. */
+  externalIds: Record<string, string>;
+  /** KAN-922 — source-tagged external id for the linked Contact. Distinct
+   *  from `externalIds` (which is the Deal's own id). Populated when the
+   *  user mapped a column to `customer_external_id`. Used by
+   *  resolveContactByMatchKey at commit time. */
+  contactExternalIds: Record<string, string>;
 }
 
 export interface ProjectedOrder {
@@ -185,6 +199,13 @@ export interface ProjectedOrder {
   // Lookup-kind targets — raw normalized values; resolved at commit time.
   contactEmail: string | null;
   companyName: string | null;
+  /** KAN-922 — source-tagged external id for the Order itself. */
+  externalIds: Record<string, string>;
+  /** KAN-922 — see ProjectedDeal.contactExternalIds. */
+  contactExternalIds: Record<string, string>;
+  /** KAN-922 — source-tagged external id for the linked Deal. Used by
+   *  resolveDealByMatchKey when ImportJob.dealLinkField='external_id'. */
+  dealExternalIds: Record<string, string>;
 }
 
 export type EntityType = "contacts" | "companies" | "deals" | "orders";
@@ -458,25 +479,48 @@ export function projectRow(
   fieldMappings: FieldMappingEntryLike[],
   entityType: EntityType,
   ctx: ProjectionLogContext,
+  /** KAN-922 — when the user mapped a CSV column to a target like
+   *  `external_id` / `customer_external_id` / `deal_external_id`, this
+   *  tag (from ImportJob.externalSourceTag) becomes the key in the
+   *  output `externalIds` JSON. NULL → those targets project to empty
+   *  `{}` (backwards compatible). */
+  externalSourceTag?: string | null,
 ): ProjectedContact | ProjectedCompany | ProjectedDeal | ProjectedOrder {
   const lookup = buildLookup(fieldMappings);
   const get = (target: string): unknown => rawValue(sourceRowData, lookup, target);
 
   switch (entityType) {
     case "contacts":
-      return projectContact(get, ctx);
+      return projectContact(get, ctx, externalSourceTag);
     case "companies":
-      return projectCompany(get, ctx);
+      return projectCompany(get, ctx, externalSourceTag);
     case "deals":
-      return projectDeal(get, ctx);
+      return projectDeal(get, ctx, externalSourceTag);
     case "orders":
-      return projectOrder(get, ctx);
+      return projectOrder(get, ctx, externalSourceTag);
   }
 }
 
 type Getter = (targetField: string) => unknown;
 
-function projectContact(get: Getter, ctx: ProjectionLogContext): ProjectedContact {
+/** KAN-922 — Build a `{ [sourceTag]: rawId }` map when the user mapped a
+ *  CSV column to `targetField` AND ImportJob.externalSourceTag is set. */
+function tagExternalId(
+  get: Getter,
+  targetField: string,
+  tag: string | null | undefined,
+): Record<string, string> {
+  if (!tag) return {};
+  const raw = coerceString(get(targetField));
+  if (!raw) return {};
+  return { [tag]: raw };
+}
+
+function projectContact(
+  get: Getter,
+  ctx: ProjectionLogContext,
+  externalSourceTag?: string | null,
+): ProjectedContact {
   return {
     email: coerceEmail(get("email")),
     phone: coerceString(get("phone")),
@@ -504,10 +548,15 @@ function projectContact(get: Getter, ctx: ProjectionLogContext): ProjectedContac
     region: coerceString(get("region")),
     postalCode: coerceString(get("postalCode")),
     country: coerceString(get("country")),
+    externalIds: tagExternalId(get, "external_id", externalSourceTag),
   };
 }
 
-function projectCompany(get: Getter, ctx: ProjectionLogContext): ProjectedCompany {
+function projectCompany(
+  get: Getter,
+  ctx: ProjectionLogContext,
+  externalSourceTag?: string | null,
+): ProjectedCompany {
   return {
     name: coerceString(get("name")),
     legalName: coerceString(get("legalName")),
@@ -557,10 +606,15 @@ function projectCompany(get: Getter, ctx: ProjectionLogContext): ProjectedCompan
     isTaxExempt: coerceBool(get("isTaxExempt")),
     ownerId: coerceString(get("ownerId")),
     linkedinUrl: coerceString(get("linkedinUrl")),
+    externalIds: tagExternalId(get, "external_id", externalSourceTag),
   };
 }
 
-function projectDeal(get: Getter, ctx: ProjectionLogContext): ProjectedDeal {
+function projectDeal(
+  get: Getter,
+  ctx: ProjectionLogContext,
+  externalSourceTag?: string | null,
+): ProjectedDeal {
   return {
     name: coerceString(get("name")),
     value: coerceDecimal(get("value")),
@@ -589,10 +643,16 @@ function projectDeal(get: Getter, ctx: ProjectionLogContext): ProjectedDeal {
     companyName: coerceString(get("companyName")),
     pipelineName: coerceString(get("pipelineName")),
     stageName: coerceString(get("stageName")),
+    externalIds: tagExternalId(get, "external_id", externalSourceTag),
+    contactExternalIds: tagExternalId(get, "customer_external_id", externalSourceTag),
   };
 }
 
-function projectOrder(get: Getter, ctx: ProjectionLogContext): ProjectedOrder {
+function projectOrder(
+  get: Getter,
+  ctx: ProjectionLogContext,
+  externalSourceTag?: string | null,
+): ProjectedOrder {
   return {
     orderNumber: coerceString(get("orderNumber")),
     providerOrderId: coerceString(get("providerOrderId")),
@@ -628,6 +688,9 @@ function projectOrder(get: Getter, ctx: ProjectionLogContext): ProjectedOrder {
     customerNotes: coerceString(get("customerNotes")),
     contactEmail: coerceEmail(get("contactEmail")),
     companyName: coerceString(get("companyName")),
+    externalIds: tagExternalId(get, "external_id", externalSourceTag),
+    contactExternalIds: tagExternalId(get, "customer_external_id", externalSourceTag),
+    dealExternalIds: tagExternalId(get, "deal_external_id", externalSourceTag),
   };
 }
 
@@ -649,6 +712,7 @@ export function projectedContactMirrorColumns(p: ProjectedContact) {
     companyName: p.companyName,
     lifecycleStage: p.lifecycleStage,
     source: p.source,
+    externalIds: p.externalIds,
   };
 }
 
@@ -659,6 +723,7 @@ export function projectedCompanyMirrorColumns(p: ProjectedCompany) {
     industry: p.industry,
     billingCity: p.billingCity,
     billingCountry: p.billingCountry,
+    externalIds: p.externalIds,
   };
 }
 
@@ -673,6 +738,7 @@ export function projectedDealMirrorColumns(p: ProjectedDeal) {
     companyName: p.companyName,
     pipelineName: p.pipelineName,
     stageName: p.stageName,
+    externalIds: p.externalIds,
   };
 }
 
@@ -686,5 +752,6 @@ export function projectedOrderMirrorColumns(p: ProjectedOrder) {
     placedAt: p.placedAt,
     contactEmail: p.contactEmail,
     companyName: p.companyName,
+    externalIds: p.externalIds,
   };
 }

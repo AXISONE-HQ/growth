@@ -63,6 +63,16 @@ const LABEL_STYLE = { color: 'var(--ds-ink-secondary)' } as const;
 
 const SUPPORTED_ENTITIES = new Set(['contacts', 'companies', 'deals', 'orders']);
 
+// KAN-922 — per-entity allow-list for the Dedup match key dropdown.
+// Mirrors the matcher's per-entity MatchKey types (import-dedup.ts) and
+// the saveFieldMappings backend validation.
+const ELIGIBLE_DEDUP_KEYS = {
+  contacts: ['email', 'phone', 'external_id'],
+  companies: ['domain', 'external_id'],
+  deals: ['external_id'],
+  orders: ['orderNumber', 'providerOrderId', 'external_id'],
+} as const;
+
 export default function MappingPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
@@ -94,6 +104,14 @@ export default function MappingPage() {
     null,
   );
 
+  // KAN-922 — per-import match configuration local state. Seeded from
+  // job columns on first load; nullable individually. The Save mutation
+  // sends these alongside the mappings.
+  const [dedupMatchField, setDedupMatchField] = useState<string | null>(null);
+  const [externalSourceTag, setExternalSourceTag] = useState<string | null>(null);
+  const [customerLinkField, setCustomerLinkField] = useState<string | null>(null);
+  const [dealLinkField, setDealLinkField] = useState<string | null>(null);
+
   // Re-seed local state when the server's fieldMappings changes (e.g.,
   // after Run AI mapping finishes). Only re-seed if we don't have local
   // state yet OR the server's mapping count differs (proxy for "fresh
@@ -110,6 +128,19 @@ export default function MappingPage() {
       return prev;
     });
   }, [job?.fieldMappings]);
+
+  // KAN-922 — seed match-config state from job columns on first load.
+  // We only seed once (initial render with job data) to avoid clobbering
+  // user edits when the query refetches.
+  const matchConfigSeededRef = useState({ seeded: false })[0];
+  useEffect(() => {
+    if (!job || matchConfigSeededRef.seeded) return;
+    setDedupMatchField(job.dedupMatchField);
+    setExternalSourceTag(job.externalSourceTag);
+    setCustomerLinkField(job.customerLinkField);
+    setDealLinkField(job.dealLinkField);
+    matchConfigSeededRef.seeded = true;
+  }, [job, matchConfigSeededRef]);
 
   useEffect(() => {
     if (job) document.title = `Map columns · ${job.fileName}`;
@@ -135,7 +166,15 @@ export default function MappingPage() {
     FieldMappingEntry[]
   >({
     mutationFn: (mappings) =>
-      importJobsApi.saveMappings({ importJobId: job!.id, mappings }),
+      importJobsApi.saveMappings({
+        importJobId: job!.id,
+        mappings,
+        // KAN-922 — send match-config alongside mappings.
+        dedupMatchField,
+        externalSourceTag,
+        customerLinkField,
+        dealLinkField,
+      }),
     onSuccess: (updated) => {
       queryClient.setQueryData(['importJobs', 'get', id], updated);
       toast.success('Mappings saved.');
@@ -208,6 +247,14 @@ export default function MappingPage() {
 
   const hasCollisions = collisions.size > 0;
 
+  // KAN-922 — validation: external_id picked anywhere → externalSourceTag required.
+  const anyFieldUsesExternalId =
+    dedupMatchField === 'external_id' ||
+    customerLinkField === 'external_id' ||
+    dealLinkField === 'external_id';
+  const sourceTagMissing =
+    anyFieldUsesExternalId && (externalSourceTag == null || externalSourceTag.trim() === '');
+
   const onChangeTarget = (sourceColumn: string, newTarget: string) => {
     setLocalMappings((prev) => {
       if (!prev) return prev;
@@ -231,6 +278,12 @@ export default function MappingPage() {
         `Two source columns ('${example[1][0]}' and '${example[1][1]}') both map to '${example[0]}'.`,
         { description: 'Resolve all collisions before saving.' },
       );
+      return;
+    }
+    if (sourceTagMissing) {
+      toast.error('External source tag is required when any match field uses external_id.', {
+        description: 'Enter a tag (e.g. hubspot, stripe) in the Match settings panel.',
+      });
       return;
     }
     saveMappingsMutation.mutate(localMappings);
@@ -418,6 +471,119 @@ export default function MappingPage() {
             </div>
           </section>
 
+          {/* KAN-922 — Match settings panel. Configures how this import
+              dedupes against existing records and links to other entities.
+              All fields nullable; NULL falls back to the heuristic cascade. */}
+          <section className="border rounded-lg p-6 mb-4 bg-white mt-4">
+            <h3 className="font-semibold mb-1" style={SECTION_HEADER_STYLE}>
+              Match settings
+            </h3>
+            <p className="text-sm mb-4" style={MUTED_STYLE}>
+              Optional. Configure how this import dedupes against existing
+              records and (for deals/orders) links to other entities.
+              Leave blank to use the default heuristic.
+            </p>
+            <div className="grid grid-cols-2 gap-6">
+              <div>
+                <label className="block text-sm font-medium mb-1" style={LABEL_STYLE}>
+                  Dedup match key
+                </label>
+                <Select
+                  value={dedupMatchField ?? '_auto'}
+                  onValueChange={(v) => setDedupMatchField(v === '_auto' ? null : v)}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Auto (heuristic)" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="_auto">Auto (heuristic)</SelectItem>
+                    {ELIGIBLE_DEDUP_KEYS[job.detectedEntityType as keyof typeof ELIGIBLE_DEDUP_KEYS]?.map((k) => (
+                      <SelectItem key={k} value={k}>{k}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs mt-1" style={MUTED_STYLE}>
+                  Strict match on this canonical field. Picked value NULL on the
+                  existing record → no match → insert.
+                </p>
+              </div>
+
+              {(dedupMatchField === 'external_id' ||
+                customerLinkField === 'external_id' ||
+                dealLinkField === 'external_id') && (
+                <div>
+                  <label className="block text-sm font-medium mb-1" style={LABEL_STYLE}>
+                    External source tag
+                    <span className="text-red-600 ml-1">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    list="external-source-suggestions"
+                    className={`w-full px-3 py-2 border rounded ${
+                      sourceTagMissing ? 'border-red-500' : 'border-gray-300'
+                    }`}
+                    placeholder="e.g. hubspot, stripe"
+                    value={externalSourceTag ?? ''}
+                    onChange={(e) => setExternalSourceTag(e.target.value || null)}
+                  />
+                  <datalist id="external-source-suggestions">
+                    <option value="stripe" />
+                    <option value="hubspot" />
+                    <option value="salesforce" />
+                    <option value="shopify" />
+                    <option value="pipedrive" />
+                    <option value="manual" />
+                  </datalist>
+                  <p className="text-xs mt-1" style={sourceTagMissing ? { color: 'rgb(220 38 38)' } : MUTED_STYLE}>
+                    {sourceTagMissing
+                      ? 'Required when any match field uses external_id.'
+                      : 'Tags the external_id value with its source.'}
+                  </p>
+                </div>
+              )}
+
+              {(job.detectedEntityType === 'deals' || job.detectedEntityType === 'orders') && (
+                <div>
+                  <label className="block text-sm font-medium mb-1" style={LABEL_STYLE}>
+                    Link customer by
+                  </label>
+                  <Select
+                    value={customerLinkField ?? 'email'}
+                    onValueChange={(v) => setCustomerLinkField(v)}
+                  >
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="email">email</SelectItem>
+                      <SelectItem value="phone">phone</SelectItem>
+                      <SelectItem value="external_id">external_id</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+
+              {job.detectedEntityType === 'orders' && (
+                <div>
+                  <label className="block text-sm font-medium mb-1" style={LABEL_STYLE}>
+                    Link deal by (optional)
+                  </label>
+                  <Select
+                    value={dealLinkField ?? '_none'}
+                    onValueChange={(v) => setDealLinkField(v === '_none' ? null : v)}
+                  >
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="_none">No deal link</SelectItem>
+                      <SelectItem value="external_id">external_id</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs mt-1" style={MUTED_STYLE}>
+                    Order.dealId stays NULL when this is blank.
+                  </p>
+                </div>
+              )}
+            </div>
+          </section>
+
           {/* Sticky bottom action bar */}
           <div
             className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 px-6 py-3 shadow-lg z-10"
@@ -438,7 +604,7 @@ export default function MappingPage() {
                 </Link>
                 <Button
                   onClick={onSave}
-                  disabled={isSaving || hasCollisions}
+                  disabled={isSaving || hasCollisions || sourceTagMissing}
                   variant="default"
                 >
                   {isSaving ? (

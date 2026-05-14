@@ -70,7 +70,27 @@ export type SignalName =
   | "legal_name_fuzzy"
   | "close_date_window"
   | "contact_email_exact"
-  | "placed_at_window";
+  | "placed_at_window"
+  // KAN-922 — exact match on externalIds[sourceTag].
+  | "external_id_exact";
+
+// KAN-922 — Per-entity match-key allow-lists. Strict union types so an
+// invalid key bubbles up as a type error rather than a silent
+// commit-time miss. The 'auto' literal (default cascade) is implicit —
+// callers pass `undefined` for backwards-compat heuristic.
+export type ContactMatchKey = "email" | "phone" | "external_id";
+export type CompanyMatchKey = "domain" | "external_id";
+export type DealMatchKey = "external_id";
+export type OrderMatchKey = "orderNumber" | "providerOrderId" | "external_id";
+
+/** KAN-922 — per-import match configuration threaded from ImportJob.
+ *  `externalSourceTag` is REQUIRED when `matchKey === 'external_id'`
+ *  (validated at saveFieldMappings; matcher returns no-candidates if
+ *  config violates this invariant at runtime). */
+export interface MatchConfig<K extends string> {
+  matchKey?: K;
+  externalSourceTag?: string | null;
+}
 
 export interface MatchCandidate {
   /** id of the matching canonical entity. */
@@ -114,6 +134,8 @@ interface ExistingContact {
   firstName: string | null;
   lastName: string | null;
   companyName: string | null;
+  /** KAN-922 — projected from Contact.externalIds JSON. */
+  externalIds: Record<string, string>;
 }
 
 interface ExistingCompany {
@@ -121,6 +143,7 @@ interface ExistingCompany {
   name: string;
   legalName: string | null;
   domain: string | null;
+  externalIds: Record<string, string>;
 }
 
 interface ExistingDeal {
@@ -128,6 +151,7 @@ interface ExistingDeal {
   name: string;
   expectedCloseDate: Date | null;
   contact: { email: string | null } | null;
+  externalIds: Record<string, string>;
 }
 
 interface ExistingOrder {
@@ -136,6 +160,7 @@ interface ExistingOrder {
   providerOrderId: string | null;
   placedAt: Date | null;
   contact: { email: string | null } | null;
+  externalIds: Record<string, string>;
 }
 
 // ─────────────────────────────────────────────
@@ -210,6 +235,27 @@ function decisionFromCandidates(candidates: MatchCandidate[]): MatchDecision {
  *   3. name fuzzy + same company → max(fuzzyScore, 85), capped 94
  *   4. name fuzzy only           → min(fuzzyScore, 94)
  */
+// KAN-922 — Helper: strict-match short-circuit when user explicitly picked
+// a non-auto match key. Returns a MatchDecision built from the strict
+// match, or null when matchKey is undefined (caller falls through to its
+// current heuristic cascade).
+function strictMatch<E extends { id: string }>(
+  config: MatchConfig<string> | undefined,
+  signalForScalar: SignalName,
+  externalIdFieldOnStaging: Record<string, string> | undefined,
+  candidates: { id: string; matched: boolean; signal: SignalName }[],
+): MatchDecision | null {
+  if (!config?.matchKey) return null;
+  const out: MatchCandidate[] = candidates
+    .filter((c) => c.matched)
+    .map((c) => ({ existingEntityId: c.id, score: 100, matchedFields: [c.signal] }));
+  // Suppress lint on unused params from the staging-shape match — the
+  // caller built the candidates list with the appropriate predicate.
+  void signalForScalar;
+  void externalIdFieldOnStaging;
+  return decisionFromCandidates(out);
+}
+
 export function matchContact(
   staging: {
     email?: string | null;
@@ -217,10 +263,50 @@ export function matchContact(
     firstName?: string | null;
     lastName?: string | null;
     companyName?: string | null;
+    externalIds?: Record<string, string>;
   },
   existing: ExistingContact[],
   nameBuckets: Map<string, ExistingContact[]>,
+  config?: MatchConfig<ContactMatchKey>,
 ): MatchDecision {
+  // KAN-922 — Strict-match short-circuit. Backwards-compatible: when
+  // config is omitted or matchKey is undefined, fall through to the
+  // existing heuristic cascade below.
+  if (config?.matchKey) {
+    const built: MatchCandidate[] = [];
+    if (config.matchKey === "external_id" && config.externalSourceTag) {
+      const tag = config.externalSourceTag;
+      const stagingExtId = staging.externalIds?.[tag];
+      if (stagingExtId) {
+        for (const e of existing) {
+          if (e.externalIds[tag] === stagingExtId) {
+            built.push({ existingEntityId: e.id, score: 100, matchedFields: ["external_id_exact"] });
+          }
+        }
+      }
+    } else if (config.matchKey === "email") {
+      const stagingEmail = normalize(staging.email);
+      if (stagingEmail) {
+        for (const e of existing) {
+          if (normalize(e.email) === stagingEmail) {
+            built.push({ existingEntityId: e.id, score: 100, matchedFields: ["email_exact"] });
+          }
+        }
+      }
+    } else if (config.matchKey === "phone") {
+      if (staging.phone) {
+        for (const e of existing) {
+          if (phonesMatch(staging.phone, e.phone)) {
+            built.push({ existingEntityId: e.id, score: 100, matchedFields: ["phone_exact"] });
+          }
+        }
+      }
+    }
+    return decisionFromCandidates(built);
+  }
+  // Suppress unused warning while keeping the imported helper visible —
+  // not all branches reference it.
+  void strictMatch;
   const candidates: MatchCandidate[] = [];
   const matchedByCandidate = new Map<string, MatchCandidate>();
 
@@ -297,10 +383,37 @@ export function matchCompany(
   staging: {
     name?: string | null;
     domain?: string | null;
+    externalIds?: Record<string, string>;
   },
   existing: ExistingCompany[],
   nameBuckets: Map<string, ExistingCompany[]>,
+  config?: MatchConfig<CompanyMatchKey>,
 ): MatchDecision {
+  // KAN-922 — Strict-match short-circuit.
+  if (config?.matchKey) {
+    const built: MatchCandidate[] = [];
+    if (config.matchKey === "external_id" && config.externalSourceTag) {
+      const tag = config.externalSourceTag;
+      const stagingExtId = staging.externalIds?.[tag];
+      if (stagingExtId) {
+        for (const e of existing) {
+          if (e.externalIds[tag] === stagingExtId) {
+            built.push({ existingEntityId: e.id, score: 100, matchedFields: ["external_id_exact"] });
+          }
+        }
+      }
+    } else if (config.matchKey === "domain") {
+      const stagingDomain = normalize(staging.domain);
+      if (stagingDomain) {
+        for (const e of existing) {
+          if (normalize(e.domain) === stagingDomain) {
+            built.push({ existingEntityId: e.id, score: 100, matchedFields: ["domain_exact"] });
+          }
+        }
+      }
+    }
+    return decisionFromCandidates(built);
+  }
   const candidates: MatchCandidate[] = [];
   const matchedByCandidate = new Map<string, MatchCandidate>();
 
@@ -367,10 +480,27 @@ export function matchDeal(
     name?: string | null;
     contactEmail?: string | null;
     expectedCloseDate?: Date | null;
+    externalIds?: Record<string, string>;
   },
   existing: ExistingDeal[],
   nameBuckets: Map<string, ExistingDeal[]>,
+  config?: MatchConfig<DealMatchKey>,
 ): MatchDecision {
+  // KAN-922 — Strict-match short-circuit. Deal only supports external_id
+  // as a non-heuristic key (locked decision G3).
+  if (config?.matchKey === "external_id" && config.externalSourceTag) {
+    const tag = config.externalSourceTag;
+    const stagingExtId = staging.externalIds?.[tag];
+    const built: MatchCandidate[] = [];
+    if (stagingExtId) {
+      for (const e of existing) {
+        if (e.externalIds[tag] === stagingExtId) {
+          built.push({ existingEntityId: e.id, score: 100, matchedFields: ["external_id_exact"] });
+        }
+      }
+    }
+    return decisionFromCandidates(built);
+  }
   const candidates: MatchCandidate[] = [];
   const matchedByCandidate = new Map<string, MatchCandidate>();
 
@@ -449,11 +579,43 @@ export function matchOrder(
     providerOrderId?: string | null;
     contactEmail?: string | null;
     placedAt?: Date | null;
+    externalIds?: Record<string, string>;
   },
   existing: ExistingOrder[],
   orderNumberMap: Map<string, ExistingOrder[]>,
   providerIdMap: Map<string, ExistingOrder[]>,
+  config?: MatchConfig<OrderMatchKey>,
 ): MatchDecision {
+  // KAN-922 — Strict-match short-circuit.
+  if (config?.matchKey) {
+    const built: MatchCandidate[] = [];
+    if (config.matchKey === "external_id" && config.externalSourceTag) {
+      const tag = config.externalSourceTag;
+      const stagingExtId = staging.externalIds?.[tag];
+      if (stagingExtId) {
+        for (const e of existing) {
+          if (e.externalIds[tag] === stagingExtId) {
+            built.push({ existingEntityId: e.id, score: 100, matchedFields: ["external_id_exact"] });
+          }
+        }
+      }
+    } else if (config.matchKey === "orderNumber") {
+      if (staging.orderNumber) {
+        const matches = orderNumberMap.get(staging.orderNumber) ?? [];
+        for (const e of matches) {
+          built.push({ existingEntityId: e.id, score: 100, matchedFields: ["order_number_exact"] });
+        }
+      }
+    } else if (config.matchKey === "providerOrderId") {
+      if (staging.providerOrderId) {
+        const matches = providerIdMap.get(staging.providerOrderId) ?? [];
+        for (const e of matches) {
+          built.push({ existingEntityId: e.id, score: 100, matchedFields: ["provider_order_id_exact"] });
+        }
+      }
+    }
+    return decisionFromCandidates(built);
+  }
   const candidates: MatchCandidate[] = [];
   const matchedByCandidate = new Map<string, MatchCandidate>();
 
@@ -618,11 +780,16 @@ export async function runDuplicateDetection(
       prisma.importStagingOrder.findMany({ where: { importJobId } }),
       prisma.contact.findMany({
         where: { tenantId },
-        select: { id: true, email: true, phone: true, firstName: true, lastName: true, companyName: true },
+        select: {
+          id: true, email: true, phone: true, firstName: true,
+          lastName: true, companyName: true,
+          // KAN-922 — needed for matchKey='external_id' lookups.
+          externalIds: true,
+        },
       }),
       prisma.company.findMany({
         where: { tenantId },
-        select: { id: true, name: true, legalName: true, domain: true },
+        select: { id: true, name: true, legalName: true, domain: true, externalIds: true },
       }),
       prisma.deal.findMany({
         where: { tenantId },
@@ -631,6 +798,7 @@ export async function runDuplicateDetection(
           name: true,
           expectedCloseDate: true,
           contact: { select: { email: true } },
+          externalIds: true,
         },
       }),
       prisma.order.findMany({
@@ -641,9 +809,40 @@ export async function runDuplicateDetection(
           providerOrderId: true,
           placedAt: true,
           contact: { select: { email: true } },
+          externalIds: true,
         },
       }),
     ]);
+
+    // KAN-922 — Project canonical entity externalIds JSON → typed
+    // Record<string,string> so matchers can do strict equality lookups.
+    // Prisma returns JsonValue; coerce defensively.
+    const projectJsonRecord = (v: unknown): Record<string, string> => {
+      if (!v || typeof v !== "object" || Array.isArray(v)) return {};
+      const out: Record<string, string> = {};
+      for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+        if (typeof val === "string") out[k] = val;
+      }
+      return out;
+    };
+    const existingContactsTyped: ExistingContact[] = existingContacts.map((c) => ({
+      id: c.id, email: c.email, phone: c.phone, firstName: c.firstName,
+      lastName: c.lastName, companyName: c.companyName,
+      externalIds: projectJsonRecord(c.externalIds),
+    }));
+    const existingCompaniesTyped: ExistingCompany[] = existingCompanies.map((c) => ({
+      id: c.id, name: c.name, legalName: c.legalName, domain: c.domain,
+      externalIds: projectJsonRecord(c.externalIds),
+    }));
+    const existingDealsTyped: ExistingDeal[] = existingDeals.map((d) => ({
+      id: d.id, name: d.name, expectedCloseDate: d.expectedCloseDate,
+      contact: d.contact, externalIds: projectJsonRecord(d.externalIds),
+    }));
+    const existingOrdersTyped: ExistingOrder[] = existingOrders.map((o) => ({
+      id: o.id, orderNumber: o.orderNumber, providerOrderId: o.providerOrderId,
+      placedAt: o.placedAt, contact: o.contact,
+      externalIds: projectJsonRecord(o.externalIds),
+    }));
 
     // 1.5 — KAN-915 mirror-column back-fill (LOAD-BEARING).
     //
@@ -665,6 +864,11 @@ export async function runDuplicateDetection(
       ? (job.fieldMappings as unknown as FieldMappingEntryLike[])
       : [];
 
+    // KAN-922 — load per-import match configuration. NULL columns fall
+    // back to the heuristic cascade in the matcher (backwards compat).
+    const externalSourceTag = job.externalSourceTag ?? null;
+    const dedupMatchField = job.dedupMatchField ?? null;
+
     function projectionCtx(row: { sourceRowIndex: number }) {
       return {
         tenantId,
@@ -683,6 +887,7 @@ export async function runDuplicateDetection(
         fieldMappings,
         "contacts",
         projectionCtx(s),
+        externalSourceTag,
       ) as ProjectedContact;
       const mirror = projectedContactMirrorColumns(projected);
       Object.assign(s, mirror);
@@ -697,6 +902,7 @@ export async function runDuplicateDetection(
         fieldMappings,
         "companies",
         projectionCtx(s),
+        externalSourceTag,
       ) as ProjectedCompany;
       const mirror = projectedCompanyMirrorColumns(projected);
       Object.assign(s, mirror);
@@ -711,6 +917,7 @@ export async function runDuplicateDetection(
         fieldMappings,
         "deals",
         projectionCtx(s),
+        externalSourceTag,
       ) as ProjectedDeal;
       const mirror = projectedDealMirrorColumns(projected);
       Object.assign(s, mirror);
@@ -725,6 +932,7 @@ export async function runDuplicateDetection(
         fieldMappings,
         "orders",
         projectionCtx(s),
+        externalSourceTag,
       ) as ProjectedOrder;
       const mirror = projectedOrderMirrorColumns(projected);
       Object.assign(s, mirror);
@@ -749,20 +957,20 @@ export async function runDuplicateDetection(
     }
 
     // 2. Build buckets + exact-lookup maps.
-    const contactNameBuckets = buildBuckets(existingContacts, (c) =>
+    const contactNameBuckets = buildBuckets(existingContactsTyped, (c) =>
       [c.firstName, c.lastName].filter((p): p is string => !!p).join(" "),
     );
-    const companyNameBuckets = buildBuckets(existingCompanies, (c) => c.name);
-    const dealNameBuckets = buildBuckets(existingDeals, (d) => d.name);
+    const companyNameBuckets = buildBuckets(existingCompaniesTyped, (c) => c.name);
+    const dealNameBuckets = buildBuckets(existingDealsTyped, (d) => d.name);
 
-    const orderNumberMap = new Map<string, typeof existingOrders>();
-    for (const o of existingOrders) {
+    const orderNumberMap = new Map<string, ExistingOrder[]>();
+    for (const o of existingOrdersTyped) {
       const arr = orderNumberMap.get(o.orderNumber) ?? [];
       arr.push(o);
       orderNumberMap.set(o.orderNumber, arr);
     }
-    const providerIdMap = new Map<string, typeof existingOrders>();
-    for (const o of existingOrders) {
+    const providerIdMap = new Map<string, ExistingOrder[]>();
+    for (const o of existingOrdersTyped) {
       if (o.providerOrderId) {
         const arr = providerIdMap.get(o.providerOrderId) ?? [];
         arr.push(o);
@@ -779,16 +987,38 @@ export async function runDuplicateDetection(
         orders: emptyPerEntity(),
       },
       candidatesScanned: {
-        contacts: existingContacts.length,
-        companies: existingCompanies.length,
-        deals: existingDeals.length,
-        orders: existingOrders.length,
+        contacts: existingContactsTyped.length,
+        companies: existingCompaniesTyped.length,
+        deals: existingDealsTyped.length,
+        orders: existingOrdersTyped.length,
       },
+    };
+
+    // KAN-922 — per-entity MatchConfig threaded into each matcher. The
+    // dedupMatchField loaded from ImportJob is a free-form string; cast
+    // narrowly here (saveFieldMappings already validated it against the
+    // per-entity allow-list). NULL → undefined → matcher falls through
+    // to heuristic cascade.
+    const contactConfig: MatchConfig<ContactMatchKey> = {
+      matchKey: (dedupMatchField as ContactMatchKey | null) ?? undefined,
+      externalSourceTag,
+    };
+    const companyConfig: MatchConfig<CompanyMatchKey> = {
+      matchKey: (dedupMatchField as CompanyMatchKey | null) ?? undefined,
+      externalSourceTag,
+    };
+    const dealConfig: MatchConfig<DealMatchKey> = {
+      matchKey: (dedupMatchField as DealMatchKey | null) ?? undefined,
+      externalSourceTag,
+    };
+    const orderConfig: MatchConfig<OrderMatchKey> = {
+      matchKey: (dedupMatchField as OrderMatchKey | null) ?? undefined,
+      externalSourceTag,
     };
 
     // Bulk-collect updates as small transactions per-entity-table.
     const contactUpdates = stagingContacts.map((s) => {
-      const decision = matchContact(s, existingContacts, contactNameBuckets);
+      const decision = matchContact(s as never, existingContactsTyped, contactNameBuckets, contactConfig);
       tallyDecision(counts.byEntity.contacts, decision);
       return prisma.importStagingContact.update({
         where: { id: s.id },
@@ -796,7 +1026,7 @@ export async function runDuplicateDetection(
       });
     });
     const companyUpdates = stagingCompanies.map((s) => {
-      const decision = matchCompany(s, existingCompanies, companyNameBuckets);
+      const decision = matchCompany(s as never, existingCompaniesTyped, companyNameBuckets, companyConfig);
       tallyDecision(counts.byEntity.companies, decision);
       return prisma.importStagingCompany.update({
         where: { id: s.id },
@@ -804,7 +1034,7 @@ export async function runDuplicateDetection(
       });
     });
     const dealUpdates = stagingDeals.map((s) => {
-      const decision = matchDeal(s, existingDeals, dealNameBuckets);
+      const decision = matchDeal(s as never, existingDealsTyped, dealNameBuckets, dealConfig);
       tallyDecision(counts.byEntity.deals, decision);
       return prisma.importStagingDeal.update({
         where: { id: s.id },
@@ -812,7 +1042,7 @@ export async function runDuplicateDetection(
       });
     });
     const orderUpdates = stagingOrders.map((s) => {
-      const decision = matchOrder(s, existingOrders, orderNumberMap, providerIdMap);
+      const decision = matchOrder(s as never, existingOrdersTyped, orderNumberMap, providerIdMap, orderConfig);
       tallyDecision(counts.byEntity.orders, decision);
       return prisma.importStagingOrder.update({
         where: { id: s.id },
@@ -829,10 +1059,10 @@ export async function runDuplicateDetection(
 
     // 4. Persist ImportJob aggregate state.
     const totalCandidates =
-      existingContacts.length +
-      existingCompanies.length +
-      existingDeals.length +
-      existingOrders.length;
+      existingContactsTyped.length +
+      existingCompaniesTyped.length +
+      existingDealsTyped.length +
+      existingOrdersTyped.length;
 
     return await prisma.importJob.update({
       where: { id: importJobId },

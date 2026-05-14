@@ -64,6 +64,10 @@ export type CommitErrorReason =
    *  (KAN-907 always writes it), but defended against here so we never
    *  silently INSERT NULL-everywhere canonical rows again. */
   | "source_row_data_missing"
+  /** KAN-922 — Order import's dealLinkField='external_id' but the
+   *  referenced Deal doesn't exist in the tenant. Distinct from
+   *  contact_not_found so the operator knows which dependency is missing. */
+  | "deal_not_found"
   | "unknown";
 
 export interface CommitErrorEntry {
@@ -122,16 +126,86 @@ function resolveEffectiveDecision(
 // (contactEmail, pipelineName, stageName) into canonical FK ids.
 // ─────────────────────────────────────────────
 
+/**
+ * KAN-922 — Generalized contact resolver. Supports email / phone /
+ * external_id match keys. The previous resolveContactByEmail is kept as
+ * a thin wrapper so the 7+ existing call sites continue working.
+ *
+ * For 'external_id': uses Prisma's JSON path filter
+ * `{ externalIds: { path: [source], equals: value } }`. Requires Prisma
+ * 4.10+ (we're on 5.22 — confirmed supported).
+ *
+ * **KAN-925** — JSON expression indexes deferred. Single-tenant scans
+ * under 10K contacts remain acceptable; revisit when a tenant crosses
+ * that threshold (currently 6740 contacts in axisone smoke tenant).
+ */
+export type ContactResolveKey =
+  | { kind: "email"; value: string | null | undefined }
+  | { kind: "phone"; value: string | null | undefined }
+  | { kind: "external_id"; source: string; value: string | null | undefined };
+
+export async function resolveContactByMatchKey(
+  prisma: PrismaClient,
+  tenantId: string,
+  key: ContactResolveKey,
+): Promise<{ id: string } | null> {
+  if (!key.value) return null;
+  switch (key.kind) {
+    case "email":
+      return prisma.contact.findFirst({
+        where: { tenantId, email: { equals: key.value, mode: "insensitive" } },
+        select: { id: true },
+      });
+    case "phone":
+      // Caller is responsible for normalizing the value via normalizePhone()
+      // before passing — staging-side projection should handle this.
+      return prisma.contact.findFirst({
+        where: { tenantId, phone: key.value },
+        select: { id: true },
+      });
+    case "external_id":
+      return prisma.contact.findFirst({
+        where: {
+          tenantId,
+          externalIds: { path: [key.source], equals: key.value },
+        },
+        select: { id: true },
+      });
+  }
+}
+
+/** KAN-922 — Backwards-compatible wrapper. 7+ existing call sites
+ *  continue working unchanged. Delegates to resolveContactByMatchKey. */
 export async function resolveContactByEmail(
   prisma: PrismaClient,
   tenantId: string,
   email: string | null | undefined,
 ): Promise<{ id: string } | null> {
-  if (!email) return null;
-  return prisma.contact.findFirst({
-    where: { tenantId, email: { equals: email, mode: "insensitive" } },
-    select: { id: true },
-  });
+  return resolveContactByMatchKey(prisma, tenantId, { kind: "email", value: email });
+}
+
+/** KAN-922 — Deal resolver (NEW). commitOrder previously did NOT
+ *  populate Order.dealId at all — this is net-new wiring for the
+ *  Order → Deal link via external_id. */
+export type DealResolveKey =
+  | { kind: "external_id"; source: string; value: string | null | undefined };
+
+export async function resolveDealByMatchKey(
+  prisma: PrismaClient,
+  tenantId: string,
+  key: DealResolveKey,
+): Promise<{ id: string } | null> {
+  if (!key.value) return null;
+  switch (key.kind) {
+    case "external_id":
+      return prisma.deal.findFirst({
+        where: {
+          tenantId,
+          externalIds: { path: [key.source], equals: key.value },
+        },
+        select: { id: true },
+      });
+  }
 }
 
 /** Look up a Pipeline by name within a tenant. When `name` is empty
@@ -385,6 +459,9 @@ async function commitContact(
   decision: EffectiveDecision,
   fieldMappings: FieldMappingEntryLike[],
   importJobId: string,
+  // KAN-922 — passed so projectRow can tag externalIds + so we can
+  // persist them onto the canonical Contact at insert/update time.
+  externalSourceTag: string | null,
 ): Promise<CommitResult> {
   if (decision.action === "needs_review") {
     return {
@@ -407,6 +484,7 @@ async function commitContact(
     fieldMappings,
     "contacts",
     { tenantId, importJobId, sourceRowIndex: staging.sourceRowIndex },
+    externalSourceTag,
   ) as ProjectedContact;
 
   const data = {
@@ -427,6 +505,10 @@ async function commitContact(
     ...(projected.region ? { region: projected.region } : {}),
     ...(projected.postalCode ? { postalCode: projected.postalCode } : {}),
     ...(projected.country ? { country: projected.country } : {}),
+    // KAN-922 — persist source-tagged external id onto canonical Contact.
+    ...(externalSourceTag && projected.externalIds?.[externalSourceTag]
+      ? { externalIds: { [externalSourceTag]: projected.externalIds[externalSourceTag] } }
+      : {}),
   };
 
   if (decision.action === "update") {
@@ -474,6 +556,8 @@ async function commitCompany(
   decision: EffectiveDecision,
   fieldMappings: FieldMappingEntryLike[],
   importJobId: string,
+  // KAN-922 — see commitContact.
+  externalSourceTag: string | null,
 ): Promise<CommitResult> {
   if (decision.action === "needs_review") {
     return {
@@ -494,6 +578,7 @@ async function commitCompany(
     fieldMappings,
     "companies",
     { tenantId, importJobId, sourceRowIndex: staging.sourceRowIndex },
+    externalSourceTag,
   ) as ProjectedCompany;
 
   if (!projected.name) {
@@ -509,6 +594,10 @@ async function commitCompany(
   const data = {
     tenantId,
     name: projected.name,
+    // KAN-922 — persist source-tagged external id onto canonical Company.
+    ...(externalSourceTag && projected.externalIds?.[externalSourceTag]
+      ? { externalIds: { [externalSourceTag]: projected.externalIds[externalSourceTag] } }
+      : {}),
     ...(projected.legalName ? { legalName: projected.legalName } : {}),
     ...(projected.domain ? { domain: projected.domain } : {}),
     ...(projected.website ? { website: projected.website } : {}),
@@ -576,6 +665,63 @@ async function commitCompany(
   return { ok: true, action: "inserted", entityId: created.id };
 }
 
+/** KAN-922 — Helper: build a ContactResolveKey dispatching on the
+ *  user-picked customerLinkField. NULL/unknown → fall back to email. */
+function buildContactResolveKey(
+  customerLinkField: string | null,
+  externalSourceTag: string | null,
+  email: string | null | undefined,
+  externalIds: Record<string, string> | undefined,
+  phone: string | null | undefined,
+): ContactResolveKey {
+  if (customerLinkField === "external_id" && externalSourceTag) {
+    return {
+      kind: "external_id",
+      source: externalSourceTag,
+      value: externalIds?.[externalSourceTag] ?? null,
+    };
+  }
+  if (customerLinkField === "phone") {
+    return { kind: "phone", value: phone ?? null };
+  }
+  return { kind: "email", value: email ?? null };
+}
+
+/** KAN-922 — Helper: error entry for contact resolution miss, with the
+ *  verbatim error message per locked decision G8 when external_id was
+ *  the link key. */
+function contactNotFoundError(
+  entityType: ImportEntityType,
+  staging: { id: string; sourceRowIndex: number },
+  key: ContactResolveKey,
+): CommitErrorEntry {
+  let unresolvedKey = "";
+  let errorMessage = "";
+  if (key.kind === "external_id") {
+    unresolvedKey = String(key.value ?? "");
+    // Verbatim from KAN-922 locked decision G8.
+    errorMessage = `Customer matched by external_id=${unresolvedKey} (source=${key.source}) not found. The customer may have been imported earlier without external_id set for this source. Re-import customers with external_id mapping first.`;
+  } else if (key.kind === "phone") {
+    unresolvedKey = String(key.value ?? "");
+    errorMessage = key.value
+      ? `No Contact with phone '${unresolvedKey}' found in tenant. Upload contacts first.`
+      : `${entityType} staging row has no phone — Contact.${entityType === "deal" ? "contactId" : "contactId"} is NOT NULL.`;
+  } else {
+    unresolvedKey = String(key.value ?? "");
+    errorMessage = key.value
+      ? `No Contact with email '${unresolvedKey}' found in tenant. Upload contacts first.`
+      : `${entityType} staging row has no contactEmail — Contact.contactId is NOT NULL.`;
+  }
+  return {
+    stagingRowId: staging.id,
+    entityType,
+    sourceRowIndex: staging.sourceRowIndex,
+    reason: "contact_not_found",
+    unresolvedKey,
+    errorMessage,
+  };
+}
+
 async function commitDeal(
   tx: Prisma.TransactionClient,
   tenantId: string,
@@ -583,6 +729,10 @@ async function commitDeal(
   decision: EffectiveDecision,
   fieldMappings: FieldMappingEntryLike[],
   importJobId: string,
+  // KAN-922 — per-import match configuration. NULL → fall back to email
+  // resolver (backwards compat).
+  customerLinkField: string | null,
+  externalSourceTag: string | null,
 ): Promise<CommitResult> {
   if (decision.action === "needs_review") {
     return {
@@ -603,25 +753,25 @@ async function commitDeal(
     fieldMappings,
     "deals",
     { tenantId, importJobId, sourceRowIndex: staging.sourceRowIndex },
+    externalSourceTag,
   ) as ProjectedDeal;
 
-  // 1. Resolve contactId — required NOT NULL.
-  const contact = await resolveContactByEmail(
+  // 1. KAN-922 — Resolve contactId via user-picked match key. NULL
+  //    customerLinkField → email (backwards compat).
+  const contactKey = buildContactResolveKey(
+    customerLinkField,
+    externalSourceTag,
+    projected.contactEmail,
+    projected.contactExternalIds,
+    null, // phone not currently projected for Deal staging (out of scope)
+  );
+  const contact = await resolveContactByMatchKey(
     tx as unknown as PrismaClient,
     tenantId,
-    projected.contactEmail,
+    contactKey,
   );
   if (!contact) {
-    return {
-      stagingRowId: staging.id,
-      entityType: "deal",
-      sourceRowIndex: staging.sourceRowIndex,
-      reason: "contact_not_found",
-      unresolvedKey: projected.contactEmail ?? "",
-      errorMessage: projected.contactEmail
-        ? `No Contact with email '${projected.contactEmail}' found in tenant. Upload contacts first.`
-        : "Deal staging row has no contactEmail — Deal.contactId is NOT NULL.",
-    };
+    return contactNotFoundError("deal", staging, contactKey);
   }
 
   // 2. Resolve pipelineId — falls back to tenant default.
@@ -683,6 +833,10 @@ async function commitDeal(
     ...(projected.wonProductSummary ? { wonProductSummary: projected.wonProductSummary } : {}),
     ...(projected.ownerId ? { ownerId: projected.ownerId } : {}),
     ...(company ? { companyId: company.id } : {}),
+    // KAN-922 — persist source-tagged external id onto canonical Deal.
+    ...(externalSourceTag && projected.externalIds?.[externalSourceTag]
+      ? { externalIds: { [externalSourceTag]: projected.externalIds[externalSourceTag] } }
+      : {}),
   };
 
   if (decision.action === "update") {
@@ -719,6 +873,11 @@ async function commitDeal(
         currency: data.currency,
         expectedCloseDate: data.expectedCloseDate,
         ...(company ? { companyId: company.id } : {}),
+        // KAN-922 — update externalIds on existing Deal too (idempotent
+        // re-import overwrites the same tag with same value).
+        ...(externalSourceTag && projected.externalIds?.[externalSourceTag]
+          ? { externalIds: { [externalSourceTag]: projected.externalIds[externalSourceTag] } }
+          : {}),
       },
       select: { id: true },
     });
@@ -736,6 +895,10 @@ async function commitOrder(
   decision: EffectiveDecision,
   fieldMappings: FieldMappingEntryLike[],
   importJobId: string,
+  // KAN-922 — per-import match configuration.
+  customerLinkField: string | null,
+  dealLinkField: string | null,
+  externalSourceTag: string | null,
 ): Promise<CommitResult> {
   if (decision.action === "needs_review") {
     return {
@@ -756,25 +919,50 @@ async function commitOrder(
     fieldMappings,
     "orders",
     { tenantId, importJobId, sourceRowIndex: staging.sourceRowIndex },
+    externalSourceTag,
   ) as ProjectedOrder;
 
-  // 1. Resolve contactId — required NOT NULL.
-  const contact = await resolveContactByEmail(
+  // 1. KAN-922 — Resolve contactId via user-picked match key.
+  const contactKey = buildContactResolveKey(
+    customerLinkField,
+    externalSourceTag,
+    projected.contactEmail,
+    projected.contactExternalIds,
+    null, // phone not currently projected for Order staging
+  );
+  const contact = await resolveContactByMatchKey(
     tx as unknown as PrismaClient,
     tenantId,
-    projected.contactEmail,
+    contactKey,
   );
   if (!contact) {
-    return {
-      stagingRowId: staging.id,
-      entityType: "order",
-      sourceRowIndex: staging.sourceRowIndex,
-      reason: "contact_not_found",
-      unresolvedKey: projected.contactEmail ?? "",
-      errorMessage: projected.contactEmail
-        ? `No Contact with email '${projected.contactEmail}' found in tenant. Upload contacts first.`
-        : "Order staging row has no contactEmail — Order.contactId is NOT NULL.",
-    };
+    return contactNotFoundError("order", staging, contactKey);
+  }
+
+  // 2. KAN-922 — NEW Deal-FK resolver. dealLinkField NULL → leave
+  //    Order.dealId NULL (today's pre-KAN-922 behavior). Only soft-misses
+  //    are an error; missing dealLinkField is a deliberate user choice.
+  let dealId: string | null = null;
+  if (dealLinkField === "external_id" && externalSourceTag) {
+    const dealExtId = projected.dealExternalIds?.[externalSourceTag] ?? null;
+    if (dealExtId) {
+      const deal = await resolveDealByMatchKey(
+        tx as unknown as PrismaClient,
+        tenantId,
+        { kind: "external_id", source: externalSourceTag, value: dealExtId },
+      );
+      if (!deal) {
+        return {
+          stagingRowId: staging.id,
+          entityType: "order",
+          sourceRowIndex: staging.sourceRowIndex,
+          reason: "deal_not_found",
+          unresolvedKey: dealExtId,
+          errorMessage: `Deal matched by external_id=${dealExtId} (source=${externalSourceTag}) not found in tenant. Re-import deals with external_id mapping first.`,
+        };
+      }
+      dealId = deal.id;
+    }
   }
 
   if (!projected.orderNumber) {
@@ -787,7 +975,7 @@ async function commitOrder(
     };
   }
 
-  // 2. Optional Company lookup.
+  // 3. Optional Company lookup.
   const company = await resolveCompanyByName(
     tx as unknown as PrismaClient,
     tenantId,
@@ -798,6 +986,7 @@ async function commitOrder(
     tenantId,
     contactId: contact.id,
     orderNumber: projected.orderNumber,
+    ...(dealId ? { dealId } : {}),
     ...(projected.providerOrderId ? { providerOrderId: projected.providerOrderId } : {}),
     ...(projected.status ? { status: projected.status } : {}),
     ...(projected.totalAmount ? { totalAmount: projected.totalAmount } : {}),
@@ -812,6 +1001,10 @@ async function commitOrder(
     ...(projected.paymentProvider ? { paymentProvider: projected.paymentProvider } : {}),
     ...(projected.customerNotes ? { customerNotes: projected.customerNotes } : {}),
     ...(company ? { companyId: company.id } : {}),
+    // KAN-922 — persist source-tagged external id onto canonical Order.
+    ...(externalSourceTag && projected.externalIds?.[externalSourceTag]
+      ? { externalIds: { [externalSourceTag]: projected.externalIds[externalSourceTag] } }
+      : {}),
   };
 
   try {
@@ -958,6 +1151,12 @@ export async function runCommit(
   const fieldMappings: FieldMappingEntryLike[] = Array.isArray(job.fieldMappings)
     ? (job.fieldMappings as unknown as FieldMappingEntryLike[])
     : [];
+
+  // KAN-922 — load per-import match configuration. NULL columns fall
+  // back to the heuristic / email defaults in each commit handler.
+  const externalSourceTag = job.externalSourceTag ?? null;
+  const customerLinkField = job.customerLinkField ?? null;
+  const dealLinkField = job.dealLinkField ?? null;
 
   // Resolve actor — `user:${createdByUserId}` with fallback to 'system'.
   let actor: string;
@@ -1117,7 +1316,7 @@ export async function runCommit(
       stagingContacts,
       "contact",
       (tx, staging, decision) =>
-        commitContact(tx, tenantId, staging, decision, fieldMappings, importJobId),
+        commitContact(tx, tenantId, staging, decision, fieldMappings, importJobId, externalSourceTag),
       (tx, id, target, status) =>
         tx.importStagingContact
           .update({
@@ -1134,7 +1333,7 @@ export async function runCommit(
       stagingCompanies,
       "company",
       (tx, staging, decision) =>
-        commitCompany(tx, tenantId, staging, decision, fieldMappings, importJobId),
+        commitCompany(tx, tenantId, staging, decision, fieldMappings, importJobId, externalSourceTag),
       (tx, id, target, status) =>
         tx.importStagingCompany
           .update({
@@ -1151,7 +1350,7 @@ export async function runCommit(
       stagingDeals,
       "deal",
       (tx, staging, decision) =>
-        commitDeal(tx, tenantId, staging, decision, fieldMappings, importJobId),
+        commitDeal(tx, tenantId, staging, decision, fieldMappings, importJobId, customerLinkField, externalSourceTag),
       (tx, id, target, status) =>
         tx.importStagingDeal
           .update({
@@ -1168,7 +1367,7 @@ export async function runCommit(
       stagingOrders,
       "order",
       (tx, staging, decision) =>
-        commitOrder(tx, tenantId, staging, decision, fieldMappings, importJobId),
+        commitOrder(tx, tenantId, staging, decision, fieldMappings, importJobId, customerLinkField, dealLinkField, externalSourceTag),
       (tx, id, target, status) =>
         tx.importStagingOrder
           .update({
