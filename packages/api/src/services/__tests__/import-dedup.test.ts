@@ -591,17 +591,33 @@ beforeEach(() => {
 
 describe("runDuplicateDetection — orchestrator", () => {
   it("happy path: stamps timestamps + writes counts + writes per-row matchDecision", async () => {
+    // KAN-915 — mirror columns are now a LAZY CACHE populated by the
+    // back-fill step at runDuplicateDetection entry. To exercise the
+    // matchers, the staging row must have sourceRowData populated AND
+    // the job must have fieldMappings — that's the new source of truth.
     const seed: OrchestratorMockSeed = {
-      job: makeJob(),
+      job: makeJob({
+        fieldMappings: [
+          { sourceColumn: "email", targetField: "email", confidence: 100 },
+          { sourceColumn: "first_name", targetField: "firstName", confidence: 100 },
+          { sourceColumn: "last_name", targetField: "lastName", confidence: 100 },
+        ] as unknown as never,
+      }),
       stagingContacts: [
         {
           id: "s1",
           importJobId: JOB_ID,
           tenantId: TENANT_A,
-          email: "alice@example.com",
-          firstName: "Alice",
-          lastName: "Anderson",
           sourceRowIndex: 0,
+          sourceRowData: {
+            email: "alice@example.com",
+            first_name: "Alice",
+            last_name: "Anderson",
+          },
+          // Mirror columns initialized NULL; back-fill populates them.
+          email: null,
+          firstName: null,
+          lastName: null,
         },
       ],
       existingContacts: [
