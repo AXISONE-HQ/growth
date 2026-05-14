@@ -74,6 +74,11 @@ export const CONTACT_FIELDS: TargetField[] = [
   { name: "region", label: "State / Region", description: "State, province, or region", kind: "canonical" },
   { name: "postalCode", label: "Postal code", description: "ZIP / postal / postcode", kind: "canonical" },
   { name: "country", label: "Country", description: "ISO 3166-1 alpha-2 preferred (e.g. 'US', 'CA')", kind: "canonical" },
+  // KAN-922 — Source-tagged external identifier. Stored in canonical
+  // Contact.externalIds JSON keyed by ImportJob.externalSourceTag.
+  // Required when ImportJob.dedupMatchField='external_id' or when a
+  // Deal/Order import uses customerLinkField='external_id'.
+  { name: "external_id", label: "External ID", description: "Source-tagged identifier for matching (e.g. HubSpot vid, Stripe cus_id). Stored in externalIds JSON keyed by externalSourceTag.", kind: "canonical" },
   SKIP_FIELD,
 ];
 
@@ -108,6 +113,8 @@ export const COMPANY_FIELDS: TargetField[] = [
   { name: "isTaxExempt", label: "Tax exempt", description: "Boolean: true/false/yes/no", kind: "canonical" },
   { name: "ownerId", label: "Owner (user ID)", description: "Internal owner user ID (raw — operator maps if known)", kind: "canonical" },
   { name: "linkedinUrl", label: "LinkedIn URL", description: "Company LinkedIn page URL", kind: "canonical" },
+  // KAN-922 — see CONTACT_FIELDS.external_id.
+  { name: "external_id", label: "External ID", description: "Source-tagged identifier for this company.", kind: "canonical" },
   SKIP_FIELD,
 ];
 
@@ -128,6 +135,12 @@ export const DEAL_FIELDS: TargetField[] = [
   { name: "companyName", label: "Company name (resolved at commit)", description: "Raw company name; resolved to Company at commit time.", kind: "lookup" },
   { name: "pipelineName", label: "Pipeline name (resolved at commit)", description: "Raw pipeline name; resolved to Pipeline at commit time.", kind: "lookup" },
   { name: "stageName", label: "Stage name (resolved at commit)", description: "Raw stage name; resolved to Stage at commit time.", kind: "lookup" },
+  // KAN-922 — Source-tagged external identifier for the Deal itself.
+  { name: "external_id", label: "External ID", description: "Source-tagged identifier for this deal.", kind: "canonical" },
+  // KAN-922 — Source-tagged external id of the LINKED customer. Used at
+  // commit time when ImportJob.customerLinkField='external_id'; the
+  // resolver looks up Contact via externalIds[externalSourceTag]=value.
+  { name: "customer_external_id", label: "Customer external ID (resolved at commit)", description: "Source-tagged identifier of the linked customer. Resolves via customerLinkField=external_id at commit time.", kind: "lookup" },
   SKIP_FIELD,
 ];
 
@@ -148,6 +161,14 @@ export const ORDER_FIELDS: TargetField[] = [
   { name: "customerNotes", label: "Customer notes", description: "Customer-facing free-text notes", kind: "canonical" },
   { name: "contactEmail", label: "Contact email (resolved at commit)", description: "Raw customer email; resolved to Contact at commit time.", kind: "lookup" },
   { name: "companyName", label: "Company name (resolved at commit)", description: "Raw customer company name; resolved to Company at commit time.", kind: "lookup" },
+  // KAN-922 — Source-tagged external identifier for the Order itself.
+  { name: "external_id", label: "External ID", description: "Source-tagged identifier for this order.", kind: "canonical" },
+  // KAN-922 — Source-tagged external id of the LINKED customer.
+  { name: "customer_external_id", label: "Customer external ID (resolved at commit)", description: "Source-tagged identifier of the linked customer.", kind: "lookup" },
+  // KAN-922 — Source-tagged external id of the LINKED deal. Used at
+  // commit time when ImportJob.dealLinkField='external_id'; populates
+  // Order.dealId (which previously stayed NULL).
+  { name: "deal_external_id", label: "Deal external ID (resolved at commit)", description: "Source-tagged identifier of the linked deal. Resolves via dealLinkField=external_id at commit time.", kind: "lookup" },
   SKIP_FIELD,
 ];
 
@@ -179,7 +200,30 @@ const SUPPORTED_ENTITY_TYPES = new Set(["contacts", "companies", "deals", "order
 
 export const MAPPING_SYSTEM_PROMPT = `You are a CRM data mapping specialist. You analyze CSV/XLSX file headers + sample data and suggest which target schema field each source column should map to. You return strict JSON only. Do not include any text outside the JSON response.
 
-Some target fields are marked as "(resolved at commit)" — these are raw lookup keys (e.g., a deal references a contact by email rather than by internal ID). Map source columns to these lookup fields when the source contains identifier text rather than internal IDs.`;
+Some target fields are marked as "(resolved at commit)" — these are raw lookup keys (e.g., a deal references a contact by email rather than by internal ID). Map source columns to these lookup fields when the source contains identifier text rather than internal IDs.
+
+// KAN-922 — external_id examples (START — atomic-revertible block)
+//
+// External ID columns: source-system identifiers used for matching across imports.
+// Common column names to recognize:
+//   - "vid", "hubspot_id", "hs_object_id" → external_id (for HubSpot data)
+//   - "stripe_customer_id", "cus_id" → external_id (for Stripe data)
+//   - "salesforce_id", "sf_id" → external_id (for Salesforce data)
+//   - "user_id", "customer_id", "client_id" → external_id (generic identifiers)
+//   - "record_id", "external_id" → external_id (literal)
+//
+// Cross-entity references (Deal/Order CSVs only):
+//   - Columns like "associated_contact_id", "customer_vid", "customer_user_id"
+//     → customer_external_id (links this row to a Customer via that customer's external_id)
+//   - Columns like "associated_deal_id", "opportunity_vid", "deal_id"
+//     → deal_external_id (Order rows linking to a Deal)
+//
+// When you see a column that's clearly a system-generated identifier (alphanumeric
+// codes, UUIDs, sequential numerics with no human meaning), prefer external_id /
+// customer_external_id / deal_external_id over "skip". The user can configure
+// externalSourceTag in the Match settings panel to tag which source it came from.
+//
+// KAN-922 — external_id examples (END)`;
 
 /**
  * Render the user prompt for an ImportJob + entity type. Exported for
