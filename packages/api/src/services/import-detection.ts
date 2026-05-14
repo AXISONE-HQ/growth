@@ -32,6 +32,7 @@
 import { TRPCError } from "@trpc/server";
 import type { ImportJob, PrismaClient } from "@prisma/client";
 import { complete } from "./llm-client.js";
+import { parseJsonFromLlm } from "./lib/llm-json.js";
 
 // ─────────────────────────────────────────────
 // Prompts
@@ -114,14 +115,13 @@ class InvalidDetectionShapeError extends Error {
  * used by csv-import-haiku-mapping.ts.
  */
 export function parseAndValidateDetectionResponse(rawText: string): ParsedDetection {
-  const jsonMatch = rawText.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) {
-    throw new UnparseableLLMOutputError(rawText);
-  }
-
+  // KAN-917 — strip markdown fences + tolerate leading explanation text.
   let parsed: unknown;
   try {
-    parsed = JSON.parse(jsonMatch[0]);
+    parsed = parseJsonFromLlm<unknown>(rawText, {
+      tolerateLeadingText: true,
+      expectedShape: "object",
+    });
   } catch {
     throw new UnparseableLLMOutputError(rawText);
   }
