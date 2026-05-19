@@ -13,7 +13,12 @@
  */
 import { describe, it, expect } from "vitest";
 import { z } from "zod";
-import { listCompanies, getCompanyById } from "../companies-router.js";
+import {
+  listCompanies,
+  getCompanyById,
+  createCompany,
+  updateCompany,
+} from "../companies-router.js";
 import { decodeCursor } from "../_pagination.js";
 
 const TENANT_A = "11111111-1111-1111-1111-111111111111";
@@ -28,13 +33,30 @@ interface FakeCompany {
   website: string | null;
   industry: string | null;
   sizeRange: string | null;
+  annualRevenue: string | null;
+  description: string | null;
   lifecycleStage: string;
+  phone: string | null;
+  email: string | null;
+  linkedinUrl: string | null;
+  billingAddressLine1: string | null;
+  billingAddressLine2: string | null;
   billingCity: string | null;
   billingRegion: string | null;
+  billingPostalCode: string | null;
   billingCountry: string | null;
+  mailingAddressLine1: string | null;
+  mailingAddressLine2: string | null;
+  mailingCity: string | null;
+  mailingRegion: string | null;
+  mailingPostalCode: string | null;
+  mailingCountry: string | null;
   taxId: string | null;
   taxIdType: string | null;
+  businessRegistrationNumber: string | null;
+  incorporationJurisdiction: string | null;
   isTaxExempt: boolean;
+  taxExemptionCertificate: string | null;
   ownerId: string | null;
   tags: string[];
   deletedAt: Date | null;
@@ -56,13 +78,30 @@ function company(overrides: Partial<FakeCompany> = {}): FakeCompany {
     website: null,
     industry: null,
     sizeRange: null,
+    annualRevenue: null,
+    description: null,
     lifecycleStage: "prospect",
+    phone: null,
+    email: null,
+    linkedinUrl: null,
+    billingAddressLine1: null,
+    billingAddressLine2: null,
     billingCity: null,
     billingRegion: null,
+    billingPostalCode: null,
     billingCountry: null,
+    mailingAddressLine1: null,
+    mailingAddressLine2: null,
+    mailingCity: null,
+    mailingRegion: null,
+    mailingPostalCode: null,
+    mailingCountry: null,
     taxId: null,
     taxIdType: null,
+    businessRegistrationNumber: null,
+    incorporationJurisdiction: null,
     isTaxExempt: false,
+    taxExemptionCertificate: null,
     ownerId: null,
     tags: [],
     deletedAt: null,
@@ -121,6 +160,7 @@ function evalWhere(c: FakeCompany, where: Record<string, unknown>): boolean {
 }
 
 function makePrisma(rows: FakeCompany[]) {
+  let nextId = rows.length;
   return {
     company: {
       findMany: async ({
@@ -160,10 +200,32 @@ function makePrisma(rows: FakeCompany[]) {
       findFirst: async ({
         where,
       }: {
-        where: { id: string; tenantId: string };
+        where: Record<string, unknown>;
+        select?: Record<string, unknown>;
         include?: unknown;
       }) =>
-        rows.find((r) => r.id === where.id && r.tenantId === where.tenantId) ?? null,
+        rows.find((r) => evalWhere(r, where)) ?? null,
+      // KAN-937 — Sub-cohort 3.2 mutation support
+      create: async ({ data }: { data: Partial<FakeCompany> & { tenantId: string; name: string } }) => {
+        const newRow = company({
+          id: `co_${++nextId}`,
+          ...data,
+        } as Partial<FakeCompany>);
+        rows.push(newRow);
+        return newRow;
+      },
+      update: async ({
+        where,
+        data,
+      }: {
+        where: { id: string };
+        data: Partial<FakeCompany>;
+      }) => {
+        const r = rows.find((row) => row.id === where.id);
+        if (!r) throw new Error("not found");
+        Object.assign(r, data, { updatedAt: new Date() });
+        return r;
+      },
     },
   } as never;
 }
@@ -397,5 +459,123 @@ describe("KAN-893 — companies.get tRPC input validator", () => {
   it("accepts CUID-shaped id (e.g. PROD Company.id format)", () => {
     const result = inputSchema.safeParse({ id: "cmou3yc2o0002a9tnt34f5q81" });
     expect(result.success).toBe(true);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// KAN-937 — Sub-cohort 3.2 Company CRUD: createCompany + updateCompany.
+// 5 tests covering full-field create, default lifecycleStage, partial
+// update, cross-tenant rejection, soft-delete rejection.
+// ─────────────────────────────────────────────────────────────────────
+describe("KAN-937 — createCompany", () => {
+  it("persists all 30 form-eligible fields across 5 cards", async () => {
+    const data: FakeCompany[] = [];
+    const prisma = makePrisma(data);
+
+    await createCompany(prisma, TENANT_A, {
+      // Card 1
+      name: "Globex Corp",
+      legalName: "Globex Corporation Ltd",
+      domain: "globex.com",
+      website: "https://globex.com",
+      industry: "Technology",
+      sizeRange: "range_51_200",
+      annualRevenue: "12500000.50",
+      description: "Enterprise software",
+      lifecycleStage: "customer",
+      // Card 2
+      phone: "+1-555-0123",
+      email: "contact@globex.com",
+      linkedinUrl: "https://linkedin.com/company/globex",
+      // Card 3
+      billingAddressLine1: "1 Globex Plaza",
+      billingAddressLine2: "Suite 500",
+      billingCity: "Boston",
+      billingRegion: "MA",
+      billingPostalCode: "02101",
+      billingCountry: "US",
+      // Card 4
+      mailingAddressLine1: "PO Box 100",
+      mailingAddressLine2: null,
+      mailingCity: "Boston",
+      mailingRegion: "MA",
+      mailingPostalCode: "02102",
+      mailingCountry: "US",
+      // Card 5
+      taxId: "12-3456789",
+      taxIdType: "ein",
+      businessRegistrationNumber: "BR-001",
+      incorporationJurisdiction: "Delaware",
+      isTaxExempt: false,
+      taxExemptionCertificate: null,
+    });
+
+    expect(data).toHaveLength(1);
+    const row = data[0];
+    expect(row.name).toBe("Globex Corp");
+    expect(row.legalName).toBe("Globex Corporation Ltd");
+    expect(row.annualRevenue).toBe("12500000.50");
+    expect(row.lifecycleStage).toBe("customer");
+    expect(row.billingCity).toBe("Boston");
+    expect(row.mailingPostalCode).toBe("02102");
+    expect(row.taxIdType).toBe("ein");
+    expect(row.tenantId).toBe(TENANT_A);
+  });
+
+  it("defaults lifecycleStage to 'prospect' when not provided", async () => {
+    const data: FakeCompany[] = [];
+    const prisma = makePrisma(data);
+    await createCompany(prisma, TENANT_A, { name: "Minimal Co" });
+    expect(data[0].lifecycleStage).toBe("prospect");
+    expect(data[0].isTaxExempt).toBe(false);
+  });
+});
+
+describe("KAN-937 — updateCompany", () => {
+  it("only sets provided fields (doesn't clobber unspecified to null)", async () => {
+    const data = [
+      company({
+        id: "co_1",
+        name: "Original Co",
+        domain: "original.com",
+        industry: "Manufacturing",
+        billingCity: "Original City",
+      }),
+    ];
+    const prisma = makePrisma(data);
+    await updateCompany(prisma, TENANT_A, {
+      id: "co_1",
+      name: "Updated Co",
+      // domain, industry, billingCity NOT provided — must NOT be cleared
+    });
+    expect(data[0].name).toBe("Updated Co");
+    expect(data[0].domain).toBe("original.com");
+    expect(data[0].industry).toBe("Manufacturing");
+    expect(data[0].billingCity).toBe("Original City");
+  });
+
+  it("cross-tenant → NOT_FOUND (no leak)", async () => {
+    const data = [company({ id: "co_1", tenantId: TENANT_B })];
+    const prisma = makePrisma(data);
+    await expect(
+      updateCompany(prisma, TENANT_A, { id: "co_1", name: "Hijack Attempt" }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+    // Original row must not have been mutated by the tenant-A caller.
+    expect(data[0].name).toBe("Acme Inc");
+  });
+
+  it("soft-deleted row → NOT_FOUND (edits operate on live rows only)", async () => {
+    const data = [
+      company({
+        id: "co_1",
+        tenantId: TENANT_A,
+        deletedAt: new Date("2026-05-10"),
+      }),
+    ];
+    const prisma = makePrisma(data);
+    await expect(
+      updateCompany(prisma, TENANT_A, { id: "co_1", name: "Resurrect" }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(data[0].name).toBe("Acme Inc");
   });
 });

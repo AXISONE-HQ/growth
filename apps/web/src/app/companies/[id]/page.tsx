@@ -18,7 +18,7 @@
  */
 
 import { useQuery } from '@tanstack/react-query';
-import { ArrowLeft, Building2 } from 'lucide-react';
+import { ArrowLeft, Building2, Pencil } from 'lucide-react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useEffect } from 'react';
@@ -115,7 +115,22 @@ export default function CompanyDetailPage() {
               <p className="text-sm mt-0.5" style={MUTED_STYLE}>{company.legalName}</p>
             ) : null}
           </div>
-          <StatusBadge kind="company-lifecycle" value={company.lifecycleStage} />
+          <div className="flex items-center gap-3">
+            <StatusBadge kind="company-lifecycle" value={company.lifecycleStage} />
+            {/* KAN-937 — Sub-cohort 3.2 Edit affordance */}
+            <Link
+              href={`/companies/${company.id}/edit`}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-md border"
+              style={{
+                backgroundColor: 'var(--ds-surface-default)',
+                borderColor: 'var(--ds-border-default)',
+                color: 'var(--ds-ink-secondary)',
+              }}
+            >
+              <Pencil className="w-3.5 h-3.5" />
+              Edit
+            </Link>
+          </div>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3 text-sm">
           <Field label="Domain" value={company.domain} />

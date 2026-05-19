@@ -11,7 +11,7 @@
  * state is the dominant initial render; tested explicitly.
  */
 
-import { Building2, Loader2, RefreshCw, Search } from 'lucide-react';
+import { Building2, Loader2, Plus, RefreshCw, Search } from 'lucide-react';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
@@ -95,18 +95,33 @@ export default function CompaniesPage() {
               Organizations the AI tracks for deals, contacts, and orders.
             </p>
           </div>
-          <button
-            onClick={() => {
-              setAccumulatedItems([]);
-              setCursor(undefined);
-              void refetch();
-            }}
-            disabled={isFetching}
-            className="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50"
-          >
-            {isFetching ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-            Refresh
-          </button>
+          <div className="flex items-center gap-2">
+            {/* KAN-937 — Sub-cohort 3.2 "+ New Company" entry point */}
+            <Link
+              href="/companies/new"
+              className="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-md border"
+              style={{
+                backgroundColor: 'var(--ds-violet-600)',
+                borderColor: 'var(--ds-violet-600)',
+                color: '#fff',
+              }}
+            >
+              <Plus className="w-4 h-4" />
+              New company
+            </Link>
+            <button
+              onClick={() => {
+                setAccumulatedItems([]);
+                setCursor(undefined);
+                void refetch();
+              }}
+              disabled={isFetching}
+              className="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50"
+            >
+              {isFetching ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+              Refresh
+            </button>
+          </div>
         </div>
 
         {/* Search */}

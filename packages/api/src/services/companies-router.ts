@@ -1,20 +1,26 @@
 /**
- * KAN-883 — Companies router service (read-only).
+ * Companies router service.
  *
- * Pure service logic for the Companies tRPC list/get routes introduced by
- * cohort 1 of the read-only CRM UI sequence. Schema landed in KAN-879.
+ * Pure service logic for the Companies tRPC routes. Schema landed in KAN-879.
  *
- * Architecture mirrors `contacts-router.ts` (KAN-689 cohort): pure functions
- * here, thin tRPC layer in apps/api/src/router.ts. Companies has no
- * mutations in this PR — that's cohort 4.
+ * History:
+ *   - KAN-883 — read surface (listCompanies, getCompanyById)
+ *   - KAN-937 — Sub-cohort 3.2 mutations (createCompany, updateCompany) for
+ *     manual CRUD forms. 30 form-eligible fields across 5 cards. Path β
+ *     extension mirroring KAN-934's contacts pattern.
+ *
+ * Architecture mirrors `contacts-router.ts`: pure functions here, thin tRPC
+ * layer in apps/api/src/router.ts.
  *
  * Multi-tenant safety: every query filters by `tenantId` from the caller.
  * `getCompanyById` returns TRPCError NOT_FOUND on miss (cross-tenant access
- * lands here too — neutral, no leak).
+ * lands here too — neutral, no leak). `updateCompany` rejects cross-tenant +
+ * soft-deleted rows with the same NOT_FOUND shape.
  *
  * Soft delete: `list` filters `deletedAt IS NULL` by default. `get` returns
  * the row regardless of soft-delete state (callers may legitimately want to
- * see a tombstone).
+ * see a tombstone). `update` rejects soft-deleted rows — edits must operate
+ * on live rows only.
  */
 import { TRPCError } from "@trpc/server";
 import type { PrismaClient } from "@prisma/client";
@@ -35,6 +41,62 @@ export interface ListInput {
 
 export interface GetInput {
   id: string;
+}
+
+/**
+ * KAN-937 — Sub-cohort 3.2 form-eligible field surface.
+ *
+ * 30 user-editable fields across 5 cards (Core Info, Contact Info, Billing
+ * Address, Mailing Address, Tax & Compliance). Excludes ownerId (deferred to
+ * KAN-936), tags / customFields / externalIds / aiContext (each needs its own
+ * UX in Sub-cohort 3.x), and system-managed fields (id, tenantId, timestamps,
+ * deletedAt).
+ *
+ * `annualRevenue` is Decimal(15,2). Serialized as string over the wire to
+ * preserve precision; Prisma coerces back to Decimal on write.
+ */
+export interface CreateInput {
+  // Card 1 — Core Info (required: name)
+  name: string;
+  legalName?: string | null;
+  domain?: string | null;
+  website?: string | null;
+  industry?: string | null;
+  sizeRange?: string | null;
+  annualRevenue?: string | null;
+  description?: string | null;
+  lifecycleStage?: string;
+  // Card 2 — Contact Info
+  phone?: string | null;
+  email?: string | null;
+  linkedinUrl?: string | null;
+  // Card 3 — Billing Address
+  billingAddressLine1?: string | null;
+  billingAddressLine2?: string | null;
+  billingCity?: string | null;
+  billingRegion?: string | null;
+  billingPostalCode?: string | null;
+  billingCountry?: string | null;
+  // Card 4 — Mailing Address
+  mailingAddressLine1?: string | null;
+  mailingAddressLine2?: string | null;
+  mailingCity?: string | null;
+  mailingRegion?: string | null;
+  mailingPostalCode?: string | null;
+  mailingCountry?: string | null;
+  // Card 5 — Tax & Compliance
+  taxId?: string | null;
+  taxIdType?: string | null;
+  businessRegistrationNumber?: string | null;
+  incorporationJurisdiction?: string | null;
+  isTaxExempt?: boolean;
+  taxExemptionCertificate?: string | null;
+}
+
+export interface UpdateInput
+  extends Partial<Omit<CreateInput, "name">> {
+  id: string;
+  name?: string;
 }
 
 const CONTACT_PREVIEW_LIMIT = 20;
@@ -191,6 +253,108 @@ export async function getCompanyById(
   }
 
   return company;
+}
+
+export async function createCompany(
+  prisma: PrismaClient,
+  tenantId: string,
+  input: CreateInput,
+) {
+  return prisma.company.create({
+    data: {
+      tenantId,
+      // Card 1
+      name: input.name,
+      legalName: input.legalName ?? null,
+      domain: input.domain ?? null,
+      website: input.website ?? null,
+      industry: input.industry ?? null,
+      sizeRange: (input.sizeRange ?? null) as never,
+      annualRevenue: input.annualRevenue ?? null,
+      description: input.description ?? null,
+      lifecycleStage: (input.lifecycleStage ?? "prospect") as never,
+      // Card 2
+      phone: input.phone ?? null,
+      email: input.email ?? null,
+      linkedinUrl: input.linkedinUrl ?? null,
+      // Card 3
+      billingAddressLine1: input.billingAddressLine1 ?? null,
+      billingAddressLine2: input.billingAddressLine2 ?? null,
+      billingCity: input.billingCity ?? null,
+      billingRegion: input.billingRegion ?? null,
+      billingPostalCode: input.billingPostalCode ?? null,
+      billingCountry: input.billingCountry ?? null,
+      // Card 4
+      mailingAddressLine1: input.mailingAddressLine1 ?? null,
+      mailingAddressLine2: input.mailingAddressLine2 ?? null,
+      mailingCity: input.mailingCity ?? null,
+      mailingRegion: input.mailingRegion ?? null,
+      mailingPostalCode: input.mailingPostalCode ?? null,
+      mailingCountry: input.mailingCountry ?? null,
+      // Card 5
+      taxId: input.taxId ?? null,
+      taxIdType: (input.taxIdType ?? null) as never,
+      businessRegistrationNumber: input.businessRegistrationNumber ?? null,
+      incorporationJurisdiction: input.incorporationJurisdiction ?? null,
+      isTaxExempt: input.isTaxExempt ?? false,
+      taxExemptionCertificate: input.taxExemptionCertificate ?? null,
+    },
+  });
+}
+
+export async function updateCompany(
+  prisma: PrismaClient,
+  tenantId: string,
+  input: UpdateInput,
+) {
+  // Verify the row exists, belongs to tenant, and is not soft-deleted.
+  // Cross-tenant + soft-deleted both surface as NOT_FOUND — no existence leak.
+  const existing = await prisma.company.findFirst({
+    where: { id: input.id, tenantId, deletedAt: null },
+    select: { id: true },
+  });
+  if (!existing) {
+    throw new TRPCError({ code: "NOT_FOUND", message: "Company not found" });
+  }
+
+  // Build a strict update payload — only set fields explicitly provided.
+  // Avoids clobbering optional values to null when a partial update is sent.
+  const data: Record<string, unknown> = {};
+  if (input.name !== undefined) data.name = input.name;
+  if (input.legalName !== undefined) data.legalName = input.legalName;
+  if (input.domain !== undefined) data.domain = input.domain;
+  if (input.website !== undefined) data.website = input.website;
+  if (input.industry !== undefined) data.industry = input.industry;
+  if (input.sizeRange !== undefined) data.sizeRange = input.sizeRange;
+  if (input.annualRevenue !== undefined) data.annualRevenue = input.annualRevenue;
+  if (input.description !== undefined) data.description = input.description;
+  if (input.lifecycleStage !== undefined) data.lifecycleStage = input.lifecycleStage;
+  if (input.phone !== undefined) data.phone = input.phone;
+  if (input.email !== undefined) data.email = input.email;
+  if (input.linkedinUrl !== undefined) data.linkedinUrl = input.linkedinUrl;
+  if (input.billingAddressLine1 !== undefined) data.billingAddressLine1 = input.billingAddressLine1;
+  if (input.billingAddressLine2 !== undefined) data.billingAddressLine2 = input.billingAddressLine2;
+  if (input.billingCity !== undefined) data.billingCity = input.billingCity;
+  if (input.billingRegion !== undefined) data.billingRegion = input.billingRegion;
+  if (input.billingPostalCode !== undefined) data.billingPostalCode = input.billingPostalCode;
+  if (input.billingCountry !== undefined) data.billingCountry = input.billingCountry;
+  if (input.mailingAddressLine1 !== undefined) data.mailingAddressLine1 = input.mailingAddressLine1;
+  if (input.mailingAddressLine2 !== undefined) data.mailingAddressLine2 = input.mailingAddressLine2;
+  if (input.mailingCity !== undefined) data.mailingCity = input.mailingCity;
+  if (input.mailingRegion !== undefined) data.mailingRegion = input.mailingRegion;
+  if (input.mailingPostalCode !== undefined) data.mailingPostalCode = input.mailingPostalCode;
+  if (input.mailingCountry !== undefined) data.mailingCountry = input.mailingCountry;
+  if (input.taxId !== undefined) data.taxId = input.taxId;
+  if (input.taxIdType !== undefined) data.taxIdType = input.taxIdType;
+  if (input.businessRegistrationNumber !== undefined) data.businessRegistrationNumber = input.businessRegistrationNumber;
+  if (input.incorporationJurisdiction !== undefined) data.incorporationJurisdiction = input.incorporationJurisdiction;
+  if (input.isTaxExempt !== undefined) data.isTaxExempt = input.isTaxExempt;
+  if (input.taxExemptionCertificate !== undefined) data.taxExemptionCertificate = input.taxExemptionCertificate;
+
+  return prisma.company.update({
+    where: { id: input.id },
+    data,
+  });
 }
 
 // Re-export for the thin tRPC layer's variable-specifier dynamic import.
