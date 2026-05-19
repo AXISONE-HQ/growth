@@ -148,6 +148,16 @@ export async function resolveContactByMatchKey(
   prisma: PrismaClient,
   tenantId: string,
   key: ContactResolveKey,
+  // KAN-930 — Optional pre-built cache keyed by externalSourceTag value.
+  // When populated, the external_id branch does O(1) Map.get instead of
+  // O(N) seqscan. Cache is built by runCommit when config warrants; a
+  // cache miss is a true miss (no DB fallback) because the cache was
+  // built from the same query the DB path would run.
+  // `undefined` (param not passed) → use DB path (backwards compat for
+  // all non-runCommit callers).
+  // `null` (param explicitly null) → use DB path (sentinel-bailed case
+  // where the tenant has too many tagged rows to pre-cache).
+  cache?: Map<string, string> | null,
 ): Promise<{ id: string } | null> {
   if (!key.value) return null;
   switch (key.kind) {
@@ -176,6 +186,19 @@ export async function resolveContactByMatchKey(
         .map((v) => v.trim())
         .filter(Boolean);
       if (candidates.length === 0) return null;
+
+      // KAN-930 — Map-first lookup path. First-match-wins semantics
+      // preserved: iterate candidates in order, return first hit.
+      if (cache) {
+        for (const v of candidates) {
+          const id = cache.get(v);
+          if (id) return { id };
+        }
+        return null;
+      }
+
+      // Fallback: per-row DB query (cache=null sentinel-bailed OR
+      // cache=undefined non-runCommit caller).
       return prisma.contact.findFirst({
         where: {
           tenantId,
@@ -209,6 +232,9 @@ export async function resolveDealByMatchKey(
   prisma: PrismaClient,
   tenantId: string,
   key: DealResolveKey,
+  // KAN-930 — symmetric to resolveContactByMatchKey's cache param. See
+  // that function for rationale + semantics.
+  cache?: Map<string, string> | null,
 ): Promise<{ id: string } | null> {
   if (!key.value) return null;
   switch (key.kind) {
@@ -221,6 +247,16 @@ export async function resolveDealByMatchKey(
         .map((v) => v.trim())
         .filter(Boolean);
       if (candidates.length === 0) return null;
+
+      // KAN-930 — Map-first lookup path.
+      if (cache) {
+        for (const v of candidates) {
+          const id = cache.get(v);
+          if (id) return { id };
+        }
+        return null;
+      }
+
       return prisma.deal.findFirst({
         where: {
           tenantId,
@@ -759,6 +795,8 @@ async function commitDeal(
   // resolver (backwards compat).
   customerLinkField: string | null,
   externalSourceTag: string | null,
+  // KAN-930 — optional pre-built resolver cache. undefined/null → DB fallback.
+  contactCacheByVid: Map<string, string> | null,
 ): Promise<CommitResult> {
   if (decision.action === "needs_review") {
     return {
@@ -795,6 +833,7 @@ async function commitDeal(
     tx as unknown as PrismaClient,
     tenantId,
     contactKey,
+    contactCacheByVid,
   );
   if (!contact) {
     return contactNotFoundError("deal", staging, contactKey);
@@ -925,6 +964,9 @@ async function commitOrder(
   customerLinkField: string | null,
   dealLinkField: string | null,
   externalSourceTag: string | null,
+  // KAN-930 — optional pre-built resolver caches. undefined/null → DB fallback.
+  contactCacheByVid: Map<string, string> | null,
+  dealCacheByVid: Map<string, string> | null,
 ): Promise<CommitResult> {
   if (decision.action === "needs_review") {
     return {
@@ -960,6 +1002,7 @@ async function commitOrder(
     tx as unknown as PrismaClient,
     tenantId,
     contactKey,
+    contactCacheByVid,
   );
   if (!contact) {
     return contactNotFoundError("order", staging, contactKey);
@@ -976,6 +1019,7 @@ async function commitOrder(
         tx as unknown as PrismaClient,
         tenantId,
         { kind: "external_id", source: externalSourceTag, value: dealExtId },
+        dealCacheByVid,
       );
       if (!deal) {
         return {
@@ -1092,6 +1136,97 @@ async function commitOrder(
     }
     throw err;
   }
+}
+
+// ─────────────────────────────────────────────
+// KAN-930 — Resolver pre-cache builders
+// ─────────────────────────────────────────────
+
+/** Sentinel: tenants with >50K tagged rows fall back to per-row resolver
+ *  to bound memory + bulk-query latency. Pre-launch single-tenant ceiling
+ *  is well below this; well-engineered for the foreseeable scale. */
+const KAN930_PRECACHE_ROW_SENTINEL = 50_000;
+
+/** KAN-930 — Build a vid → contactId Map for resolver fast path.
+ *  Returns null when tenant has >SENTINEL contacts with the tag (caller
+ *  falls back to per-row DB resolver). */
+async function buildContactCacheByExternalId(
+  prisma: PrismaClient,
+  tenantId: string,
+  externalSourceTag: string,
+): Promise<Map<string, string> | null> {
+  const taggedCount = await prisma.contact.count({
+    where: {
+      tenantId,
+      externalIds: { path: [externalSourceTag], not: Prisma.JsonNull },
+    },
+  });
+  if (taggedCount > KAN930_PRECACHE_ROW_SENTINEL) {
+    // eslint-disable-next-line no-console
+    console.log(
+      `[KAN-930] Pre-cache bailed: tenantId=${tenantId} tag=${externalSourceTag} ` +
+        `taggedCount=${taggedCount} > sentinel=${KAN930_PRECACHE_ROW_SENTINEL}. Per-row fallback.`,
+    );
+    return null;
+  }
+  const tagged = await prisma.contact.findMany({
+    where: {
+      tenantId,
+      externalIds: { path: [externalSourceTag], not: Prisma.JsonNull },
+    },
+    select: { id: true, externalIds: true },
+  });
+  const cache = new Map<string, string>();
+  for (const c of tagged) {
+    const vid = (c.externalIds as Record<string, string> | null)?.[externalSourceTag];
+    if (vid) cache.set(vid, c.id);
+  }
+  // eslint-disable-next-line no-console
+  console.log(
+    `[KAN-930] Contact pre-cache built: tenantId=${tenantId} tag=${externalSourceTag} ` +
+      `taggedContacts=${tagged.length} mapEntries=${cache.size}`,
+  );
+  return cache;
+}
+
+/** KAN-930 — Symmetric Deal cache builder for Order.dealId resolution. */
+async function buildDealCacheByExternalId(
+  prisma: PrismaClient,
+  tenantId: string,
+  externalSourceTag: string,
+): Promise<Map<string, string> | null> {
+  const taggedCount = await prisma.deal.count({
+    where: {
+      tenantId,
+      externalIds: { path: [externalSourceTag], not: Prisma.JsonNull },
+    },
+  });
+  if (taggedCount > KAN930_PRECACHE_ROW_SENTINEL) {
+    // eslint-disable-next-line no-console
+    console.log(
+      `[KAN-930] Pre-cache bailed (deal): tenantId=${tenantId} tag=${externalSourceTag} ` +
+        `taggedCount=${taggedCount} > sentinel=${KAN930_PRECACHE_ROW_SENTINEL}. Per-row fallback.`,
+    );
+    return null;
+  }
+  const tagged = await prisma.deal.findMany({
+    where: {
+      tenantId,
+      externalIds: { path: [externalSourceTag], not: Prisma.JsonNull },
+    },
+    select: { id: true, externalIds: true },
+  });
+  const cache = new Map<string, string>();
+  for (const d of tagged) {
+    const vid = (d.externalIds as Record<string, string> | null)?.[externalSourceTag];
+    if (vid) cache.set(vid, d.id);
+  }
+  // eslint-disable-next-line no-console
+  console.log(
+    `[KAN-930] Deal pre-cache built: tenantId=${tenantId} tag=${externalSourceTag} ` +
+      `taggedDeals=${tagged.length} mapEntries=${cache.size}`,
+  );
+  return cache;
 }
 
 // ─────────────────────────────────────────────
@@ -1280,6 +1415,40 @@ export async function runCommit(
         }),
       ]);
 
+    // KAN-930 — Build resolver pre-caches if config + workload warrants.
+    // contactCacheByVid: built when customerLinkField='external_id' AND there
+    //   are deals/orders to commit (savings come from per-row resolver calls).
+    // dealCacheByVid: built when dealLinkField='external_id' AND there are
+    //   orders to commit.
+    // Sentinel at 50K tagged rows: bail to per-row resolver fallback.
+    // See KAN-927 reframe (`feedback_kan927_hang_misdiagnosis_2026_05_19.md`)
+    // for the motivation — turning N seqscans into 1 bulk fetch + O(1) Map
+    // lookups; worst-case wall-clock improvement 49min → <30sec at 8528 rows.
+    let contactCacheByVid: Map<string, string> | null = null;
+    let dealCacheByVid: Map<string, string> | null = null;
+    if (
+      externalSourceTag &&
+      customerLinkField === "external_id" &&
+      (stagingDeals.length > 0 || stagingOrders.length > 0)
+    ) {
+      contactCacheByVid = await buildContactCacheByExternalId(
+        prisma,
+        tenantId,
+        externalSourceTag,
+      );
+    }
+    if (
+      externalSourceTag &&
+      dealLinkField === "external_id" &&
+      stagingOrders.length > 0
+    ) {
+      dealCacheByVid = await buildDealCacheByExternalId(
+        prisma,
+        tenantId,
+        externalSourceTag,
+      );
+    }
+
     // Helper — process a list of staging rows with a per-entity commit
     // handler. Each row gets its own $transaction; the handler returns
     // either CommitOk (canonical write + staging update + audit log
@@ -1301,6 +1470,19 @@ export async function runCommit(
       ) => Promise<void>,
       targetIdKey: string,
     ): Promise<void> => {
+      // KAN-930 — Per-row progress logging. Closes the "invisible-progressing
+      // vs stuck" observability gap surfaced by KAN-927's misdiagnosis: when
+      // all rows fail with contact_not_found, the per-row $transaction commits
+      // with no DB writes (stagingUpdater + writeAuditEntry are inside the
+      // `if ("ok" in r)` branch), making mid-run state visually identical to
+      // a hang. Structured log every N rows answers "stuck or just slow?".
+      const PROGRESS_LOG_EVERY = 100;
+      const batchStartedAt = Date.now();
+      let batchRowsProcessed = 0;
+      let batchRowsCommitted = 0;
+      let batchRowsErrored = 0;
+      let batchRowsSkipped = 0;
+
       for (const row of rows) {
         const decision = resolveEffectiveDecision(
           row.matchDecision as MatchDecisionLike | null,
@@ -1312,6 +1494,19 @@ export async function runCommit(
           await prisma.$transaction(async (tx) => {
             await stagingUpdater(tx, row.id, { key: targetIdKey, value: "" }, "skipped");
           });
+          batchRowsProcessed++;
+          batchRowsSkipped++;
+          if (batchRowsProcessed % PROGRESS_LOG_EVERY === 0) {
+            const elapsedMs = Date.now() - batchStartedAt;
+            const rowsPerSec = (batchRowsProcessed / (elapsedMs / 1000)).toFixed(1);
+            // eslint-disable-next-line no-console
+            console.log(
+              `[KAN-930] runCommit progress: importJobId=${importJobId} ` +
+                `entityType=${entityType} processed=${batchRowsProcessed}/${rows.length} ` +
+                `committed=${batchRowsCommitted} errored=${batchRowsErrored} skipped=${batchRowsSkipped} ` +
+                `elapsedMs=${elapsedMs} rowsPerSec=${rowsPerSec}`,
+            );
+          }
           continue;
         }
 
@@ -1337,6 +1532,7 @@ export async function runCommit(
 
           if ("ok" in result) {
             committedCount++;
+            batchRowsCommitted++;
             fanoutEvents.push({
               entityType,
               entityId: result.entityId,
@@ -1347,6 +1543,7 @@ export async function runCommit(
             });
           } else {
             errors.push(result);
+            batchRowsErrored++;
           }
         } catch (err) {
           // Anything that bubbles past the per-row tx (DB connection
@@ -1361,7 +1558,35 @@ export async function runCommit(
             errorMessage:
               err instanceof Error ? err.message : String(err),
           });
+          batchRowsErrored++;
         }
+
+        batchRowsProcessed++;
+        if (batchRowsProcessed % PROGRESS_LOG_EVERY === 0) {
+          const elapsedMs = Date.now() - batchStartedAt;
+          const rowsPerSec = (batchRowsProcessed / (elapsedMs / 1000)).toFixed(1);
+          // eslint-disable-next-line no-console
+          console.log(
+            `[KAN-930] runCommit progress: importJobId=${importJobId} ` +
+              `entityType=${entityType} processed=${batchRowsProcessed}/${rows.length} ` +
+              `committed=${batchRowsCommitted} errored=${batchRowsErrored} skipped=${batchRowsSkipped} ` +
+              `elapsedMs=${elapsedMs} rowsPerSec=${rowsPerSec}`,
+          );
+        }
+      }
+
+      // KAN-930 — Final batch summary (always logged, regardless of N-row alignment).
+      // Helps differentiate "completed cleanly" from "killed mid-loop" in PROD
+      // logs even when the import is shorter than PROGRESS_LOG_EVERY.
+      if (rows.length > 0) {
+        const elapsedMs = Date.now() - batchStartedAt;
+        // eslint-disable-next-line no-console
+        console.log(
+          `[KAN-930] runCommit batch done: importJobId=${importJobId} ` +
+            `entityType=${entityType} processed=${batchRowsProcessed}/${rows.length} ` +
+            `committed=${batchRowsCommitted} errored=${batchRowsErrored} skipped=${batchRowsSkipped} ` +
+            `elapsedMs=${elapsedMs}`,
+        );
       }
     };
 
@@ -1412,7 +1637,7 @@ export async function runCommit(
       stagingDeals,
       "deal",
       (tx, staging, decision) =>
-        commitDeal(tx, tenantId, staging, decision, fieldMappings, importJobId, customerLinkField, externalSourceTag),
+        commitDeal(tx, tenantId, staging, decision, fieldMappings, importJobId, customerLinkField, externalSourceTag, contactCacheByVid),
       (tx, id, target, status) =>
         tx.importStagingDeal
           .update({
@@ -1429,7 +1654,7 @@ export async function runCommit(
       stagingOrders,
       "order",
       (tx, staging, decision) =>
-        commitOrder(tx, tenantId, staging, decision, fieldMappings, importJobId, customerLinkField, dealLinkField, externalSourceTag),
+        commitOrder(tx, tenantId, staging, decision, fieldMappings, importJobId, customerLinkField, dealLinkField, externalSourceTag, contactCacheByVid, dealCacheByVid),
       (tx, id, target, status) =>
         tx.importStagingOrder
           .update({
