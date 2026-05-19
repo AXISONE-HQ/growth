@@ -282,6 +282,245 @@ describe("KAN-921 — multi-value external_id resolver", () => {
   });
 });
 
+describe("KAN-930 — pre-cache resolver + per-row progress logging", () => {
+  const TAG = "smoke_tag";
+
+  describe("resolveContactByMatchKey with cache", () => {
+    it("(1) cache hit: returns id without DB call", async () => {
+      const findFirst = vi.fn();
+      const prisma = { contact: { findFirst } } as unknown as PrismaClient;
+      const cache = new Map<string, string>([["VID_A", "ctc_a"]]);
+      const res = await resolveContactByMatchKey(
+        prisma, TENANT_A,
+        { kind: "external_id", source: TAG, value: "VID_A" },
+        cache,
+      );
+      expect(res).toEqual({ id: "ctc_a" });
+      expect(findFirst).not.toHaveBeenCalled();
+    });
+
+    it("(2) cache miss (no DB fallback): cache is authoritative when populated", async () => {
+      const findFirst = vi.fn();
+      const prisma = { contact: { findFirst } } as unknown as PrismaClient;
+      const cache = new Map<string, string>([["VID_OTHER", "ctc_other"]]);
+      const res = await resolveContactByMatchKey(
+        prisma, TENANT_A,
+        { kind: "external_id", source: TAG, value: "VID_MISS" },
+        cache,
+      );
+      expect(res).toBeNull();
+      expect(findFirst).not.toHaveBeenCalled();
+    });
+
+    it("(3) multi-value first-match wins in cache (VID_A;VID_B, both present)", async () => {
+      const findFirst = vi.fn();
+      const prisma = { contact: { findFirst } } as unknown as PrismaClient;
+      const cache = new Map<string, string>([
+        ["VID_A", "ctc_a"],
+        ["VID_B", "ctc_b"],
+      ]);
+      const res = await resolveContactByMatchKey(
+        prisma, TENANT_A,
+        { kind: "external_id", source: TAG, value: "VID_A;VID_B" },
+        cache,
+      );
+      expect(res).toEqual({ id: "ctc_a" });
+      expect(findFirst).not.toHaveBeenCalled();
+    });
+
+    it("(4) multi-value first miss + second match (VID_X;VID_A, only A in cache)", async () => {
+      const findFirst = vi.fn();
+      const prisma = { contact: { findFirst } } as unknown as PrismaClient;
+      const cache = new Map<string, string>([["VID_A", "ctc_a"]]);
+      const res = await resolveContactByMatchKey(
+        prisma, TENANT_A,
+        { kind: "external_id", source: TAG, value: "VID_X;VID_A" },
+        cache,
+      );
+      expect(res).toEqual({ id: "ctc_a" });
+      expect(findFirst).not.toHaveBeenCalled();
+    });
+
+    it("(5) all multi-value miss: returns null without DB call", async () => {
+      const findFirst = vi.fn();
+      const prisma = { contact: { findFirst } } as unknown as PrismaClient;
+      const cache = new Map<string, string>([["VID_A", "ctc_a"]]);
+      const res = await resolveContactByMatchKey(
+        prisma, TENANT_A,
+        { kind: "external_id", source: TAG, value: "VID_X;VID_Y;VID_Z" },
+        cache,
+      );
+      expect(res).toBeNull();
+      expect(findFirst).not.toHaveBeenCalled();
+    });
+
+    it("(6) cache=null (sentinel-bailed): falls back to DB path", async () => {
+      const findFirst = vi.fn().mockResolvedValue({ id: "ctc_db" });
+      const prisma = { contact: { findFirst } } as unknown as PrismaClient;
+      const res = await resolveContactByMatchKey(
+        prisma, TENANT_A,
+        { kind: "external_id", source: TAG, value: "VID_A" },
+        null,
+      );
+      expect(res).toEqual({ id: "ctc_db" });
+      expect(findFirst).toHaveBeenCalledOnce();
+    });
+
+    it("(7) cache=undefined (non-runCommit caller): falls back to DB (backwards compat)", async () => {
+      const findFirst = vi.fn().mockResolvedValue({ id: "ctc_db" });
+      const prisma = { contact: { findFirst } } as unknown as PrismaClient;
+      const res = await resolveContactByMatchKey(
+        prisma, TENANT_A,
+        { kind: "external_id", source: TAG, value: "VID_A" },
+        // cache omitted entirely
+      );
+      expect(res).toEqual({ id: "ctc_db" });
+      expect(findFirst).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe("resolveDealByMatchKey with cache", () => {
+    it("(8) symmetric cache hit for Deal resolver", async () => {
+      const findFirst = vi.fn();
+      const prisma = { deal: { findFirst } } as unknown as PrismaClient;
+      const cache = new Map<string, string>([["DEAL_A", "deal_a_id"]]);
+      const res = await resolveDealByMatchKey(
+        prisma, TENANT_A,
+        { kind: "external_id", source: TAG, value: "DEAL_A" },
+        cache,
+      );
+      expect(res).toEqual({ id: "deal_a_id" });
+      expect(findFirst).not.toHaveBeenCalled();
+    });
+
+    it("(9) cache=null Deal resolver: falls back to DB", async () => {
+      const findFirst = vi.fn().mockResolvedValue({ id: "deal_db" });
+      const prisma = { deal: { findFirst } } as unknown as PrismaClient;
+      const res = await resolveDealByMatchKey(
+        prisma, TENANT_A,
+        { kind: "external_id", source: TAG, value: "DEAL_A" },
+        null,
+      );
+      expect(res).toEqual({ id: "deal_db" });
+      expect(findFirst).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe("per-row progress logging", () => {
+    it("(10) cache builder fires when customerLinkField=external_id + tag + staging deals exist", async () => {
+      const seed = {
+        job: makeJob({
+          customerLinkField: "external_id",
+          externalSourceTag: "smoke_tag",
+        } as Partial<ImportJob>),
+        stagingDeals: [
+          {
+            id: "sd1",
+            importJobId: JOB_ID,
+            tenantId: TENANT_A,
+            sourceRowIndex: 0,
+            sourceRowData: { name: "Deal A" },
+            matchDecision: { suggestedAction: "insert" },
+            stagingStatus: "pending",
+          } as unknown,
+        ] as never,
+      };
+      const { prisma } = makeOrchestratorPrismaMock(seed);
+      const contactCount = vi.fn().mockResolvedValue(0);
+      const contactFindMany = vi.fn().mockResolvedValue([]);
+      (prisma as unknown as { contact: { count: typeof contactCount; findMany: typeof contactFindMany } }).contact.count = contactCount;
+      (prisma as unknown as { contact: { count: typeof contactCount; findMany: typeof contactFindMany } }).contact.findMany = contactFindMany;
+      await runCommit(prisma, JOB_ID, TENANT_A);
+      expect(contactCount).toHaveBeenCalledOnce();
+      expect(contactFindMany).toHaveBeenCalledOnce();
+    });
+
+    it("(11) cache builder skipped when no external_id linking (customerLinkField=null)", async () => {
+      const seed = {
+        job: makeJob({
+          customerLinkField: null,
+          externalSourceTag: null,
+        } as Partial<ImportJob>),
+      };
+      const { prisma } = makeOrchestratorPrismaMock(seed);
+      const contactCount = vi.fn().mockResolvedValue(0);
+      const contactFindMany = vi.fn().mockResolvedValue([]);
+      (prisma as unknown as { contact: { count: typeof contactCount; findMany: typeof contactFindMany } }).contact.count = contactCount;
+      (prisma as unknown as { contact: { count: typeof contactCount; findMany: typeof contactFindMany } }).contact.findMany = contactFindMany;
+      await runCommit(prisma, JOB_ID, TENANT_A);
+      expect(contactCount).not.toHaveBeenCalled();
+      expect(contactFindMany).not.toHaveBeenCalled();
+    });
+
+    it("(12) cache builder sentinel bails to null on >50K tagged rows", async () => {
+      const seed = {
+        job: makeJob({
+          customerLinkField: "external_id",
+          externalSourceTag: "smoke_tag",
+        } as Partial<ImportJob>),
+        stagingDeals: [
+          {
+            id: "sd1",
+            importJobId: JOB_ID,
+            tenantId: TENANT_A,
+            sourceRowIndex: 0,
+            sourceRowData: { name: "Deal A" },
+            matchDecision: { suggestedAction: "insert" },
+            stagingStatus: "pending",
+          } as unknown,
+        ] as never,
+      };
+      const { prisma } = makeOrchestratorPrismaMock(seed);
+      const contactCount = vi.fn().mockResolvedValue(50_001);
+      const contactFindMany = vi.fn();
+      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+      (prisma as unknown as { contact: { count: typeof contactCount; findMany: typeof contactFindMany } }).contact.count = contactCount;
+      (prisma as unknown as { contact: { count: typeof contactCount; findMany: typeof contactFindMany } }).contact.findMany = contactFindMany;
+      await runCommit(prisma, JOB_ID, TENANT_A);
+      expect(contactCount).toHaveBeenCalledOnce();
+      expect(contactFindMany).not.toHaveBeenCalled();
+      const bailLog = consoleSpy.mock.calls.find((c) =>
+        typeof c[0] === "string" && (c[0] as string).includes("Pre-cache bailed"),
+      );
+      expect(bailLog).toBeDefined();
+      consoleSpy.mockRestore();
+    });
+
+    it("(13) progress log final batch summary fires for any non-empty batch", async () => {
+      const seed = {
+        job: makeJob(),
+        stagingContacts: [
+          {
+            id: "sc1",
+            importJobId: JOB_ID,
+            tenantId: TENANT_A,
+            sourceRowIndex: 0,
+            sourceRowData: { email: "a@test.com", firstName: "A" },
+            matchDecision: { suggestedAction: "insert" },
+            stagingStatus: "pending",
+            email: "a@test.com",
+            phone: null,
+            firstName: "A",
+            lastName: null,
+            companyName: null,
+            lifecycleStage: null,
+            source: null,
+            targetContactId: null,
+          },
+        ],
+      };
+      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+      const { prisma } = makeOrchestratorPrismaMock(seed);
+      await runCommit(prisma, JOB_ID, TENANT_A);
+      const batchDoneLog = consoleSpy.mock.calls.find((c) =>
+        typeof c[0] === "string" && (c[0] as string).includes("runCommit batch done"),
+      );
+      expect(batchDoneLog).toBeDefined();
+      consoleSpy.mockRestore();
+    });
+  });
+});
+
 describe("resolveStageByName", () => {
   it("hits by name first", async () => {
     const findFirst = vi.fn().mockResolvedValueOnce({ id: "s1" });
