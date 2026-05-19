@@ -237,12 +237,107 @@ jobs:
           port: '8080'
           health-path: '/health'
 
+      # ─────────────────────────────────────────────
+      # KAN-920 — explicit resource flags + post-deploy verification.
+      #
+      # Pre-KAN-920: deploy step took only `service / region / image` and
+      # inherited memory/timeout/cpu/concurrency/min-instances from the
+      # prior revision. KAN-919's 2Gi/3600s recovery bump (2026-05-13) held
+      # across 4 deploys but was one rogue deploy away from silent regression
+      # to defaults (1Gi/300s/cpu=1/concurrency=80/min=0).
+      #
+      # Resource flags below match the current PROD config exactly. The
+      # verification step (next) hard-fails the workflow on any drift.
+      #
+      # Memory: 2Gi   — bumped from default 1Gi via KAN-919 recovery.
+      # Timeout: 3600s — bumped from default 300s for synchronous large-import
+      #                  commit. KAN-927 follow-up may relax once async lands.
+      # CPU: 1        — explicit for verification parity.
+      # Concurrency: 80 — explicit, load-bearing for cost.
+      # min-instances: 1 — always-warm for sub-second cold-start UX.
+      #
+      # max-instances NOT pinned — autoscaler default (currently 10) is free
+      # to grow with traffic. Deliberate bumps via `gcloud run services update`
+      # outside this workflow.
+      #
+      # Annotations (startup-cpu-boost, autoscaling.knative.dev/, cloudsql-
+      # instances) NOT enforced here — deploy-cloudrun@v2 handles annotations
+      # awkwardly; file as KAN-XXX-followup if annotation drift ever surfaces
+      # a real incident. Not blocking for resource-drift class fix.
+      #
+      # DO NOT reduce memory/timeout without coordinating with KAN-919's
+      # stuck-commit performance profile. Default values caused 3+ hang
+      # incidents on deals imports >~3500 rows (KAN-927).
+      # ─────────────────────────────────────────────
+
       - name: Deploy to Cloud Run
         uses: google-github-actions/deploy-cloudrun@v2
         with:
           service: ${{ env.SERVICE_NAME }}
           region: ${{ env.REGION }}
           image: ${{ env.IMAGE }}:${{ github.sha }}
+          flags: |
+            --memory=2Gi
+            --timeout=3600s
+            --cpu=1
+            --concurrency=80
+            --min-instances=1
+
+      # KAN-920 — post-deploy config drift guard. Hard-fails the workflow
+      # if the just-deployed revision's serving config doesn't match the
+      # flags above.
+      #
+      # Reads the service's CURRENTLY-SERVING revision config. Assumes
+      # single-deploy single-revision (no traffic splits). If we add gradual
+      # rollouts via traffic splitting (KAN-XXX-followup), this verification
+      # needs to assert config on the NEW revision specifically via
+      # `--revision=$NEW_REVISION` rather than the service-level view.
+      #
+      # NOTE: A verification failure marks the workflow red but does NOT
+      # automatically roll back the deployed revision. The bad revision is
+      # already serving traffic. Manual recovery:
+      #   gcloud run services update growth-api --region=us-central1 \
+      #     --memory=2Gi --timeout=3600s --cpu=1 --concurrency=80 \
+      #     --min-instances=1
+      # Or rollback to prior revision via:
+      #   gcloud run services update-traffic growth-api --region=us-central1 \
+      #     --to-revisions=<prior-rev>=100
+      - name: Verify Cloud Run config (KAN-920 drift guard)
+        run: |
+          set -euo pipefail
+          EXPECTED_MEMORY="2Gi"
+          EXPECTED_TIMEOUT="3600"
+          EXPECTED_CPU="1"
+          EXPECTED_CONCURRENCY="80"
+          EXPECTED_MIN_INSTANCES="1"
+          # gcloud value() format separates fields with tab — confirmed via
+          # `od -c` on the local proxy session 2026-05-19. cut -f with default
+          # tab delimiter is correct.
+          ACTUAL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
+            --region=${{ env.REGION }} \
+            --project=${{ env.PROJECT_ID }} \
+            --format='value(spec.template.spec.containers[0].resources.limits.memory,spec.template.spec.timeoutSeconds,spec.template.spec.containers[0].resources.limits.cpu,spec.template.spec.containerConcurrency,spec.template.metadata.annotations[autoscaling.knative.dev/minScale])')
+          ACTUAL_MEMORY=$(echo "$ACTUAL" | cut -f1)
+          ACTUAL_TIMEOUT=$(echo "$ACTUAL" | cut -f2)
+          ACTUAL_CPU=$(echo "$ACTUAL" | cut -f3)
+          ACTUAL_CONCURRENCY=$(echo "$ACTUAL" | cut -f4)
+          ACTUAL_MIN_INSTANCES=$(echo "$ACTUAL" | cut -f5)
+          echo "Expected: memory=$EXPECTED_MEMORY timeout=$EXPECTED_TIMEOUT cpu=$EXPECTED_CPU concurrency=$EXPECTED_CONCURRENCY min=$EXPECTED_MIN_INSTANCES"
+          echo "Actual:   memory=$ACTUAL_MEMORY timeout=$ACTUAL_TIMEOUT cpu=$ACTUAL_CPU concurrency=$ACTUAL_CONCURRENCY min=$ACTUAL_MIN_INSTANCES"
+          if [ "$ACTUAL_MEMORY" != "$EXPECTED_MEMORY" ] \
+            || [ "$ACTUAL_TIMEOUT" != "$EXPECTED_TIMEOUT" ] \
+            || [ "$ACTUAL_CPU" != "$EXPECTED_CPU" ] \
+            || [ "$ACTUAL_CONCURRENCY" != "$EXPECTED_CONCURRENCY" ] \
+            || [ "$ACTUAL_MIN_INSTANCES" != "$EXPECTED_MIN_INSTANCES" ]; then
+            echo "::error::KAN-920 config drift detected — bad revision is already serving traffic. Manual recovery needed (see deploy-api.yml header comment)."
+            exit 1
+          fi
+          echo "## KAN-920 Config Verification" >> $GITHUB_STEP_SUMMARY
+          echo "- memory=$ACTUAL_MEMORY ✓" >> $GITHUB_STEP_SUMMARY
+          echo "- timeout=${ACTUAL_TIMEOUT}s ✓" >> $GITHUB_STEP_SUMMARY
+          echo "- cpu=$ACTUAL_CPU ✓" >> $GITHUB_STEP_SUMMARY
+          echo "- concurrency=$ACTUAL_CONCURRENCY ✓" >> $GITHUB_STEP_SUMMARY
+          echo "- min-instances=$ACTUAL_MIN_INSTANCES ✓" >> $GITHUB_STEP_SUMMARY
 
       - name: Show deployment URL
         run: |
