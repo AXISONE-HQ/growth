@@ -350,6 +350,15 @@ const contactsRouter = router({
         segment: z.string().nullable().optional(),
         lifecycleStage: z.string().optional(),
         source: z.string().nullable().optional(),
+        // KAN-934 — Cohort 3.1 form-eligible fields (Path β: full 14-field
+        // surface; companyId backed by AsyncSelect Company picker).
+        companyId: z.string().nullable().optional(),
+        addressLine1: z.string().nullable().optional(),
+        addressLine2: z.string().nullable().optional(),
+        city: z.string().nullable().optional(),
+        region: z.string().nullable().optional(),
+        postalCode: z.string().nullable().optional(),
+        country: z.string().nullable().optional(),
       }),
     )
     .mutation(async ({ ctx, input }) => {
@@ -368,6 +377,14 @@ const contactsRouter = router({
         segment: z.string().nullable().optional(),
         lifecycleStage: z.string().optional(),
         source: z.string().nullable().optional(),
+        // KAN-934 — same 7 fields added to update.
+        companyId: z.string().nullable().optional(),
+        addressLine1: z.string().nullable().optional(),
+        addressLine2: z.string().nullable().optional(),
+        city: z.string().nullable().optional(),
+        region: z.string().nullable().optional(),
+        postalCode: z.string().nullable().optional(),
+        country: z.string().nullable().optional(),
       }),
     )
     .mutation(async ({ ctx, input }) => {

@@ -36,11 +36,20 @@ interface FakeContact {
   companyId: string | null;
   companyName: string | null;
   addressLine1: string | null;
+  // KAN-934 — Cohort 3.1 form-eligible fields (addressLine2 + postalCode)
+  addressLine2: string | null;
+  postalCode: string | null;
   city: string | null;
   region: string | null;
   country: string | null;
   createdAt: Date;
   updatedAt: Date;
+}
+
+interface FakeCompany {
+  id: string;
+  tenantId: string;
+  name: string;
 }
 
 function contact(overrides: Partial<FakeContact> = {}): FakeContact {
@@ -58,6 +67,8 @@ function contact(overrides: Partial<FakeContact> = {}): FakeContact {
     companyId: null,
     companyName: null,
     addressLine1: null,
+    addressLine2: null,
+    postalCode: null,
     city: null,
     region: null,
     country: null,
@@ -85,9 +96,17 @@ function whereMatches(c: FakeContact, where: Record<string, unknown>): boolean {
   return true;
 }
 
-function makePrisma(rows: FakeContact[]) {
+function makePrisma(rows: FakeContact[], companies: FakeCompany[] = []) {
   let nextId = rows.length;
   return {
+    // KAN-934 — Company FK validation table (used by assertCompanyInTenant)
+    company: {
+      findFirst: async ({
+        where,
+      }: {
+        where: { id: string; tenantId: string };
+      }) => companies.find((c) => c.id === where.id && c.tenantId === where.tenantId) ?? null,
+    },
     contact: {
       findMany: async ({
         where,
@@ -296,6 +315,111 @@ describe("KAN-718 Day 10 — updateContact", () => {
     await expect(
       updateContact(prisma, TENANT_A, { id: "c-1", firstName: "X" }),
     ).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// KAN-934 — Cohort 3.1 Contact CRUD: extended create + update with
+// full 14-field surface (companyId + address block) + FK validation.
+// ─────────────────────────────────────────────────────────────────────
+describe("KAN-934 — createContact / updateContact extended fields", () => {
+  it("(KAN-934 a) create with full 14-field payload persists all fields", async () => {
+    const data: FakeContact[] = [];
+    const companies: FakeCompany[] = [
+      { id: "co-1", tenantId: TENANT_A, name: "Acme Corp" },
+    ];
+    const prisma = makePrisma(data, companies);
+
+    await createContact(prisma, TENANT_A, {
+      email: "extended@test.local",
+      phone: "+1-555-0100",
+      firstName: "Ext",
+      lastName: "Fields",
+      segment: "smb",
+      lifecycleStage: "lead",
+      source: "manual",
+      companyId: "co-1",
+      addressLine1: "1 Test St",
+      addressLine2: "Apt 5",
+      city: "Montreal",
+      region: "QC",
+      postalCode: "H1A 1A1",
+      country: "CA",
+    });
+
+    expect(data).toHaveLength(1);
+    expect(data[0].companyId).toBe("co-1");
+    expect(data[0].addressLine1).toBe("1 Test St");
+    expect(data[0].addressLine2).toBe("Apt 5");
+    expect(data[0].city).toBe("Montreal");
+    expect(data[0].region).toBe("QC");
+    expect(data[0].postalCode).toBe("H1A 1A1");
+    expect(data[0].country).toBe("CA");
+  });
+
+  it("(KAN-934 b) create with companyId from another tenant → BAD_REQUEST", async () => {
+    const data: FakeContact[] = [];
+    const companies: FakeCompany[] = [
+      { id: "co-other", tenantId: TENANT_B, name: "Other Tenant Co" },
+    ];
+    const prisma = makePrisma(data, companies);
+
+    await expect(
+      createContact(prisma, TENANT_A, {
+        email: "leak@test.local",
+        companyId: "co-other",
+      }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    expect(data).toHaveLength(0); // No partial write
+  });
+
+  it("(KAN-934 c) update with new fields persists them", async () => {
+    const data = [contact({ id: "c-1" })];
+    const companies: FakeCompany[] = [
+      { id: "co-1", tenantId: TENANT_A, name: "Acme" },
+    ];
+    const prisma = makePrisma(data, companies);
+
+    await updateContact(prisma, TENANT_A, {
+      id: "c-1",
+      companyId: "co-1",
+      addressLine1: "Updated Addr",
+      city: "Toronto",
+      country: "CA",
+    });
+
+    expect(data[0].companyId).toBe("co-1");
+    expect(data[0].addressLine1).toBe("Updated Addr");
+    expect(data[0].city).toBe("Toronto");
+    expect(data[0].country).toBe("CA");
+  });
+
+  it("(KAN-934 d) update with invalid companyId (cross-tenant) → BAD_REQUEST", async () => {
+    const data = [contact({ id: "c-1" })];
+    const companies: FakeCompany[] = [
+      { id: "co-other", tenantId: TENANT_B, name: "Other" },
+    ];
+    const prisma = makePrisma(data, companies);
+
+    await expect(
+      updateContact(prisma, TENANT_A, {
+        id: "c-1",
+        companyId: "co-other",
+      }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    expect(data[0].companyId).toBeNull(); // No partial write
+  });
+
+  it("(KAN-934 e) update with companyId=null explicitly clears the FK", async () => {
+    const data = [contact({ id: "c-1", companyId: "co-1" })];
+    const prisma = makePrisma(data);
+
+    await updateContact(prisma, TENANT_A, {
+      id: "c-1",
+      companyId: null,
+    });
+
+    expect(data[0].companyId).toBeNull();
   });
 });
 

@@ -40,6 +40,14 @@ export interface CreateInput {
   segment?: string | null;
   lifecycleStage?: string;
   source?: string | null;
+  // KAN-934 — Cohort 3.1 form-eligible fields.
+  companyId?: string | null;
+  addressLine1?: string | null;
+  addressLine2?: string | null;
+  city?: string | null;
+  region?: string | null;
+  postalCode?: string | null;
+  country?: string | null;
 }
 
 export interface UpdateInput {
@@ -51,6 +59,14 @@ export interface UpdateInput {
   segment?: string | null;
   lifecycleStage?: string;
   source?: string | null;
+  // KAN-934 — Cohort 3.1 form-eligible fields.
+  companyId?: string | null;
+  addressLine1?: string | null;
+  addressLine2?: string | null;
+  city?: string | null;
+  region?: string | null;
+  postalCode?: string | null;
+  country?: string | null;
 }
 
 const DEFAULT_LIMIT = 50;
@@ -221,11 +237,40 @@ export async function getContactById(
   return row;
 }
 
+/**
+ * KAN-934 — Validate companyId belongs to the same tenant.
+ * Throws BAD_REQUEST if the FK references a Company in a different tenant
+ * (or doesn't exist at all). Returns silently for null/undefined.
+ *
+ * Pattern matches the rest of the codebase's FK-validation discipline —
+ * never trust client-supplied FK ids; always re-verify tenant scope.
+ */
+async function assertCompanyInTenant(
+  prisma: PrismaClient,
+  tenantId: string,
+  companyId: string | null | undefined,
+): Promise<void> {
+  if (companyId == null) return;
+  const found = await prisma.company.findFirst({
+    where: { id: companyId, tenantId },
+    select: { id: true },
+  });
+  if (!found) {
+    throw new TRPCError({
+      code: 'BAD_REQUEST',
+      message: 'Company not found in this tenant',
+    });
+  }
+}
+
 export async function createContact(
   prisma: PrismaClient,
   tenantId: string,
   input: CreateInput,
 ) {
+  // KAN-934 — FK validation before write.
+  await assertCompanyInTenant(prisma, tenantId, input.companyId);
+
   return prisma.contact.create({
     data: {
       tenantId,
@@ -236,6 +281,14 @@ export async function createContact(
       segment: input.segment ?? null,
       lifecycleStage: input.lifecycleStage ?? 'lead',
       source: input.source ?? null,
+      // KAN-934 — Cohort 3.1 fields.
+      companyId: input.companyId ?? null,
+      addressLine1: input.addressLine1 ?? null,
+      addressLine2: input.addressLine2 ?? null,
+      city: input.city ?? null,
+      region: input.region ?? null,
+      postalCode: input.postalCode ?? null,
+      country: input.country ?? null,
     },
   });
 }
@@ -253,6 +306,9 @@ export async function updateContact(
     throw new TRPCError({ code: 'NOT_FOUND', message: 'Contact not found' });
   }
 
+  // KAN-934 — FK validation before write.
+  await assertCompanyInTenant(prisma, tenantId, input.companyId);
+
   // Build a strict update payload — only set fields that were explicitly
   // provided. Avoids accidentally clearing optional values to null.
   const data: Record<string, unknown> = {};
@@ -263,6 +319,14 @@ export async function updateContact(
   if (input.segment !== undefined) data.segment = input.segment;
   if (input.lifecycleStage !== undefined) data.lifecycleStage = input.lifecycleStage;
   if (input.source !== undefined) data.source = input.source;
+  // KAN-934 — Cohort 3.1 fields.
+  if (input.companyId !== undefined) data.companyId = input.companyId;
+  if (input.addressLine1 !== undefined) data.addressLine1 = input.addressLine1;
+  if (input.addressLine2 !== undefined) data.addressLine2 = input.addressLine2;
+  if (input.city !== undefined) data.city = input.city;
+  if (input.region !== undefined) data.region = input.region;
+  if (input.postalCode !== undefined) data.postalCode = input.postalCode;
+  if (input.country !== undefined) data.country = input.country;
 
   return prisma.contact.update({
     where: { id: input.id },
