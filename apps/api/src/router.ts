@@ -394,12 +394,49 @@ const contactsRouter = router({
 });
 
 // ============================================================================
-// COMPANIES ROUTER — KAN-883 (CRM read-layer cohort 1, PR 1 of 3)
+// COMPANIES ROUTER — KAN-883 (read surface) + KAN-937 (Sub-cohort 3.2 mutations)
 // ============================================================================
 //
 // Thin tRPC layer over packages/api/src/services/companies-router.ts. Same
 // variable-specifier dynamic-import pattern as contacts (TS6059 cohort).
-// All read-only; mutations land in cohort 4.
+// Read surface (list/get) shipped in KAN-883; mutations (create/update) added
+// in KAN-937 for Sub-cohort 3.2 Company CRUD form.
+interface CompaniesCreateInput {
+  name: string;
+  legalName?: string | null;
+  domain?: string | null;
+  website?: string | null;
+  industry?: string | null;
+  sizeRange?: string | null;
+  annualRevenue?: string | null;
+  description?: string | null;
+  lifecycleStage?: string;
+  phone?: string | null;
+  email?: string | null;
+  linkedinUrl?: string | null;
+  billingAddressLine1?: string | null;
+  billingAddressLine2?: string | null;
+  billingCity?: string | null;
+  billingRegion?: string | null;
+  billingPostalCode?: string | null;
+  billingCountry?: string | null;
+  mailingAddressLine1?: string | null;
+  mailingAddressLine2?: string | null;
+  mailingCity?: string | null;
+  mailingRegion?: string | null;
+  mailingPostalCode?: string | null;
+  mailingCountry?: string | null;
+  taxId?: string | null;
+  taxIdType?: string | null;
+  businessRegistrationNumber?: string | null;
+  incorporationJurisdiction?: string | null;
+  isTaxExempt?: boolean;
+  taxExemptionCertificate?: string | null;
+}
+type CompaniesUpdateInput = Partial<Omit<CompaniesCreateInput, "name">> & {
+  id: string;
+  name?: string;
+};
 interface CompaniesRouterModule {
   listCompanies: (
     prisma: unknown,
@@ -416,6 +453,16 @@ interface CompaniesRouterModule {
     prisma: unknown,
     tenantId: string,
     input: { id: string },
+  ) => Promise<unknown>;
+  createCompany: (
+    prisma: unknown,
+    tenantId: string,
+    input: CompaniesCreateInput,
+  ) => Promise<unknown>;
+  updateCompany: (
+    prisma: unknown,
+    tenantId: string,
+    input: CompaniesUpdateInput,
   ) => Promise<unknown>;
 }
 let _companiesModule: CompaniesRouterModule | null = null;
@@ -450,6 +497,96 @@ const companiesRouter = router({
     .query(async ({ ctx, input }) => {
       const { getCompanyById } = await loadCompaniesModule();
       return getCompanyById(ctx.prisma, ctx.tenantId, input);
+    }),
+
+  // KAN-937 — Sub-cohort 3.2 Company CRUD: 30 form-eligible fields across
+  // 5 cards. Loose enums match contacts.create's pattern; Prisma rejects bad
+  // values at write time. `annualRevenue` is Decimal serialized as string.
+  create: protectedProcedure
+    .input(
+      z.object({
+        // Card 1 — Core Info
+        name: z.string().min(1),
+        legalName: z.string().nullable().optional(),
+        domain: z.string().nullable().optional(),
+        website: z.string().nullable().optional(),
+        industry: z.string().nullable().optional(),
+        sizeRange: z.string().nullable().optional(),
+        annualRevenue: z.string().nullable().optional(),
+        description: z.string().nullable().optional(),
+        lifecycleStage: z.string().optional(),
+        // Card 2 — Contact Info
+        phone: z.string().nullable().optional(),
+        email: z.string().nullable().optional(),
+        linkedinUrl: z.string().nullable().optional(),
+        // Card 3 — Billing Address
+        billingAddressLine1: z.string().nullable().optional(),
+        billingAddressLine2: z.string().nullable().optional(),
+        billingCity: z.string().nullable().optional(),
+        billingRegion: z.string().nullable().optional(),
+        billingPostalCode: z.string().nullable().optional(),
+        billingCountry: z.string().nullable().optional(),
+        // Card 4 — Mailing Address
+        mailingAddressLine1: z.string().nullable().optional(),
+        mailingAddressLine2: z.string().nullable().optional(),
+        mailingCity: z.string().nullable().optional(),
+        mailingRegion: z.string().nullable().optional(),
+        mailingPostalCode: z.string().nullable().optional(),
+        mailingCountry: z.string().nullable().optional(),
+        // Card 5 — Tax & Compliance
+        taxId: z.string().nullable().optional(),
+        taxIdType: z.string().nullable().optional(),
+        businessRegistrationNumber: z.string().nullable().optional(),
+        incorporationJurisdiction: z.string().nullable().optional(),
+        isTaxExempt: z.boolean().optional(),
+        taxExemptionCertificate: z.string().nullable().optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const { createCompany } = await loadCompaniesModule();
+      return createCompany(ctx.prisma, ctx.tenantId, input);
+    }),
+
+  update: protectedProcedure
+    .input(
+      z.object({
+        id: z.string().cuid(),
+        // All fields optional on update — partial-update semantics.
+        name: z.string().min(1).optional(),
+        legalName: z.string().nullable().optional(),
+        domain: z.string().nullable().optional(),
+        website: z.string().nullable().optional(),
+        industry: z.string().nullable().optional(),
+        sizeRange: z.string().nullable().optional(),
+        annualRevenue: z.string().nullable().optional(),
+        description: z.string().nullable().optional(),
+        lifecycleStage: z.string().optional(),
+        phone: z.string().nullable().optional(),
+        email: z.string().nullable().optional(),
+        linkedinUrl: z.string().nullable().optional(),
+        billingAddressLine1: z.string().nullable().optional(),
+        billingAddressLine2: z.string().nullable().optional(),
+        billingCity: z.string().nullable().optional(),
+        billingRegion: z.string().nullable().optional(),
+        billingPostalCode: z.string().nullable().optional(),
+        billingCountry: z.string().nullable().optional(),
+        mailingAddressLine1: z.string().nullable().optional(),
+        mailingAddressLine2: z.string().nullable().optional(),
+        mailingCity: z.string().nullable().optional(),
+        mailingRegion: z.string().nullable().optional(),
+        mailingPostalCode: z.string().nullable().optional(),
+        mailingCountry: z.string().nullable().optional(),
+        taxId: z.string().nullable().optional(),
+        taxIdType: z.string().nullable().optional(),
+        businessRegistrationNumber: z.string().nullable().optional(),
+        incorporationJurisdiction: z.string().nullable().optional(),
+        isTaxExempt: z.boolean().optional(),
+        taxExemptionCertificate: z.string().nullable().optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const { updateCompany } = await loadCompaniesModule();
+      return updateCompany(ctx.prisma, ctx.tenantId, input);
     }),
 });
 

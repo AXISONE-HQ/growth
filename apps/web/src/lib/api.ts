@@ -991,6 +991,51 @@ export interface CursorPage<T> {
   totalCount: number;
 }
 
+// KAN-937 — Sub-cohort 3.2 Company CRUD form payload. Mirrors the
+// companies.create/update Zod schemas in apps/api/src/router.ts.
+// 30 form-eligible fields across 5 cards.
+export interface CompanyCreateInput {
+  // Card 1 — Core Info (required: name)
+  name: string;
+  legalName?: string | null;
+  domain?: string | null;
+  website?: string | null;
+  industry?: string | null;
+  sizeRange?: string | null;
+  annualRevenue?: string | null;
+  description?: string | null;
+  lifecycleStage?: string;
+  // Card 2 — Contact Info
+  phone?: string | null;
+  email?: string | null;
+  linkedinUrl?: string | null;
+  // Card 3 — Billing Address
+  billingAddressLine1?: string | null;
+  billingAddressLine2?: string | null;
+  billingCity?: string | null;
+  billingRegion?: string | null;
+  billingPostalCode?: string | null;
+  billingCountry?: string | null;
+  // Card 4 — Mailing Address
+  mailingAddressLine1?: string | null;
+  mailingAddressLine2?: string | null;
+  mailingCity?: string | null;
+  mailingRegion?: string | null;
+  mailingPostalCode?: string | null;
+  mailingCountry?: string | null;
+  // Card 5 — Tax & Compliance
+  taxId?: string | null;
+  taxIdType?: string | null;
+  businessRegistrationNumber?: string | null;
+  incorporationJurisdiction?: string | null;
+  isTaxExempt?: boolean;
+  taxExemptionCertificate?: string | null;
+}
+
+export interface CompanyUpdateInput extends Partial<CompanyCreateInput> {
+  id: string;
+}
+
 export const companiesApi = {
   list: (input?: {
     search?: string;
@@ -1002,6 +1047,11 @@ export const companiesApi = {
     trpcQuery<CursorPage<CompanyListItem>>('companies.list', input ?? { limit: 50 }),
   get: (id: string) =>
     trpcQuery<CompanyDetail>('companies.get', { id }),
+  // KAN-937 — Sub-cohort 3.2 CRUD mutations.
+  create: (input: CompanyCreateInput) =>
+    trpcMutation<CompanyDetail>('companies.create', input),
+  update: (input: CompanyUpdateInput) =>
+    trpcMutation<CompanyDetail>('companies.update', input),
 };
 
 export interface OrderListItem {
