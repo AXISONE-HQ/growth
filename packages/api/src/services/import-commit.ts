@@ -126,220 +126,32 @@ function resolveEffectiveDecision(
 // (contactEmail, pipelineName, stageName) into canonical FK ids.
 // ─────────────────────────────────────────────
 
-/**
- * KAN-922 — Generalized contact resolver. Supports email / phone /
- * external_id match keys. The previous resolveContactByEmail is kept as
- * a thin wrapper so the 7+ existing call sites continue working.
- *
- * For 'external_id': uses Prisma's JSON path filter
- * `{ externalIds: { path: [source], equals: value } }`. Requires Prisma
- * 4.10+ (we're on 5.22 — confirmed supported).
- *
- * **KAN-925** — JSON expression indexes deferred. Single-tenant scans
- * under 10K contacts remain acceptable; revisit when a tenant crosses
- * that threshold (currently 6740 contacts in axisone smoke tenant).
- */
-export type ContactResolveKey =
-  | { kind: "email"; value: string | null | undefined }
-  | { kind: "phone"; value: string | null | undefined }
-  | { kind: "external_id"; source: string; value: string | null | undefined };
-
-export async function resolveContactByMatchKey(
-  prisma: PrismaClient,
-  tenantId: string,
-  key: ContactResolveKey,
-  // KAN-930 — Optional pre-built cache keyed by externalSourceTag value.
-  // When populated, the external_id branch does O(1) Map.get instead of
-  // O(N) seqscan. Cache is built by runCommit when config warrants; a
-  // cache miss is a true miss (no DB fallback) because the cache was
-  // built from the same query the DB path would run.
-  // `undefined` (param not passed) → use DB path (backwards compat for
-  // all non-runCommit callers).
-  // `null` (param explicitly null) → use DB path (sentinel-bailed case
-  // where the tenant has too many tagged rows to pre-cache).
-  cache?: Map<string, string> | null,
-): Promise<{ id: string } | null> {
-  if (!key.value) return null;
-  switch (key.kind) {
-    case "email":
-      return prisma.contact.findFirst({
-        where: { tenantId, email: { equals: key.value, mode: "insensitive" } },
-        select: { id: true },
-      });
-    case "phone":
-      // Caller is responsible for normalizing the value via normalizePhone()
-      // before passing — staging-side projection should handle this.
-      return prisma.contact.findFirst({
-        where: { tenantId, phone: key.value },
-        select: { id: true },
-      });
-    case "external_id": {
-      // KAN-921 — accept multi-value delimited external_ids. HubSpot
-      // semicolon-delimits when a relation has >1 association (empirical
-      // evidence: importJob cmpcol6920ae1dqcvubia7u72, 6630/8528 = 77.7%
-      // of staged deals had vid1;vid2 shape). Split on common CSV-export
-      // delimiters, OR-batch the lookups, first-match-wins per Prisma's
-      // default ordering. Single-value inputs pass through unchanged
-      // (split returns [value], OR with one element ≡ prior exact-match).
-      const candidates = key.value
-        .split(/[;,|]/)
-        .map((v) => v.trim())
-        .filter(Boolean);
-      if (candidates.length === 0) return null;
-
-      // KAN-930 — Map-first lookup path. First-match-wins semantics
-      // preserved: iterate candidates in order, return first hit.
-      if (cache) {
-        for (const v of candidates) {
-          const id = cache.get(v);
-          if (id) return { id };
-        }
-        return null;
-      }
-
-      // Fallback: per-row DB query (cache=null sentinel-bailed OR
-      // cache=undefined non-runCommit caller).
-      return prisma.contact.findFirst({
-        where: {
-          tenantId,
-          OR: candidates.map((v) => ({
-            externalIds: { path: [key.source], equals: v },
-          })),
-        },
-        select: { id: true },
-      });
-    }
-  }
-}
-
-/** KAN-922 — Backwards-compatible wrapper. 7+ existing call sites
- *  continue working unchanged. Delegates to resolveContactByMatchKey. */
-export async function resolveContactByEmail(
-  prisma: PrismaClient,
-  tenantId: string,
-  email: string | null | undefined,
-): Promise<{ id: string } | null> {
-  return resolveContactByMatchKey(prisma, tenantId, { kind: "email", value: email });
-}
-
-/** KAN-922 — Deal resolver (NEW). commitOrder previously did NOT
- *  populate Order.dealId at all — this is net-new wiring for the
- *  Order → Deal link via external_id. */
-export type DealResolveKey =
-  | { kind: "external_id"; source: string; value: string | null | undefined };
-
-export async function resolveDealByMatchKey(
-  prisma: PrismaClient,
-  tenantId: string,
-  key: DealResolveKey,
-  // KAN-930 — symmetric to resolveContactByMatchKey's cache param. See
-  // that function for rationale + semantics.
-  cache?: Map<string, string> | null,
-): Promise<{ id: string } | null> {
-  if (!key.value) return null;
-  switch (key.kind) {
-    case "external_id": {
-      // KAN-921 — symmetric to resolveContactByMatchKey's external_id
-      // case. See that branch for delimiter-set + first-match-wins
-      // rationale + empirical motivation.
-      const candidates = key.value
-        .split(/[;,|]/)
-        .map((v) => v.trim())
-        .filter(Boolean);
-      if (candidates.length === 0) return null;
-
-      // KAN-930 — Map-first lookup path.
-      if (cache) {
-        for (const v of candidates) {
-          const id = cache.get(v);
-          if (id) return { id };
-        }
-        return null;
-      }
-
-      return prisma.deal.findFirst({
-        where: {
-          tenantId,
-          OR: candidates.map((v) => ({
-            externalIds: { path: [key.source], equals: v },
-          })),
-        },
-        select: { id: true },
-      });
-    }
-  }
-}
-
-/** Look up a Pipeline by name within a tenant. When `name` is empty
- *  OR no Pipeline matches, falls back to the tenant's default Pipeline
- *  (first active Pipeline by createdAt asc — matches the
- *  default-pipeline-bootstrap.ts convention). Returns null if the
- *  tenant has no Pipelines at all (caller emits 'pipeline_not_found'). */
-export async function resolvePipelineByName(
-  prisma: PrismaClient,
-  tenantId: string,
-  name: string | null | undefined,
-): Promise<{ id: string } | null> {
-  if (name && name.trim()) {
-    const byName = await prisma.pipeline.findFirst({
-      where: { tenantId, name: { equals: name, mode: "insensitive" } },
-      select: { id: true },
-    });
-    if (byName) return byName;
-  }
-  // Fallback: tenant's default (first active by createdAt asc).
-  return prisma.pipeline.findFirst({
-    where: { tenantId, isActive: true },
-    orderBy: { createdAt: "asc" },
-    select: { id: true },
-  });
-}
-
-/** Look up a Stage by name within a Pipeline. When `name` is empty OR
- *  no Stage matches, falls back to the Pipeline's `isInitial=true`
- *  Stage. Returns null if the Pipeline has no stages at all (caller
- *  emits 'stage_not_found'). */
-export async function resolveStageByName(
-  prisma: PrismaClient,
-  pipelineId: string,
-  name: string | null | undefined,
-): Promise<{ id: string } | null> {
-  if (name && name.trim()) {
-    const byName = await prisma.stage.findFirst({
-      where: { pipelineId, name: { equals: name, mode: "insensitive" } },
-      select: { id: true },
-    });
-    if (byName) return byName;
-  }
-  // Fallback: the Pipeline's isInitial Stage (one is guaranteed by
-  // KAN-791 invariant). If somehow absent, return the first by order.
-  return (
-    (await prisma.stage.findFirst({
-      where: { pipelineId, isInitial: true },
-      select: { id: true },
-    })) ??
-    (await prisma.stage.findFirst({
-      where: { pipelineId },
-      orderBy: { order: "asc" },
-      select: { id: true },
-    }))
-  );
-}
-
-/** Optional Company lookup by name within tenant. Returns null on miss
- *  — Company linkage on Contact/Deal/Order is optional, so a miss just
- *  leaves the relation unset (no error). */
-async function resolveCompanyByName(
-  prisma: PrismaClient,
-  tenantId: string,
-  name: string | null | undefined,
-): Promise<{ id: string } | null> {
-  if (!name || !name.trim()) return null;
-  return prisma.company.findFirst({
-    where: { tenantId, name: { equals: name, mode: "insensitive" } },
-    select: { id: true },
-  });
-}
+// KAN-932 — Resolver helpers lifted to `canonical-lookups.ts` for reuse
+// across CSV-import (this file) and Cohort 3 manual CRUD forms. Re-exported
+// here so the 7+ existing internal call sites (commitContact / commitCompany
+// / commitDeal / commitOrder + tests) continue working unchanged. Pure
+// refactor — zero behavior change.
+import {
+  resolveContactByMatchKey,
+  resolveContactByEmail,
+  resolveDealByMatchKey,
+  resolvePipelineByName,
+  resolveStageByName,
+  resolveCompanyByName,
+  type ContactResolveKey,
+  type DealResolveKey,
+} from "./canonical-lookups.js";
+export {
+  resolveContactByMatchKey,
+  resolveContactByEmail,
+  resolveDealByMatchKey,
+  resolvePipelineByName,
+  resolveStageByName,
+} from "./canonical-lookups.js";
+export type {
+  ContactResolveKey,
+  DealResolveKey,
+} from "./canonical-lookups.js";
 
 // ─────────────────────────────────────────────
 // Audit log writer + Pub/Sub emitter
