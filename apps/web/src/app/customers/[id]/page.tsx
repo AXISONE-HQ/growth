@@ -29,7 +29,7 @@
  */
 
 import { useQuery } from '@tanstack/react-query';
-import { ArrowLeft, Users } from 'lucide-react';
+import { ArrowLeft, Pencil, Users } from 'lucide-react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { useEffect } from 'react';
@@ -157,7 +157,22 @@ export default function ContactDetailPage() {
               </p>
             </div>
           </div>
-          <StatusBadge kind="contact-lifecycle" value={contact.lifecycleStage} />
+          <div className="flex items-center gap-3">
+            <StatusBadge kind="contact-lifecycle" value={contact.lifecycleStage} />
+            {/* KAN-934 — Cohort 3.1 Edit affordance */}
+            <Link
+              href={`/customers/${contact.id}/edit`}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-md border"
+              style={{
+                backgroundColor: 'var(--ds-surface-default)',
+                borderColor: 'var(--ds-border-default)',
+                color: 'var(--ds-ink-secondary)',
+              }}
+            >
+              <Pencil className="w-3.5 h-3.5" />
+              Edit
+            </Link>
+          </div>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3 text-sm">
           <Field

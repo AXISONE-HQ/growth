@@ -19,7 +19,7 @@
  * Pagination stays on offset/limit — convergence to cursor is KAN-882.
  */
 
-import { Loader2, RefreshCw, Search, Users } from 'lucide-react';
+import { Loader2, Plus, RefreshCw, Search, Users } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
@@ -118,19 +118,34 @@ export default function CustomersPage() {
             Contacts the AI is working with — leads, qualified prospects, customers.
           </p>
         </div>
-        <button
-          onClick={() => void refetch()}
-          disabled={isFetching}
-          className="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-md border disabled:opacity-50"
-          style={{
-            backgroundColor: 'var(--ds-surface-default)',
-            borderColor: 'var(--ds-border-default)',
-            color: 'var(--ds-ink-secondary)',
-          }}
-        >
-          {isFetching ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-          Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          {/* KAN-934 — Cohort 3.1 "+ New Customer" entry point */}
+          <Link
+            href="/customers/new"
+            className="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-md border"
+            style={{
+              backgroundColor: 'var(--ds-violet-600)',
+              borderColor: 'var(--ds-violet-600)',
+              color: '#fff',
+            }}
+          >
+            <Plus className="w-4 h-4" />
+            New customer
+          </Link>
+          <button
+            onClick={() => void refetch()}
+            disabled={isFetching}
+            className="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-md border disabled:opacity-50"
+            style={{
+              backgroundColor: 'var(--ds-surface-default)',
+              borderColor: 'var(--ds-border-default)',
+              color: 'var(--ds-ink-secondary)',
+            }}
+          >
+            {isFetching ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+            Refresh
+          </button>
+        </div>
       </div>
 
       {/* Search */}

@@ -855,6 +855,29 @@ export interface ContactDetail extends ContactListItem {
   }>;
 }
 
+// KAN-934 — Cohort 3.1 Contact CRUD form payload. Mirrors the extended
+// contacts.create/update Zod schemas in apps/api/src/router.ts.
+export interface ContactCreateInput {
+  email: string;
+  phone?: string | null;
+  firstName?: string | null;
+  lastName?: string | null;
+  segment?: string | null;
+  lifecycleStage?: string | null;
+  source?: string | null;
+  companyId?: string | null;
+  addressLine1?: string | null;
+  addressLine2?: string | null;
+  city?: string | null;
+  region?: string | null;
+  postalCode?: string | null;
+  country?: string | null;
+}
+
+export interface ContactUpdateInput extends Partial<ContactCreateInput> {
+  id: string;
+}
+
 export const contactsApi = {
   list: (input?: {
     search?: string;
@@ -872,6 +895,11 @@ export const contactsApi = {
     }>('contacts.list', input ?? {}),
   getById: (id: string) =>
     trpcQuery<ContactDetail>('contacts.getById', { id }),
+  // KAN-934 — Cohort 3.1 CRUD mutations.
+  create: (input: ContactCreateInput) =>
+    trpcMutation<ContactDetail>('contacts.create', input),
+  update: (input: ContactUpdateInput) =>
+    trpcMutation<ContactDetail>('contacts.update', input),
 };
 
 // ─────────────────────────────────────────────────────────────────────────
