@@ -3406,6 +3406,44 @@ const StageInputSchema = z.object({
 });
 
 const pipelinesRouter = router({
+  // KAN-932 — Lean nested fetch for Cohort 3 Deal CRUD form dropdowns.
+  // Returns active Pipelines with their Stages (id+name+order+isInitial+
+  // isTerminal). Separate procedure from `list` (which returns stage IDs
+  // only + summary metadata for the pipeline-management UI) to avoid
+  // regressing that UI's shape.
+  listWithStages: protectedProcedure.query(async ({ ctx }) => {
+    const pipelines: any[] =
+      (await (ctx.prisma as any).pipeline?.findMany({
+        where: { tenantId: ctx.tenantId, isActive: true },
+        orderBy: [{ order: "asc" }, { createdAt: "asc" }],
+        include: {
+          stages: {
+            orderBy: { order: "asc" },
+            select: {
+              id: true,
+              name: true,
+              order: true,
+              isInitial: true,
+              isTerminal: true,
+            },
+          },
+        },
+      })) ?? [];
+
+    return pipelines.map((p) => ({
+      id: p.id,
+      name: p.name,
+      description: p.description ?? null,
+      stages: (p.stages ?? []) as Array<{
+        id: string;
+        name: string;
+        order: number;
+        isInitial: boolean;
+        isTerminal: boolean;
+      }>,
+    }));
+  }),
+
   // List the tenant's pipelines with computed counts (active leads + stages)
   // and the current period's target progress where a Target row exists.
   list: protectedProcedure.query(async ({ ctx }) => {
