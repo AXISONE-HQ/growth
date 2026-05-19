@@ -1077,6 +1077,42 @@ export async function runCommit(
   importJobId: string,
   tenantId: string,
 ): Promise<ImportJob> {
+  // KAN-923 — Pre-claim match-config completeness gate. If any field
+  // mapping targets the external_id family but externalSourceTag is null,
+  // the commit would silently produce external_ids={} on every canonical
+  // row (current write-path code is null-tolerant but the data shape
+  // would be wrong). Fail loud before any state mutation. See KAN-923
+  // reframe (2026-05-19) — empirical evidence from importJob
+  // cmp65ai4m1hr3bea6v7umawas: 6592 rows committed with external_ids={}
+  // because externalSourceTag was set 6 min POST-commit.
+  const preflightJob = await prisma.importJob.findFirst({
+    where: { id: importJobId, tenantId },
+    select: { fieldMappings: true, externalSourceTag: true },
+  });
+  if (preflightJob) {
+    const externalIdTargets = new Set([
+      "external_id",
+      "customer_external_id",
+      "deal_external_id",
+    ]);
+    const preflightMappings = Array.isArray(preflightJob.fieldMappings)
+      ? (preflightJob.fieldMappings as unknown as FieldMappingEntryLike[])
+      : [];
+    const hasExternalIdMapping = preflightMappings.some(
+      (m) => m.targetField != null && externalIdTargets.has(m.targetField),
+    );
+    if (hasExternalIdMapping && !preflightJob.externalSourceTag) {
+      throw new TRPCError({
+        code: "PRECONDITION_FAILED",
+        message:
+          "Match configuration is incomplete. Field mappings include an " +
+          "external_id target but externalSourceTag is not set. " +
+          "Re-open Card 5 (Match settings) and configure externalSourceTag " +
+          "before committing.",
+      });
+    }
+  }
+
   // Atomic claim: race-free transition from pending → running.
   // Only one caller's updateMany returns count=1; concurrent callers see
   // count=0 and get an informative CONFLICT / BAD_REQUEST / NOT_FOUND from

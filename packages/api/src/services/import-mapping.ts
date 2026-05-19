@@ -585,6 +585,21 @@ export async function saveFieldMappings(
       message: `Import job not found: ${importJobId}`,
     });
   }
+  // KAN-923 — State-machine gate. Match config (and field mappings) cannot
+  // be modified once commit has started. The pre-gate behavior allowed
+  // post-commit edits that silently desynced canonical writes from the
+  // configured tags (importJob cmp65ai4m1hr3bea6v7umawas evidence:
+  // external_source_tag set 6 min post-commit_completed_at, 6592 rows
+  // already written with external_ids={}). Reframed 2026-05-19.
+  if (job.commitStartedAt != null || job.commitStatus !== "pending") {
+    throw new TRPCError({
+      code: "PRECONDITION_FAILED",
+      message:
+        `Match settings cannot be modified after commit has started ` +
+        `(commit_status='${job.commitStatus}'). ` +
+        `Cancel this import and re-upload to change match configuration.`,
+    });
+  }
   if (job.detectedEntityType == null) {
     throw new TRPCError({
       code: "BAD_REQUEST",

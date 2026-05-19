@@ -59,6 +59,9 @@ interface JobOverrides {
   detectedHeaders?: unknown;
   sampleRows?: unknown;
   fieldMappingConfirmedAt?: Date | null;
+  // KAN-923 — state-machine gate test surface
+  commitStatus?: ImportJob["commitStatus"];
+  commitStartedAt?: Date | null;
 }
 
 function makeJob(overrides: JobOverrides = {}): ImportJob {
@@ -112,6 +115,8 @@ function makeJob(overrides: JobOverrides = {}): ImportJob {
     fieldMappingOutputTokens: null,
     fieldMappingLlmModel: null,
     fieldMappingConfirmedAt: overrides.fieldMappingConfirmedAt ?? null,
+    commitStatus: overrides.commitStatus ?? "pending",
+    commitStartedAt: overrides.commitStartedAt ?? null,
     errorMessage: null,
     errorAt: null,
     createdAt: new Date(),
@@ -390,6 +395,82 @@ describe("KAN-905 — saveFieldMappings", () => {
         { sourceColumn: "email", targetField: "wat_is_this", confidence: 99 },
       ]),
     ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
+
+  // KAN-923 — state-machine gate. Match config cannot be modified after
+  // commit has started. Reframed from "drops external_ids on write" after
+  // 2026-05-19 Phase 1 audit revealed the bug is sequencing, not write-path.
+  describe("KAN-923 — state-machine gate", () => {
+    it("(KAN-923 a) succeeded commit → PRECONDITION_FAILED", async () => {
+      const job = makeJob({
+        commitStatus: "succeeded",
+        commitStartedAt: new Date("2026-05-15T00:16:34Z"),
+      });
+      const { prisma, update } = makePrismaMock(job);
+
+      await expect(
+        saveFieldMappings(prisma, JOB_ID, TENANT_A, validMappings),
+      ).rejects.toMatchObject({
+        code: "PRECONDITION_FAILED",
+        message: expect.stringContaining("Match settings cannot be modified after commit"),
+      });
+      expect(update).not.toHaveBeenCalled();
+    });
+
+    it("(KAN-923 b) running commit → PRECONDITION_FAILED", async () => {
+      const job = makeJob({
+        commitStatus: "running",
+        commitStartedAt: new Date(),
+      });
+      const { prisma, update } = makePrismaMock(job);
+
+      await expect(
+        saveFieldMappings(prisma, JOB_ID, TENANT_A, validMappings),
+      ).rejects.toMatchObject({ code: "PRECONDITION_FAILED" });
+      expect(update).not.toHaveBeenCalled();
+    });
+
+    it("(KAN-923 c) failed/partial commit → PRECONDITION_FAILED (no retry-edit)", async () => {
+      for (const status of ["failed", "partial"] as const) {
+        const job = makeJob({
+          commitStatus: status,
+          commitStartedAt: new Date(),
+        });
+        const { prisma, update } = makePrismaMock(job);
+
+        await expect(
+          saveFieldMappings(prisma, JOB_ID, TENANT_A, validMappings),
+        ).rejects.toMatchObject({ code: "PRECONDITION_FAILED" });
+        expect(update).not.toHaveBeenCalled();
+      }
+    });
+
+    it("(KAN-923 d) pending commit + null commitStartedAt → succeeds (baseline regression)", async () => {
+      const job = makeJob({
+        commitStatus: "pending",
+        commitStartedAt: null,
+      });
+      const { prisma, update } = makePrismaMock(job);
+
+      await saveFieldMappings(prisma, JOB_ID, TENANT_A, validMappings);
+      expect(update).toHaveBeenCalledOnce();
+    });
+
+    it("(KAN-923 e) defensive — pending status but commitStartedAt set → blocked", async () => {
+      // Race window: the optimistic-lock claim sets commitStartedAt
+      // BEFORE flipping commitStatus → 'running' transactionally. We
+      // gate on EITHER signal so this transient state still blocks.
+      const job = makeJob({
+        commitStatus: "pending",
+        commitStartedAt: new Date(),
+      });
+      const { prisma, update } = makePrismaMock(job);
+
+      await expect(
+        saveFieldMappings(prisma, JOB_ID, TENANT_A, validMappings),
+      ).rejects.toMatchObject({ code: "PRECONDITION_FAILED" });
+      expect(update).not.toHaveBeenCalled();
+    });
   });
 });
 
