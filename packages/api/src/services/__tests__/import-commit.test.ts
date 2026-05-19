@@ -442,6 +442,88 @@ describe("runCommit — gates", () => {
       /already running/,
     );
   });
+
+  // KAN-923 — pre-claim match-config completeness gate. Fail loud BEFORE
+  // any state mutation if a field mapping targets external_id family but
+  // externalSourceTag is null. See KAN-923 reframe (2026-05-19).
+  describe("KAN-923 — pre-loop config completeness", () => {
+    it("(KAN-923 f) external_id mapping + null externalSourceTag → PRECONDITION_FAILED", async () => {
+      const seed = {
+        job: makeJob({
+          fieldMappings: [
+            { sourceColumn: "objectId", targetField: "external_id", confidence: 95 },
+            { sourceColumn: "email", targetField: "email", confidence: 99 },
+          ] as unknown as ImportJob["fieldMappings"],
+          externalSourceTag: null,
+        }),
+      };
+      const { prisma } = makeOrchestratorPrismaMock(seed);
+      await expect(runCommit(prisma, JOB_ID, TENANT_A)).rejects.toThrow(
+        /Match configuration is incomplete/,
+      );
+    });
+
+    it("(KAN-923 g) customer_external_id mapping + null externalSourceTag → PRECONDITION_FAILED", async () => {
+      const seed = {
+        job: makeJob({
+          fieldMappings: [
+            { sourceColumn: "AssocContact", targetField: "customer_external_id", confidence: 90 },
+          ] as unknown as ImportJob["fieldMappings"],
+          externalSourceTag: null,
+        }),
+      };
+      const { prisma } = makeOrchestratorPrismaMock(seed);
+      await expect(runCommit(prisma, JOB_ID, TENANT_A)).rejects.toThrow(
+        /Match configuration is incomplete/,
+      );
+    });
+
+    it("(KAN-923 h) deal_external_id mapping + null externalSourceTag → PRECONDITION_FAILED", async () => {
+      const seed = {
+        job: makeJob({
+          fieldMappings: [
+            { sourceColumn: "DealVID", targetField: "deal_external_id", confidence: 90 },
+          ] as unknown as ImportJob["fieldMappings"],
+          externalSourceTag: null,
+        }),
+      };
+      const { prisma } = makeOrchestratorPrismaMock(seed);
+      await expect(runCommit(prisma, JOB_ID, TENANT_A)).rejects.toThrow(
+        /Match configuration is incomplete/,
+      );
+    });
+
+    it("(KAN-923 i) no external_id family mappings + null externalSourceTag → proceeds (current heuristic mode)", async () => {
+      // Backwards-compat: pre-KAN-922 imports without any external_id-family
+      // mappings should still commit cleanly with null externalSourceTag.
+      const seed = {
+        job: makeJob({
+          fieldMappings: [
+            { sourceColumn: "email", targetField: "email", confidence: 99 },
+            { sourceColumn: "phone", targetField: "phone", confidence: 95 },
+          ] as unknown as ImportJob["fieldMappings"],
+          externalSourceTag: null,
+        }),
+      };
+      const { prisma } = makeOrchestratorPrismaMock(seed);
+      // No staging rows → fast path through orchestrator; we just need to
+      // verify the pre-loop gate doesn't throw.
+      await expect(runCommit(prisma, JOB_ID, TENANT_A)).resolves.toBeDefined();
+    });
+
+    it("(KAN-923 j) external_id mapping + valid externalSourceTag → proceeds (KAN-922 happy path)", async () => {
+      const seed = {
+        job: makeJob({
+          fieldMappings: [
+            { sourceColumn: "objectId", targetField: "external_id", confidence: 95 },
+          ] as unknown as ImportJob["fieldMappings"],
+          externalSourceTag: "hubspot",
+        }),
+      };
+      const { prisma } = makeOrchestratorPrismaMock(seed);
+      await expect(runCommit(prisma, JOB_ID, TENANT_A)).resolves.toBeDefined();
+    });
+  });
 });
 
 describe("runCommit — Contact happy path", () => {

@@ -255,6 +255,15 @@ export default function MappingPage() {
   const sourceTagMissing =
     anyFieldUsesExternalId && (externalSourceTag == null || externalSourceTag.trim() === '');
 
+  // KAN-923 — read-only mode when commit has started (running/succeeded/
+  // partial/failed). Backend gate rejects any saveMappings call against a
+  // non-pending job; UI mirrors that as a disabled state + banner so the
+  // user understands WHY they can't edit. Defensive `commitStartedAt`
+  // check covers any race window where status briefly stays 'pending' but
+  // the claim has already flipped commitStartedAt.
+  const isReadOnly =
+    job.commitStatus !== 'pending' || job.commitStartedAt != null;
+
   const onChangeTarget = (sourceColumn: string, newTarget: string) => {
     setLocalMappings((prev) => {
       if (!prev) return prev;
@@ -360,6 +369,27 @@ export default function MappingPage() {
       {/* State (b) — mapping table */}
       {hasMappings ? (
         <>
+          {/* KAN-923 — read-only banner when commit has started */}
+          {isReadOnly ? (
+            <div
+              className="flex items-start gap-2 p-3 mb-4 rounded-md border"
+              style={{
+                backgroundColor: 'var(--ds-warning-soft)',
+                color: 'var(--ds-warning-text)',
+                borderColor: 'var(--ds-warning)',
+              }}
+              role="status"
+            >
+              <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" aria-hidden />
+              <div className="text-sm">
+                <strong>This import has already been committed</strong>
+                {' '}
+                (commit status: <span className="font-mono">{job.commitStatus}</span>).
+                Match settings cannot be modified after commit. To change match
+                configuration, cancel this import and re-upload the CSV.
+              </div>
+            </div>
+          ) : null}
           {hasCollisions ? (
             <div
               className="flex items-start gap-2 p-3 mb-4 rounded-md border"
@@ -428,6 +458,7 @@ export default function MappingPage() {
                           <Select
                             value={m.targetField}
                             onValueChange={(v) => onChangeTarget(m.sourceColumn, v)}
+                            disabled={isReadOnly}
                           >
                             <SelectTrigger className="h-9 text-sm">
                               <SelectValue placeholder="Choose a target field…" />
@@ -491,6 +522,7 @@ export default function MappingPage() {
                 <Select
                   value={dedupMatchField ?? '_auto'}
                   onValueChange={(v) => setDedupMatchField(v === '_auto' ? null : v)}
+                  disabled={isReadOnly}
                 >
                   <SelectTrigger>
                     <SelectValue placeholder="Auto (heuristic)" />
@@ -521,10 +553,11 @@ export default function MappingPage() {
                     list="external-source-suggestions"
                     className={`w-full px-3 py-2 border rounded ${
                       sourceTagMissing ? 'border-red-500' : 'border-gray-300'
-                    }`}
+                    } disabled:bg-gray-100 disabled:cursor-not-allowed`}
                     placeholder="e.g. hubspot, stripe"
                     value={externalSourceTag ?? ''}
                     onChange={(e) => setExternalSourceTag(e.target.value || null)}
+                    disabled={isReadOnly}
                   />
                   <datalist id="external-source-suggestions">
                     <option value="stripe" />
@@ -550,6 +583,7 @@ export default function MappingPage() {
                   <Select
                     value={customerLinkField ?? 'email'}
                     onValueChange={(v) => setCustomerLinkField(v)}
+                    disabled={isReadOnly}
                   >
                     <SelectTrigger><SelectValue /></SelectTrigger>
                     <SelectContent>
@@ -569,6 +603,7 @@ export default function MappingPage() {
                   <Select
                     value={dealLinkField ?? '_none'}
                     onValueChange={(v) => setDealLinkField(v === '_none' ? null : v)}
+                    disabled={isReadOnly}
                   >
                     <SelectTrigger><SelectValue /></SelectTrigger>
                     <SelectContent>
@@ -592,7 +627,7 @@ export default function MappingPage() {
               <Button
                 variant="outline"
                 onClick={() => setReRunOpen(true)}
-                disabled={isRunning || isSaving}
+                disabled={isRunning || isSaving || isReadOnly}
               >
                 <Sparkles className="w-4 h-4 mr-1.5" /> Re-run AI mapping
               </Button>
@@ -604,7 +639,7 @@ export default function MappingPage() {
                 </Link>
                 <Button
                   onClick={onSave}
-                  disabled={isSaving || hasCollisions || sourceTagMissing}
+                  disabled={isSaving || hasCollisions || sourceTagMissing || isReadOnly}
                   variant="default"
                 >
                   {isSaving ? (
