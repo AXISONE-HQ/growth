@@ -43,6 +43,8 @@ import {
   runCommit,
   downloadCommitErrors,
   resolveContactByEmail,
+  resolveContactByMatchKey,
+  resolveDealByMatchKey,
   resolvePipelineByName,
   resolveStageByName,
 } from "../import-commit.js";
@@ -112,6 +114,171 @@ describe("resolvePipelineByName", () => {
     const prisma = { pipeline: { findFirst } } as unknown as PrismaClient;
     const res = await resolvePipelineByName(prisma, TENANT_A, null);
     expect(res).toBeNull();
+  });
+});
+
+describe("KAN-921 — multi-value external_id resolver", () => {
+  const TAG = "smoke_tag";
+
+  describe("resolveContactByMatchKey", () => {
+    it("(1) single value: passes through as 1-element OR (backwards compat)", async () => {
+      const findFirst = vi.fn().mockResolvedValue({ id: "ctc_a" });
+      const prisma = { contact: { findFirst } } as unknown as PrismaClient;
+      const res = await resolveContactByMatchKey(prisma, TENANT_A, {
+        kind: "external_id", source: TAG, value: "VID_A",
+      });
+      expect(res).toEqual({ id: "ctc_a" });
+      expect(findFirst).toHaveBeenCalledWith({
+        where: {
+          tenantId: TENANT_A,
+          OR: [{ externalIds: { path: [TAG], equals: "VID_A" } }],
+        },
+        select: { id: true },
+      });
+    });
+
+    it("(2) semicolon multi-value: split into N-element OR", async () => {
+      const findFirst = vi.fn().mockResolvedValue({ id: "ctc_a" });
+      const prisma = { contact: { findFirst } } as unknown as PrismaClient;
+      const res = await resolveContactByMatchKey(prisma, TENANT_A, {
+        kind: "external_id", source: TAG, value: "VID_A;VID_X",
+      });
+      expect(res).toEqual({ id: "ctc_a" });
+      const callArgs = findFirst.mock.calls[0]![0] as { where: { OR: unknown[] } };
+      expect(callArgs.where.OR).toEqual([
+        { externalIds: { path: [TAG], equals: "VID_A" } },
+        { externalIds: { path: [TAG], equals: "VID_X" } },
+      ]);
+    });
+
+    it("(3) order preserved: VID_X;VID_A keeps both candidates in OR", async () => {
+      const findFirst = vi.fn().mockResolvedValue({ id: "ctc_a" });
+      const prisma = { contact: { findFirst } } as unknown as PrismaClient;
+      await resolveContactByMatchKey(prisma, TENANT_A, {
+        kind: "external_id", source: TAG, value: "VID_X;VID_A",
+      });
+      const callArgs = findFirst.mock.calls[0]![0] as { where: { OR: unknown[] } };
+      expect(callArgs.where.OR).toHaveLength(2);
+    });
+
+    it("(4) both candidates match — returns first per Prisma findFirst default ordering", async () => {
+      const findFirst = vi.fn().mockResolvedValue({ id: "ctc_a" });
+      const prisma = { contact: { findFirst } } as unknown as PrismaClient;
+      const res = await resolveContactByMatchKey(prisma, TENANT_A, {
+        kind: "external_id", source: TAG, value: "VID_A;VID_B",
+      });
+      expect(res).toEqual({ id: "ctc_a" });
+    });
+
+    it("(5) all candidates miss — returns null", async () => {
+      const findFirst = vi.fn().mockResolvedValue(null);
+      const prisma = { contact: { findFirst } } as unknown as PrismaClient;
+      const res = await resolveContactByMatchKey(prisma, TENANT_A, {
+        kind: "external_id", source: TAG, value: "VID_X;VID_Y;VID_Z",
+      });
+      expect(res).toBeNull();
+    });
+
+    it("(6) comma delimiter", async () => {
+      const findFirst = vi.fn().mockResolvedValue({ id: "ctc_a" });
+      const prisma = { contact: { findFirst } } as unknown as PrismaClient;
+      await resolveContactByMatchKey(prisma, TENANT_A, {
+        kind: "external_id", source: TAG, value: "VID_A,VID_B",
+      });
+      const callArgs = findFirst.mock.calls[0]![0] as { where: { OR: unknown[] } };
+      expect(callArgs.where.OR).toHaveLength(2);
+    });
+
+    it("(7) pipe delimiter", async () => {
+      const findFirst = vi.fn().mockResolvedValue({ id: "ctc_a" });
+      const prisma = { contact: { findFirst } } as unknown as PrismaClient;
+      await resolveContactByMatchKey(prisma, TENANT_A, {
+        kind: "external_id", source: TAG, value: "VID_A|VID_B",
+      });
+      const callArgs = findFirst.mock.calls[0]![0] as { where: { OR: unknown[] } };
+      expect(callArgs.where.OR).toHaveLength(2);
+    });
+
+    it("(8) mixed delimiters: ; , |", async () => {
+      const findFirst = vi.fn().mockResolvedValue({ id: "ctc_a" });
+      const prisma = { contact: { findFirst } } as unknown as PrismaClient;
+      await resolveContactByMatchKey(prisma, TENANT_A, {
+        kind: "external_id", source: TAG, value: "VID_A;VID_B,VID_C|VID_D",
+      });
+      const callArgs = findFirst.mock.calls[0]![0] as { where: { OR: unknown[] } };
+      expect(callArgs.where.OR).toHaveLength(4);
+    });
+
+    it("(9) whitespace-padded: trim() each candidate", async () => {
+      const findFirst = vi.fn().mockResolvedValue({ id: "ctc_a" });
+      const prisma = { contact: { findFirst } } as unknown as PrismaClient;
+      await resolveContactByMatchKey(prisma, TENANT_A, {
+        kind: "external_id", source: TAG, value: "  VID_A ; VID_B  ",
+      });
+      const callArgs = findFirst.mock.calls[0]![0] as { where: { OR: unknown[] } };
+      expect(callArgs.where.OR).toEqual([
+        { externalIds: { path: [TAG], equals: "VID_A" } },
+        { externalIds: { path: [TAG], equals: "VID_B" } },
+      ]);
+    });
+
+    it("(10) empty string — returns null without DB call (existing key.value guard)", async () => {
+      const findFirst = vi.fn();
+      const prisma = { contact: { findFirst } } as unknown as PrismaClient;
+      const res = await resolveContactByMatchKey(prisma, TENANT_A, {
+        kind: "external_id", source: TAG, value: "",
+      });
+      expect(res).toBeNull();
+      expect(findFirst).not.toHaveBeenCalled();
+    });
+
+    it("(11) null value — returns null without DB call", async () => {
+      const findFirst = vi.fn();
+      const prisma = { contact: { findFirst } } as unknown as PrismaClient;
+      const res = await resolveContactByMatchKey(prisma, TENANT_A, {
+        kind: "external_id", source: TAG, value: null,
+      });
+      expect(res).toBeNull();
+      expect(findFirst).not.toHaveBeenCalled();
+    });
+
+    it("(12) all-empty after split: ';;;' — returns null after filter(Boolean)", async () => {
+      const findFirst = vi.fn();
+      const prisma = { contact: { findFirst } } as unknown as PrismaClient;
+      const res = await resolveContactByMatchKey(prisma, TENANT_A, {
+        kind: "external_id", source: TAG, value: ";;;",
+      });
+      expect(res).toBeNull();
+      expect(findFirst).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("resolveDealByMatchKey", () => {
+    it("(13) symmetric multi-value split + OR-batch", async () => {
+      const findFirst = vi.fn().mockResolvedValue({ id: "deal_a" });
+      const prisma = { deal: { findFirst } } as unknown as PrismaClient;
+      const res = await resolveDealByMatchKey(prisma, TENANT_A, {
+        kind: "external_id", source: TAG, value: "DEAL_X;DEAL_A",
+      });
+      expect(res).toEqual({ id: "deal_a" });
+      const callArgs = findFirst.mock.calls[0]![0] as { where: { OR: unknown[] } };
+      expect(callArgs.where.OR).toEqual([
+        { externalIds: { path: [TAG], equals: "DEAL_X" } },
+        { externalIds: { path: [TAG], equals: "DEAL_A" } },
+      ]);
+    });
+
+    it("(14) null/empty value — returns null without DB call", async () => {
+      const findFirst = vi.fn();
+      const prisma = { deal: { findFirst } } as unknown as PrismaClient;
+      expect(await resolveDealByMatchKey(prisma, TENANT_A, {
+        kind: "external_id", source: TAG, value: null,
+      })).toBeNull();
+      expect(await resolveDealByMatchKey(prisma, TENANT_A, {
+        kind: "external_id", source: TAG, value: "",
+      })).toBeNull();
+      expect(findFirst).not.toHaveBeenCalled();
+    });
   });
 });
 

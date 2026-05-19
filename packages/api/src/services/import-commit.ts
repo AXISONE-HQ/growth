@@ -163,14 +163,29 @@ export async function resolveContactByMatchKey(
         where: { tenantId, phone: key.value },
         select: { id: true },
       });
-    case "external_id":
+    case "external_id": {
+      // KAN-921 — accept multi-value delimited external_ids. HubSpot
+      // semicolon-delimits when a relation has >1 association (empirical
+      // evidence: importJob cmpcol6920ae1dqcvubia7u72, 6630/8528 = 77.7%
+      // of staged deals had vid1;vid2 shape). Split on common CSV-export
+      // delimiters, OR-batch the lookups, first-match-wins per Prisma's
+      // default ordering. Single-value inputs pass through unchanged
+      // (split returns [value], OR with one element ≡ prior exact-match).
+      const candidates = key.value
+        .split(/[;,|]/)
+        .map((v) => v.trim())
+        .filter(Boolean);
+      if (candidates.length === 0) return null;
       return prisma.contact.findFirst({
         where: {
           tenantId,
-          externalIds: { path: [key.source], equals: key.value },
+          OR: candidates.map((v) => ({
+            externalIds: { path: [key.source], equals: v },
+          })),
         },
         select: { id: true },
       });
+    }
   }
 }
 
@@ -197,14 +212,25 @@ export async function resolveDealByMatchKey(
 ): Promise<{ id: string } | null> {
   if (!key.value) return null;
   switch (key.kind) {
-    case "external_id":
+    case "external_id": {
+      // KAN-921 — symmetric to resolveContactByMatchKey's external_id
+      // case. See that branch for delimiter-set + first-match-wins
+      // rationale + empirical motivation.
+      const candidates = key.value
+        .split(/[;,|]/)
+        .map((v) => v.trim())
+        .filter(Boolean);
+      if (candidates.length === 0) return null;
       return prisma.deal.findFirst({
         where: {
           tenantId,
-          externalIds: { path: [key.source], equals: key.value },
+          OR: candidates.map((v) => ({
+            externalIds: { path: [key.source], equals: v },
+          })),
         },
         select: { id: true },
       });
+    }
   }
 }
 
