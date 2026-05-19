@@ -295,7 +295,7 @@ describe('KAN-922 — resolveContactByMatchKey', () => {
     });
   });
 
-  it('kind=external_id dispatches to JSON path filter', async () => {
+  it('kind=external_id dispatches to JSON path filter (post-KAN-921: OR-wrapped for multi-value support)', async () => {
     const fakePrisma = {
       contact: {
         findFirst: vi.fn().mockResolvedValue({ id: 'c3' }),
@@ -306,10 +306,13 @@ describe('KAN-922 — resolveContactByMatchKey', () => {
       't1',
       { kind: 'external_id', source: 'hubspot', value: 'hub_123' },
     );
+    // KAN-921: resolver now splits delimited values and OR-batches the
+    // lookups. Single-value inputs produce a 1-element OR — semantically
+    // equivalent to pre-KAN-921 exact-match.
     expect(fakePrisma.contact.findFirst).toHaveBeenCalledWith({
       where: {
         tenantId: 't1',
-        externalIds: { path: ['hubspot'], equals: 'hub_123' },
+        OR: [{ externalIds: { path: ['hubspot'], equals: 'hub_123' } }],
       },
       select: { id: true },
     });
@@ -325,7 +328,7 @@ describe('KAN-922 — resolveContactByMatchKey', () => {
 });
 
 describe('KAN-922 — resolveDealByMatchKey', () => {
-  it('kind=external_id dispatches to JSON path filter on Deal', async () => {
+  it('kind=external_id dispatches to JSON path filter on Deal (post-KAN-921: OR-wrapped)', async () => {
     const fakePrisma = {
       deal: {
         findFirst: vi.fn().mockResolvedValue({ id: 'd1' }),
@@ -337,10 +340,11 @@ describe('KAN-922 — resolveDealByMatchKey', () => {
       { kind: 'external_id', source: 'hubspot', value: 'opp_42' },
     );
     expect(result).toEqual({ id: 'd1' });
+    // KAN-921: see sibling test on resolveContactByMatchKey for rationale.
     expect(fakePrisma.deal.findFirst).toHaveBeenCalledWith({
       where: {
         tenantId: 't1',
-        externalIds: { path: ['hubspot'], equals: 'opp_42' },
+        OR: [{ externalIds: { path: ['hubspot'], equals: 'opp_42' } }],
       },
       select: { id: true },
     });
