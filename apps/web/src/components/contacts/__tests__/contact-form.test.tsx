@@ -85,6 +85,8 @@ const SAMPLE_CONTACT: ContactDetail = {
   outcomes: [],
   decisions: [],
   escalations: [],
+  orders: [],
+  _count: { orders: 0 },
   createdAt: '2026-05-19T00:00:00Z',
   updatedAt: '2026-05-19T00:00:00Z',
 };

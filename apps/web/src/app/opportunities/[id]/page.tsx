@@ -388,6 +388,35 @@ export default function DealDetailPage() {
         )}
       </section>
 
+      {/* Card 8.5 — Linked Orders (KAN-cohort-3.5). Capped take:20; the
+          truthful total comes from _count.orders so the header doesn't lie
+          when the list is truncated. */}
+      <section className="bg-white border rounded-lg p-6">
+        <h2 className="text-sm font-semibold mb-3" style={SECTION_HEADER_STYLE}>
+          Linked orders{' '}
+          <span style={MUTED_STYLE} className="font-normal">
+            ({deal._count.orders})
+          </span>
+        </h2>
+        {deal.orders.length === 0 ? (
+          <p className="text-sm" style={MUTED_STYLE}>No linked orders</p>
+        ) : (
+          <ul className="divide-y divide-gray-100">
+            {deal.orders.map((o) => (
+              <li key={o.id} className="py-2 text-sm">
+                <Link href={`/orders/${o.id}`} className="flex items-center justify-between hover:bg-gray-50 -mx-2 px-2 py-1 rounded">
+                  <span className="font-medium">{o.orderNumber}</span>
+                  <div className="flex items-center gap-3">
+                    <MoneyDisplay value={o.grandTotal} currency={o.currency} className="tabular-nums" />
+                    <StatusBadge kind="order-status" value={o.status} />
+                  </div>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
       {/* Card 9 — Raw data */}
       <section className="bg-white border rounded-lg p-6">
         <h2 className="text-sm font-semibold mb-3" style={SECTION_HEADER_STYLE}>Raw data</h2>

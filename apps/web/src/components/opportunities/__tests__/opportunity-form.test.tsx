@@ -136,6 +136,8 @@ const SAMPLE_DEAL: DealDetail = {
   pipeline: { id: 'pip_1', name: 'Sales' },
   stageHistory: [],
   owner: null,
+  orders: [],
+  _count: { orders: 0 },
 };
 
 describe('KAN-938 — OpportunityForm', () => {
