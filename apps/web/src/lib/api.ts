@@ -468,8 +468,27 @@ export interface MicroObjective {
   isDefault: boolean;
 }
 
+// KAN-932 / KAN-938 — Pipeline + nested Stage shape for cascading form
+// dropdowns. Backend returns active pipelines with stages ordered ASC.
+export interface PipelineWithStages {
+  id: string;
+  name: string;
+  description: string | null;
+  stages: Array<{
+    id: string;
+    name: string;
+    order: number;
+    isInitial: boolean;
+    isTerminal: boolean;
+  }>;
+}
+
 export const pipelinesApi = {
   list: () => trpcQuery<PipelineSummary[]>('pipelines.list'),
+
+  // KAN-932 — nested stages for cascading picker UX (Deal form first user).
+  listWithStages: () =>
+    trpcQuery<PipelineWithStages[]>('pipelines.listWithStages'),
 
   getById: (id: string) => trpcQuery<PipelineDetail>('pipelines.getById', { id }),
 
@@ -1217,6 +1236,37 @@ export interface DealDetail extends Omit<DealListItem, 'contact' | 'company'> {
   } | null;
 }
 
+// KAN-938 — Sub-cohort 3.3 Deal CRUD form payload. Mirrors the
+// deals.create/update Zod schemas in apps/api/src/router.ts.
+// 13 form-eligible fields across 4 cards.
+export interface DealCreateInput {
+  // Card 1 — Core
+  name?: string;
+  value?: string;
+  currency?: string;
+  probability?: number | null;
+  // Card 2 — Status & Outcomes
+  status?: string;
+  expectedCloseDate?: string | null;
+  lostReason?: string | null;
+  lostReasonDetail?: string | null;
+  wonProductSummary?: string | null;
+  // Card 3 — Pipeline & Stage (REQUIRED)
+  pipelineId: string;
+  currentStageId: string;
+  // Card 4 — Relationships
+  contactId: string;
+  companyId?: string | null;
+}
+
+export interface DealUpdateInput
+  extends Partial<Omit<DealCreateInput, "pipelineId" | "currentStageId" | "contactId">> {
+  id: string;
+  pipelineId?: string;
+  currentStageId?: string;
+  contactId?: string;
+}
+
 export const dealsApi = {
   list: (input?: {
     search?: string;
@@ -1230,6 +1280,11 @@ export const dealsApi = {
     trpcQuery<CursorPage<DealListItem>>('deals.list', input ?? { limit: 50 }),
   get: (id: string) =>
     trpcQuery<DealDetail>('deals.get', { id }),
+  // KAN-938 — Sub-cohort 3.3 CRUD mutations.
+  create: (input: DealCreateInput) =>
+    trpcMutation<DealDetail>('deals.create', input),
+  update: (input: DealUpdateInput) =>
+    trpcMutation<DealDetail>('deals.update', input),
 };
 
 export const recommendationsApi = {

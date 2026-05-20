@@ -1,12 +1,22 @@
 /**
- * KAN-883 — Deals router service (read-only).
+ * Deals router service.
  *
- * Net-new tRPC list/get surface for Deals. No prior Deal router existed —
- * Deal was managed entirely via the lead-received subscriber and the brain
- * pipeline. Surfacing it now for the CRM UI cohort.
+ * History:
+ *   - KAN-883 — read surface (listDeals, getDealById)
+ *   - KAN-938 — Sub-cohort 3.3 mutations (createDeal, updateDeal) for manual
+ *     CRUD forms. 13 form-eligible fields across 4 cards. Path β build from
+ *     scratch (mirrors KAN-937 contacts/companies mutation pattern).
  *
  * Architecture mirrors companies-router.ts: pure functions here, thin tRPC
  * layer in apps/api/src/router.ts, cursor pagination from _pagination.ts.
+ *
+ * Multi-tenant safety: every query filters by `tenantId`. Cross-tenant access
+ * surfaces as NOT_FOUND (no existence leak). FK validation helpers live in
+ * canonical-lookups.ts (KAN-938 lift).
+ *
+ * Soft delete: Deal currently LACKS `deletedAt` column. Update uses double-
+ * guard (id + tenantId) instead of the KAN-937 triple-guard. KAN-940 tracks
+ * the schema migration to add soft-delete + filter updates.
  */
 import { TRPCError } from "@trpc/server";
 import type { PrismaClient } from "@prisma/client";
@@ -15,6 +25,12 @@ import {
   decodeCursor,
   encodeCursor,
 } from "./_pagination.js";
+import {
+  assertCompanyInTenant,
+  assertContactInTenant,
+  assertPipelineInTenant,
+  assertStageInPipeline,
+} from "./canonical-lookups.js";
 
 export interface ListInput {
   search?: string;
@@ -28,6 +44,60 @@ export interface ListInput {
 
 export interface GetInput {
   id: string;
+}
+
+/**
+ * KAN-938 — Sub-cohort 3.3 form-eligible field surface.
+ *
+ * 13 user-editable fields across 4 cards:
+ *  - Card 1 Core: name, value (Decimal as string), currency, probability
+ *  - Card 2 Status & Outcomes: status, expectedCloseDate (yyyy-mm-dd),
+ *    lostReason, lostReasonDetail, wonProductSummary
+ *  - Card 3 Pipeline & Stage: pipelineId, currentStageId (cascading)
+ *  - Card 4 Relationships: contactId (required), companyId (optional)
+ *
+ * Deferred: ownerId (KAN-936), assignedAgentId, microObjectiveProgress,
+ * products, metadata, externalIds, customFields, aiContext (each needs
+ * its own UX in Sub-cohort 3.x).
+ *
+ * `closedAt` is system-managed (set on status transition) — NOT exposed.
+ */
+export interface CreateInput {
+  // Card 1 — Core
+  name?: string;
+  value?: string;
+  currency?: string;
+  probability?: number | null;
+  // Card 2 — Status & Outcomes (conditional fields driven by status)
+  status?: string;
+  expectedCloseDate?: string | null;
+  lostReason?: string | null;
+  lostReasonDetail?: string | null;
+  wonProductSummary?: string | null;
+  // Card 3 — Pipeline & Stage (REQUIRED FKs)
+  pipelineId: string;
+  currentStageId: string;
+  // Card 4 — Relationships
+  contactId: string;          // REQUIRED
+  companyId?: string | null;  // optional
+}
+
+export interface UpdateInput {
+  id: string;
+  // All fields optional on update — partial-update semantics.
+  name?: string;
+  value?: string;
+  currency?: string;
+  probability?: number | null;
+  status?: string;
+  expectedCloseDate?: string | null;
+  lostReason?: string | null;
+  lostReasonDetail?: string | null;
+  wonProductSummary?: string | null;
+  pipelineId?: string;
+  currentStageId?: string;
+  contactId?: string;
+  companyId?: string | null;
 }
 
 const LIST_SELECT = {
@@ -185,4 +255,115 @@ export async function getDealById(
   }
 
   return { ...deal, owner };
+}
+
+/**
+ * KAN-938 — Create a Deal with full FK validation.
+ *
+ * Required FKs: contactId, pipelineId, currentStageId — all must exist in
+ * the caller's tenant + stage must belong to the pipeline.
+ * Optional FK: companyId — validated if non-null.
+ *
+ * Conditional-field defensive null-clear lives in the FORM layer
+ * (`formToCreateInput` in opportunity-form.tsx) — caller is expected to
+ * have already cleared lostReason/lostReasonDetail when status≠'lost' and
+ * wonProductSummary when status≠'won'. Backend trusts the payload.
+ */
+export async function createDeal(
+  prisma: PrismaClient,
+  tenantId: string,
+  input: CreateInput,
+) {
+  // FK validations — order matters: tenant-scope first, then stage-in-pipeline.
+  await assertContactInTenant(prisma, tenantId, input.contactId);
+  await assertPipelineInTenant(prisma, tenantId, input.pipelineId);
+  await assertStageInPipeline(prisma, tenantId, input.pipelineId, input.currentStageId);
+  await assertCompanyInTenant(prisma, tenantId, input.companyId);
+
+  return prisma.deal.create({
+    data: {
+      tenantId,
+      // Required FKs
+      contactId: input.contactId,
+      pipelineId: input.pipelineId,
+      currentStageId: input.currentStageId,
+      // Card 1 — defaults handled by Prisma schema when undefined
+      ...(input.name !== undefined ? { name: input.name } : {}),
+      ...(input.value !== undefined ? { value: input.value } : {}),
+      ...(input.currency !== undefined ? { currency: input.currency } : {}),
+      probability: input.probability ?? null,
+      // Card 2
+      ...(input.status !== undefined ? { status: input.status as never } : {}),
+      expectedCloseDate: input.expectedCloseDate ?? null,
+      lostReason: (input.lostReason ?? null) as never,
+      lostReasonDetail: input.lostReasonDetail ?? null,
+      wonProductSummary: input.wonProductSummary ?? null,
+      // Card 4 — optional companyId (required contactId set above)
+      companyId: input.companyId ?? null,
+    },
+  });
+}
+
+/**
+ * KAN-938 — Update a Deal with partial-update semantics.
+ *
+ * Double-guard on existence: `id + tenantId` (Deal lacks `deletedAt`; see
+ * KAN-940 for the soft-delete migration). NOT_FOUND surfaces uniformly for
+ * cross-tenant access (no existence leak).
+ *
+ * Pipeline + Stage are tightly coupled: if either is provided, BOTH must
+ * be provided and consistent (matches the frontend cascading-picker UX
+ * that resets stageId on pipeline change).
+ */
+export async function updateDeal(
+  prisma: PrismaClient,
+  tenantId: string,
+  input: UpdateInput,
+) {
+  const existing = await prisma.deal.findFirst({
+    where: { id: input.id, tenantId },
+    select: { id: true },
+  });
+  if (!existing) {
+    throw new TRPCError({ code: "NOT_FOUND", message: "Deal not found" });
+  }
+
+  // FK validations — only for fields being updated.
+  await assertContactInTenant(prisma, tenantId, input.contactId);
+  await assertCompanyInTenant(prisma, tenantId, input.companyId);
+
+  // Pipeline + Stage tightly coupled: BOTH or NEITHER.
+  if (input.pipelineId !== undefined || input.currentStageId !== undefined) {
+    if (input.pipelineId === undefined || input.currentStageId === undefined) {
+      throw new TRPCError({
+        code: "BAD_REQUEST",
+        message: "pipelineId and currentStageId must be updated together",
+      });
+    }
+    await assertPipelineInTenant(prisma, tenantId, input.pipelineId);
+    await assertStageInPipeline(prisma, tenantId, input.pipelineId, input.currentStageId);
+  }
+
+  // Build a strict partial-update payload — only set fields explicitly
+  // provided. Avoids clobbering optional values to null when a partial
+  // update is sent.
+  const data: Record<string, unknown> = {};
+  if (input.name !== undefined) data.name = input.name;
+  if (input.value !== undefined) data.value = input.value;
+  if (input.currency !== undefined) data.currency = input.currency;
+  if (input.probability !== undefined) data.probability = input.probability;
+  if (input.status !== undefined) data.status = input.status;
+  if (input.expectedCloseDate !== undefined) data.expectedCloseDate = input.expectedCloseDate;
+  if (input.lostReason !== undefined) data.lostReason = input.lostReason;
+  if (input.lostReasonDetail !== undefined) data.lostReasonDetail = input.lostReasonDetail;
+  if (input.wonProductSummary !== undefined) data.wonProductSummary = input.wonProductSummary;
+  if (input.pipelineId !== undefined) data.pipelineId = input.pipelineId;
+  if (input.currentStageId !== undefined) data.currentStageId = input.currentStageId;
+  if (input.contactId !== undefined) data.contactId = input.contactId;
+  if (input.companyId !== undefined) data.companyId = input.companyId;
+
+  return prisma.deal.update({
+    where: { id: input.id },
+    data,
+  });
 }

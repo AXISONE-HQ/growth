@@ -14,7 +14,7 @@
  * inside the row stopPropagation so it doesn't trigger row nav.
  */
 
-import { Loader2, RefreshCw, Search, Target } from 'lucide-react';
+import { Loader2, Plus, RefreshCw, Search, Target } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
@@ -96,18 +96,35 @@ export function AllDealsView() {
             Every Deal in the pipeline. Filter by status, search by name.
           </p>
         </div>
-        <button
-          onClick={() => {
-            setAccumulatedItems([]);
-            setCursor(undefined);
-            void refetch();
-          }}
-          disabled={isFetching}
-          className="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50"
-        >
-          {isFetching ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-          Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          {/* KAN-938 — Sub-cohort 3.3 "+ New Deal" entry point. Placed inside
+              AllDealsView (not the parent /opportunities/page.tsx header)
+              so it only surfaces on this tab — not on AI Segments. */}
+          <Link
+            href="/opportunities/new"
+            className="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-md border"
+            style={{
+              backgroundColor: 'var(--ds-violet-600)',
+              borderColor: 'var(--ds-violet-600)',
+              color: '#fff',
+            }}
+          >
+            <Plus className="w-4 h-4" />
+            New deal
+          </Link>
+          <button
+            onClick={() => {
+              setAccumulatedItems([]);
+              setCursor(undefined);
+              void refetch();
+            }}
+            disabled={isFetching}
+            className="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50"
+          >
+            {isFetching ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+            Refresh
+          </button>
+        </div>
       </div>
 
       {/* Search */}

@@ -28,6 +28,7 @@ import {
   Bot,
   FileText,
   Filter,
+  Pencil,
   Server,
   Target,
   User as UserIcon,
@@ -151,7 +152,25 @@ export default function DealDetailPage() {
             <h1 className="text-xl font-semibold" style={SECTION_HEADER_STYLE}>{deal.name}</h1>
             <p className="text-xs mt-0.5" style={MUTED_STYLE}>Deal ID: {deal.id}</p>
           </div>
-          <StatusBadge kind="deal-status" value={deal.status} />
+          <div className="flex items-center gap-3">
+            <StatusBadge kind="deal-status" value={deal.status} />
+            {/* KAN-938 — Sub-cohort 3.3 Edit affordance. Placed in detail
+                header (not row-level) — row-click already routes to detail
+                via AllDealsView's stopPropagation pattern, and adding a per-
+                row Edit would compete with that interaction. */}
+            <Link
+              href={`/opportunities/${deal.id}/edit`}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-md border"
+              style={{
+                backgroundColor: 'var(--ds-surface-default)',
+                borderColor: 'var(--ds-border-default)',
+                color: 'var(--ds-ink-secondary)',
+              }}
+            >
+              <Pencil className="w-3.5 h-3.5" />
+              Edit
+            </Link>
+          </div>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3 text-sm">
           <Field

@@ -20,6 +20,13 @@
  */
 import { TRPCError } from '@trpc/server';
 import type { PrismaClient } from '@prisma/client';
+import { assertCompanyInTenant } from './canonical-lookups.js';
+
+// KAN-938 — `assertCompanyInTenant` lifted to canonical-lookups.ts for reuse
+// across Cohort 3.x manual-CRUD procedures (Deal, Order). Re-exported here
+// for backwards compat with any existing internal imports + the identity-
+// check tests that pin behavior post-lift.
+export { assertCompanyInTenant };
 
 export interface ListInput {
   search?: string;
@@ -235,32 +242,6 @@ export async function getContactById(
     throw new TRPCError({ code: 'NOT_FOUND', message: 'Contact not found' });
   }
   return row;
-}
-
-/**
- * KAN-934 — Validate companyId belongs to the same tenant.
- * Throws BAD_REQUEST if the FK references a Company in a different tenant
- * (or doesn't exist at all). Returns silently for null/undefined.
- *
- * Pattern matches the rest of the codebase's FK-validation discipline —
- * never trust client-supplied FK ids; always re-verify tenant scope.
- */
-async function assertCompanyInTenant(
-  prisma: PrismaClient,
-  tenantId: string,
-  companyId: string | null | undefined,
-): Promise<void> {
-  if (companyId == null) return;
-  const found = await prisma.company.findFirst({
-    where: { id: companyId, tenantId },
-    select: { id: true },
-  });
-  if (!found) {
-    throw new TRPCError({
-      code: 'BAD_REQUEST',
-      message: 'Company not found in this tenant',
-    });
-  }
 }
 
 export async function createContact(
