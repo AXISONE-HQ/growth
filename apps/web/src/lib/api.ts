@@ -1009,6 +1009,9 @@ export interface CompanyDetail extends CompanyListItem {
     currency: string;
     placedAt: string;
   }>;
+  // KAN-936 — owner hydration via the new @relation; null when ownerId
+  // is unset.
+  owner: { id: string; name: string | null; email: string } | null;
 }
 
 export interface CursorPage<T> {
@@ -1016,6 +1019,18 @@ export interface CursorPage<T> {
   nextCursor: string | null;
   totalCount: number;
 }
+
+// KAN-936 — User list item shape for AsyncSelect User picker.
+export interface UserListItem {
+  id: string;
+  name: string | null;
+  email: string;
+}
+
+export const usersApi = {
+  list: (input?: { search?: string; limit?: number }) =>
+    trpcQuery<{ items: UserListItem[] }>('users.list', input ?? { limit: 50 }),
+};
 
 // KAN-937 — Sub-cohort 3.2 Company CRUD form payload. Mirrors the
 // companies.create/update Zod schemas in apps/api/src/router.ts.
@@ -1056,6 +1071,8 @@ export interface CompanyCreateInput {
   incorporationJurisdiction?: string | null;
   isTaxExempt?: boolean;
   taxExemptionCertificate?: string | null;
+  // KAN-936 — optional FK to User
+  ownerId?: string | null;
 }
 
 export interface CompanyUpdateInput extends Partial<CompanyCreateInput> {
@@ -1311,6 +1328,8 @@ export interface DealCreateInput {
   // Card 4 — Relationships
   contactId: string;
   companyId?: string | null;
+  // KAN-936 — optional User FK (formalized via @relation in this PR)
+  ownerId?: string | null;
 }
 
 export interface DealUpdateInput

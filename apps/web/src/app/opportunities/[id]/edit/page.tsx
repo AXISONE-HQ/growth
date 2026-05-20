@@ -59,6 +59,7 @@ export default function EditOpportunityPage() {
       initialValues={dealToFormValues(deal)}
       initialContactLabel={formatContactLabel(deal.contact)}
       initialCompanyLabel={deal.company?.name}
+      initialOwnerLabel={deal.owner ? (deal.owner.name ? `${deal.owner.name} <${deal.owner.email}>` : deal.owner.email) : undefined}
     />
   );
 }

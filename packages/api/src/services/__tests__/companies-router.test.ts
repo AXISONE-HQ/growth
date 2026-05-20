@@ -159,9 +159,37 @@ function evalWhere(c: FakeCompany, where: Record<string, unknown>): boolean {
   return true;
 }
 
-function makePrisma(rows: FakeCompany[]) {
+interface FakeUser {
+  id: string;
+  tenantId: string;
+  name: string | null;
+  email: string;
+}
+
+function makePrisma(rows: FakeCompany[], users: FakeUser[] = []) {
   let nextId = rows.length;
   return {
+    // KAN-936 — assertOwnerInTenant calls prisma.user.findFirst scoped to
+    // { id, tenantId }; fake mirrors the multi-tenant filter so cross-tenant
+    // owners surface as null (→ BAD_REQUEST in the service).
+    user: {
+      findFirst: async ({
+        where,
+        select,
+      }: {
+        where: { id: string; tenantId: string };
+        select?: Record<string, true>;
+      }) => {
+        const u = users.find(
+          (u) => u.id === where.id && u.tenantId === where.tenantId,
+        );
+        if (!u) return null;
+        if (!select) return u;
+        const out: Record<string, unknown> = {};
+        for (const k of Object.keys(select)) out[k] = (u as Record<string, unknown>)[k];
+        return out;
+      },
+    },
     company: {
       findMany: async ({
         where,
@@ -577,5 +605,81 @@ describe("KAN-937 — updateCompany", () => {
       updateCompany(prisma, TENANT_A, { id: "co_1", name: "Resurrect" }),
     ).rejects.toMatchObject({ code: "NOT_FOUND" });
     expect(data[0].name).toBe("Acme Inc");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// KAN-936 — Company owner FK formalized as @relation + cross-tenant guard.
+//
+// Coverage:
+//   - createCompany persists ownerId when the user is in-tenant
+//   - createCompany rejects cross-tenant ownerId → BAD_REQUEST (no row written)
+//   - updateCompany persists ownerId when in-tenant
+//   - updateCompany rejects cross-tenant ownerId → BAD_REQUEST
+//   - updateCompany explicit null clears ownerId
+// ─────────────────────────────────────────────────────────────────────
+describe("KAN-936 — Company owner FK + cross-tenant guard", () => {
+  const U_A = "u_in_tenant_A";
+  const U_B = "u_in_tenant_B";
+
+  it("createCompany persists ownerId when user is in the same tenant", async () => {
+    const data: FakeCompany[] = [];
+    const prisma = makePrisma(
+      data,
+      [{ id: U_A, tenantId: TENANT_A, name: "Alice", email: "alice@a.com" }],
+    );
+    await createCompany(prisma, TENANT_A, {
+      name: "Owned Co",
+      ownerId: U_A,
+    });
+    expect(data).toHaveLength(1);
+    expect(data[0].ownerId).toBe(U_A);
+  });
+
+  it("createCompany rejects cross-tenant ownerId → BAD_REQUEST, no row written", async () => {
+    const data: FakeCompany[] = [];
+    const prisma = makePrisma(
+      data,
+      [{ id: U_B, tenantId: TENANT_B, name: "Spy", email: "spy@b.com" }],
+    );
+    await expect(
+      createCompany(prisma, TENANT_A, { name: "Hijack Co", ownerId: U_B }),
+    ).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+      message: expect.stringMatching(/owner.*not found/i),
+    });
+    expect(data).toHaveLength(0);
+  });
+
+  it("updateCompany persists ownerId when user is in the same tenant", async () => {
+    const data = [company({ id: "co_1", tenantId: TENANT_A, ownerId: null })];
+    const prisma = makePrisma(
+      data,
+      [{ id: U_A, tenantId: TENANT_A, name: "Alice", email: "alice@a.com" }],
+    );
+    await updateCompany(prisma, TENANT_A, { id: "co_1", ownerId: U_A });
+    expect(data[0].ownerId).toBe(U_A);
+  });
+
+  it("updateCompany rejects cross-tenant ownerId → BAD_REQUEST", async () => {
+    const data = [company({ id: "co_1", tenantId: TENANT_A, ownerId: null })];
+    const prisma = makePrisma(
+      data,
+      [{ id: U_B, tenantId: TENANT_B, name: "Spy", email: "spy@b.com" }],
+    );
+    await expect(
+      updateCompany(prisma, TENANT_A, { id: "co_1", ownerId: U_B }),
+    ).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+      message: expect.stringMatching(/owner.*not found/i),
+    });
+    expect(data[0].ownerId).toBeNull();
+  });
+
+  it("updateCompany explicit null clears ownerId (bypasses user existence check)", async () => {
+    const data = [company({ id: "co_1", tenantId: TENANT_A, ownerId: U_A })];
+    const prisma = makePrisma(data); // no users — null bypasses the lookup
+    await updateCompany(prisma, TENANT_A, { id: "co_1", ownerId: null });
+    expect(data[0].ownerId).toBeNull();
   });
 });

@@ -28,6 +28,7 @@ import {
 import {
   assertCompanyInTenant,
   assertContactInTenant,
+  assertOwnerInTenant,
   assertPipelineInTenant,
   assertStageInPipeline,
   toDate,
@@ -87,6 +88,7 @@ export interface CreateInput {
   // Card 4 — Relationships
   contactId: string;          // REQUIRED
   companyId?: string | null;  // optional
+  ownerId?: string | null;    // KAN-936 optional FK to User
 }
 
 export interface UpdateInput {
@@ -105,6 +107,7 @@ export interface UpdateInput {
   currentStageId?: string;
   contactId?: string;
   companyId?: string | null;
+  ownerId?: string | null;    // KAN-936 optional FK to User
 }
 
 const LIST_SELECT = {
@@ -252,10 +255,12 @@ export async function getDealById(
     throw new TRPCError({ code: "NOT_FOUND", message: "Deal not found" });
   }
 
-  // KAN-888 — Manual owner hydration. Deal.ownerId is a String? with no
-  // Prisma @relation to User (memory: feedback_phase_1_pivot_kan_786...).
-  // Future cleanup tracked in the User-relations follow-up — once that
-  // migration lands, this becomes an `include: { owner: ... }`.
+  // KAN-936 — manual owner hydration is now redundant because the relation
+  // is declared on the schema. But the include above doesn't pull `owner`
+  // (it was added in this PR; not yet wired into the existing include
+  // block to avoid a wider audit). Manual hydration kept as a safety net
+  // for the same shape; will collapse to `include: { owner }` in a future
+  // PR. Either path returns the same { id, name, email } subset.
   let owner: { id: string; name: string | null; email: string } | null = null;
   if (deal.ownerId) {
     owner = await prisma.user.findFirst({
@@ -289,6 +294,8 @@ export async function createDeal(
   await assertPipelineInTenant(prisma, tenantId, input.pipelineId);
   await assertStageInPipeline(prisma, tenantId, input.pipelineId, input.currentStageId);
   await assertCompanyInTenant(prisma, tenantId, input.companyId);
+  // KAN-936 — owner FK validation (formalized in this PR).
+  await assertOwnerInTenant(prisma, tenantId, input.ownerId);
 
   return prisma.deal.create({
     data: {
@@ -309,8 +316,9 @@ export async function createDeal(
       lostReason: (input.lostReason ?? null) as never,
       lostReasonDetail: input.lostReasonDetail ?? null,
       wonProductSummary: input.wonProductSummary ?? null,
-      // Card 4 — optional companyId (required contactId set above)
+      // Card 4 — optional companyId + ownerId (required contactId set above)
       companyId: input.companyId ?? null,
+      ownerId: input.ownerId ?? null,
     },
   });
 }
@@ -345,6 +353,8 @@ export async function updateDeal(
   // FK validations — only for fields being updated.
   await assertContactInTenant(prisma, tenantId, input.contactId);
   await assertCompanyInTenant(prisma, tenantId, input.companyId);
+  // KAN-936 — owner FK validation (formalized in this PR).
+  await assertOwnerInTenant(prisma, tenantId, input.ownerId);
 
   // Pipeline + Stage tightly coupled: BOTH or NEITHER.
   if (input.pipelineId !== undefined || input.currentStageId !== undefined) {
@@ -376,6 +386,8 @@ export async function updateDeal(
   if (input.currentStageId !== undefined) data.currentStageId = input.currentStageId;
   if (input.contactId !== undefined) data.contactId = input.contactId;
   if (input.companyId !== undefined) data.companyId = input.companyId;
+  // KAN-936 — optional ownerId (User FK). Null clears the owner.
+  if (input.ownerId !== undefined) data.ownerId = input.ownerId;
 
   return prisma.deal.update({
     where: { id: input.id },

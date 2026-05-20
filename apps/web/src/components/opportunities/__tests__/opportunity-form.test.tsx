@@ -329,6 +329,7 @@ describe('KAN-938 — OpportunityForm', () => {
           currentStageId: 'stg_1a',
           contactId: 'ct_1',
           companyId: 'co_1',
+          ownerId: null,
         }}
         initialContactLabel="Alice"
       />,
@@ -373,6 +374,7 @@ describe('KAN-938 — OpportunityForm', () => {
           currentStageId: 'stg_1a',
           contactId: 'ct_1',
           companyId: 'co_1',
+          ownerId: null,
         }}
         initialContactLabel="Alice"
       />,

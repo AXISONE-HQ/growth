@@ -34,11 +34,14 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { DecimalInput } from '@/components/ui/decimal-input';
+import { AsyncSelect } from '@/components/ui/async-select';
 import { EntityFormShell } from '@/components/forms/entity-form-shell';
 import {
   companiesApi,
+  usersApi,
   type CompanyDetail,
   type CompanyCreateInput,
+  type UserListItem,
 } from '@/lib/api';
 
 const SIZE_OPTIONS = [
@@ -106,6 +109,8 @@ export interface CompanyFormValues {
   incorporationJurisdiction: string;
   isTaxExempt: boolean;
   taxExemptionCertificate: string;
+  // KAN-936 — optional FK to User (AsyncSelect picker in Card 1)
+  ownerId: string | null;
 }
 
 const EMPTY_VALUES: CompanyFormValues = {
@@ -139,6 +144,7 @@ const EMPTY_VALUES: CompanyFormValues = {
   incorporationJurisdiction: '',
   isTaxExempt: false,
   taxExemptionCertificate: '',
+  ownerId: null,
 };
 
 /** Map a server Company (nullable fields) to form values. */
@@ -174,6 +180,7 @@ export function companyToFormValues(c: CompanyDetail): CompanyFormValues {
     incorporationJurisdiction: c.incorporationJurisdiction ?? '',
     isTaxExempt: c.isTaxExempt,
     taxExemptionCertificate: c.taxExemptionCertificate ?? '',
+    ownerId: c.ownerId,
   };
 }
 
@@ -212,6 +219,7 @@ function formToCreateInput(v: CompanyFormValues): CompanyCreateInput {
     incorporationJurisdiction: nullable(v.incorporationJurisdiction),
     isTaxExempt: v.isTaxExempt,
     taxExemptionCertificate: v.isTaxExempt ? nullable(v.taxExemptionCertificate) : null,
+    ownerId: v.ownerId,
   };
 }
 
@@ -232,12 +240,15 @@ export interface CompanyFormProps {
   mode: 'create' | 'edit';
   initialValues?: CompanyFormValues;
   companyId?: string;
+  /** Pre-loaded owner label for edit mode (KAN-936). */
+  initialOwnerLabel?: string;
 }
 
 export function CompanyForm({
   mode,
   initialValues,
   companyId,
+  initialOwnerLabel,
 }: CompanyFormProps) {
   const router = useRouter();
   const queryClient = useQueryClient();
@@ -431,6 +442,22 @@ export function CompanyForm({
               onChange={(e) => setValues({ ...values, description: e.target.value })}
               rows={3}
               placeholder="What this company does, who they are…"
+            />
+          </div>
+          <div className="col-span-2">
+            {/* KAN-936 — Owner picker (optional FK to User; clearable). */}
+            <Label style={LABEL_STYLE}>Owner</Label>
+            <AsyncSelect<UserListItem>
+              fetchOptions={async (search) => {
+                const result = await usersApi.list({ search: search || undefined, limit: 50 });
+                return result.items;
+              }}
+              getOptionLabel={(u) => u.name ? `${u.name} <${u.email}>` : u.email}
+              getOptionValue={(u) => u.id}
+              value={values.ownerId}
+              onChange={(id) => setValues({ ...values, ownerId: id })}
+              placeholder="Search users…"
+              selectedLabel={initialOwnerLabel}
             />
           </div>
         </CardContent>

@@ -127,6 +127,11 @@ model User {
   resolvedEscalations Escalation[] @relation("ResolvedByUser")
   // KAN-896 — Ingestion Cohort 2.1a (upload backend). Single relation, no name needed.
   imports             ImportJob[]
+  // KAN-936 — back-relations for Deal.owner + Company.owner FKs. Optional
+  // on the entity side (`ownerId String?`) — nullable; Prisma default for
+  // optional relations on user deletion is SET NULL.
+  ownedDeals          Deal[]       @relation("DealOwner")
+  ownedCompanies      Company[]    @relation("CompanyOwner")
 
   @@index([tenantId])
   @@map("users")
@@ -1382,6 +1387,9 @@ model Deal {
   contact       Contact            @relation(fields: [contactId], references: [id], onDelete: Cascade)
   pipeline      Pipeline           @relation(fields: [pipelineId], references: [id], onDelete: Restrict)
   currentStage  Stage              @relation("DealCurrentStage", fields: [currentStageId], references: [id], onDelete: Restrict)
+  // KAN-936 — formalize Deal.ownerId → User FK (was dangling string). Nullable;
+  // SET NULL on User delete (Prisma default for optional relations).
+  owner         User?              @relation("DealOwner", fields: [ownerId], references: [id])
   engagements   Engagement[]
   stageHistory  DealStageHistory[]
   deferredSends DeferredSend[]
@@ -1873,6 +1881,9 @@ model Company {
   contacts Contact[]
   deals    Deal[]
   orders   Order[]
+  // KAN-936 — formalize Company.ownerId → User FK (was dangling string).
+  // Nullable; SET NULL on User delete.
+  owner    User?     @relation("CompanyOwner", fields: [ownerId], references: [id])
 
   @@index([tenantId, name])
   @@index([tenantId, domain])
