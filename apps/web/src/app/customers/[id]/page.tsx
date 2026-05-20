@@ -60,14 +60,19 @@ function initials(c: ContactDetail): string {
   return '??';
 }
 
+/** KAN-943 — TZ-safe date rendering. `new Date(iso).toLocaleDateString()`
+ *  without a `timeZone` option shifts the rendered day by the browser's
+ *  UTC offset (off-by-one in TZs west of UTC). `timeZone: 'UTC'` aligns
+ *  the detail-page display with the edit-form's UTC-day pre-population.
+ *  Broader non-entity audit tracked in KAN-947. */
 function fmtDate(iso: string | null | undefined): string {
   if (!iso) return '—';
-  return new Date(iso).toLocaleDateString();
+  return new Date(iso).toLocaleDateString('en-US', { timeZone: 'UTC' });
 }
 
 function fmtDateTime(iso: string | null | undefined): string {
   if (!iso) return '—';
-  return new Date(iso).toLocaleString();
+  return new Date(iso).toLocaleString('en-US', { timeZone: 'UTC' });
 }
 
 function signalClassTone(sc: string): { bg: string; fg: string; border: string } {

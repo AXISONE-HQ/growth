@@ -70,10 +70,17 @@ export async function trpcQuery<T = unknown>(
   return json.result?.data as T;
 }
 
-/** Call a tRPC mutation (POST /trpc/<path> with JSON body) */
+/** Call a tRPC mutation (POST /trpc/<path> with JSON body).
+ *
+ *  KAN-944 — Input parameter relaxed from `Record<string, unknown>` to
+ *  `object` so typed input interfaces (ContactCreateInput, DealUpdateInput,
+ *  etc.) satisfy the constraint without requiring `[key: string]: unknown`
+ *  index signatures on every interface. `JSON.stringify` accepts any value;
+ *  the `object` constraint just prevents primitives from being passed.
+ *  Caught during Batch 1 typecheck — 8 pre-existing errors swept here. */
 export async function trpcMutation<T = unknown>(
   path: string,
-  input: Record<string, unknown>
+  input: object
 ): Promise<T> {
   const res = await fetch(`${API_BASE}/trpc/${path}`, {
     method: 'POST',

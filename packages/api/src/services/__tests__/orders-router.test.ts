@@ -396,24 +396,36 @@ describe("KAN-893 — orders.list?dealId tRPC input validator", () => {
   });
 });
 
-// KAN-945 — Q9 regression. Sibling of the KAN-893 fix-up; this one was
-// missed in KAN-893. Contact.id is @default(cuid()), so the orders.list
-// contactId filter Zod must accept CUID. Broader sweep: KAN-944.
-describe("KAN-945 — orders.list?contactId tRPC input validator (Q9 fix)", () => {
+// KAN-944 — orders.list?contactId Zod validator. Contact.id is
+// @default(uuid()) (verified directly in schema.prisma — KAN-944 sweep).
+//
+// History:
+//  - KAN-893 originally fixed Deal/Order/Company `.uuid() → .cuid()` for
+//    cuid-defaulted entity ids. KAN-893 did NOT touch contactId because
+//    Contact.id is uuid (correctly).
+//  - KAN-945 Q9 (2026-05-20) erroneously flipped contactId from .uuid()
+//    to .cuid() based on a wrong-premise audit claim. The smoke didn't
+//    catch this because the orders.list?contactId filter wasn't exercised.
+//  - KAN-944 (this revert, 2026-05-20) restores .uuid(). Per-procedure
+//    sweep of all 82 .uuid()/.cuid() in router.ts confirmed this was the
+//    ONLY validator mismatch.
+describe("KAN-944 — orders.list?contactId tRPC input validator", () => {
   const inputSchema = z.object({
-    contactId: z.string().cuid().optional(),
+    contactId: z.string().uuid().optional(),
   });
 
-  it("accepts CUID-shaped contactId filter (post-KAN-945 Q9 fix)", () => {
-    const result = inputSchema.safeParse({ contactId: "cmou3yc2o0002a9tnt34f5q81" });
+  it("accepts UUID-shaped contactId filter (Contact.id is uuid)", () => {
+    const result = inputSchema.safeParse({
+      contactId: "11111111-1111-1111-1111-111111111111",
+    });
     expect(result.success).toBe(true);
   });
 
-  it("rejects UUID-shaped contactId (would silently fail pre-fix)", () => {
-    // Pre-fix, contactId was z.string().uuid().optional() — so a CUID would
-    // be REJECTED. Post-fix, the validator accepts CUID and rejects UUID
-    // (UUID is no longer in the contract).
-    const result = inputSchema.safeParse({ contactId: "11111111-1111-1111-1111-111111111111" });
+  it("rejects CUID-shaped contactId (KAN-945 Q9 misfire would have accepted)", () => {
+    // Post-revert, the validator rejects CUID. KAN-945 Q9 had inverted this.
+    const result = inputSchema.safeParse({
+      contactId: "cmou3yc2o0002a9tnt34f5q81",
+    });
     expect(result.success).toBe(false);
   });
 });

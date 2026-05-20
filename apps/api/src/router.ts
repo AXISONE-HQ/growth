@@ -670,10 +670,14 @@ const ordersRouter = router({
       z.object({
         search: z.string().optional(),
         status: z.string().optional(),
-        // KAN-945 Q9 — Contact.id is @default(cuid()), NOT uuid (KAN-893
-        // fixed the symmetric Deal validator; this is the sibling instance).
-        // Broader sweep tracked in KAN-944.
-        contactId: z.string().cuid().optional(),
+        // KAN-944 — Contact.id is @default(uuid()) — verified directly in
+        // packages/db/prisma/schema.prisma. KAN-945 Q9 erroneously flipped
+        // this to .cuid() based on a wrong-premise audit claim (the smoke
+        // didn't catch it because the contactId filter wasn't exercised).
+        // Reverted here as part of the KAN-944 sweep. Per-procedure schema
+        // cross-reference confirmed this is the ONLY validator mismatch in
+        // router.ts — all 81 other .uuid()/.cuid() occurrences are correct.
+        contactId: z.string().uuid().optional(),
         companyId: z.string().cuid().optional(),
         dealId: z.string().cuid().optional(),
         limit: z.number().int().min(1).max(200).default(50),
