@@ -452,6 +452,9 @@ describe("KAN-954 — Formspree parser integration (happy path)", () => {
     expect(res.status).toBe(200);
 
     // Contact upserted with the real submitter, NOT noreply@formspree.io
+    // (firstName/lastName/companyName/source — but NOT customFields,
+    // because Contact has no custom_fields column; that bag flows
+    // through event.metadata.customFields to Deal.customFields)
     expect(hooks.upsertContactFromEmail).toHaveBeenCalledWith(
       expect.objectContaining({
         email: "cowork-pipeline-test@e2etest.co",
@@ -459,21 +462,22 @@ describe("KAN-954 — Formspree parser integration (happy path)", () => {
         lastName: "Pipeline Test",
         companyName: "E2E Test Co",
         source: "web_form",
-        customFields: expect.objectContaining({
-          formSource: "growth-landing-v1",
-          leadType: "early_access_request",
-          role: "Founder / CEO",
-          monthlyLeadVolume: "100-500",
-        }),
       }),
     );
 
-    // Event metadata carries dealName + vendor + formSource/leadType
+    // Event metadata carries dealName + vendor + formSource/leadType +
+    // customFields (consumer puts the latter on Deal.customFields)
     const event = ctx.publishedEvents[0];
     expect(event.metadata.dealName).toBe("Early-access — E2E Test Co");
     expect(event.metadata.vendor).toBe("formspree");
     expect(event.metadata.formSource).toBe("growth-landing-v1");
     expect(event.metadata.leadType).toBe("early_access_request");
+    expect(event.metadata.customFields).toMatchObject({
+      formSource: "growth-landing-v1",
+      leadType: "early_access_request",
+      role: "Founder / CEO",
+      monthlyLeadVolume: "100-500",
+    });
     // fromAddress preserved (audit-trail signal — Formspree forwarded from noreply)
     expect(event.metadata.fromAddress).toBe("noreply@formspree.io");
     // bodyPreview now populated from the fetched specimen (closes the
@@ -577,16 +581,19 @@ describe("KAN-954 — non-Formspree regression (parser is a no-op)", () => {
       }),
     );
     // Critically: NO Formspree-specific attribution leaked to non-Formspree
-    const upsertArg = hooks.upsertContactFromEmail.mock.calls[0][0];
-    expect(upsertArg.companyName).toBeNull();
-    expect(upsertArg.source).toBeUndefined();
-    expect(upsertArg.customFields).toBeUndefined();
-    // Event has no vendor/formSource/leadType/dealName
+    expect(hooks.upsertContactFromEmail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        companyName: null,
+        source: undefined,
+      }),
+    );
+    // Event has no vendor/formSource/leadType/dealName/customFields
     const event = ctx.publishedEvents[0];
     expect(event.metadata.vendor).toBeUndefined();
     expect(event.metadata.formSource).toBeUndefined();
     expect(event.metadata.leadType).toBeUndefined();
     expect(event.metadata.dealName).toBeUndefined();
+    expect(event.metadata.customFields).toBeUndefined();
     // But bodyPreview IS populated from the fetched text — D5 win
     expect(event.metadata.bodyPreview).toContain("enterprise tier");
   });

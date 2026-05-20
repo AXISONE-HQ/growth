@@ -107,10 +107,12 @@ interface ResendInboundPayload {
 export interface InboundHandlerHooks {
   resolveTenantBySlug: (slug: string) => Promise<{ id: string; inboxDkimStrict: boolean } | null>;
   /**
-   * KAN-954 — extended with optional `companyName`, `customFields`, and
-   * `source` so Formspree-parsed leads can write the full identity. All
-   * new fields are optional; pre-KAN-954 callers (direct inbound email,
-   * non-Formspree) pass only the original 4 and behavior is unchanged.
+   * KAN-954 — extended with optional `companyName` + `source` so
+   * Formspree-parsed leads can write firstName/lastName/companyName/source.
+   * Form-field bag (role / monthlyLeadVolume / biggestPain) is NOT passed
+   * here because Contact has no customFields column — those fields flow
+   * through LeadReceivedEvent.metadata.customFields and land on Deal in
+   * the consumer.
    */
   upsertContactFromEmail: (input: {
     tenantId: string;
@@ -118,7 +120,6 @@ export interface InboundHandlerHooks {
     firstName: string | null;
     lastName: string | null;
     companyName?: string | null;
-    customFields?: Record<string, unknown>;
     source?: "email_inbox" | "web_form";
   }) => Promise<{ id: string }>;
   writeLeadInboxEvent: (row: LeadInboxEventRow) => Promise<void>;
@@ -437,7 +438,6 @@ resendInboundWebhookApp.post(
         firstName: formspreeParsed.firstName,
         lastName: formspreeParsed.lastName,
         companyName: formspreeParsed.companyName,
-        customFields: formspreeParsed.customFields,
         source: "web_form" as const,
       }
     : {
@@ -445,7 +445,6 @@ resendInboundWebhookApp.post(
         firstName: legacyFirst,
         lastName: legacyLast,
         companyName: null,
-        customFields: undefined,
         source: undefined,
       };
 
@@ -455,7 +454,6 @@ resendInboundWebhookApp.post(
     firstName: identity.firstName,
     lastName: identity.lastName,
     companyName: identity.companyName,
-    customFields: identity.customFields,
     source: identity.source,
   });
 
@@ -495,6 +493,7 @@ resendInboundWebhookApp.post(
             formSource: formspreeParsed.formSource ?? undefined,
             leadType: formspreeParsed.leadType ?? undefined,
             dealName: formspreeParsed.dealNameSeed,
+            customFields: formspreeParsed.customFields,
           }
         : {}),
     },

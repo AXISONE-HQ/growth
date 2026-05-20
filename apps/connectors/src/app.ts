@@ -39,31 +39,30 @@ export function buildApp(): Hono {
       });
       return t;
     },
-    upsertContactFromEmail: async ({ tenantId, email, firstName, lastName, companyName, customFields, source }) => {
+    upsertContactFromEmail: async ({ tenantId, email, firstName, lastName, companyName, source }) => {
       // Upsert: find by tenantId+email, create if absent. Match is on
       // (tenantId, email) — there's no unique index on that pair today, so
       // we do a manual find→update or create.
       //
-      // KAN-954 — on Formspree-parsed leads (customFields present), we now
-      // ALSO update existing Contacts with the new firstName/lastName/
-      // companyName/customFields when they were previously blank. The
-      // legacy path (existing Contact, no customFields) preserves the
-      // original "refresh updatedAt only" behavior so direct inbound
-      // doesn't clobber prior identity edits.
+      // KAN-954 — on Formspree-parsed leads (companyName / source passed in),
+      // fill blank fields on existing Contacts without clobbering prior
+      // manual edits. Form-field bag (role / monthlyLeadVolume / biggestPain
+      // / etc.) is NOT written here — Contact has no `customFields` column.
+      // Those fields flow through LeadReceivedEvent.metadata.customFields
+      // and land on Deal.customFields in the consumer.
       const existing = await getPrisma().contact.findFirst({
         where: { tenantId, email },
-        select: { id: true, firstName: true, lastName: true, companyName: true, customFields: true },
+        select: { id: true, firstName: true, lastName: true, companyName: true },
       });
       if (existing) {
         const updateData: Record<string, unknown> = { updatedAt: new Date() };
-        if (customFields !== undefined) {
+        // Only Formspree-parsed leads (companyName-bearing) trigger the
+        // additive identity merge; direct inbound preserves the original
+        // refresh-updatedAt-only behavior.
+        if (companyName !== undefined || source !== undefined) {
           if (!existing.firstName && firstName) updateData.firstName = firstName;
           if (!existing.lastName && lastName) updateData.lastName = lastName;
           if (!existing.companyName && companyName) updateData.companyName = companyName;
-          // Merge customFields (Formspree fields are additive — never overwrite
-          // prior entries the user may have set manually).
-          const prior = (existing.customFields ?? {}) as Record<string, unknown>;
-          updateData.customFields = { ...customFields, ...prior };
         }
         await getPrisma().contact.update({
           where: { id: existing.id },
@@ -78,7 +77,6 @@ export function buildApp(): Hono {
           firstName,
           lastName,
           companyName: companyName ?? null,
-          customFields: customFields ?? {},
           source: source ?? 'email_inbox',
           lifecycleStage: 'lead',
         },

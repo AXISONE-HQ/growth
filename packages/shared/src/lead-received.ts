@@ -87,6 +87,15 @@ export const LeadReceivedEventSchema = z.object({
      * Format example: `Early-access — Acme Corp`.
      */
     dealName: z.string().optional(),
+    /**
+     * Free-shape map of form-field values from the parser (Formspree V1:
+     * role, monthlyLeadVolume, biggestPain, plus echoes of name/email/
+     * company/formSource/leadType). The consumer writes this verbatim
+     * to Deal.customFields (which DOES have a custom_fields column;
+     * Contact does not). Keys are caller-defined strings; values are
+     * strings only for V1.
+     */
+    customFields: z.record(z.string(), z.string()).optional(),
   }),
   receivedAt: z.string().datetime(),
 });

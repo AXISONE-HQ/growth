@@ -701,6 +701,10 @@ async function writePhase1Deal(
         // name in metadata. Legacy/non-Formspree events omit it and the
         // Prisma column default (`Untitled deal`) applies.
         ...(event.metadata.dealName ? { name: event.metadata.dealName } : {}),
+        // KAN-954 — Formspree form fields land on Deal.customFields
+        // (Contact has no custom_fields column). Pre-KAN-954 events omit
+        // this; Prisma default `{}` applies.
+        ...(event.metadata.customFields ? { customFields: event.metadata.customFields } : {}),
         // event.eventId is UUID-shaped + always present per
         // LeadReceivedEventSchema; safe as the idempotency anchor across
         // Pub/Sub redeliveries.
