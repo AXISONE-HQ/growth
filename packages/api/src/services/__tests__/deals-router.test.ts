@@ -40,6 +40,8 @@ interface FakeDeal {
   pipelineId: string;
   createdAt: Date;
   updatedAt: Date;
+  // KAN-940 — soft-delete column
+  deletedAt: Date | null;
 }
 
 function deal(overrides: Partial<FakeDeal> = {}): FakeDeal {
@@ -67,6 +69,8 @@ function deal(overrides: Partial<FakeDeal> = {}): FakeDeal {
     pipelineId: "pip_1",
     createdAt: new Date("2026-05-10T10:00:00Z"),
     updatedAt: new Date("2026-05-10T10:00:00Z"),
+    // KAN-940 — soft-delete column (null = not soft-deleted)
+    deletedAt: null,
     ...overrides,
   };
 }
@@ -166,12 +170,15 @@ function makePrisma(
       },
       count: async ({ where }: { where: Record<string, unknown> }) =>
         rows.filter((r) => evalWhere(r, where)).length,
+      // KAN-940 — findFirst routes through evalWhere so it honors the
+      // full where shape (e.g., the triple-guard's `deletedAt: null`
+      // filter, not just id + tenantId).
       findFirst: async ({
         where,
       }: {
-        where: { id: string; tenantId: string };
+        where: Record<string, unknown>;
       }) =>
-        rows.find((r) => r.id === where.id && r.tenantId === where.tenantId) ?? null,
+        rows.find((r) => evalWhere(r, where)) ?? null,
       // KAN-938 — create + update support for Sub-cohort 3.3 tests
       create: async ({ data }: { data: Partial<FakeDeal> & { tenantId: string; contactId: string; pipelineId: string; currentStageId: string } }) => {
         const newRow = deal({ id: `dl_${++nextId}`, ...data } as Partial<FakeDeal>);
@@ -747,5 +754,59 @@ describe("KAN-938 — updateDeal", () => {
       expectedCloseDate: null,
     });
     expect(data[0].expectedCloseDate).toBeNull();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// KAN-940 — Deal soft-delete (deletedAt column).
+//
+// Coverage:
+//   - listDeals excludes soft-deleted rows by default
+//   - getDealById still returns tombstones (audit-trail parity with
+//     getCompanyById)
+//   - updateDeal triple-guard rejects soft-deleted rows as NOT_FOUND
+//     (uniform error shape alongside cross-tenant; no existence leak)
+// ─────────────────────────────────────────────────────────────────────
+describe("KAN-940 — Deal soft-delete", () => {
+  it("listDeals excludes soft-deleted rows by default", async () => {
+    const data = [
+      deal({ id: "dl_live", deletedAt: null }),
+      deal({ id: "dl_tombstone", deletedAt: new Date("2026-05-15") }),
+    ];
+    const prisma = makePrisma(data);
+    const result = await listDeals(prisma, TENANT_A, { limit: 50 });
+    expect(result.items.map((i) => i.id)).toEqual(["dl_live"]);
+    expect(result.totalCount).toBe(1);
+  });
+
+  it("getDealById returns tombstones (audit-trail parity)", async () => {
+    const data = [
+      deal({
+        id: "dl_tombstone",
+        tenantId: TENANT_A,
+        deletedAt: new Date("2026-05-15"),
+      }),
+    ];
+    const prisma = makePrisma(data);
+    const result = await getDealById(prisma, TENANT_A, { id: "dl_tombstone" });
+    expect((result as { id: string }).id).toBe("dl_tombstone");
+    expect((result as { deletedAt: Date | null }).deletedAt).toBeInstanceOf(Date);
+  });
+
+  it("updateDeal rejects soft-deleted rows → NOT_FOUND (triple-guard)", async () => {
+    const data = [
+      deal({
+        id: "dl_tombstone",
+        tenantId: TENANT_A,
+        name: "Original",
+        deletedAt: new Date("2026-05-15"),
+      }),
+    ];
+    const prisma = makePrisma(data);
+    await expect(
+      updateDeal(prisma, TENANT_A, { id: "dl_tombstone", name: "resurrect" }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+    // Original row untouched
+    expect(data[0].name).toBe("Original");
   });
 });
