@@ -26,8 +26,13 @@ vi.mock('next/navigation', () => ({
   useParams: () => ({ id: 'dl-1' }),
 }));
 
+const toastSuccessMock = vi.fn();
+const toastErrorMock = vi.fn();
 vi.mock('sonner', () => ({
-  toast: { success: vi.fn(), error: vi.fn() },
+  toast: {
+    success: (...args: unknown[]) => toastSuccessMock(...args),
+    error: (...args: unknown[]) => toastErrorMock(...args),
+  },
 }));
 
 const createMock = vi.fn();
@@ -137,6 +142,8 @@ describe('KAN-938 — OpportunityForm', () => {
   beforeEach(() => {
     createMock.mockReset();
     updateMock.mockReset();
+    toastSuccessMock.mockReset();
+    toastErrorMock.mockReset();
   });
 
   it('(1) renders all 4 cards + key fields in create mode', async () => {
@@ -340,6 +347,51 @@ describe('KAN-938 — OpportunityForm', () => {
     expect(payload.contactId).toBe('ct_1');
     expect(payload.companyId).toBe('co_1');
     expect(payload.expectedCloseDate).toBe('2026-12-31');
+  });
+
+  // KAN-942 — silent-failure UX fix. A 500 from deals.create must surface
+  // BOTH a visible toast AND an inline error banner (and scroll to top so
+  // the banner is visible on long forms).
+  it('(KAN-942) Server error → toast.error + inline banner both fire', async () => {
+    createMock.mockRejectedValue(
+      new Error('Invalid value for argument `expectedCloseDate`'),
+    );
+    renderWithProviders(
+      <OpportunityForm
+        mode="create"
+        initialValues={{
+          name: 'New Globex Deal',
+          value: '50000',
+          currency: 'USD',
+          probability: '40',
+          status: 'open',
+          expectedCloseDate: '2026-12-31',
+          lostReason: '',
+          lostReasonDetail: '',
+          wonProductSummary: '',
+          pipelineId: 'pip_1',
+          currentStageId: 'stg_1a',
+          contactId: 'ct_1',
+          companyId: 'co_1',
+        }}
+        initialContactLabel="Alice"
+      />,
+    );
+    fireEvent.change(screen.getByLabelText(/^name/i), {
+      target: { value: 'New Globex Deal!' }, // dirty
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^create$/i }));
+    await waitFor(() => expect(createMock).toHaveBeenCalledOnce());
+    // Inline banner
+    await waitFor(() => {
+      expect(
+        screen.getByText(/invalid value for argument.*expectedclosedate/i),
+      ).toBeInTheDocument();
+    });
+    // Toast
+    expect(toastErrorMock).toHaveBeenCalledWith(
+      expect.stringMatching(/invalid value for argument.*expectedclosedate/i),
+    );
   });
 
   it('(12) Edit mode: Save invokes dealsApi.update with id + payload', async () => {

@@ -258,6 +258,21 @@ export async function getDealById(
 }
 
 /**
+ * KAN-942 — Coerce wire-format date strings (yyyy-mm-dd) to Date objects
+ * before passing to Prisma. Native `<input type="date">` returns yyyy-mm-dd;
+ * Prisma's deserializer requires either a full ISO-8601 DateTime string or
+ * a JS Date object (even for `@db.Date` columns). Defense in depth: any
+ * caller submitting a date string is coerced uniformly. `null` and
+ * `undefined` pass through unchanged.
+ */
+function toDate(s: string | null | undefined): Date | null {
+  if (s == null || s === "") return null;
+  // `new Date("2026-09-30")` parses as UTC midnight per JS spec for
+  // date-only strings — clean mapping to @db.Date.
+  return new Date(s);
+}
+
+/**
  * KAN-938 — Create a Deal with full FK validation.
  *
  * Required FKs: contactId, pipelineId, currentStageId — all must exist in
@@ -294,7 +309,8 @@ export async function createDeal(
       probability: input.probability ?? null,
       // Card 2
       ...(input.status !== undefined ? { status: input.status as never } : {}),
-      expectedCloseDate: input.expectedCloseDate ?? null,
+      // KAN-942 — coerce yyyy-mm-dd → Date for Prisma's @db.Date column.
+      expectedCloseDate: toDate(input.expectedCloseDate),
       lostReason: (input.lostReason ?? null) as never,
       lostReasonDetail: input.lostReasonDetail ?? null,
       wonProductSummary: input.wonProductSummary ?? null,
@@ -353,7 +369,8 @@ export async function updateDeal(
   if (input.currency !== undefined) data.currency = input.currency;
   if (input.probability !== undefined) data.probability = input.probability;
   if (input.status !== undefined) data.status = input.status;
-  if (input.expectedCloseDate !== undefined) data.expectedCloseDate = input.expectedCloseDate;
+  // KAN-942 — coerce yyyy-mm-dd → Date for Prisma's @db.Date column.
+  if (input.expectedCloseDate !== undefined) data.expectedCloseDate = toDate(input.expectedCloseDate);
   if (input.lostReason !== undefined) data.lostReason = input.lostReason;
   if (input.lostReasonDetail !== undefined) data.lostReasonDetail = input.lostReasonDetail;
   if (input.wonProductSummary !== undefined) data.wonProductSummary = input.wonProductSummary;
