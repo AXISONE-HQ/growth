@@ -217,12 +217,22 @@ function makePrisma(
         pipelines.find((p) => p.id === where.id && p.tenantId === where.tenantId) ?? null,
     },
     stage: {
+      // KAN-938 hardening — assertStageInPipeline now joins through
+      // `pipeline: { id, tenantId }` for self-contained defense-in-depth.
+      // Mock returns the stage only when (a) stage.pipelineId === where.pipeline.id
+      // AND (b) the pipeline lives in where.pipeline.tenantId.
       findFirst: async ({
         where,
       }: {
-        where: { id: string; pipelineId: string };
-      }) =>
-        stages.find((s) => s.id === where.id && s.pipelineId === where.pipelineId) ?? null,
+        where: { id: string; pipeline: { id: string; tenantId: string } };
+      }) => {
+        const stage = stages.find((s) => s.id === where.id);
+        if (!stage) return null;
+        if (stage.pipelineId !== where.pipeline.id) return null;
+        const pipeline = pipelines.find((p) => p.id === stage.pipelineId);
+        if (!pipeline || pipeline.tenantId !== where.pipeline.tenantId) return null;
+        return { id: stage.id };
+      },
     },
     // KAN-888 — manual owner hydration calls prisma.user.findFirst with
     // tenantId scoping + a `select` clause. Fake mirrors both: tenantId

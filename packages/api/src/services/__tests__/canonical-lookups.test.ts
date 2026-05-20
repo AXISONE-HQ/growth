@@ -197,27 +197,29 @@ describe("KAN-938 — FK validation assertions", () => {
     });
   });
 
-  describe("assertStageInPipeline (two-level guard)", () => {
+  describe("assertStageInPipeline (self-contained tenant-isolation guard)", () => {
     it("returns silently when either pipelineId or stageId is null", async () => {
       const findFirst = vi.fn();
       const prisma = { stage: { findFirst } } as unknown as PrismaClient;
       await expect(
-        assertStageInPipeline(prisma, null, "s_1"),
+        assertStageInPipeline(prisma, TENANT_A, null, "s_1"),
       ).resolves.toBeUndefined();
       await expect(
-        assertStageInPipeline(prisma, "p_1", null),
+        assertStageInPipeline(prisma, TENANT_A, "p_1", null),
       ).resolves.toBeUndefined();
       expect(findFirst).not.toHaveBeenCalled();
     });
 
-    it("returns silently when stage belongs to the pipeline", async () => {
+    it("returns silently when stage belongs to pipeline AND pipeline is in tenant", async () => {
       const findFirst = vi.fn().mockResolvedValue({ id: "s_1" });
       const prisma = { stage: { findFirst } } as unknown as PrismaClient;
       await expect(
-        assertStageInPipeline(prisma, "p_1", "s_1"),
+        assertStageInPipeline(prisma, TENANT_A, "p_1", "s_1"),
       ).resolves.toBeUndefined();
+      // Query MUST join through pipeline → tenantId for self-contained
+      // defense-in-depth (caller may have skipped assertPipelineInTenant).
       expect(findFirst).toHaveBeenCalledWith({
-        where: { id: "s_1", pipelineId: "p_1" },
+        where: { id: "s_1", pipeline: { id: "p_1", tenantId: TENANT_A } },
         select: { id: true },
       });
     });
@@ -226,10 +228,34 @@ describe("KAN-938 — FK validation assertions", () => {
       const findFirst = vi.fn().mockResolvedValue(null);
       const prisma = { stage: { findFirst } } as unknown as PrismaClient;
       await expect(
-        assertStageInPipeline(prisma, "p_1", "s_from_other_pipeline"),
+        assertStageInPipeline(prisma, TENANT_A, "p_1", "s_from_other_pipeline"),
       ).rejects.toMatchObject({
         code: "BAD_REQUEST",
         message: expect.stringMatching(/stage does not belong/i),
+      });
+    });
+
+    // Defense-in-depth: stage belongs to the right pipeline, but the pipeline
+    // is in a different tenant. The helper must reject EVEN IF the caller
+    // skipped assertPipelineInTenant (which is what currently sequences
+    // tenant validation in createDeal/updateDeal). This pins the
+    // join-through-tenant invariant.
+    it("throws BAD_REQUEST when stage's pipeline is in a different tenant", async () => {
+      // The relational where clause `pipeline: { id, tenantId }` returns null
+      // because no Stage matches a Pipeline that's both in `p_cross_tenant`
+      // AND in TENANT_A. Real Prisma would join; the mock just returns null.
+      const findFirst = vi.fn().mockResolvedValue(null);
+      const prisma = { stage: { findFirst } } as unknown as PrismaClient;
+      await expect(
+        assertStageInPipeline(prisma, TENANT_A, "p_cross_tenant", "s_1"),
+      ).rejects.toMatchObject({
+        code: "BAD_REQUEST",
+        message: expect.stringMatching(/stage does not belong/i),
+      });
+      // The defense-in-depth check is in the query shape itself.
+      expect(findFirst).toHaveBeenCalledWith({
+        where: { id: "s_1", pipeline: { id: "p_cross_tenant", tenantId: TENANT_A } },
+        select: { id: true },
       });
     });
   });

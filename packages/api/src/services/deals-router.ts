@@ -277,7 +277,7 @@ export async function createDeal(
   // FK validations — order matters: tenant-scope first, then stage-in-pipeline.
   await assertContactInTenant(prisma, tenantId, input.contactId);
   await assertPipelineInTenant(prisma, tenantId, input.pipelineId);
-  await assertStageInPipeline(prisma, input.pipelineId, input.currentStageId);
+  await assertStageInPipeline(prisma, tenantId, input.pipelineId, input.currentStageId);
   await assertCompanyInTenant(prisma, tenantId, input.companyId);
 
   return prisma.deal.create({
@@ -341,7 +341,7 @@ export async function updateDeal(
       });
     }
     await assertPipelineInTenant(prisma, tenantId, input.pipelineId);
-    await assertStageInPipeline(prisma, input.pipelineId, input.currentStageId);
+    await assertStageInPipeline(prisma, tenantId, input.pipelineId, input.currentStageId);
   }
 
   // Build a strict partial-update payload — only set fields explicitly

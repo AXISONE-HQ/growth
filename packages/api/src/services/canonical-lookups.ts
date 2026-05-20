@@ -293,18 +293,20 @@ export async function assertPipelineInTenant(
   }
 }
 
-/** Validate that stageId belongs to the given pipelineId. Two-level guard:
- *  caller MUST have already validated pipeline-in-tenant (via
- *  assertPipelineInTenant) before invoking this helper. This function only
- *  verifies the stage-pipeline edge. KAN-938. */
+/** Validate that stageId belongs to the given pipelineId AND that the
+ *  pipeline lives in tenantId. Self-contained tenant-isolation guard —
+ *  defense-in-depth so the helper's correctness does NOT depend on the
+ *  caller having already run `assertPipelineInTenant` (belt-and-suspenders;
+ *  callers should still run both for clearer error surfaces). KAN-938. */
 export async function assertStageInPipeline(
   prisma: PrismaClient,
+  tenantId: string,
   pipelineId: string | null | undefined,
   stageId: string | null | undefined,
 ): Promise<void> {
   if (pipelineId == null || stageId == null) return;
   const found = await prisma.stage.findFirst({
-    where: { id: stageId, pipelineId },
+    where: { id: stageId, pipeline: { id: pipelineId, tenantId } },
     select: { id: true },
   });
   if (!found) {
