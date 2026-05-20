@@ -71,6 +71,8 @@ const BASE_CONTACT = {
   outcomes: [],
   decisions: [],
   escalations: [],
+  orders: [],
+  _count: { orders: 0 },
   createdAt: "2026-05-01T10:00:00Z",
   updatedAt: "2026-05-01T10:00:00Z",
 };

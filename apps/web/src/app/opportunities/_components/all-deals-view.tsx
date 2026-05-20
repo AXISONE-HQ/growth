@@ -35,9 +35,13 @@ function contactName(c: DealListItem['contact']): string {
   return name || c.email || 'Unknown';
 }
 
+// KAN-cohort-3.5 — TZ off-by-one fix carried over from KAN-943 (detail
+// pages were patched; this list view rendered yyyy-mm-dd values in the
+// caller's locale TZ, which shifted "2026-09-30T00:00:00Z" to 9/29 in
+// America/Toronto). UTC anchoring keeps list + detail in sync.
 function fmtDate(iso: string | null): string {
   if (!iso) return '—';
-  return new Date(iso).toLocaleDateString();
+  return new Date(iso).toLocaleDateString(undefined, { timeZone: 'UTC' });
 }
 
 export function AllDealsView() {

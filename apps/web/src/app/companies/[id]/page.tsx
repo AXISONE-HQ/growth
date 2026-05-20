@@ -228,14 +228,16 @@ export default function CompanyDetailPage() {
             {company.contacts.map((c) => {
               const name = [c.firstName, c.lastName].filter(Boolean).join(' ').trim() || c.email || 'Unknown';
               return (
-                <li key={c.id} className="py-2 flex items-center justify-between text-sm">
-                  <div>
-                    <span className="font-medium">{name}</span>
-                    {c.email ? (
-                      <span style={MUTED_STYLE} className="ml-2 text-xs">{c.email}</span>
-                    ) : null}
-                  </div>
-                  <StatusBadge kind="contact-lifecycle" value={c.lifecycleStage} />
+                <li key={c.id} className="py-2 text-sm">
+                  <Link href={`/customers/${c.id}`} className="flex items-center justify-between hover:bg-gray-50 -mx-2 px-2 py-1 rounded">
+                    <div>
+                      <span className="font-medium">{name}</span>
+                      {c.email ? (
+                        <span style={MUTED_STYLE} className="ml-2 text-xs">{c.email}</span>
+                      ) : null}
+                    </div>
+                    <StatusBadge kind="contact-lifecycle" value={c.lifecycleStage} />
+                  </Link>
                 </li>
               );
             })}
@@ -256,12 +258,14 @@ export default function CompanyDetailPage() {
         ) : (
           <ul className="divide-y divide-gray-100">
             {company.deals.map((d) => (
-              <li key={d.id} className="py-2 flex items-center justify-between text-sm">
-                <span className="font-medium">{d.name}</span>
-                <div className="flex items-center gap-3">
-                  <MoneyDisplay value={d.value} currency={d.currency} className="tabular-nums" />
-                  <StatusBadge kind="deal-status" value={d.status} />
-                </div>
+              <li key={d.id} className="py-2 text-sm">
+                <Link href={`/opportunities/${d.id}`} className="flex items-center justify-between hover:bg-gray-50 -mx-2 px-2 py-1 rounded">
+                  <span className="font-medium">{d.name}</span>
+                  <div className="flex items-center gap-3">
+                    <MoneyDisplay value={d.value} currency={d.currency} className="tabular-nums" />
+                    <StatusBadge kind="deal-status" value={d.status} />
+                  </div>
+                </Link>
               </li>
             ))}
           </ul>

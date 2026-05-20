@@ -879,6 +879,18 @@ export interface ContactDetail extends ContactListItem {
     severity: string;
     createdAt: string;
   }>;
+  // KAN-cohort-3.5 — reverse "Linked orders" relation (capped take:20).
+  orders: Array<{
+    id: string;
+    orderNumber: string;
+    status: string;
+    grandTotal: string;
+    currency: string;
+    placedAt: string;
+  }>;
+  // KAN-cohort-3.5 — truthful count of orders for the section header,
+  // even when `orders` is truncated to the cap.
+  _count: { orders: number };
 }
 
 // KAN-934 — Cohort 3.1 Contact CRUD form payload. Mirrors the extended
@@ -1305,6 +1317,16 @@ export interface DealDetail extends Omit<DealListItem, 'contact' | 'company'> {
     name: string | null;
     email: string;
   } | null;
+  // KAN-cohort-3.5 — reverse "Linked orders" relation (capped take:20).
+  orders: Array<{
+    id: string;
+    orderNumber: string;
+    status: string;
+    grandTotal: string;
+    currency: string;
+    placedAt: string;
+  }>;
+  _count: { orders: number };
 }
 
 // KAN-938 — Sub-cohort 3.3 Deal CRUD form payload. Mirrors the

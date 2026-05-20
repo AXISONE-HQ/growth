@@ -99,12 +99,17 @@ function findActiveHref(pathname: string): string | null {
   return bestHref;
 }
 
-// KAN-878 follow-ups: sub-tab titles (e.g. /settings/account/contact)
-// fall through to the default "Dashboard" because this is exact-match.
-// Route-aware page heading is tracked in task #83 (Topbar DS v1 alignment).
+// Cohort 3.5 — longest-prefix match (mirrors findActiveHref above) so
+// detail / new / edit routes like /companies/[id]/edit resolve to
+// "Companies" instead of falling through to "Dashboard". Longest match
+// wins so `/settings/account/identity` beats `/settings`. Keys MUST be
+// sorted longest-first for the rule to read declaratively at a glance,
+// but resolveTitle scans all entries so ordering is documentation-only.
 // `/knowledge` legacy entry kept — Fred deferred deletion (sales objections
 // data still consumes the route).
 const pageTitle: Record<string, string> = {
+  '/settings/account/identity': 'Account',
+  '/settings/knowledge': 'Knowledge Center',
   '/dashboard': 'Dashboard',
   '/opportunities': 'Opportunities',
   '/conversations': 'Conversations',
@@ -115,16 +120,28 @@ const pageTitle: Record<string, string> = {
   '/imports': 'Data Imports',
   '/audit': 'Audit Log',
   '/knowledge': 'Knowledge Center',
-  '/settings/knowledge': 'Knowledge Center',
-  '/settings/account/identity': 'Account',
   '/settings': 'Settings',
 };
+
+export function resolveTitle(pathname: string): string {
+  let bestTitle = 'Dashboard';
+  let bestLen = -1;
+  for (const [prefix, title] of Object.entries(pageTitle)) {
+    if (pathname === prefix || pathname.startsWith(prefix + '/')) {
+      if (prefix.length > bestLen) {
+        bestTitle = title;
+        bestLen = prefix.length;
+      }
+    }
+  }
+  return bestTitle;
+}
 
 function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const { user, loading, logout } = useAuth();
-  const currentTitle = pageTitle[pathname] || 'Dashboard';
+  const currentTitle = resolveTitle(pathname);
   const isLoginPage = pathname === '/login';
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);

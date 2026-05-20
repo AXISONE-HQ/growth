@@ -82,6 +82,8 @@ const BASE_DEAL = {
   pipeline: { id: "p_1", name: "Default Pipeline" },
   stageHistory: [],
   owner: null,
+  orders: [],
+  _count: { orders: 0 },
 };
 
 describe("KAN-888 — DealDetailPage", () => {

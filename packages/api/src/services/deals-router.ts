@@ -248,6 +248,25 @@ export async function getDealById(
           },
         },
       },
+      // KAN-cohort-3.5 — reverse "Linked orders" relation for Deal detail.
+      // Capped + ordered by placedAt DESC, parity with getCompanyById.orders
+      // + getContactById.orders. Paired _count.orders below for truthful
+      // total when cap is exceeded.
+      orders: {
+        take: 20,
+        orderBy: { placedAt: "desc" },
+        select: {
+          id: true,
+          orderNumber: true,
+          status: true,
+          grandTotal: true,
+          currency: true,
+          placedAt: true,
+        },
+      },
+      _count: {
+        select: { orders: true },
+      },
     },
   });
 

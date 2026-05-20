@@ -186,4 +186,50 @@ describe("KAN-886 — AllDealsView", () => {
     // contact row containing it (avoids false positives from other em-dashes).
     expect(container.textContent).toContain("—");
   });
+
+  // KAN-cohort-3.5 — TZ off-by-one regression. yyyy-mm-dd values stored as
+  // midnight UTC must NOT shift backward when rendered in a US-leaning
+  // locale (America/Toronto, etc). 2026-09-30T00:00:00Z must surface as
+  // "9/30/2026" not "9/29/2026".
+  it("KAN-cohort-3.5: expectedCloseDate renders UTC-anchored (no TZ shift)", async () => {
+    dealsListMock.mockResolvedValue({
+      items: [
+        {
+          id: "d1",
+          name: "TZ-safe deal",
+          status: "open",
+          probability: null,
+          expectedCloseDate: "2026-09-30T00:00:00.000Z",
+          closedAt: null,
+          lostReason: null,
+          ownerId: null,
+          assignedAgentId: null,
+          companyId: null,
+          value: "100.00",
+          currency: "USD",
+          currentStageId: "stg1",
+          contactId: "ct1",
+          pipelineId: "p1",
+          createdAt: "2026-05-01T10:00:00Z",
+          updatedAt: "2026-05-01T10:00:00Z",
+          contact: { id: "ct1", email: "tz@example.com", firstName: null, lastName: null },
+          company: null,
+        },
+      ],
+      nextCursor: null,
+      totalCount: 1,
+    });
+    wrap(<AllDealsView />);
+    await waitFor(() => {
+      expect(screen.getByText("TZ-safe deal")).toBeInTheDocument();
+    });
+    // toLocaleDateString format varies by locale — check the day component
+    // didn't wrap to 29. We use a permissive match: either "9/30/2026" (US)
+    // or "30/09/2026" (EU) or "2026-09-30" (ISO) is fine; "9/29" or "29/09"
+    // would mean the UTC anchor was lost. No word-boundary anchors because
+    // table text concatenates without separators (e.g., "2026-09-30Showing").
+    const body = document.body.textContent || "";
+    expect(body).toMatch(/(?:09\/30|9\/30|30\/09|30\/9|2026-09-30)/);
+    expect(body).not.toMatch(/(?:09\/29\/|9\/29\/|29\/09|29\/9|2026-09-29)/);
+  });
 });

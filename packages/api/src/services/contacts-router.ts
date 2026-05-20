@@ -235,6 +235,25 @@ export async function getContactById(
           createdAt: true,
         },
       },
+      // KAN-cohort-3.5 — reverse "Linked orders" relation for Contact detail.
+      // Capped + ordered by placedAt DESC (most recent first), parity with
+      // getCompanyById.orders. Paired _count.orders below carries the
+      // truthful total even when the capped list omits older rows.
+      orders: {
+        take: 20,
+        orderBy: { placedAt: 'desc' },
+        select: {
+          id: true,
+          orderNumber: true,
+          status: true,
+          grandTotal: true,
+          currency: true,
+          placedAt: true,
+        },
+      },
+      _count: {
+        select: { orders: true },
+      },
     },
   });
   if (!row) {
