@@ -217,6 +217,19 @@ export function OpportunityForm({
     }
   }, [selectedPipeline, values.currentStageId]);
 
+  // KAN-942 — Robust error message extraction. tRPC 500 responses may not
+  // surface as Error instances with .message populated; fall back through
+  // String(err) before the user-friendly fallback.
+  const errMessage = (err: unknown, fallback: string): string => {
+    const msg =
+      err instanceof Error
+        ? err.message
+        : typeof err === 'string'
+          ? err
+          : '';
+    return msg || fallback;
+  };
+
   const createMutation = useMutation<DealDetail, Error, OpportunityFormValues>({
     mutationFn: (formValues) => dealsApi.create(formToCreateInput(formValues)),
     onSuccess: (saved) => {
@@ -225,7 +238,13 @@ export function OpportunityForm({
       router.push(`/opportunities/${saved.id}`);
     },
     onError: (err) => {
-      setServerErrors([err.message || 'Create failed. Please try again.']);
+      // KAN-942 — silent-failure UX fix. The inline banner sits at body-top
+      // and may scroll off-screen on long forms; pair with a toast so the
+      // failure is always visible regardless of scroll position.
+      const message = errMessage(err, 'Create failed. Please try again.');
+      setServerErrors([message]);
+      toast.error(message);
+      if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });
     },
   });
 
@@ -239,7 +258,10 @@ export function OpportunityForm({
       router.push(`/opportunities/${saved.id}`);
     },
     onError: (err) => {
-      setServerErrors([err.message || 'Save failed. Please try again.']);
+      const message = errMessage(err, 'Save failed. Please try again.');
+      setServerErrors([message]);
+      toast.error(message);
+      if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });
     },
   });
 

@@ -511,11 +511,81 @@ describe("KAN-938 — createDeal", () => {
     expect(row.value).toBe("125000.00");
     expect(row.probability).toBe(60);
     expect(row.status).toBe("open");
-    expect(row.expectedCloseDate).toBe("2026-09-30");
+    // KAN-942 — expectedCloseDate must arrive at Prisma as a Date object
+    // (not a yyyy-mm-dd string). The native <input type="date"> returns
+    // yyyy-mm-dd; the backend coerces via toDate() helper.
+    expect(row.expectedCloseDate).toBeInstanceOf(Date);
+    expect((row.expectedCloseDate as unknown as Date).toISOString()).toBe(
+      "2026-09-30T00:00:00.000Z",
+    );
     expect(row.contactId).toBe(C_1);
     expect(row.pipelineId).toBe(P_1);
     expect(row.currentStageId).toBe(S_1);
     expect(row.companyId).toBe(CO_1);
+  });
+
+  // KAN-942 — explicit regression test for the PROD 500. Prisma rejects
+  // yyyy-mm-dd strings on @db.Date columns; require Date object at the
+  // service boundary. Pre-fix this test would have caught the failure mode
+  // without requiring real Prisma.
+  it("KAN-942: expectedCloseDate yyyy-mm-dd string coerced to Date before Prisma", async () => {
+    const data: FakeDeal[] = [];
+    const prisma = makePrisma(
+      data,
+      [],
+      [{ id: C_1, tenantId: TENANT_A }],
+      [],
+      [{ id: P_1, tenantId: TENANT_A }],
+      [{ id: S_1, pipelineId: P_1 }],
+    );
+    await createDeal(prisma, TENANT_A, {
+      pipelineId: P_1,
+      currentStageId: S_1,
+      contactId: C_1,
+      expectedCloseDate: "2026-12-31",
+    });
+    expect(data[0].expectedCloseDate).toBeInstanceOf(Date);
+    expect((data[0].expectedCloseDate as unknown as Date).toISOString()).toBe(
+      "2026-12-31T00:00:00.000Z",
+    );
+  });
+
+  it("KAN-942: null expectedCloseDate persists as null (no coercion)", async () => {
+    const data: FakeDeal[] = [];
+    const prisma = makePrisma(
+      data,
+      [],
+      [{ id: C_1, tenantId: TENANT_A }],
+      [],
+      [{ id: P_1, tenantId: TENANT_A }],
+      [{ id: S_1, pipelineId: P_1 }],
+    );
+    await createDeal(prisma, TENANT_A, {
+      pipelineId: P_1,
+      currentStageId: S_1,
+      contactId: C_1,
+      expectedCloseDate: null,
+    });
+    expect(data[0].expectedCloseDate).toBeNull();
+  });
+
+  it("KAN-942: empty-string expectedCloseDate persists as null", async () => {
+    const data: FakeDeal[] = [];
+    const prisma = makePrisma(
+      data,
+      [],
+      [{ id: C_1, tenantId: TENANT_A }],
+      [],
+      [{ id: P_1, tenantId: TENANT_A }],
+      [{ id: S_1, pipelineId: P_1 }],
+    );
+    await createDeal(prisma, TENANT_A, {
+      pipelineId: P_1,
+      currentStageId: S_1,
+      contactId: C_1,
+      expectedCloseDate: "",
+    });
+    expect(data[0].expectedCloseDate).toBeNull();
   });
 
   it("rejects cross-tenant contactId with BAD_REQUEST", async () => {
@@ -647,5 +717,35 @@ describe("KAN-938 — updateDeal", () => {
     });
     expect(data[0].pipelineId).toBe(P_NEW);
     expect(data[0].currentStageId).toBe(S_NEW);
+  });
+
+  // KAN-942 — Date coercion applies symmetrically on the update path.
+  it("KAN-942: updateDeal coerces yyyy-mm-dd expectedCloseDate to Date", async () => {
+    const data = [deal({ id: "dl_1", tenantId: TENANT_A })];
+    const prisma = makePrisma(data);
+    await updateDeal(prisma, TENANT_A, {
+      id: "dl_1",
+      expectedCloseDate: "2027-03-15",
+    });
+    expect(data[0].expectedCloseDate).toBeInstanceOf(Date);
+    expect((data[0].expectedCloseDate as unknown as Date).toISOString()).toBe(
+      "2027-03-15T00:00:00.000Z",
+    );
+  });
+
+  it("KAN-942: updateDeal with explicit null clears expectedCloseDate", async () => {
+    const data = [
+      deal({
+        id: "dl_1",
+        tenantId: TENANT_A,
+        expectedCloseDate: new Date("2026-09-30T00:00:00.000Z"),
+      }),
+    ];
+    const prisma = makePrisma(data);
+    await updateDeal(prisma, TENANT_A, {
+      id: "dl_1",
+      expectedCloseDate: null,
+    });
+    expect(data[0].expectedCloseDate).toBeNull();
   });
 });
