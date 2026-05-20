@@ -57,6 +57,16 @@ const EnvSchema = z.object({
   //   --update-secrets=RESEND_INBOUND_WEBHOOK_SIGNING_SECRET=resend-inbound-webhook-secret:latest
   RESEND_INBOUND_WEBHOOK_SIGNING_SECRET: z.string().optional(),
 
+  // KAN-954. Read-scoped Resend API key for the inbound Receiving API
+  // (`GET /emails/receiving/{email_id}`). Required because the `email.received`
+  // webhook is metadata-only — body / reply_to / headers must be fetched
+  // separately. Kept distinct from the send-only `growth-resend-key` (defense
+  // in depth). Optional at boot — if unset, the handler skips body hydration
+  // and falls back to current empty-body behavior (no regression for inbound
+  // already working in metadata-only mode). Bind via:
+  //   --update-secrets=RESEND_API_KEY_RW=growth-resend-key-rw:latest
+  RESEND_API_KEY_RW: z.string().optional(),
+
   // KAN-741. Domain that forms per-tenant inbox addresses as
   // <tenant.inboxSlug>@<LEAD_INBOX_DOMAIN>. Apps/web also reads this for
   // address display; both services should resolve to the same value.

@@ -409,3 +409,185 @@ describe("inbound webhook — published event payload shape", () => {
     expect(event.eventId).toMatch(/^evt_/);
   });
 });
+
+// ─────────────────────────────────────────────
+// KAN-954 — Formspree parser integration
+// ─────────────────────────────────────────────
+import { FORMSPREE_SPECIMEN_2026_05_20 } from "../../parsers/__tests__/fixtures/formspree-2026-05-20.js";
+
+const formspreeInboundPayload = {
+  type: "email.received",
+  data: {
+    email_id: FORMSPREE_SPECIMEN_2026_05_20.emailId,
+    from: { email: FORMSPREE_SPECIMEN_2026_05_20.from, name: "Formspree" },
+    to: FORMSPREE_SPECIMEN_2026_05_20.to,
+    subject: FORMSPREE_SPECIMEN_2026_05_20.subject,
+    attachments: [],
+    // Webhook payload deliberately omits text/html/reply_to — those come
+    // from the Receiving API fetch (mocked via fetchEmailContent hook).
+  },
+};
+
+describe("KAN-954 — Formspree parser integration (happy path)", () => {
+  it("upserts Contact with the real submitter (NOT noreply@formspree.io) + sets dealName via event metadata", async () => {
+    const ctx = makeHooks({ resolvedTenant: { id: TENANT_A, inboxDkimStrict: true } });
+    // Mock the Receiving API fetch to return the verbatim D2 specimen.
+    const hooks = {
+      ...ctx.hooks,
+      fetchEmailContent: vi.fn(async () => ({
+        text: FORMSPREE_SPECIMEN_2026_05_20.text,
+        html: null,
+        replyTo: [...FORMSPREE_SPECIMEN_2026_05_20.replyTo],
+        headers: { ...FORMSPREE_SPECIMEN_2026_05_20.headers },
+        messageId: FORMSPREE_SPECIMEN_2026_05_20.messageId,
+      })),
+    };
+    __setInboundHooksForTest(hooks);
+
+    const app = makeApp();
+    const res = await app.request("/webhooks/resend-inbound", {
+      method: "POST",
+      body: JSON.stringify(formspreeInboundPayload),
+    });
+    expect(res.status).toBe(200);
+
+    // Contact upserted with the real submitter, NOT noreply@formspree.io
+    expect(hooks.upsertContactFromEmail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        email: "cowork-pipeline-test@e2etest.co",
+        firstName: "Cowork",
+        lastName: "Pipeline Test",
+        companyName: "E2E Test Co",
+        source: "web_form",
+        customFields: expect.objectContaining({
+          formSource: "growth-landing-v1",
+          leadType: "early_access_request",
+          role: "Founder / CEO",
+          monthlyLeadVolume: "100-500",
+        }),
+      }),
+    );
+
+    // Event metadata carries dealName + vendor + formSource/leadType
+    const event = ctx.publishedEvents[0];
+    expect(event.metadata.dealName).toBe("Early-access — E2E Test Co");
+    expect(event.metadata.vendor).toBe("formspree");
+    expect(event.metadata.formSource).toBe("growth-landing-v1");
+    expect(event.metadata.leadType).toBe("early_access_request");
+    // fromAddress preserved (audit-trail signal — Formspree forwarded from noreply)
+    expect(event.metadata.fromAddress).toBe("noreply@formspree.io");
+    // bodyPreview now populated from the fetched specimen (closes the
+    // empty-body bug for ALL inbound, KAN-954 D5)
+    expect(event.metadata.bodyPreview).toContain("formSource:");
+    expect(event.metadata.bodyPreview).toContain("growth-landing-v1");
+  });
+});
+
+describe("KAN-954 — Formspree parser fallback paths (never drop a lead)", () => {
+  it("Receiving API fetch fails → falls back to legacy noreply attribution + still lands the lead", async () => {
+    const ctx = makeHooks({ resolvedTenant: { id: TENANT_A, inboxDkimStrict: true } });
+    const hooks = {
+      ...ctx.hooks,
+      fetchEmailContent: vi.fn(async () => null), // simulates 4xx/5xx/timeout
+    };
+    __setInboundHooksForTest(hooks);
+
+    const app = makeApp();
+    const res = await app.request("/webhooks/resend-inbound", {
+      method: "POST",
+      body: JSON.stringify(formspreeInboundPayload),
+    });
+    expect(res.status).toBe(200);
+
+    // Contact still created — mis-attributed but landed (the non-negotiable)
+    expect(hooks.upsertContactFromEmail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        email: "noreply@formspree.io",
+      }),
+    );
+    expect(ctx.publishedEvents).toHaveLength(1);
+    // Audit row written with "accepted" — lead NOT dropped
+    expect(ctx.auditRows[0]?.status).toBe("accepted");
+    // No vendor/dealName set when parser didn't fire
+    expect(ctx.publishedEvents[0].metadata.dealName).toBeUndefined();
+    expect(ctx.publishedEvents[0].metadata.vendor).toBeUndefined();
+  });
+
+  it("Body fetched but malformed (no recognizable fields) → falls back, lead lands mis-attributed", async () => {
+    const ctx = makeHooks({ resolvedTenant: { id: TENANT_A, inboxDkimStrict: true } });
+    const hooks = {
+      ...ctx.hooks,
+      fetchEmailContent: vi.fn(async () => ({
+        text: "Garbage that doesn't match the Formspree format at all.",
+        html: null,
+        replyTo: [], // no reply-to either
+        headers: {},
+        messageId: null,
+      })),
+    };
+    __setInboundHooksForTest(hooks);
+
+    const app = makeApp();
+    const res = await app.request("/webhooks/resend-inbound", {
+      method: "POST",
+      body: JSON.stringify(formspreeInboundPayload),
+    });
+    expect(res.status).toBe(200);
+
+    // Parser returned null → legacy path → Contact under noreply
+    expect(hooks.upsertContactFromEmail).toHaveBeenCalledWith(
+      expect.objectContaining({ email: "noreply@formspree.io" }),
+    );
+    expect(ctx.auditRows[0]?.status).toBe("accepted");
+    expect(ctx.publishedEvents[0].metadata.dealName).toBeUndefined();
+  });
+});
+
+describe("KAN-954 — non-Formspree regression (parser is a no-op)", () => {
+  it("direct inbound from fred@mkze.vc-style address routes through unchanged", async () => {
+    const ctx = makeHooks({ resolvedTenant: { id: TENANT_A, inboxDkimStrict: true } });
+    // Body is fetched for ALL inbound (D5 hydration step), but parser
+    // doesn't fire because From is not formspree.io
+    const hooks = {
+      ...ctx.hooks,
+      fetchEmailContent: vi.fn(async () => ({
+        text: "Hi team, I'd like to learn about your enterprise tier.",
+        html: null,
+        replyTo: ["alice@customer.example"], // ignored by non-Formspree path
+        headers: {},
+        messageId: null,
+      })),
+    };
+    __setInboundHooksForTest(hooks);
+
+    const app = makeApp();
+    const res = await app.request("/webhooks/resend-inbound", {
+      method: "POST",
+      body: JSON.stringify(validInboundPayload),
+    });
+    expect(res.status).toBe(200);
+
+    // Contact upserted with original From-keyed identity (Alice Customer),
+    // not from the body or replyTo
+    expect(hooks.upsertContactFromEmail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        email: "alice@customer.example",
+        firstName: "Alice",
+        lastName: "Customer",
+      }),
+    );
+    // Critically: NO Formspree-specific attribution leaked to non-Formspree
+    const upsertArg = hooks.upsertContactFromEmail.mock.calls[0][0];
+    expect(upsertArg.companyName).toBeNull();
+    expect(upsertArg.source).toBeUndefined();
+    expect(upsertArg.customFields).toBeUndefined();
+    // Event has no vendor/formSource/leadType/dealName
+    const event = ctx.publishedEvents[0];
+    expect(event.metadata.vendor).toBeUndefined();
+    expect(event.metadata.formSource).toBeUndefined();
+    expect(event.metadata.leadType).toBeUndefined();
+    expect(event.metadata.dealName).toBeUndefined();
+    // But bodyPreview IS populated from the fetched text — D5 win
+    expect(event.metadata.bodyPreview).toContain("enterprise tier");
+  });
+});
