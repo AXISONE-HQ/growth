@@ -46,6 +46,29 @@ async function loadAccountPublisher(): Promise<AccountPublisherModule> {
   return _accountPublisherModule;
 }
 
+// KAN-936 fix-forward — Shared id-string validator (uuid/cuid/firebase-uid
+// class fix). Hand-picked `.uuid()` vs `.cuid()` Zod validators have bitten
+// us 4× this session because the schema is heterogeneous: UUID defaults
+// (Contact, Pipeline, Stage, User-schema-default), CUID defaults (Deal,
+// Company, Order, Engagement, ImportJob, ...), and User rows in PROD carry
+// 28-char Firebase Auth UIDs that bypass the schema default. Trust the DB
+// FK + tenant-scoped `assertX` helpers to do real existence validation;
+// the wire layer only needs "this is a plausibly-shaped id string."
+//
+// Bounds: min 20 / max 40 covers all three formats with a safety floor
+// against empty-string + a ceiling against trivially-bad inputs. Charset
+// is base62 + `-` + `_` (uuid dashes, cuid lowercase alphanumeric, Firebase
+// base62-like).
+//
+// Class follow-up KAN-949 will fold the existing ~85 hand-picked validators
+// in this file onto this shared shape where the FK-target is heterogeneous.
+const entityId = z
+  .string()
+  .min(20)
+  .max(40)
+  .regex(/^[a-zA-Z0-9_-]+$/, "Invalid id format");
+export { entityId };
+
 // KAN-855 — Account Page Cohort 2 logo storage helpers. Same dynamic-import
 // dance as the publisher above (cross-rootDir; KAN-689 cohort hygiene).
 interface AccountLogoStorageModule {
@@ -541,7 +564,10 @@ const companiesRouter = router({
         isTaxExempt: z.boolean().optional(),
         taxExemptionCertificate: z.string().nullable().optional(),
         // KAN-936 — optional FK to User
-        ownerId: z.string().uuid().nullable().optional(),
+        // KAN-936 fix-forward — entityId covers uuid/cuid/firebase-uid (User
+        // rows in PROD use Firebase Auth UIDs which bypass the schema's
+        // @default(uuid())). See entityId definition for class-fix rationale.
+        ownerId: entityId.nullable().optional(),
       }),
     )
     .mutation(async ({ ctx, input }) => {
@@ -585,7 +611,10 @@ const companiesRouter = router({
         isTaxExempt: z.boolean().optional(),
         taxExemptionCertificate: z.string().nullable().optional(),
         // KAN-936 — optional FK to User
-        ownerId: z.string().uuid().nullable().optional(),
+        // KAN-936 fix-forward — entityId covers uuid/cuid/firebase-uid (User
+        // rows in PROD use Firebase Auth UIDs which bypass the schema's
+        // @default(uuid())). See entityId definition for class-fix rationale.
+        ownerId: entityId.nullable().optional(),
       }),
     )
     .mutation(async ({ ctx, input }) => {
@@ -898,7 +927,10 @@ const dealsRouter = router({
         contactId: z.string().min(1),
         companyId: z.string().nullable().optional(),
         // KAN-936 — optional FK to User
-        ownerId: z.string().uuid().nullable().optional(),
+        // KAN-936 fix-forward — entityId covers uuid/cuid/firebase-uid (User
+        // rows in PROD use Firebase Auth UIDs which bypass the schema's
+        // @default(uuid())). See entityId definition for class-fix rationale.
+        ownerId: entityId.nullable().optional(),
       }),
     )
     .mutation(async ({ ctx, input }) => {
@@ -925,7 +957,10 @@ const dealsRouter = router({
         contactId: z.string().min(1).optional(),
         companyId: z.string().nullable().optional(),
         // KAN-936 — optional FK to User
-        ownerId: z.string().uuid().nullable().optional(),
+        // KAN-936 fix-forward — entityId covers uuid/cuid/firebase-uid (User
+        // rows in PROD use Firebase Auth UIDs which bypass the schema's
+        // @default(uuid())). See entityId definition for class-fix rationale.
+        ownerId: entityId.nullable().optional(),
       }),
     )
     .mutation(async ({ ctx, input }) => {
