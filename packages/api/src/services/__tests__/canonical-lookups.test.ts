@@ -25,9 +25,12 @@ import {
   assertContactInTenant,
   assertPipelineInTenant,
   assertStageInPipeline,
+  assertDealInTenant,
+  toDate,
 } from "../canonical-lookups.js";
 import * as ImportCommit from "../import-commit.js";
 import * as ContactsRouter from "../contacts-router.js";
+import * as DealsRouter from "../deals-router.js";
 
 const TENANT_A = "11111111-1111-1111-1111-111111111111";
 
@@ -258,5 +261,66 @@ describe("KAN-938 — FK validation assertions", () => {
         select: { id: true },
       });
     });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// KAN-945 — assertDealInTenant + toDate lift.
+//
+// `toDate` was lifted from deals-router.ts in KAN-945; identity check
+// pins the re-export shim. `assertDealInTenant` is a NEW helper for
+// Order.dealId optional-FK validation (Sub-cohort 3.4).
+// ─────────────────────────────────────────────────────────────────────
+describe("KAN-945 — assertDealInTenant", () => {
+  it("returns silently for null dealId (optional FK)", async () => {
+    const findFirst = vi.fn();
+    const prisma = { deal: { findFirst } } as unknown as PrismaClient;
+    await expect(
+      assertDealInTenant(prisma, TENANT_A, null),
+    ).resolves.toBeUndefined();
+    expect(findFirst).not.toHaveBeenCalled();
+  });
+
+  it("returns silently when deal exists in tenant", async () => {
+    const findFirst = vi.fn().mockResolvedValue({ id: "dl_1" });
+    const prisma = { deal: { findFirst } } as unknown as PrismaClient;
+    await expect(
+      assertDealInTenant(prisma, TENANT_A, "dl_1"),
+    ).resolves.toBeUndefined();
+  });
+
+  it("throws BAD_REQUEST when deal is in a different tenant", async () => {
+    const findFirst = vi.fn().mockResolvedValue(null);
+    const prisma = { deal: { findFirst } } as unknown as PrismaClient;
+    await expect(
+      assertDealInTenant(prisma, TENANT_A, "dl_other"),
+    ).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+      message: expect.stringMatching(/deal not found/i),
+    });
+  });
+});
+
+describe("KAN-945 — toDate lift", () => {
+  it("DealsRouter.toDate === canonical-lookups version (identity check)", () => {
+    expect(DealsRouter.toDate).toBe(toDate);
+  });
+
+  it("coerces yyyy-mm-dd string to UTC-midnight Date", () => {
+    const result = toDate("2026-09-30");
+    expect(result).toBeInstanceOf(Date);
+    expect((result as Date).toISOString()).toBe("2026-09-30T00:00:00.000Z");
+  });
+
+  it("returns null for null / undefined / empty-string", () => {
+    expect(toDate(null)).toBeNull();
+    expect(toDate(undefined)).toBeNull();
+    expect(toDate("")).toBeNull();
+  });
+
+  it("preserves full ISO-8601 DateTime if caller passes one", () => {
+    const result = toDate("2026-05-20T19:30:00.000Z");
+    expect(result).toBeInstanceOf(Date);
+    expect((result as Date).toISOString()).toBe("2026-05-20T19:30:00.000Z");
   });
 });

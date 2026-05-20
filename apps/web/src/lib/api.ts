@@ -1134,6 +1134,48 @@ export interface OrderDetail extends Omit<OrderListItem, "company" | "deal"> {
   } | null;
 }
 
+// KAN-945 — Sub-cohort 3.4 Order CRUD form payload. Mirrors the
+// orders.create/update Zod schemas in apps/api/src/router.ts.
+// 22 form-eligible fields across 5 cards.
+export interface OrderCreateInput {
+  // Card 1 — Core Order (required: orderNumber, contactId)
+  orderNumber: string;
+  status?: string;
+  source?: string;
+  // Card 2 — Money
+  totalAmount?: string;
+  taxAmount?: string;
+  discountAmount?: string;
+  grandTotal?: string;
+  currency?: string;
+  // Card 3 — Payment & Timeline (yyyy-mm-dd strings)
+  paymentMethod?: string | null;
+  paymentProvider?: string | null;
+  providerOrderId?: string | null;
+  placedAt?: string | null;
+  paidAt?: string | null;
+  refundedAt?: string | null;
+  cancelledAt?: string | null;
+  // Card 4 — Relationships (REQUIRED contactId, optional company/deal)
+  contactId: string;
+  companyId?: string | null;
+  dealId?: string | null;
+  // Card 5 — Attribution & Notes
+  attributionFirstSource?: string | null;
+  attributionLastSource?: string | null;
+  customerNotes?: string | null;
+  internalNotes?: string | null;
+}
+
+// Update surface: orderNumber is NOT editable on edit (Q8 read-only).
+// All other fields optional. Time-preservation (Q6.1) relies on the form
+// OMITTING unchanged date fields entirely (not sending the same value).
+export interface OrderUpdateInput
+  extends Partial<Omit<OrderCreateInput, "orderNumber" | "contactId">> {
+  id: string;
+  contactId?: string;
+}
+
 export const ordersApi = {
   list: (input?: {
     search?: string;
@@ -1147,6 +1189,11 @@ export const ordersApi = {
     trpcQuery<CursorPage<OrderListItem>>('orders.list', input ?? { limit: 50 }),
   get: (id: string) =>
     trpcQuery<OrderDetail>('orders.get', { id }),
+  // KAN-945 — Sub-cohort 3.4 CRUD mutations.
+  create: (input: OrderCreateInput) =>
+    trpcMutation<OrderDetail>('orders.create', input),
+  update: (input: OrderUpdateInput) =>
+    trpcMutation<OrderDetail>('orders.update', input),
 };
 
 export interface DealListItem {

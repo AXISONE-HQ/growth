@@ -15,7 +15,7 @@
  */
 
 import { useQuery } from '@tanstack/react-query';
-import { ArrowLeft, Receipt } from 'lucide-react';
+import { ArrowLeft, Pencil, Receipt } from 'lucide-react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useEffect } from 'react';
@@ -46,9 +46,15 @@ function parseLineItems(raw: unknown): LineItem[] | null {
   return raw as LineItem[];
 }
 
+/** KAN-945 Q10 — TZ-safe date rendering. Previously called
+ *  `new Date(iso).toLocaleString()` without a `timeZone` option, which
+ *  shifted the rendered date by the browser's UTC offset (KAN-943 class).
+ *  Explicit `timeZone: 'UTC'` aligns the detail-page display with the
+ *  edit-form's UTC-day pre-population. Broader Company/Customer audit
+ *  stays in KAN-943 scope. */
 function fmtDate(iso: string | null | undefined): string {
   if (!iso) return '—';
-  return new Date(iso).toLocaleString();
+  return new Date(iso).toLocaleString('en-US', { timeZone: 'UTC' });
 }
 
 export default function OrderDetailPage() {
@@ -121,7 +127,25 @@ export default function OrderDetailPage() {
               Placed {fmtDate(order.placedAt)}
             </p>
           </div>
-          <StatusBadge kind="order-status" value={order.status} />
+          <div className="flex items-center gap-3">
+            <StatusBadge kind="order-status" value={order.status} />
+            {/* KAN-945 — Sub-cohort 3.4 Edit affordance. Placed in Card 1
+                header next to status (mirrors KAN-937/938 pattern). Row-
+                level Edit avoided — list's orderNumber cell already navigates
+                to detail via Link, and per-row Edit would compete. */}
+            <Link
+              href={`/orders/${order.id}/edit`}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-md border"
+              style={{
+                backgroundColor: 'var(--ds-surface-default)',
+                borderColor: 'var(--ds-border-default)',
+                color: 'var(--ds-ink-secondary)',
+              }}
+            >
+              <Pencil className="w-3.5 h-3.5" />
+              Edit
+            </Link>
+          </div>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3 text-sm">
           <Field label="Source" value={enumLabel(ORDER_SOURCE_LABELS, order.source)} />

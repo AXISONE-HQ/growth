@@ -153,6 +153,25 @@ export async function resolveDealByMatchKey(
 // Pipeline + Stage lookups
 // ─────────────────────────────────────────────
 
+// ─────────────────────────────────────────────
+// Date coercion (KAN-945 lift from deals-router.ts)
+// ─────────────────────────────────────────────
+
+/** Coerce wire-format date strings (yyyy-mm-dd) to Date objects before
+ *  passing to Prisma. Native `<input type="date">` returns yyyy-mm-dd;
+ *  Prisma's deserializer requires either a full ISO-8601 DateTime string or
+ *  a JS Date object (even for `@db.Date` columns). Defense-in-depth: any
+ *  service-layer caller submitting a date string is coerced uniformly.
+ *  `null` / `undefined` / empty-string pass through as `null`.
+ *
+ *  KAN-942 origin (private in deals-router.ts); lifted in KAN-945 for reuse
+ *  in orders-router.ts and any future canonical-entity CRUD with date inputs.
+ */
+export function toDate(s: string | null | undefined): Date | null {
+  if (s == null || s === "") return null;
+  return new Date(s);
+}
+
 /** Look up a Pipeline by name within a tenant. When `name` is empty
  *  OR no Pipeline matches, falls back to the tenant's default Pipeline
  *  (first active Pipeline by createdAt asc). Returns null if the
@@ -289,6 +308,26 @@ export async function assertPipelineInTenant(
     throw new TRPCError({
       code: "BAD_REQUEST",
       message: "Pipeline not found in this tenant",
+    });
+  }
+}
+
+/** Validate dealId belongs to the same tenant. KAN-945. Optional FK on
+ *  Order — caller may pass null/undefined for "no deal linkage". */
+export async function assertDealInTenant(
+  prisma: PrismaClient,
+  tenantId: string,
+  dealId: string | null | undefined,
+): Promise<void> {
+  if (dealId == null) return;
+  const found = await prisma.deal.findFirst({
+    where: { id: dealId, tenantId },
+    select: { id: true },
+  });
+  if (!found) {
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: "Deal not found in this tenant",
     });
   }
 }

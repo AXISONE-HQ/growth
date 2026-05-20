@@ -591,8 +591,41 @@ const companiesRouter = router({
 });
 
 // ============================================================================
-// ORDERS ROUTER — KAN-883
+// ORDERS ROUTER — KAN-883 (read surface) + KAN-945 (Sub-cohort 3.4 mutations)
 // ============================================================================
+interface OrdersCreateInput {
+  // Card 1
+  orderNumber: string;
+  status?: string;
+  source?: string;
+  // Card 2
+  totalAmount?: string;
+  taxAmount?: string;
+  discountAmount?: string;
+  grandTotal?: string;
+  currency?: string;
+  // Card 3
+  paymentMethod?: string | null;
+  paymentProvider?: string | null;
+  providerOrderId?: string | null;
+  placedAt?: string | null;
+  paidAt?: string | null;
+  refundedAt?: string | null;
+  cancelledAt?: string | null;
+  // Card 4
+  contactId: string;
+  companyId?: string | null;
+  dealId?: string | null;
+  // Card 5
+  attributionFirstSource?: string | null;
+  attributionLastSource?: string | null;
+  customerNotes?: string | null;
+  internalNotes?: string | null;
+}
+type OrdersUpdateInput = Partial<Omit<OrdersCreateInput, "orderNumber" | "contactId">> & {
+  id: string;
+  contactId?: string;
+};
 interface OrdersRouterModule {
   listOrders: (
     prisma: unknown,
@@ -612,6 +645,16 @@ interface OrdersRouterModule {
     tenantId: string,
     input: { id: string },
   ) => Promise<unknown>;
+  createOrder: (
+    prisma: unknown,
+    tenantId: string,
+    input: OrdersCreateInput,
+  ) => Promise<unknown>;
+  updateOrder: (
+    prisma: unknown,
+    tenantId: string,
+    input: OrdersUpdateInput,
+  ) => Promise<unknown>;
 }
 let _ordersModule: OrdersRouterModule | null = null;
 async function loadOrdersModule(): Promise<OrdersRouterModule> {
@@ -627,7 +670,10 @@ const ordersRouter = router({
       z.object({
         search: z.string().optional(),
         status: z.string().optional(),
-        contactId: z.string().uuid().optional(),
+        // KAN-945 Q9 — Contact.id is @default(cuid()), NOT uuid (KAN-893
+        // fixed the symmetric Deal validator; this is the sibling instance).
+        // Broader sweep tracked in KAN-944.
+        contactId: z.string().cuid().optional(),
         companyId: z.string().cuid().optional(),
         dealId: z.string().cuid().optional(),
         limit: z.number().int().min(1).max(200).default(50),
@@ -644,6 +690,86 @@ const ordersRouter = router({
     .query(async ({ ctx, input }) => {
       const { getOrderById } = await loadOrdersModule();
       return getOrderById(ctx.prisma, ctx.tenantId, input);
+    }),
+
+  // KAN-945 — Sub-cohort 3.4 Order CRUD. 22 form-eligible fields across 5
+  // cards. Required: orderNumber + contactId. Optional FKs: companyId,
+  // dealId. Loose enums match contacts/companies/deals pattern; Prisma
+  // rejects bad values at write time. Money fields are Decimal serialized
+  // as string. Date fields are full DateTime (form sends yyyy-mm-dd;
+  // backend's `toDate()` coerces). orderNumber is unique per tenant —
+  // P2002 collisions surface as friendly BAD_REQUEST.
+  create: protectedProcedure
+    .input(
+      z.object({
+        // Card 1 — Core Order
+        orderNumber: z.string().min(1),
+        status: z.string().optional(),
+        source: z.string().optional(),
+        // Card 2 — Money
+        totalAmount: z.string().optional(),
+        taxAmount: z.string().optional(),
+        discountAmount: z.string().optional(),
+        grandTotal: z.string().optional(),
+        currency: z.string().optional(),
+        // Card 3 — Payment & Timeline
+        paymentMethod: z.string().nullable().optional(),
+        paymentProvider: z.string().nullable().optional(),
+        providerOrderId: z.string().nullable().optional(),
+        placedAt: z.string().nullable().optional(),
+        paidAt: z.string().nullable().optional(),
+        refundedAt: z.string().nullable().optional(),
+        cancelledAt: z.string().nullable().optional(),
+        // Card 4 — Relationships
+        contactId: z.string().min(1),
+        companyId: z.string().nullable().optional(),
+        dealId: z.string().nullable().optional(),
+        // Card 5 — Attribution & Notes
+        attributionFirstSource: z.string().nullable().optional(),
+        attributionLastSource: z.string().nullable().optional(),
+        customerNotes: z.string().nullable().optional(),
+        internalNotes: z.string().nullable().optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const { createOrder } = await loadOrdersModule();
+      return createOrder(ctx.prisma, ctx.tenantId, input);
+    }),
+
+  update: protectedProcedure
+    .input(
+      z.object({
+        id: z.string().cuid(),
+        // orderNumber NOT in update surface (Q8 read-only-on-edit decision).
+        // All other fields optional — partial-update semantics. Time-
+        // preservation (Q6.1) relies on the form omitting unchanged date
+        // fields entirely.
+        status: z.string().optional(),
+        source: z.string().optional(),
+        totalAmount: z.string().optional(),
+        taxAmount: z.string().optional(),
+        discountAmount: z.string().optional(),
+        grandTotal: z.string().optional(),
+        currency: z.string().optional(),
+        paymentMethod: z.string().nullable().optional(),
+        paymentProvider: z.string().nullable().optional(),
+        providerOrderId: z.string().nullable().optional(),
+        placedAt: z.string().nullable().optional(),
+        paidAt: z.string().nullable().optional(),
+        refundedAt: z.string().nullable().optional(),
+        cancelledAt: z.string().nullable().optional(),
+        contactId: z.string().min(1).optional(),
+        companyId: z.string().nullable().optional(),
+        dealId: z.string().nullable().optional(),
+        attributionFirstSource: z.string().nullable().optional(),
+        attributionLastSource: z.string().nullable().optional(),
+        customerNotes: z.string().nullable().optional(),
+        internalNotes: z.string().nullable().optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const { updateOrder } = await loadOrdersModule();
+      return updateOrder(ctx.prisma, ctx.tenantId, input);
     }),
 });
 
