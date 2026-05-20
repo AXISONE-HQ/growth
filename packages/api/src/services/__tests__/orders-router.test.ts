@@ -46,6 +46,8 @@ interface FakeOrder {
   internalNotes?: string | null;
   createdAt: Date;
   updatedAt: Date;
+  // KAN-946 — soft-delete column
+  deletedAt?: Date | null;
 }
 
 function order(overrides: Partial<FakeOrder> = {}): FakeOrder {
@@ -67,6 +69,8 @@ function order(overrides: Partial<FakeOrder> = {}): FakeOrder {
     source: "manual",
     createdAt: new Date("2026-05-10T10:00:00Z"),
     updatedAt: new Date("2026-05-10T10:00:00Z"),
+    // KAN-946 — soft-delete column (null = not soft-deleted)
+    deletedAt: null,
     ...overrides,
   };
 }
@@ -158,12 +162,15 @@ function makePrisma(
       },
       count: async ({ where }: { where: Record<string, unknown> }) =>
         rows.filter((r) => evalWhere(r, where)).length,
+      // KAN-946 — findFirst routes through evalWhere so it honors the
+      // full where shape (e.g., the triple-guard's `deletedAt: null`
+      // filter, not just id + tenantId).
       findFirst: async ({
         where,
       }: {
-        where: { id: string; tenantId: string };
+        where: Record<string, unknown>;
       }) =>
-        rows.find((r) => r.id === where.id && r.tenantId === where.tenantId) ?? null,
+        rows.find((r) => evalWhere(r, where)) ?? null,
       // KAN-945 — create + update support. Tracks exact args for type-shape
       // assertions on data reaching Prisma. Simulates P2002 unique-collision
       // on @@unique([tenantId, orderNumber]).
@@ -696,5 +703,62 @@ describe("KAN-945 — updateOrder", () => {
     });
     expect(data[0].customerNotes).toBe("updated");
     expect(data[0].internalNotes).toBe("original-internal");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// KAN-946 — Order soft-delete (deletedAt column).
+//
+// Coverage mirrors KAN-940 / Deal:
+//   - listOrders excludes soft-deleted rows by default
+//   - getOrderById still returns tombstones (audit-trail parity)
+//   - updateOrder triple-guard rejects soft-deleted rows as NOT_FOUND
+// ─────────────────────────────────────────────────────────────────────
+describe("KAN-946 — Order soft-delete", () => {
+  it("listOrders excludes soft-deleted rows by default", async () => {
+    const data = [
+      order({ id: "ord_live", deletedAt: null }),
+      order({ id: "ord_tombstone", deletedAt: new Date("2026-05-15") }),
+    ];
+    const prisma = makePrisma(data);
+    const result = await listOrders(prisma, TENANT_A, { limit: 50 });
+    expect(result.items.map((i) => i.id)).toEqual(["ord_live"]);
+    expect(result.totalCount).toBe(1);
+  });
+
+  it("getOrderById returns tombstones (audit-trail parity)", async () => {
+    const data = [
+      order({
+        id: "ord_tombstone",
+        tenantId: TENANT_A,
+        deletedAt: new Date("2026-05-15"),
+      }),
+    ];
+    const prisma = makePrisma(data);
+    const result = await getOrderById(prisma, TENANT_A, {
+      id: "ord_tombstone",
+    });
+    expect((result as { id: string }).id).toBe("ord_tombstone");
+    expect((result as { deletedAt: Date | null }).deletedAt).toBeInstanceOf(Date);
+  });
+
+  it("updateOrder rejects soft-deleted rows → NOT_FOUND (triple-guard)", async () => {
+    const data = [
+      order({
+        id: "ord_tombstone",
+        tenantId: TENANT_A,
+        customerNotes: "Original note",
+        deletedAt: new Date("2026-05-15"),
+      }),
+    ];
+    const prisma = makePrisma(data);
+    await expect(
+      updateOrder(prisma, TENANT_A, {
+        id: "ord_tombstone",
+        customerNotes: "resurrect",
+      }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+    // Original row untouched
+    expect(data[0].customerNotes).toBe("Original note");
   });
 });

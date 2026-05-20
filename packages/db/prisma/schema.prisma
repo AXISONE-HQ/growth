@@ -1374,6 +1374,9 @@ model Deal {
   aiContext              Json            @default("{}") @map("ai_context")
   createdAt              DateTime        @default(now()) @map("created_at")
   updatedAt              DateTime        @updatedAt @map("updated_at")
+  // KAN-940 — soft-delete column. Nullable; rows with deletedAt IS NOT NULL
+  // are excluded from listDeals by default. Mirrors Company's pattern.
+  deletedAt              DateTime?       @map("deleted_at")
 
   tenant        Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   contact       Contact            @relation(fields: [contactId], references: [id], onDelete: Cascade)
@@ -1927,6 +1930,9 @@ model Order {
   correlationId String?  @unique @map("correlation_id")
   createdAt     DateTime @default(now()) @map("created_at")
   updatedAt     DateTime @updatedAt @map("updated_at")
+  // KAN-946 — soft-delete column. Nullable; rows with deletedAt IS NOT NULL
+  // are excluded from listOrders by default. Mirrors Company's pattern.
+  deletedAt     DateTime? @map("deleted_at")
 
   tenant  Tenant   @relation(fields: [tenantId], references: [id])
   contact Contact  @relation(fields: [contactId], references: [id])

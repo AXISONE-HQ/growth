@@ -168,7 +168,10 @@ export async function listOrders(
 ) {
   const cursor = decodeCursor(input.cursor);
 
-  const where: Record<string, unknown> = { tenantId };
+  // KAN-946 — soft-delete filter. Exclude tombstones from list by default.
+  // getOrderById still returns tombstones for audit-trail use (matches
+  // getCompanyById's pattern).
+  const where: Record<string, unknown> = { tenantId, deletedAt: null };
   if (input.status) where.status = input.status;
   if (input.contactId) where.contactId = input.contactId;
   if (input.companyId) where.companyId = input.companyId;
@@ -188,7 +191,7 @@ export async function listOrders(
   if (searchOr) andClauses.push({ OR: searchOr });
   if (andClauses.length > 0) where.AND = andClauses;
 
-  const totalCountWhere: Record<string, unknown> = { tenantId };
+  const totalCountWhere: Record<string, unknown> = { tenantId, deletedAt: null };
   if (input.status) totalCountWhere.status = input.status;
   if (input.contactId) totalCountWhere.contactId = input.contactId;
   if (input.companyId) totalCountWhere.companyId = input.companyId;
@@ -374,8 +377,11 @@ export async function updateOrder(
   tenantId: string,
   input: UpdateInput,
 ) {
+  // KAN-946 — Triple-guard: id + tenantId + deletedAt: null. Soft-deleted
+  // rows surface as NOT_FOUND alongside cross-tenant access (uniform error
+  // shape, no existence leak). Mirrors Company's updateCompany pattern.
   const existing = await prisma.order.findFirst({
-    where: { id: input.id, tenantId },
+    where: { id: input.id, tenantId, deletedAt: null },
     select: { id: true },
   });
   if (!existing) {
