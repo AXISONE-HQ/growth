@@ -50,6 +50,8 @@ import {
 import { env } from "../env.js";
 import { logger } from "../logger.js";
 import { buildSvixMiddleware, getSvixContext } from "../middleware/svix.js";
+import { fetchInboundEmailContent, type InboundEmailContent } from "../adapters/resend/inbound-fetch.js";
+import { parseFormspreeEmail, isFormspreeSource } from "../parsers/formspree-email.js";
 
 export const resendInboundWebhookApp = new Hono();
 
@@ -104,9 +106,31 @@ interface ResendInboundPayload {
 
 export interface InboundHandlerHooks {
   resolveTenantBySlug: (slug: string) => Promise<{ id: string; inboxDkimStrict: boolean } | null>;
-  upsertContactFromEmail: (input: { tenantId: string; email: string; firstName: string | null; lastName: string | null }) => Promise<{ id: string }>;
+  /**
+   * KAN-954 — extended with optional `companyName` + `source` so
+   * Formspree-parsed leads can write firstName/lastName/companyName/source.
+   * Form-field bag (role / monthlyLeadVolume / biggestPain) is NOT passed
+   * here because Contact has no customFields column — those fields flow
+   * through LeadReceivedEvent.metadata.customFields and land on Deal in
+   * the consumer.
+   */
+  upsertContactFromEmail: (input: {
+    tenantId: string;
+    email: string;
+    firstName: string | null;
+    lastName: string | null;
+    companyName?: string | null;
+    source?: "email_inbox" | "web_form";
+  }) => Promise<{ id: string }>;
   writeLeadInboxEvent: (row: LeadInboxEventRow) => Promise<void>;
   publishLeadReceived: (event: LeadReceivedEvent) => Promise<string>;
+  /**
+   * KAN-954 — hydrate body / reply_to / headers via the Resend Receiving
+   * API. Optional hook so tests can mock without hitting real fetch().
+   * The default production wiring uses `fetchInboundEmailContent` from
+   * `../adapters/resend/inbound-fetch.js`.
+   */
+  fetchEmailContent?: (emailId: string) => Promise<InboundEmailContent | null>;
 }
 
 export interface LeadInboxEventRow {
@@ -223,7 +247,6 @@ resendInboundWebhookApp.post(
   const fromParsed = extractFromAddress(data.from);
   const fromAddress = fromParsed?.email ?? "unknown";
   const subject = data.subject ?? null;
-  const bodyPreview = (data.text ?? data.html ?? "").slice(0, BODY_PREVIEW_CAP) || null;
   const attachmentCount = Array.isArray(data.attachments) ? data.attachments.length : 0;
   const spfPass = data.spf?.pass === true;
   const dkimPass = data.dkim?.pass === true;
@@ -254,6 +277,28 @@ resendInboundWebhookApp.post(
       logger.warn({ err }, "[resend-inbound] redis dedup failed — fail-open");
     }
   }
+
+  // ── KAN-954 — hydrate body / reply_to / headers via Resend Receiving API.
+  // Webhook payload is metadata-only — bodyPreview is empty without this
+  // fetch. Applies to ALL inbound (not Formspree-specific); the Formspree
+  // parser sits on top. Fail-open: null result on any failure falls through
+  // to current empty-body behavior (no regression for direct inbound).
+  let fetchedContent: InboundEmailContent | null = null;
+  if (resendEmailId) {
+    const fetchHook = getHooks().fetchEmailContent;
+    fetchedContent = fetchHook
+      ? await fetchHook(resendEmailId).catch((err: unknown) => {
+          logger.warn({ err, resendEmailId }, "[resend-inbound] fetch hook threw");
+          return null;
+        })
+      : await fetchInboundEmailContent(resendEmailId, env.RESEND_API_KEY_RW);
+  }
+  // bodyPreview now sources from the fetched text (Formspree + every other
+  // inbound), falling back to the legacy webhook-payload fields if the
+  // Receiving API isn't reachable.
+  const bodyPreview =
+    (fetchedContent?.text ?? fetchedContent?.html ?? data.text ?? data.html ?? "")
+      .slice(0, BODY_PREVIEW_CAP) || null;
 
   // ── Resolve tenant from slug
   if (!slug) {
@@ -357,13 +402,59 @@ resendInboundWebhookApp.post(
     return c.text("OK", 200);
   }
 
+  // ── KAN-954 — Formspree parser hook. Runs only when From-domain is
+  // Formspree-shaped; for every other inbound (direct, normal email), the
+  // parser is a no-op and the original From-keyed identity flows through
+  // unchanged. Parser returns null on detection failure, malformed body,
+  // or missing senderEmail — null path also falls through to current
+  // (mis-attributed but flagged) behavior. NEVER drops a lead.
+  let formspreeParsed:
+    | ReturnType<typeof parseFormspreeEmail>
+    | null = null;
+  if (isFormspreeSource(fromParsed.email)) {
+    formspreeParsed = parseFormspreeEmail({
+      fromHeader: fromParsed.email,
+      subject,
+      text: fetchedContent?.text ?? null,
+      replyTo: fetchedContent?.replyTo ?? [],
+    });
+    if (!formspreeParsed) {
+      logger.warn(
+        { resendEmailId, fromAddress, subject },
+        "[resend-inbound] formspree detection fired but parsing failed — falling back to mis-attributed Contact",
+      );
+    }
+  }
+
   // ── Contact upsert + audit + publish
-  const { firstName, lastName } = splitDisplayName(fromParsed.name);
+  // Identity selection: Formspree-parsed values when available; otherwise
+  // the legacy From-header values. Either path produces a Contact row + a
+  // lead.received event — fallback is "mis-attributed but landed," never
+  // dropped.
+  const { firstName: legacyFirst, lastName: legacyLast } = splitDisplayName(fromParsed.name);
+  const identity = formspreeParsed
+    ? {
+        email: formspreeParsed.senderEmail,
+        firstName: formspreeParsed.firstName,
+        lastName: formspreeParsed.lastName,
+        companyName: formspreeParsed.companyName,
+        source: "web_form" as const,
+      }
+    : {
+        email: fromParsed.email,
+        firstName: legacyFirst,
+        lastName: legacyLast,
+        companyName: null,
+        source: undefined,
+      };
+
   const contact = await getHooks().upsertContactFromEmail({
     tenantId: tenant.id,
-    email: fromParsed.email,
-    firstName,
-    lastName,
+    email: identity.email,
+    firstName: identity.firstName,
+    lastName: identity.lastName,
+    companyName: identity.companyName,
+    source: identity.source,
   });
 
   await safeWriteAuditRow({
@@ -387,10 +478,24 @@ resendInboundWebhookApp.post(
     contactId: contact.id,
     source: "email_inbox",
     metadata: {
+      // fromAddress remains the raw envelope From — preserves audit trail
+      // (Formspree forwarded from `noreply@formspree.io`, even though the
+      // Contact + dealName use the parsed real submitter identity).
       fromAddress: fromParsed.email,
       subject: subject ?? undefined,
       bodyPreview: bodyPreview ?? undefined,
       attachmentCount,
+      // KAN-954 — optional vendor-attribution + deal-naming hints.
+      // Pre-KAN-954 producers omit these; consumer falls back to defaults.
+      ...(formspreeParsed
+        ? {
+            vendor: "formspree" as const,
+            formSource: formspreeParsed.formSource ?? undefined,
+            leadType: formspreeParsed.leadType ?? undefined,
+            dealName: formspreeParsed.dealNameSeed,
+            customFields: formspreeParsed.customFields,
+          }
+        : {}),
     },
   });
 

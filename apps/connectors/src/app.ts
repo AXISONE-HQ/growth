@@ -39,18 +39,34 @@ export function buildApp(): Hono {
       });
       return t;
     },
-    upsertContactFromEmail: async ({ tenantId, email, firstName, lastName }) => {
+    upsertContactFromEmail: async ({ tenantId, email, firstName, lastName, companyName, source }) => {
       // Upsert: find by tenantId+email, create if absent. Match is on
       // (tenantId, email) — there's no unique index on that pair today, so
       // we do a manual find→update or create.
+      //
+      // KAN-954 — on Formspree-parsed leads (companyName / source passed in),
+      // fill blank fields on existing Contacts without clobbering prior
+      // manual edits. Form-field bag (role / monthlyLeadVolume / biggestPain
+      // / etc.) is NOT written here — Contact has no `customFields` column.
+      // Those fields flow through LeadReceivedEvent.metadata.customFields
+      // and land on Deal.customFields in the consumer.
       const existing = await getPrisma().contact.findFirst({
         where: { tenantId, email },
-        select: { id: true },
+        select: { id: true, firstName: true, lastName: true, companyName: true },
       });
       if (existing) {
+        const updateData: Record<string, unknown> = { updatedAt: new Date() };
+        // Only Formspree-parsed leads (companyName-bearing) trigger the
+        // additive identity merge; direct inbound preserves the original
+        // refresh-updatedAt-only behavior.
+        if (companyName !== undefined || source !== undefined) {
+          if (!existing.firstName && firstName) updateData.firstName = firstName;
+          if (!existing.lastName && lastName) updateData.lastName = lastName;
+          if (!existing.companyName && companyName) updateData.companyName = companyName;
+        }
         await getPrisma().contact.update({
           where: { id: existing.id },
-          data: { updatedAt: new Date() },
+          data: updateData,
         });
         return { id: existing.id };
       }
@@ -60,7 +76,8 @@ export function buildApp(): Hono {
           email,
           firstName,
           lastName,
-          source: 'email_inbox',
+          companyName: companyName ?? null,
+          source: source ?? 'email_inbox',
           lifecycleStage: 'lead',
         },
       });

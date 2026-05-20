@@ -69,6 +69,33 @@ export const LeadReceivedEventSchema = z.object({
     leadApiEventId: z.string().uuid().optional(),
     /** API key tag (lead_api source only) for posture/rate-limit attribution. */
     apiKeyTag: z.string().optional(),
+    /**
+     * KAN-954 — optional vendor-attribution + deal-naming fields for
+     * email-forwarded form submissions (Formspree V1; Tally/Typeform later).
+     * Additive / backward-compatible: existing producers omit these and
+     * consumers fall back to current defaults.
+     */
+    /** Hidden form field — e.g. `growth-landing-v1`. Persists campaign attribution. */
+    formSource: z.string().optional(),
+    /** Hidden form field — e.g. `early_access_request`. Persists intent attribution. */
+    leadType: z.string().optional(),
+    /** Form-vendor identifier — `formspree`, `tally`, etc. */
+    vendor: z.string().optional(),
+    /**
+     * Pre-computed deal name to use when the consumer creates the Deal row.
+     * If unset, the consumer uses the Prisma column default (`Untitled deal`).
+     * Format example: `Early-access — Acme Corp`.
+     */
+    dealName: z.string().optional(),
+    /**
+     * Free-shape map of form-field values from the parser (Formspree V1:
+     * role, monthlyLeadVolume, biggestPain, plus echoes of name/email/
+     * company/formSource/leadType). The consumer writes this verbatim
+     * to Deal.customFields (which DOES have a custom_fields column;
+     * Contact does not). Keys are caller-defined strings; values are
+     * strings only for V1.
+     */
+    customFields: z.record(z.string(), z.string()).optional(),
   }),
   receivedAt: z.string().datetime(),
 });
