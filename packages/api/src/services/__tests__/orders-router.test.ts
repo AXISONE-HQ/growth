@@ -10,7 +10,8 @@
  */
 import { describe, it, expect } from "vitest";
 import { z } from "zod";
-import { listOrders, getOrderById } from "../orders-router.js";
+import { Prisma } from "@prisma/client";
+import { listOrders, getOrderById, createOrder, updateOrder } from "../orders-router.js";
 import { decodeCursor } from "../_pagination.js";
 
 const TENANT_A = "11111111-1111-1111-1111-111111111111";
@@ -24,14 +25,25 @@ interface FakeOrder {
   dealId: string | null;
   orderNumber: string;
   status: string;
-  totalAmount: number;
-  grandTotal: number;
+  // KAN-945 — money fields (Decimal as string when set via mutation)
+  totalAmount: number | string;
+  taxAmount?: number | string;
+  discountAmount?: number | string;
+  grandTotal: number | string;
   currency: string;
+  // KAN-945 — datetime fields
   placedAt: Date;
   paidAt: Date | null;
+  refundedAt?: Date | null;
+  cancelledAt?: Date | null;
   paymentMethod: string | null;
   paymentProvider: string | null;
+  providerOrderId?: string | null;
   source: string;
+  attributionFirstSource?: string | null;
+  attributionLastSource?: string | null;
+  customerNotes?: string | null;
+  internalNotes?: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -57,6 +69,24 @@ function order(overrides: Partial<FakeOrder> = {}): FakeOrder {
     updatedAt: new Date("2026-05-10T10:00:00Z"),
     ...overrides,
   };
+}
+
+// KAN-945 — FK validation fixtures + call tracker for type-shape assertions.
+interface FakeContact {
+  id: string;
+  tenantId: string;
+}
+interface FakeCompany {
+  id: string;
+  tenantId: string;
+}
+interface FakeDeal {
+  id: string;
+  tenantId: string;
+}
+interface CallTracker {
+  createArgs: Array<Record<string, unknown>>;
+  updateArgs: Array<{ where: Record<string, unknown>; data: Record<string, unknown> }>;
 }
 
 function evalWhere(o: FakeOrder, where: Record<string, unknown>): boolean {
@@ -100,7 +130,14 @@ function evalWhere(o: FakeOrder, where: Record<string, unknown>): boolean {
   return true;
 }
 
-function makePrisma(rows: FakeOrder[]) {
+function makePrisma(
+  rows: FakeOrder[],
+  contacts: FakeContact[] = [],
+  companies: FakeCompany[] = [],
+  deals: FakeDeal[] = [],
+  tracker: CallTracker = { createArgs: [], updateArgs: [] },
+) {
+  let nextId = rows.length;
   return {
     order: {
       findMany: async ({
@@ -127,6 +164,69 @@ function makePrisma(rows: FakeOrder[]) {
         where: { id: string; tenantId: string };
       }) =>
         rows.find((r) => r.id === where.id && r.tenantId === where.tenantId) ?? null,
+      // KAN-945 — create + update support. Tracks exact args for type-shape
+      // assertions on data reaching Prisma. Simulates P2002 unique-collision
+      // on @@unique([tenantId, orderNumber]).
+      create: async ({ data }: { data: Partial<FakeOrder> & { tenantId: string; contactId: string; orderNumber: string } }) => {
+        tracker.createArgs.push(data as Record<string, unknown>);
+        // Simulate @@unique([tenantId, orderNumber]) collision.
+        const dup = rows.find(
+          (r) => r.tenantId === data.tenantId && r.orderNumber === data.orderNumber,
+        );
+        if (dup) {
+          throw new Prisma.PrismaClientKnownRequestError(
+            "Unique constraint failed on the fields: (`tenant_id`, `order_number`)",
+            {
+              code: "P2002",
+              clientVersion: "test",
+              meta: { target: ["tenant_id", "order_number"] },
+            },
+          );
+        }
+        const newRow = order({
+          id: `ord_${++nextId}`,
+          ...data,
+        } as Partial<FakeOrder>);
+        rows.push(newRow);
+        return newRow;
+      },
+      update: async ({
+        where,
+        data,
+      }: {
+        where: { id: string };
+        data: Record<string, unknown>;
+      }) => {
+        tracker.updateArgs.push({ where, data });
+        const r = rows.find((row) => row.id === where.id);
+        if (!r) throw new Error("not found");
+        Object.assign(r, data, { updatedAt: new Date() });
+        return r;
+      },
+    },
+    contact: {
+      findFirst: async ({
+        where,
+      }: {
+        where: { id: string; tenantId: string };
+      }) =>
+        contacts.find((c) => c.id === where.id && c.tenantId === where.tenantId) ?? null,
+    },
+    company: {
+      findFirst: async ({
+        where,
+      }: {
+        where: { id: string; tenantId: string };
+      }) =>
+        companies.find((c) => c.id === where.id && c.tenantId === where.tenantId) ?? null,
+    },
+    deal: {
+      findFirst: async ({
+        where,
+      }: {
+        where: { id: string; tenantId: string };
+      }) =>
+        deals.find((d) => d.id === where.id && d.tenantId === where.tenantId) ?? null,
     },
   } as never;
 }
@@ -293,5 +393,296 @@ describe("KAN-893 — orders.list?dealId tRPC input validator", () => {
   it("accepts CUID-shaped dealId filter", () => {
     const result = inputSchema.safeParse({ dealId: "cmou3yc2o0002a9tnt34f5q81" });
     expect(result.success).toBe(true);
+  });
+});
+
+// KAN-945 — Q9 regression. Sibling of the KAN-893 fix-up; this one was
+// missed in KAN-893. Contact.id is @default(cuid()), so the orders.list
+// contactId filter Zod must accept CUID. Broader sweep: KAN-944.
+describe("KAN-945 — orders.list?contactId tRPC input validator (Q9 fix)", () => {
+  const inputSchema = z.object({
+    contactId: z.string().cuid().optional(),
+  });
+
+  it("accepts CUID-shaped contactId filter (post-KAN-945 Q9 fix)", () => {
+    const result = inputSchema.safeParse({ contactId: "cmou3yc2o0002a9tnt34f5q81" });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects UUID-shaped contactId (would silently fail pre-fix)", () => {
+    // Pre-fix, contactId was z.string().uuid().optional() — so a CUID would
+    // be REJECTED. Post-fix, the validator accepts CUID and rejects UUID
+    // (UUID is no longer in the contract).
+    const result = inputSchema.safeParse({ contactId: "11111111-1111-1111-1111-111111111111" });
+    expect(result.success).toBe(false);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// KAN-945 — Sub-cohort 3.4 Order CRUD: createOrder + updateOrder.
+//
+// Coverage per Phase 4 acceptance gate:
+//   - Happy path with all FKs validated
+//   - Cross-tenant rejection for contactId (req) + companyId/dealId (opt)
+//   - Duplicate orderNumber (P2002 → friendly BAD_REQUEST, Q8)
+//   - Type-shape assertions on data reaching prisma.order.create:
+//     * Date instances for placedAt / paidAt / refundedAt / cancelledAt
+//     * Decimal as string for totalAmount / taxAmount / discountAmount /
+//       grandTotal
+//   - Q6.1 time-preservation: updateOrder must NOT include omitted date
+//     fields in the data argument to prisma.order.update — proves
+//     original DateTime is preserved byte-for-byte (load-bearing
+//     guarantee against silently truncating webhook-sourced timestamps).
+// ─────────────────────────────────────────────────────────────────────
+const C_1 = "ct_1";
+const CO_1 = "co_1";
+const D_1 = "dl_1";
+
+describe("KAN-945 — createOrder", () => {
+  it("happy path: creates an order with all FKs validated + type-shape correct", async () => {
+    const data: FakeOrder[] = [];
+    const tracker: CallTracker = { createArgs: [], updateArgs: [] };
+    const prisma = makePrisma(
+      data,
+      [{ id: C_1, tenantId: TENANT_A }],
+      [{ id: CO_1, tenantId: TENANT_A }],
+      [{ id: D_1, tenantId: TENANT_A }],
+      tracker,
+    );
+
+    await createOrder(prisma, TENANT_A, {
+      orderNumber: "ORD-2026-001",
+      status: "paid",
+      source: "manual",
+      totalAmount: "100.00",
+      taxAmount: "8.50",
+      discountAmount: "0.00",
+      grandTotal: "108.50",
+      currency: "USD",
+      paymentMethod: "card",
+      paymentProvider: "stripe",
+      providerOrderId: "ch_test_123",
+      placedAt: "2026-05-20",
+      paidAt: "2026-05-20",
+      refundedAt: null,
+      cancelledAt: null,
+      contactId: C_1,
+      companyId: CO_1,
+      dealId: D_1,
+      attributionFirstSource: "organic_search",
+      attributionLastSource: "direct",
+      customerNotes: "Customer asked about extended warranty",
+      internalNotes: "Approved by sales lead",
+    });
+
+    expect(data).toHaveLength(1);
+    const row = data[0];
+    expect(row.orderNumber).toBe("ORD-2026-001");
+    expect(row.contactId).toBe(C_1);
+    expect(row.companyId).toBe(CO_1);
+    expect(row.dealId).toBe(D_1);
+
+    // Q-acceptance: type-shape assertions on data reaching Prisma.
+    // The 3.3 / KAN-942 lesson — mock-passed/prod-500 gap. These assertions
+    // would have caught the date-string failure mode without real Prisma.
+    const args = tracker.createArgs[0];
+    expect(args.placedAt).toBeInstanceOf(Date);
+    expect((args.placedAt as Date).toISOString()).toBe("2026-05-20T00:00:00.000Z");
+    expect(args.paidAt).toBeInstanceOf(Date);
+    expect(args.refundedAt).toBeNull();
+    expect(args.cancelledAt).toBeNull();
+    // Decimal fields arrive as strings; Prisma coerces.
+    expect(args.totalAmount).toBe("100.00");
+    expect(args.taxAmount).toBe("8.50");
+    expect(args.discountAmount).toBe("0.00");
+    expect(args.grandTotal).toBe("108.50");
+  });
+
+  it("rejects cross-tenant contactId (required FK)", async () => {
+    const data: FakeOrder[] = [];
+    const prisma = makePrisma(
+      data,
+      [{ id: C_1, tenantId: TENANT_B }], // wrong tenant
+    );
+    await expect(
+      createOrder(prisma, TENANT_A, {
+        orderNumber: "ORD-1",
+        contactId: C_1,
+      }),
+    ).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+      message: expect.stringMatching(/contact not found/i),
+    });
+    expect(data).toHaveLength(0);
+  });
+
+  it("rejects cross-tenant companyId (optional FK, when provided)", async () => {
+    const data: FakeOrder[] = [];
+    const prisma = makePrisma(
+      data,
+      [{ id: C_1, tenantId: TENANT_A }],
+      [{ id: CO_1, tenantId: TENANT_B }], // wrong tenant
+    );
+    await expect(
+      createOrder(prisma, TENANT_A, {
+        orderNumber: "ORD-1",
+        contactId: C_1,
+        companyId: CO_1,
+      }),
+    ).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+      message: expect.stringMatching(/company not found/i),
+    });
+  });
+
+  it("rejects cross-tenant dealId (optional FK, when provided)", async () => {
+    const data: FakeOrder[] = [];
+    const prisma = makePrisma(
+      data,
+      [{ id: C_1, tenantId: TENANT_A }],
+      [],
+      [{ id: D_1, tenantId: TENANT_B }], // wrong tenant
+    );
+    await expect(
+      createOrder(prisma, TENANT_A, {
+        orderNumber: "ORD-1",
+        contactId: C_1,
+        dealId: D_1,
+      }),
+    ).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+      message: expect.stringMatching(/deal not found/i),
+    });
+  });
+
+  it("Q8: duplicate orderNumber (P2002) → friendly BAD_REQUEST (not 500)", async () => {
+    const data: FakeOrder[] = [
+      order({ id: "existing", tenantId: TENANT_A, orderNumber: "ORD-DUP" }),
+    ];
+    const prisma = makePrisma(data, [{ id: C_1, tenantId: TENANT_A }]);
+    await expect(
+      createOrder(prisma, TENANT_A, {
+        orderNumber: "ORD-DUP",
+        contactId: C_1,
+      }),
+    ).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+      message: expect.stringMatching(/order number already exists/i),
+    });
+  });
+
+  it("Q8: unique-collision in a DIFFERENT tenant succeeds (per-tenant uniqueness)", async () => {
+    // Tenant B has ORD-DUP. Tenant A creating ORD-DUP must succeed (the
+    // uniqueness is per-tenant via @@unique([tenantId, orderNumber])).
+    const data: FakeOrder[] = [
+      order({ id: "tenant_b_dup", tenantId: TENANT_B, orderNumber: "ORD-DUP" }),
+    ];
+    const prisma = makePrisma(data, [{ id: C_1, tenantId: TENANT_A }]);
+    await createOrder(prisma, TENANT_A, {
+      orderNumber: "ORD-DUP",
+      contactId: C_1,
+    });
+    expect(data).toHaveLength(2);
+  });
+});
+
+describe("KAN-945 — updateOrder", () => {
+  // Q6.1 — load-bearing time-preservation invariant. Edit a non-date field;
+  // assert that prisma.order.update receives data WITHOUT placedAt — so the
+  // original timestamp (with time-of-day precision from a webhook source)
+  // is preserved byte-for-byte by Prisma.
+  it("Q6.1: edit non-date field → omitted date fields NOT in Prisma data arg", async () => {
+    const ORIGINAL_PLACED = new Date("2026-05-10T19:30:00.000Z"); // not midnight!
+    const data = [
+      order({
+        id: "ord_1",
+        tenantId: TENANT_A,
+        placedAt: ORIGINAL_PLACED,
+      }),
+    ];
+    const tracker: CallTracker = { createArgs: [], updateArgs: [] };
+    const prisma = makePrisma(data, [], [], [], tracker);
+
+    await updateOrder(prisma, TENANT_A, {
+      id: "ord_1",
+      internalNotes: "Just adding a note — no date fields touched",
+    });
+
+    expect(tracker.updateArgs).toHaveLength(1);
+    const args = tracker.updateArgs[0]!;
+    // The critical assertion: placedAt MUST NOT be in the data arg.
+    // Prisma's partial-update semantics preserve the existing DateTime
+    // value (including time-of-day precision) when a field is omitted.
+    expect(args.data).not.toHaveProperty("placedAt");
+    expect(args.data).not.toHaveProperty("paidAt");
+    expect(args.data).not.toHaveProperty("refundedAt");
+    expect(args.data).not.toHaveProperty("cancelledAt");
+    // internalNotes IS in the data arg.
+    expect(args.data.internalNotes).toBe("Just adding a note — no date fields touched");
+    // Row's placedAt remains byte-for-byte the original.
+    expect((data[0].placedAt as Date).toISOString()).toBe(ORIGINAL_PLACED.toISOString());
+  });
+
+  it("Q6.1: explicit date update coerces yyyy-mm-dd → Date (overrides original)", async () => {
+    const data = [order({ id: "ord_1", tenantId: TENANT_A })];
+    const tracker: CallTracker = { createArgs: [], updateArgs: [] };
+    const prisma = makePrisma(data, [], [], [], tracker);
+
+    await updateOrder(prisma, TENANT_A, {
+      id: "ord_1",
+      placedAt: "2027-03-15",
+    });
+
+    const args = tracker.updateArgs[0]!;
+    expect(args.data.placedAt).toBeInstanceOf(Date);
+    expect((args.data.placedAt as Date).toISOString()).toBe("2027-03-15T00:00:00.000Z");
+  });
+
+  it("Q6.1: explicit null clears the date field", async () => {
+    const data = [
+      order({
+        id: "ord_1",
+        tenantId: TENANT_A,
+        paidAt: new Date("2026-05-10T10:00:00Z"),
+      }),
+    ];
+    const tracker: CallTracker = { createArgs: [], updateArgs: [] };
+    const prisma = makePrisma(data, [], [], [], tracker);
+
+    await updateOrder(prisma, TENANT_A, {
+      id: "ord_1",
+      paidAt: null,
+    });
+
+    const args = tracker.updateArgs[0]!;
+    expect(args.data.paidAt).toBeNull();
+  });
+
+  it("cross-tenant → NOT_FOUND (no existence leak)", async () => {
+    const data = [order({ id: "ord_1", tenantId: TENANT_B })];
+    const prisma = makePrisma(data);
+    await expect(
+      updateOrder(prisma, TENANT_A, { id: "ord_1", internalNotes: "hijack" }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+    // Original row unchanged.
+    expect(data[0].internalNotes).toBeUndefined();
+  });
+
+  it("only sets provided fields (doesn't clobber other fields to null)", async () => {
+    const data = [
+      order({
+        id: "ord_1",
+        tenantId: TENANT_A,
+        customerNotes: "original",
+        internalNotes: "original-internal",
+      }),
+    ];
+    const prisma = makePrisma(data);
+    await updateOrder(prisma, TENANT_A, {
+      id: "ord_1",
+      customerNotes: "updated",
+    });
+    expect(data[0].customerNotes).toBe("updated");
+    expect(data[0].internalNotes).toBe("original-internal");
   });
 });

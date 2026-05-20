@@ -9,7 +9,7 @@
  * _pagination helper from KAN-883).
  */
 
-import { Loader2, Receipt, RefreshCw, Search } from 'lucide-react';
+import { Loader2, Plus, Receipt, RefreshCw, Search } from 'lucide-react';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
@@ -93,18 +93,33 @@ export default function OrdersPage() {
               Transactional outcomes — payments, refunds, fulfillment status.
             </p>
           </div>
-          <button
-            onClick={() => {
-              setAccumulatedItems([]);
-              setCursor(undefined);
-              void refetch();
-            }}
-            disabled={isFetching}
-            className="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50"
-          >
-            {isFetching ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-            Refresh
-          </button>
+          <div className="flex items-center gap-2">
+            {/* KAN-945 — Sub-cohort 3.4 "+ New Order" entry point */}
+            <Link
+              href="/orders/new"
+              className="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-md border"
+              style={{
+                backgroundColor: 'var(--ds-violet-600)',
+                borderColor: 'var(--ds-violet-600)',
+                color: '#fff',
+              }}
+            >
+              <Plus className="w-4 h-4" />
+              New order
+            </Link>
+            <button
+              onClick={() => {
+                setAccumulatedItems([]);
+                setCursor(undefined);
+                void refetch();
+              }}
+              disabled={isFetching}
+              className="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50"
+            >
+              {isFetching ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+              Refresh
+            </button>
+          </div>
         </div>
 
         <div className="mb-4 relative">

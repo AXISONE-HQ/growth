@@ -30,7 +30,14 @@ import {
   assertContactInTenant,
   assertPipelineInTenant,
   assertStageInPipeline,
+  toDate,
 } from "./canonical-lookups.js";
+
+// KAN-945 — `toDate` lifted to canonical-lookups.ts for reuse across
+// orders-router.ts and any future canonical-entity CRUD with date inputs.
+// Re-exported here for backwards compat with any existing internal callers
+// + the identity-check test that pins behavior post-lift.
+export { toDate };
 
 export interface ListInput {
   search?: string;
@@ -255,21 +262,6 @@ export async function getDealById(
   }
 
   return { ...deal, owner };
-}
-
-/**
- * KAN-942 — Coerce wire-format date strings (yyyy-mm-dd) to Date objects
- * before passing to Prisma. Native `<input type="date">` returns yyyy-mm-dd;
- * Prisma's deserializer requires either a full ISO-8601 DateTime string or
- * a JS Date object (even for `@db.Date` columns). Defense in depth: any
- * caller submitting a date string is coerced uniformly. `null` and
- * `undefined` pass through unchanged.
- */
-function toDate(s: string | null | undefined): Date | null {
-  if (s == null || s === "") return null;
-  // `new Date("2026-09-30")` parses as UTC midnight per JS spec for
-  // date-only strings — clean mapping to @db.Date.
-  return new Date(s);
 }
 
 /**
