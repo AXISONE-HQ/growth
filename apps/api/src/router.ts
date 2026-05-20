@@ -540,6 +540,8 @@ const companiesRouter = router({
         incorporationJurisdiction: z.string().nullable().optional(),
         isTaxExempt: z.boolean().optional(),
         taxExemptionCertificate: z.string().nullable().optional(),
+        // KAN-936 — optional FK to User
+        ownerId: z.string().uuid().nullable().optional(),
       }),
     )
     .mutation(async ({ ctx, input }) => {
@@ -582,6 +584,8 @@ const companiesRouter = router({
         incorporationJurisdiction: z.string().nullable().optional(),
         isTaxExempt: z.boolean().optional(),
         taxExemptionCertificate: z.string().nullable().optional(),
+        // KAN-936 — optional FK to User
+        ownerId: z.string().uuid().nullable().optional(),
       }),
     )
     .mutation(async ({ ctx, input }) => {
@@ -893,6 +897,8 @@ const dealsRouter = router({
         // Card 4 — Relationships
         contactId: z.string().min(1),
         companyId: z.string().nullable().optional(),
+        // KAN-936 — optional FK to User
+        ownerId: z.string().uuid().nullable().optional(),
       }),
     )
     .mutation(async ({ ctx, input }) => {
@@ -918,6 +924,8 @@ const dealsRouter = router({
         currentStageId: z.string().min(1).optional(),
         contactId: z.string().min(1).optional(),
         companyId: z.string().nullable().optional(),
+        // KAN-936 — optional FK to User
+        ownerId: z.string().uuid().nullable().optional(),
       }),
     )
     .mutation(async ({ ctx, input }) => {
@@ -5426,12 +5434,51 @@ export const accountRouter = router({
   }),
 });
 
+// ============================================================================
+// USERS ROUTER — KAN-936 (tenant-scoped users list for AsyncSelect picker)
+// ============================================================================
+//
+// Single procedure (users.list). Powers the AsyncSelect User picker in
+// Deal + Company forms. Tenant-scoped via ctx.tenantId. Search by name
+// OR email (case-insensitive). Limit-bounded — no cursor pagination
+// because tenants typically have <100 users.
+//
+// Inlined here (no separate service file) — single procedure with simple
+// prisma query, matches pipelines.listWithStages precedent.
+const usersRouter = router({
+  list: protectedProcedure
+    .input(
+      z.object({
+        search: z.string().optional(),
+        limit: z.number().int().min(1).max(200).default(50),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      const where: Record<string, unknown> = { tenantId: ctx.tenantId };
+      if (input.search) {
+        where.OR = [
+          { name: { contains: input.search, mode: "insensitive" as const } },
+          { email: { contains: input.search, mode: "insensitive" as const } },
+        ];
+      }
+      const items = await ctx.prisma.user.findMany({
+        where,
+        orderBy: [{ name: "asc" }, { email: "asc" }],
+        take: input.limit,
+        select: { id: true, name: true, email: true },
+      });
+      return { items };
+    }),
+});
+
 export const appRouter = router({
   contacts: contactsRouter,
   // KAN-883 — CRM read-layer cohort 1 (PR 1 of 3). UI lands in PR 2-3.
   companies: companiesRouter,
   orders: ordersRouter,
   deals: dealsRouter,
+  // KAN-936 — users.list powers AsyncSelect User picker in Deal/Company forms
+  users: usersRouter,
   // KAN-896 — Ingestion Cohort 2.1a (upload backend). UI in PR 2 (2.1b).
   importJobs: importJobsRouter,
   pipelines: pipelinesRouter,

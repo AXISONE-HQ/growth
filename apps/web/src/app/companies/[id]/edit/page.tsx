@@ -52,6 +52,13 @@ export default function EditCompanyPage() {
       mode="edit"
       companyId={id}
       initialValues={companyToFormValues(company)}
+      initialOwnerLabel={
+        company.owner
+          ? company.owner.name
+            ? `${company.owner.name} <${company.owner.email}>`
+            : company.owner.email
+          : undefined
+      }
     />
   );
 }

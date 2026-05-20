@@ -312,6 +312,28 @@ export async function assertPipelineInTenant(
   }
 }
 
+/** Validate ownerId (a User id) belongs to the same tenant. KAN-936.
+ *  Used on Deal + Company create/update to enforce the User FK before
+ *  the relational migration's runtime constraint kicks in. Optional FK
+ *  on both entities — caller may pass null/undefined for "no owner". */
+export async function assertOwnerInTenant(
+  prisma: PrismaClient,
+  tenantId: string,
+  ownerId: string | null | undefined,
+): Promise<void> {
+  if (ownerId == null) return;
+  const found = await prisma.user.findFirst({
+    where: { id: ownerId, tenantId },
+    select: { id: true },
+  });
+  if (!found) {
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: "Owner (User) not found in this tenant",
+    });
+  }
+}
+
 /** Validate dealId belongs to the same tenant. KAN-945. Optional FK on
  *  Order — caller may pass null/undefined for "no deal linkage". */
 export async function assertDealInTenant(

@@ -810,3 +810,97 @@ describe("KAN-940 — Deal soft-delete", () => {
     expect(data[0].name).toBe("Original");
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────
+// KAN-936 — Deal owner FK formalized as @relation + cross-tenant guard.
+//
+// Coverage:
+//   - createDeal persists ownerId when the user is in-tenant
+//   - createDeal rejects cross-tenant ownerId → BAD_REQUEST (no row written)
+//   - updateDeal persists ownerId when in-tenant
+//   - updateDeal rejects cross-tenant ownerId → BAD_REQUEST
+//   - updateDeal explicit null clears ownerId
+// ─────────────────────────────────────────────────────────────────────
+describe("KAN-936 — Deal owner FK + cross-tenant guard", () => {
+  const U_A = "u_in_tenant_A";
+  const U_B = "u_in_tenant_B";
+
+  it("createDeal persists ownerId when user is in the same tenant", async () => {
+    const data: FakeDeal[] = [];
+    const prisma = makePrisma(
+      data,
+      [{ id: U_A, tenantId: TENANT_A, name: "Alice", email: "alice@a.com" }],
+      [{ id: C_1, tenantId: TENANT_A }],
+      [],
+      [{ id: P_1, tenantId: TENANT_A }],
+      [{ id: S_1, pipelineId: P_1 }],
+    );
+
+    await createDeal(prisma, TENANT_A, {
+      pipelineId: P_1,
+      currentStageId: S_1,
+      contactId: C_1,
+      ownerId: U_A,
+    });
+
+    expect(data).toHaveLength(1);
+    expect(data[0].ownerId).toBe(U_A);
+  });
+
+  it("createDeal rejects cross-tenant ownerId → BAD_REQUEST, no row written", async () => {
+    const data: FakeDeal[] = [];
+    const prisma = makePrisma(
+      data,
+      [{ id: U_B, tenantId: TENANT_B, name: "Spy", email: "spy@b.com" }], // wrong tenant
+      [{ id: C_1, tenantId: TENANT_A }],
+      [],
+      [{ id: P_1, tenantId: TENANT_A }],
+      [{ id: S_1, pipelineId: P_1 }],
+    );
+
+    await expect(
+      createDeal(prisma, TENANT_A, {
+        pipelineId: P_1,
+        currentStageId: S_1,
+        contactId: C_1,
+        ownerId: U_B,
+      }),
+    ).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+      message: expect.stringMatching(/owner.*not found/i),
+    });
+    expect(data).toHaveLength(0);
+  });
+
+  it("updateDeal persists ownerId when user is in the same tenant", async () => {
+    const data = [deal({ id: "dl_1", tenantId: TENANT_A, ownerId: null })];
+    const prisma = makePrisma(
+      data,
+      [{ id: U_A, tenantId: TENANT_A, name: "Alice", email: "alice@a.com" }],
+    );
+    await updateDeal(prisma, TENANT_A, { id: "dl_1", ownerId: U_A });
+    expect(data[0].ownerId).toBe(U_A);
+  });
+
+  it("updateDeal rejects cross-tenant ownerId → BAD_REQUEST", async () => {
+    const data = [deal({ id: "dl_1", tenantId: TENANT_A, ownerId: null })];
+    const prisma = makePrisma(
+      data,
+      [{ id: U_B, tenantId: TENANT_B, name: "Spy", email: "spy@b.com" }],
+    );
+    await expect(
+      updateDeal(prisma, TENANT_A, { id: "dl_1", ownerId: U_B }),
+    ).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+      message: expect.stringMatching(/owner.*not found/i),
+    });
+    expect(data[0].ownerId).toBeNull();
+  });
+
+  it("updateDeal explicit null clears ownerId (and bypasses user existence check)", async () => {
+    const data = [deal({ id: "dl_1", tenantId: TENANT_A, ownerId: U_A })];
+    const prisma = makePrisma(data, []); // no users — null bypasses the lookup
+    await updateDeal(prisma, TENANT_A, { id: "dl_1", ownerId: null });
+    expect(data[0].ownerId).toBeNull();
+  });
+});

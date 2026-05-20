@@ -30,6 +30,7 @@ import {
   encodeCursor,
   type CursorPayload,
 } from "./_pagination.js";
+import { assertOwnerInTenant } from "./canonical-lookups.js";
 
 export interface ListInput {
   search?: string;
@@ -91,6 +92,8 @@ export interface CreateInput {
   incorporationJurisdiction?: string | null;
   isTaxExempt?: boolean;
   taxExemptionCertificate?: string | null;
+  // KAN-936 — optional FK to User
+  ownerId?: string | null;
 }
 
 export interface UpdateInput
@@ -236,6 +239,11 @@ export async function getCompanyById(
           placedAt: true,
         },
       },
+      // KAN-936 — owner FK now formalized; hydrate for the edit form's
+      // pre-population label and the detail page if it surfaces ownership.
+      owner: {
+        select: { id: true, name: true, email: true },
+      },
       _count: {
         select: {
           contacts: true,
@@ -260,6 +268,9 @@ export async function createCompany(
   tenantId: string,
   input: CreateInput,
 ) {
+  // KAN-936 — owner FK validation (formalized in this PR).
+  await assertOwnerInTenant(prisma, tenantId, input.ownerId);
+
   return prisma.company.create({
     data: {
       tenantId,
@@ -298,6 +309,8 @@ export async function createCompany(
       incorporationJurisdiction: input.incorporationJurisdiction ?? null,
       isTaxExempt: input.isTaxExempt ?? false,
       taxExemptionCertificate: input.taxExemptionCertificate ?? null,
+      // KAN-936 — optional FK to User
+      ownerId: input.ownerId ?? null,
     },
   });
 }
@@ -316,6 +329,10 @@ export async function updateCompany(
   if (!existing) {
     throw new TRPCError({ code: "NOT_FOUND", message: "Company not found" });
   }
+
+  // KAN-936 — owner FK validation (formalized in this PR). Only validates
+  // when ownerId is explicitly being updated.
+  await assertOwnerInTenant(prisma, tenantId, input.ownerId);
 
   // Build a strict update payload — only set fields explicitly provided.
   // Avoids clobbering optional values to null when a partial update is sent.
@@ -350,6 +367,8 @@ export async function updateCompany(
   if (input.incorporationJurisdiction !== undefined) data.incorporationJurisdiction = input.incorporationJurisdiction;
   if (input.isTaxExempt !== undefined) data.isTaxExempt = input.isTaxExempt;
   if (input.taxExemptionCertificate !== undefined) data.taxExemptionCertificate = input.taxExemptionCertificate;
+  // KAN-936 — optional ownerId (User FK). Null clears the owner.
+  if (input.ownerId !== undefined) data.ownerId = input.ownerId;
 
   return prisma.company.update({
     where: { id: input.id },

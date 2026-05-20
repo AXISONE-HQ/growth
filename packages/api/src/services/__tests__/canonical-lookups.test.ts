@@ -26,6 +26,7 @@ import {
   assertPipelineInTenant,
   assertStageInPipeline,
   assertDealInTenant,
+  assertOwnerInTenant,
   toDate,
 } from "../canonical-lookups.js";
 import * as ImportCommit from "../import-commit.js";
@@ -297,6 +298,38 @@ describe("KAN-945 — assertDealInTenant", () => {
     ).rejects.toMatchObject({
       code: "BAD_REQUEST",
       message: expect.stringMatching(/deal not found/i),
+    });
+  });
+});
+
+// KAN-936 — assertOwnerInTenant validates the User FK on Deal + Company.
+// Optional FK; null/undefined pass through silently.
+describe("KAN-936 — assertOwnerInTenant", () => {
+  it("returns silently for null ownerId (optional FK)", async () => {
+    const findFirst = vi.fn();
+    const prisma = { user: { findFirst } } as unknown as PrismaClient;
+    await expect(
+      assertOwnerInTenant(prisma, TENANT_A, null),
+    ).resolves.toBeUndefined();
+    expect(findFirst).not.toHaveBeenCalled();
+  });
+
+  it("returns silently when user exists in tenant", async () => {
+    const findFirst = vi.fn().mockResolvedValue({ id: "user_1" });
+    const prisma = { user: { findFirst } } as unknown as PrismaClient;
+    await expect(
+      assertOwnerInTenant(prisma, TENANT_A, "user_1"),
+    ).resolves.toBeUndefined();
+  });
+
+  it("throws BAD_REQUEST when user is in a different tenant", async () => {
+    const findFirst = vi.fn().mockResolvedValue(null);
+    const prisma = { user: { findFirst } } as unknown as PrismaClient;
+    await expect(
+      assertOwnerInTenant(prisma, TENANT_A, "user_other"),
+    ).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+      message: expect.stringMatching(/owner.*not found/i),
     });
   });
 });

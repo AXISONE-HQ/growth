@@ -82,6 +82,7 @@ const SAMPLE_COMPANY: CompanyDetail = {
   isTaxExempt: false,
   taxExemptionCertificate: null,
   ownerId: null,
+  owner: null,
   tags: [],
   externalIds: {},
   customFields: {},

@@ -44,11 +44,13 @@ import {
   contactsApi,
   companiesApi,
   pipelinesApi,
+  usersApi,
   type DealDetail,
   type DealCreateInput,
   type ContactListItem,
   type CompanyListItem,
   type PipelineWithStages,
+  type UserListItem,
 } from '@/lib/api';
 
 const STATUS_OPTIONS = [
@@ -87,6 +89,8 @@ export interface OpportunityFormValues {
   // Card 4 — Relationships
   contactId: string;
   companyId: string | null;
+  // KAN-936 — optional FK to User
+  ownerId: string | null;
 }
 
 const EMPTY_VALUES: OpportunityFormValues = {
@@ -103,6 +107,7 @@ const EMPTY_VALUES: OpportunityFormValues = {
   currentStageId: '',
   contactId: '',
   companyId: null,
+  ownerId: null,
 };
 
 /** Map a server Deal (nullable fields) to form values. */
@@ -121,6 +126,7 @@ export function dealToFormValues(d: DealDetail): OpportunityFormValues {
     currentStageId: d.currentStageId,
     contactId: d.contactId,
     companyId: d.companyId,
+    ownerId: d.ownerId,
   };
 }
 
@@ -148,6 +154,7 @@ function formToCreateInput(v: OpportunityFormValues): DealCreateInput {
     // Card 4
     contactId: v.contactId,
     companyId: v.companyId,
+    ownerId: v.ownerId,
   };
 }
 
@@ -180,6 +187,8 @@ export interface OpportunityFormProps {
   initialContactLabel?: string;
   /** Pre-loaded company label for edit mode. */
   initialCompanyLabel?: string;
+  /** Pre-loaded owner label for edit mode (KAN-936). */
+  initialOwnerLabel?: string;
 }
 
 export function OpportunityForm({
@@ -188,6 +197,7 @@ export function OpportunityForm({
   dealId,
   initialContactLabel,
   initialCompanyLabel,
+  initialOwnerLabel,
 }: OpportunityFormProps) {
   const router = useRouter();
   const queryClient = useQueryClient();
@@ -292,10 +302,17 @@ export function OpportunityForm({
     return result.items;
   };
 
+  // KAN-936 — User picker for owner FK (optional, clearable).
+  const fetchUsers = async (search: string): Promise<UserListItem[]> => {
+    const result = await usersApi.list({ search: search || undefined, limit: 50 });
+    return result.items;
+  };
+
   const contactLabel = (c: ContactListItem) => {
     const name = `${c.firstName ?? ''} ${c.lastName ?? ''}`.trim();
     return name ? `${name}${c.email ? ` <${c.email}>` : ''}` : c.email ?? c.id;
   };
+  const userLabel = (u: UserListItem) => u.name ? `${u.name} <${u.email}>` : u.email;
 
   return (
     <EntityFormShell
@@ -556,6 +573,19 @@ export function OpportunityForm({
               onChange={(id) => setValues({ ...values, companyId: id })}
               placeholder="Search companies…"
               selectedLabel={initialCompanyLabel}
+            />
+          </div>
+          <div className="col-span-2">
+            {/* KAN-936 — Owner picker (optional FK to User; clearable). */}
+            <Label style={LABEL_STYLE}>Owner</Label>
+            <AsyncSelect<UserListItem>
+              fetchOptions={fetchUsers}
+              getOptionLabel={userLabel}
+              getOptionValue={(u) => u.id}
+              value={values.ownerId}
+              onChange={(id) => setValues({ ...values, ownerId: id })}
+              placeholder="Search users…"
+              selectedLabel={initialOwnerLabel}
             />
           </div>
         </CardContent>
