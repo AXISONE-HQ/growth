@@ -11,7 +11,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { z } from "zod";
-import { listDeals, getDealById } from "../deals-router.js";
+import { listDeals, getDealById, createDeal, updateDeal } from "../deals-router.js";
 
 const TENANT_A = "11111111-1111-1111-1111-111111111111";
 const TENANT_B = "22222222-2222-2222-2222-222222222222";
@@ -119,7 +119,33 @@ interface FakeUser {
   email: string;
 }
 
-function makePrisma(rows: FakeDeal[], users: FakeUser[] = []) {
+// KAN-938 — FK validation fixtures for createDeal/updateDeal tests.
+interface FakeContact {
+  id: string;
+  tenantId: string;
+}
+interface FakeCompany {
+  id: string;
+  tenantId: string;
+}
+interface FakePipeline {
+  id: string;
+  tenantId: string;
+}
+interface FakeStage {
+  id: string;
+  pipelineId: string;
+}
+
+function makePrisma(
+  rows: FakeDeal[],
+  users: FakeUser[] = [],
+  contacts: FakeContact[] = [],
+  companies: FakeCompany[] = [],
+  pipelines: FakePipeline[] = [],
+  stages: FakeStage[] = [],
+) {
+  let nextId = rows.length;
   return {
     deal: {
       findMany: async ({
@@ -146,6 +172,57 @@ function makePrisma(rows: FakeDeal[], users: FakeUser[] = []) {
         where: { id: string; tenantId: string };
       }) =>
         rows.find((r) => r.id === where.id && r.tenantId === where.tenantId) ?? null,
+      // KAN-938 — create + update support for Sub-cohort 3.3 tests
+      create: async ({ data }: { data: Partial<FakeDeal> & { tenantId: string; contactId: string; pipelineId: string; currentStageId: string } }) => {
+        const newRow = deal({ id: `dl_${++nextId}`, ...data } as Partial<FakeDeal>);
+        rows.push(newRow);
+        return newRow;
+      },
+      update: async ({
+        where,
+        data,
+      }: {
+        where: { id: string };
+        data: Partial<FakeDeal>;
+      }) => {
+        const r = rows.find((row) => row.id === where.id);
+        if (!r) throw new Error("not found");
+        Object.assign(r, data, { updatedAt: new Date() });
+        return r;
+      },
+    },
+    // KAN-938 — FK validation tables for assertContact/Pipeline/Stage helpers
+    contact: {
+      findFirst: async ({
+        where,
+      }: {
+        where: { id: string; tenantId: string };
+      }) =>
+        contacts.find((c) => c.id === where.id && c.tenantId === where.tenantId) ?? null,
+    },
+    company: {
+      findFirst: async ({
+        where,
+      }: {
+        where: { id: string; tenantId: string };
+      }) =>
+        companies.find((c) => c.id === where.id && c.tenantId === where.tenantId) ?? null,
+    },
+    pipeline: {
+      findFirst: async ({
+        where,
+      }: {
+        where: { id: string; tenantId: string };
+      }) =>
+        pipelines.find((p) => p.id === where.id && p.tenantId === where.tenantId) ?? null,
+    },
+    stage: {
+      findFirst: async ({
+        where,
+      }: {
+        where: { id: string; pipelineId: string };
+      }) =>
+        stages.find((s) => s.id === where.id && s.pipelineId === where.pipelineId) ?? null,
     },
     // KAN-888 — manual owner hydration calls prisma.user.findFirst with
     // tenantId scoping + a `select` clause. Fake mirrors both: tenantId
@@ -375,5 +452,190 @@ describe("KAN-893 — deals.list?companyId tRPC input validator", () => {
   it("accepts CUID-shaped companyId filter", () => {
     const result = inputSchema.safeParse({ companyId: "cmou3yc2o0002a9tnt34f5q81" });
     expect(result.success).toBe(true);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// KAN-938 — Sub-cohort 3.3 Deal CRUD: createDeal + updateDeal.
+// 8 tests covering happy paths + FK validation + cross-tenant + partial
+// update + pipeline/stage coupled-update invariant.
+// ─────────────────────────────────────────────────────────────────────
+const C_1 = "ct_1";
+const CO_1 = "co_1";
+const P_1 = "pip_1";
+const S_1 = "stg_open";
+const S_OTHER_PIPELINE = "stg_other";
+
+describe("KAN-938 — createDeal", () => {
+  it("creates a deal with all required FKs + optional companyId", async () => {
+    const data: FakeDeal[] = [];
+    const prisma = makePrisma(
+      data,
+      [],
+      [{ id: C_1, tenantId: TENANT_A }],
+      [{ id: CO_1, tenantId: TENANT_A }],
+      [{ id: P_1, tenantId: TENANT_A }],
+      [{ id: S_1, pipelineId: P_1 }],
+    );
+
+    await createDeal(prisma, TENANT_A, {
+      name: "Acme Q3 expansion",
+      value: "125000.00",
+      currency: "USD",
+      probability: 60,
+      status: "open",
+      expectedCloseDate: "2026-09-30",
+      lostReason: null,
+      lostReasonDetail: null,
+      wonProductSummary: null,
+      pipelineId: P_1,
+      currentStageId: S_1,
+      contactId: C_1,
+      companyId: CO_1,
+    });
+
+    expect(data).toHaveLength(1);
+    const row = data[0];
+    expect(row.tenantId).toBe(TENANT_A);
+    expect(row.name).toBe("Acme Q3 expansion");
+    expect(row.value).toBe("125000.00");
+    expect(row.probability).toBe(60);
+    expect(row.status).toBe("open");
+    expect(row.expectedCloseDate).toBe("2026-09-30");
+    expect(row.contactId).toBe(C_1);
+    expect(row.pipelineId).toBe(P_1);
+    expect(row.currentStageId).toBe(S_1);
+    expect(row.companyId).toBe(CO_1);
+  });
+
+  it("rejects cross-tenant contactId with BAD_REQUEST", async () => {
+    const data: FakeDeal[] = [];
+    const prisma = makePrisma(
+      data,
+      [],
+      [{ id: C_1, tenantId: TENANT_B }], // wrong tenant
+      [],
+      [{ id: P_1, tenantId: TENANT_A }],
+      [{ id: S_1, pipelineId: P_1 }],
+    );
+    await expect(
+      createDeal(prisma, TENANT_A, {
+        pipelineId: P_1,
+        currentStageId: S_1,
+        contactId: C_1,
+      }),
+    ).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+      message: expect.stringMatching(/contact not found/i),
+    });
+    expect(data).toHaveLength(0);
+  });
+
+  it("rejects stage that doesn't belong to the selected pipeline", async () => {
+    const data: FakeDeal[] = [];
+    const prisma = makePrisma(
+      data,
+      [],
+      [{ id: C_1, tenantId: TENANT_A }],
+      [],
+      [{ id: P_1, tenantId: TENANT_A }],
+      [{ id: S_OTHER_PIPELINE, pipelineId: "pip_other" }], // wrong pipeline
+    );
+    await expect(
+      createDeal(prisma, TENANT_A, {
+        pipelineId: P_1,
+        currentStageId: S_OTHER_PIPELINE,
+        contactId: C_1,
+      }),
+    ).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+      message: expect.stringMatching(/stage does not belong/i),
+    });
+    expect(data).toHaveLength(0);
+  });
+});
+
+describe("KAN-938 — updateDeal", () => {
+  it("partial update only sets provided fields (doesn't clobber others to null)", async () => {
+    const data = [
+      deal({
+        id: "dl_1",
+        tenantId: TENANT_A,
+        name: "Original name",
+        value: 50000 as never, // mock fixture
+        probability: 30,
+        contactId: C_1,
+        pipelineId: P_1,
+        currentStageId: S_1,
+      }),
+    ];
+    const prisma = makePrisma(
+      data,
+      [],
+      [{ id: C_1, tenantId: TENANT_A }],
+      [],
+      [{ id: P_1, tenantId: TENANT_A }],
+      [{ id: S_1, pipelineId: P_1 }],
+    );
+    await updateDeal(prisma, TENANT_A, {
+      id: "dl_1",
+      name: "Updated name",
+      // probability, value, contactId NOT provided — must NOT be cleared
+    });
+    expect(data[0].name).toBe("Updated name");
+    expect(data[0].probability).toBe(30);
+    expect(data[0].contactId).toBe(C_1);
+  });
+
+  it("cross-tenant → NOT_FOUND (no existence leak)", async () => {
+    const data = [deal({ id: "dl_1", tenantId: TENANT_B, name: "Original" })];
+    const prisma = makePrisma(data);
+    await expect(
+      updateDeal(prisma, TENANT_A, { id: "dl_1", name: "Hijack Attempt" }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(data[0].name).toBe("Original");
+  });
+
+  it("rejects pipelineId without currentStageId (coupled-update invariant)", async () => {
+    const data = [deal({ id: "dl_1", tenantId: TENANT_A })];
+    const prisma = makePrisma(data);
+    await expect(
+      updateDeal(prisma, TENANT_A, { id: "dl_1", pipelineId: "pip_new" }),
+    ).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+      message: expect.stringMatching(/must be updated together/i),
+    });
+  });
+
+  it("rejects currentStageId without pipelineId (symmetric invariant)", async () => {
+    const data = [deal({ id: "dl_1", tenantId: TENANT_A })];
+    const prisma = makePrisma(data);
+    await expect(
+      updateDeal(prisma, TENANT_A, { id: "dl_1", currentStageId: "stg_new" }),
+    ).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+      message: expect.stringMatching(/must be updated together/i),
+    });
+  });
+
+  it("accepts pipelineId + currentStageId together when both valid", async () => {
+    const P_NEW = "pip_new";
+    const S_NEW = "stg_new";
+    const data = [deal({ id: "dl_1", tenantId: TENANT_A })];
+    const prisma = makePrisma(
+      data,
+      [],
+      [],
+      [],
+      [{ id: P_NEW, tenantId: TENANT_A }],
+      [{ id: S_NEW, pipelineId: P_NEW }],
+    );
+    await updateDeal(prisma, TENANT_A, {
+      id: "dl_1",
+      pipelineId: P_NEW,
+      currentStageId: S_NEW,
+    });
+    expect(data[0].pipelineId).toBe(P_NEW);
+    expect(data[0].currentStageId).toBe(S_NEW);
   });
 });

@@ -648,8 +648,33 @@ const ordersRouter = router({
 });
 
 // ============================================================================
-// DEALS ROUTER — KAN-883 (net-new — no prior Deal tRPC surface existed)
+// DEALS ROUTER — KAN-883 (read surface) + KAN-938 (Sub-cohort 3.3 mutations)
 // ============================================================================
+interface DealsCreateInput {
+  // Card 1 — Core
+  name?: string;
+  value?: string;
+  currency?: string;
+  probability?: number | null;
+  // Card 2 — Status & Outcomes
+  status?: string;
+  expectedCloseDate?: string | null;
+  lostReason?: string | null;
+  lostReasonDetail?: string | null;
+  wonProductSummary?: string | null;
+  // Card 3 — Pipeline & Stage (REQUIRED)
+  pipelineId: string;
+  currentStageId: string;
+  // Card 4 — Relationships
+  contactId: string;
+  companyId?: string | null;
+}
+type DealsUpdateInput = Partial<Omit<DealsCreateInput, "pipelineId" | "currentStageId" | "contactId">> & {
+  id: string;
+  pipelineId?: string;
+  currentStageId?: string;
+  contactId?: string;
+};
 interface DealsRouterModule {
   listDeals: (
     prisma: unknown,
@@ -668,6 +693,16 @@ interface DealsRouterModule {
     prisma: unknown,
     tenantId: string,
     input: { id: string },
+  ) => Promise<unknown>;
+  createDeal: (
+    prisma: unknown,
+    tenantId: string,
+    input: DealsCreateInput,
+  ) => Promise<unknown>;
+  updateDeal: (
+    prisma: unknown,
+    tenantId: string,
+    input: DealsUpdateInput,
   ) => Promise<unknown>;
 }
 let _dealsModule: DealsRouterModule | null = null;
@@ -701,6 +736,63 @@ const dealsRouter = router({
     .query(async ({ ctx, input }) => {
       const { getDealById } = await loadDealsModule();
       return getDealById(ctx.prisma, ctx.tenantId, input);
+    }),
+
+  // KAN-938 — Sub-cohort 3.3 Deal CRUD. 13 form-eligible fields across 4
+  // cards. Required FKs: contactId, pipelineId, currentStageId. Optional
+  // FK: companyId. Loose enums match contacts/companies pattern; Prisma
+  // rejects bad values at write time. `value` is Decimal(12,2) serialized
+  // as string. `expectedCloseDate` is @db.Date (yyyy-mm-dd).
+  create: protectedProcedure
+    .input(
+      z.object({
+        // Card 1 — Core
+        name: z.string().optional(),
+        value: z.string().optional(),
+        currency: z.string().optional(),
+        probability: z.number().int().min(0).max(100).nullable().optional(),
+        // Card 2 — Status & Outcomes
+        status: z.string().optional(),
+        expectedCloseDate: z.string().nullable().optional(),
+        lostReason: z.string().nullable().optional(),
+        lostReasonDetail: z.string().nullable().optional(),
+        wonProductSummary: z.string().nullable().optional(),
+        // Card 3 — Pipeline & Stage (REQUIRED)
+        pipelineId: z.string().min(1),
+        currentStageId: z.string().min(1),
+        // Card 4 — Relationships
+        contactId: z.string().min(1),
+        companyId: z.string().nullable().optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const { createDeal } = await loadDealsModule();
+      return createDeal(ctx.prisma, ctx.tenantId, input);
+    }),
+
+  update: protectedProcedure
+    .input(
+      z.object({
+        id: z.string().cuid(),
+        // All fields optional on update — partial-update semantics.
+        name: z.string().optional(),
+        value: z.string().optional(),
+        currency: z.string().optional(),
+        probability: z.number().int().min(0).max(100).nullable().optional(),
+        status: z.string().optional(),
+        expectedCloseDate: z.string().nullable().optional(),
+        lostReason: z.string().nullable().optional(),
+        lostReasonDetail: z.string().nullable().optional(),
+        wonProductSummary: z.string().nullable().optional(),
+        pipelineId: z.string().min(1).optional(),
+        currentStageId: z.string().min(1).optional(),
+        contactId: z.string().min(1).optional(),
+        companyId: z.string().nullable().optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const { updateDeal } = await loadDealsModule();
+      return updateDeal(ctx.prisma, ctx.tenantId, input);
     }),
 });
 

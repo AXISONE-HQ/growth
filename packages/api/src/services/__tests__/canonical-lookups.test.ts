@@ -21,8 +21,13 @@ import {
   resolvePipelineByName,
   resolveStageByName,
   resolveCompanyByName,
+  assertCompanyInTenant,
+  assertContactInTenant,
+  assertPipelineInTenant,
+  assertStageInPipeline,
 } from "../canonical-lookups.js";
 import * as ImportCommit from "../import-commit.js";
+import * as ContactsRouter from "../contacts-router.js";
 
 const TENANT_A = "11111111-1111-1111-1111-111111111111";
 
@@ -97,6 +102,135 @@ describe("KAN-932 — canonical-lookups lift", () => {
 
     it("ImportCommit.resolveStageByName === canonical-lookups version", () => {
       expect(ImportCommit.resolveStageByName).toBe(resolveStageByName);
+    });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// KAN-938 — FK validation assertions: lift identity + 3 new helpers.
+//
+// `assertCompanyInTenant` was lifted from contacts-router.ts in KAN-938;
+// identity check pins the re-export shim. 3 new helpers (Contact, Pipeline,
+// Stage-in-Pipeline) cover the FK surface for Sub-cohort 3.3 Deal CRUD.
+// ─────────────────────────────────────────────────────────────────────
+describe("KAN-938 — FK validation assertions", () => {
+  describe("assertCompanyInTenant lift (identity check)", () => {
+    it("ContactsRouter.assertCompanyInTenant === canonical-lookups version", () => {
+      expect(ContactsRouter.assertCompanyInTenant).toBe(assertCompanyInTenant);
+    });
+
+    it("returns silently for null companyId (optional FK)", async () => {
+      const findFirst = vi.fn();
+      const prisma = { company: { findFirst } } as unknown as PrismaClient;
+      await expect(
+        assertCompanyInTenant(prisma, TENANT_A, null),
+      ).resolves.toBeUndefined();
+      expect(findFirst).not.toHaveBeenCalled();
+    });
+
+    it("throws BAD_REQUEST when company is in a different tenant", async () => {
+      const findFirst = vi.fn().mockResolvedValue(null);
+      const prisma = { company: { findFirst } } as unknown as PrismaClient;
+      await expect(
+        assertCompanyInTenant(prisma, TENANT_A, "co_other_tenant"),
+      ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    });
+  });
+
+  describe("assertContactInTenant", () => {
+    it("returns silently for null contactId", async () => {
+      const findFirst = vi.fn();
+      const prisma = { contact: { findFirst } } as unknown as PrismaClient;
+      await expect(
+        assertContactInTenant(prisma, TENANT_A, null),
+      ).resolves.toBeUndefined();
+      expect(findFirst).not.toHaveBeenCalled();
+    });
+
+    it("returns silently when contact exists in tenant", async () => {
+      const findFirst = vi.fn().mockResolvedValue({ id: "c_1" });
+      const prisma = { contact: { findFirst } } as unknown as PrismaClient;
+      await expect(
+        assertContactInTenant(prisma, TENANT_A, "c_1"),
+      ).resolves.toBeUndefined();
+    });
+
+    it("throws BAD_REQUEST when contact is in a different tenant", async () => {
+      const findFirst = vi.fn().mockResolvedValue(null);
+      const prisma = { contact: { findFirst } } as unknown as PrismaClient;
+      await expect(
+        assertContactInTenant(prisma, TENANT_A, "c_other"),
+      ).rejects.toMatchObject({
+        code: "BAD_REQUEST",
+        message: expect.stringMatching(/contact not found/i),
+      });
+    });
+  });
+
+  describe("assertPipelineInTenant", () => {
+    it("returns silently for null pipelineId", async () => {
+      const findFirst = vi.fn();
+      const prisma = { pipeline: { findFirst } } as unknown as PrismaClient;
+      await expect(
+        assertPipelineInTenant(prisma, TENANT_A, null),
+      ).resolves.toBeUndefined();
+      expect(findFirst).not.toHaveBeenCalled();
+    });
+
+    it("returns silently when pipeline exists in tenant", async () => {
+      const findFirst = vi.fn().mockResolvedValue({ id: "p_1" });
+      const prisma = { pipeline: { findFirst } } as unknown as PrismaClient;
+      await expect(
+        assertPipelineInTenant(prisma, TENANT_A, "p_1"),
+      ).resolves.toBeUndefined();
+    });
+
+    it("throws BAD_REQUEST when pipeline is in a different tenant", async () => {
+      const findFirst = vi.fn().mockResolvedValue(null);
+      const prisma = { pipeline: { findFirst } } as unknown as PrismaClient;
+      await expect(
+        assertPipelineInTenant(prisma, TENANT_A, "p_other"),
+      ).rejects.toMatchObject({
+        code: "BAD_REQUEST",
+        message: expect.stringMatching(/pipeline not found/i),
+      });
+    });
+  });
+
+  describe("assertStageInPipeline (two-level guard)", () => {
+    it("returns silently when either pipelineId or stageId is null", async () => {
+      const findFirst = vi.fn();
+      const prisma = { stage: { findFirst } } as unknown as PrismaClient;
+      await expect(
+        assertStageInPipeline(prisma, null, "s_1"),
+      ).resolves.toBeUndefined();
+      await expect(
+        assertStageInPipeline(prisma, "p_1", null),
+      ).resolves.toBeUndefined();
+      expect(findFirst).not.toHaveBeenCalled();
+    });
+
+    it("returns silently when stage belongs to the pipeline", async () => {
+      const findFirst = vi.fn().mockResolvedValue({ id: "s_1" });
+      const prisma = { stage: { findFirst } } as unknown as PrismaClient;
+      await expect(
+        assertStageInPipeline(prisma, "p_1", "s_1"),
+      ).resolves.toBeUndefined();
+      expect(findFirst).toHaveBeenCalledWith({
+        where: { id: "s_1", pipelineId: "p_1" },
+        select: { id: true },
+      });
+    });
+
+    it("throws BAD_REQUEST when stage does not belong to the pipeline", async () => {
+      const findFirst = vi.fn().mockResolvedValue(null);
+      const prisma = { stage: { findFirst } } as unknown as PrismaClient;
+      await expect(
+        assertStageInPipeline(prisma, "p_1", "s_from_other_pipeline"),
+      ).rejects.toMatchObject({
+        code: "BAD_REQUEST",
+        message: expect.stringMatching(/stage does not belong/i),
+      });
     });
   });
 });

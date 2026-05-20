@@ -22,6 +22,7 @@
  * sidesteps the issue for runCommit; manual-form lookups use the cache=
  * undefined backwards-compat path (one query per call).
  */
+import { TRPCError } from "@trpc/server";
 import type { PrismaClient } from "@prisma/client";
 
 // ─────────────────────────────────────────────
@@ -220,4 +221,96 @@ export async function resolveCompanyByName(
     where: { tenantId, name: { equals: name, mode: "insensitive" } },
     select: { id: true },
   });
+}
+
+// ─────────────────────────────────────────────
+// FK validation assertions (KAN-938 lift + extensions)
+// ─────────────────────────────────────────────
+//
+// Lifted from `contacts-router.ts` (KAN-934) for reuse across manual-CRUD
+// procedures in Cohort 3.x. Same shape: never trust client-supplied FK ids;
+// always re-verify tenant scope. Throws BAD_REQUEST when the FK references
+// a row in a different tenant (or doesn't exist at all). Returns silently
+// for null/undefined (caller's optional-FK semantic preserved).
+
+/** Validate companyId belongs to the same tenant. KAN-934 origin; lifted
+ *  to canonical-lookups in KAN-938 for reuse. */
+export async function assertCompanyInTenant(
+  prisma: PrismaClient,
+  tenantId: string,
+  companyId: string | null | undefined,
+): Promise<void> {
+  if (companyId == null) return;
+  const found = await prisma.company.findFirst({
+    where: { id: companyId, tenantId },
+    select: { id: true },
+  });
+  if (!found) {
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: "Company not found in this tenant",
+    });
+  }
+}
+
+/** Validate contactId belongs to the same tenant. KAN-938. Required FK on
+ *  Deal — caller passes a value, not null. */
+export async function assertContactInTenant(
+  prisma: PrismaClient,
+  tenantId: string,
+  contactId: string | null | undefined,
+): Promise<void> {
+  if (contactId == null) return;
+  const found = await prisma.contact.findFirst({
+    where: { id: contactId, tenantId },
+    select: { id: true },
+  });
+  if (!found) {
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: "Contact not found in this tenant",
+    });
+  }
+}
+
+/** Validate pipelineId belongs to the same tenant. KAN-938. Required FK
+ *  on Deal — caller passes a value, not null. */
+export async function assertPipelineInTenant(
+  prisma: PrismaClient,
+  tenantId: string,
+  pipelineId: string | null | undefined,
+): Promise<void> {
+  if (pipelineId == null) return;
+  const found = await prisma.pipeline.findFirst({
+    where: { id: pipelineId, tenantId },
+    select: { id: true },
+  });
+  if (!found) {
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: "Pipeline not found in this tenant",
+    });
+  }
+}
+
+/** Validate that stageId belongs to the given pipelineId. Two-level guard:
+ *  caller MUST have already validated pipeline-in-tenant (via
+ *  assertPipelineInTenant) before invoking this helper. This function only
+ *  verifies the stage-pipeline edge. KAN-938. */
+export async function assertStageInPipeline(
+  prisma: PrismaClient,
+  pipelineId: string | null | undefined,
+  stageId: string | null | undefined,
+): Promise<void> {
+  if (pipelineId == null || stageId == null) return;
+  const found = await prisma.stage.findFirst({
+    where: { id: stageId, pipelineId },
+    select: { id: true },
+  });
+  if (!found) {
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: "Stage does not belong to the selected pipeline",
+    });
+  }
 }
