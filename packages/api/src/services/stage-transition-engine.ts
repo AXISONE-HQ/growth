@@ -149,6 +149,9 @@ interface LoadedStage {
 interface LoadedDeal {
   id: string;
   tenantId: string;
+  // KAN-963 (slice 2a PR B) — needed for the CustomerLifecycleEvent writer
+  // hook on terminal_won (upsert Customer + log eventType='created').
+  contactId: string;
   pipelineId: string;
   currentStageId: string;
   currentStage: LoadedStage;
@@ -200,6 +203,7 @@ export async function evaluateStageTransition(
   const deal: LoadedDeal = {
     id: dealRaw.id,
     tenantId: dealRaw.tenantId,
+    contactId: dealRaw.contactId,
     pipelineId: dealRaw.pipelineId,
     currentStageId: dealRaw.currentStageId,
     currentStage: {
@@ -379,6 +383,58 @@ async function writeTransition(
       },
       select: { id: true },
     });
+
+    // KAN-963 (slice 2a PR B) — CustomerLifecycleEvent writer hook.
+    // When this transition lands on a terminal_won stage, the Contact has
+    // effectively become a customer. Upsert the Customer row (status='active',
+    // since=now) + append a CustomerLifecycleEvent row capturing the moment.
+    //
+    // Append-only audit: this is the recording layer. No status-automation,
+    // no standards engine, no slicing this slice — just start logging what
+    // naturally happens (per Phase 1 Q3 Option β). Slice 2b/3/4 layers
+    // consume these rows.
+    //
+    // Both writes ride the same $transaction as the Deal stage transition
+    // so a partial commit can't leave a torn lifecycle audit. Best-effort:
+    // if Customer.upsert throws (FK violation, concurrent insert), the
+    // surrounding transaction will roll back — preferable to a half-recorded
+    // state. Stage transition stays atomic.
+    if (targetStage.outcomeType === 'terminal_won') {
+      const customer = await tx.customer.upsert({
+        where: { contactId: deal.contactId },
+        create: {
+          tenantId: deal.tenantId,
+          contactId: deal.contactId,
+          status: 'active',
+          since: transitionedAt,
+        },
+        update: {
+          // Existing Customer row (e.g., seeded from a prior deal win or
+          // sync): keep `since`/`plan`/`mrr` etc. but bump status back to
+          // active if previously churned. No-op if already active.
+          status: 'active',
+        },
+        select: { id: true, status: true },
+      });
+
+      await tx.customerLifecycleEvent.create({
+        data: {
+          tenantId: deal.tenantId,
+          contactId: deal.contactId,
+          customerId: customer.id,
+          eventType: 'created',
+          toStatus: 'active',
+          source: 'deal_won',
+          metadata: {
+            dealId: deal.id,
+            dealStageHistoryId: historyRow.id,
+            fromStageName: deal.currentStage.name,
+            toStageName: targetStage.name,
+            brainEvaluatedAt: brainDecision.evaluatedAt.toISOString(),
+          },
+        },
+      });
+    }
 
     return {
       type: 'transitioned' as const,

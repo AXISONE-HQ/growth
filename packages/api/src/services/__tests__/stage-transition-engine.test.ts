@@ -65,6 +65,9 @@ function buildDealFixture(opts: DealFixtureOpts = {}) {
   return {
     id: DEAL_A,
     tenantId: 'tenant_a',
+    // KAN-963 (slice 2a PR B) — needed for the CustomerLifecycleEvent
+    // writer hook on terminal_won.
+    contactId: 'contact_a',
     pipelineId: PIPELINE_A,
     currentStageId,
     currentStage,
@@ -120,11 +123,27 @@ function makePrismaMock(opts: PrismaMockOpts) {
   const findUniqueDeal = vi.fn(async () => opts.deal);
   const updateDeal = vi.fn(async (args: any) => ({ id: DEAL_A, ...args.data }));
   const createHistory = vi.fn(async () => ({ id: 'dsh_created' }));
+  // KAN-963 (slice 2a PR B) — CustomerLifecycleEvent writer hook fires
+  // inside the $transaction on terminal_won transitions. Fakes return
+  // synthetic rows so the existing tests that DON'T hit terminal_won
+  // still pass (calls don't fire) AND the terminal_won test gets a
+  // working upsert + create.
+  const upsertCustomer = vi.fn(async (args: any) => ({
+    id: 'cust_test',
+    contactId: args.where.contactId,
+    status: args.create?.status ?? args.update?.status ?? 'active',
+  }));
+  const createLifecycleEvent = vi.fn(async (args: any) => ({
+    id: 'cle_test',
+    ...args.data,
+  }));
 
   const transaction = vi.fn(async (cb: (tx: any) => Promise<unknown>) => {
     const tx = {
       deal: { update: updateDeal },
       dealStageHistory: { create: createHistory },
+      customer: { upsert: upsertCustomer },
+      customerLifecycleEvent: { create: createLifecycleEvent },
     };
     return cb(tx);
   });
@@ -134,7 +153,17 @@ function makePrismaMock(opts: PrismaMockOpts) {
     $transaction: transaction,
   } as unknown as PrismaClient;
 
-  return { prisma, mocks: { findUniqueDeal, updateDeal, createHistory, transaction } };
+  return {
+    prisma,
+    mocks: {
+      findUniqueDeal,
+      updateDeal,
+      createHistory,
+      transaction,
+      upsertCustomer,
+      createLifecycleEvent,
+    },
+  };
 }
 
 beforeEach(() => {

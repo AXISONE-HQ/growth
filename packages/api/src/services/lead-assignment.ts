@@ -69,6 +69,11 @@ export type BelowThresholdPosture = 'stay_unassigned' | 'default_pipeline' | 'es
 
 export type AssignmentResult =
   | { mode: 'rule'; ruleId: string; pipelineId: string; stageId: string | null }
+  // KAN-963 (slice 2a PR B) — tier 1.5: tenant has declared a primary
+  // objective AND there's an active Pipeline bound to that objective at
+  // segment='new_leads'. Short-circuits the AI router for the common case
+  // ("operate the primary objective on fresh inbound").
+  | { mode: 'objective_primary'; pipelineId: string; stageId: string | null; objectiveId: string }
   | { mode: 'ai_fallback'; pipelineId: string; stageId: string | null; confidence: number; reasoning: string }
   | { mode: 'default_pipeline'; pipelineId: string; stageId: string | null }
   | { mode: 'escalated'; escalationId: string }
@@ -217,6 +222,42 @@ export async function assignLeadToPipeline(
       reasoning: `AssignmentRule ${matched.id} matched (priority ${matched.priority}). Routed to pipeline ${matched.pipelineId}.`,
     });
     return { mode: 'rule', ruleId: matched.id, pipelineId: matched.pipelineId, stageId };
+  }
+
+  // 1.5. KAN-963 (slice 2a PR B) — Primary-objective tier.
+  //    Short-circuit to the Pipeline bound to the tenant's primary
+  //    TenantObjectiveSelection at segment='new_leads'. Bypasses the AI
+  //    router for the common single-primary case so fresh inbound always
+  //    lands on the declared primary path (and future winback pipelines
+  //    bound to the same Objective never catch new leads — segment filter
+  //    enforces the separation).
+  //
+  //    Non-regression: when no primary is declared (status≠selected, or
+  //    no row at all), or when no Pipeline matches the (objective_id,
+  //    segment=new_leads) tuple, this tier is a no-op and the resolution
+  //    falls through to the existing tier 2 (AI router). Pre-slice-2a
+  //    tenants see zero behavior change.
+  const primarySelection = await loadPrimaryObjectivePipeline(prisma, tenantId);
+  if (primarySelection) {
+    const stageId = await resolveInitialStageId(prisma, primarySelection.pipelineId);
+    await persistAssignment(prisma, contactId, primarySelection.pipelineId, stageId);
+    await emitAuditLog(prisma, {
+      tenantId,
+      contactId,
+      mode: 'objective_primary',
+      payload: {
+        pipelineId: primarySelection.pipelineId,
+        objectiveId: primarySelection.objectiveId,
+        stageId,
+      },
+      reasoning: `Tenant primary objective ${primarySelection.objectiveType} routed to bound Pipeline ${primarySelection.pipelineId} (segment=new_leads).`,
+    });
+    return {
+      mode: 'objective_primary',
+      pipelineId: primarySelection.pipelineId,
+      stageId,
+      objectiveId: primarySelection.objectiveId,
+    };
   }
 
   // 2. KAN-795 pipeline-router tier (Sonnet reasoning by default; 0/1-Pipeline
@@ -389,6 +430,51 @@ async function loadActiveRulesForTenant(
     conditions: (r.conditions ?? {}) as Record<string, unknown>,
     isActive: r.isActive,
   }));
+}
+
+/**
+ * KAN-963 (slice 2a PR B) — load the Pipeline bound to the tenant's primary
+ * (priority=1, status='selected', entityScope='contact') TenantObjectiveSelection
+ * at segment='new_leads'. Returns null if any link is missing — caller falls
+ * through to the AI router tier in that case.
+ *
+ * Cost: 1 indexed lookup (covered by tenant_objective_selection's
+ * (tenantId, entityScope, priority) index + pipelines'
+ * (tenantId, objectiveId, segment) composite index from KAN-962).
+ */
+async function loadPrimaryObjectivePipeline(
+  prisma: PrismaClient,
+  tenantId: string,
+): Promise<{ pipelineId: string; objectiveId: string; objectiveType: string } | null> {
+  const selection: any = await (prisma as any).tenantObjectiveSelection?.findFirst({
+    where: {
+      tenantId,
+      entityScope: 'contact',
+      priority: 1,
+      status: 'selected',
+    },
+    include: {
+      objective: { select: { id: true, type: true } },
+    },
+  });
+  if (!selection?.objective) return null;
+
+  const pipeline: any = await (prisma as any).pipeline?.findFirst({
+    where: {
+      tenantId,
+      objectiveId: selection.objective.id,
+      segment: 'new_leads',
+      isActive: true,
+    },
+    select: { id: true },
+  });
+  if (!pipeline) return null;
+
+  return {
+    pipelineId: pipeline.id,
+    objectiveId: selection.objective.id,
+    objectiveType: selection.objective.type,
+  };
 }
 
 // KAN-795: loadTenantPipelines removed — pipeline-router.routePipelineForNewLead

@@ -73,6 +73,20 @@ export interface BrainStateSnapshot {
   moProgressPercent: number | null;
   pipelineName: string;
   pipelineObjectiveType: string;
+  /**
+   * KAN-963 (slice 2a PR B) — bound Objective (when Pipeline.objectiveId is
+   * set). Threads the tenant's declared objective intent into Brain's
+   * prompt so the LLM can reason about "what success looks like" beyond the
+   * Pipeline name / objective_type enum. Light prompt enhancement — NOT a
+   * full objective-aware routing rebuild (slice 4 work). Null when Pipeline
+   * isn't bound to an Objective row (legacy fixtures, etc.).
+   */
+  boundObjective: {
+    type: string;
+    name: string;
+    successCondition: unknown;
+    subObjectives: unknown;
+  } | null;
 }
 
 export interface BrainDecision {
@@ -277,7 +291,20 @@ export async function evaluateDealState(
     where: { id: dealId },
     include: {
       contact: true,
-      pipeline: true,
+      pipeline: {
+        // KAN-963 — include bound Objective (slice 2a PR B). Null when
+        // Pipeline.objectiveId is unset (legacy fixtures, pre-slice-2a).
+        include: {
+          objective: {
+            select: {
+              type: true,
+              name: true,
+              successCondition: true,
+              subObjectives: true,
+            },
+          },
+        },
+      },
       currentStage: true,
       engagements: {
         orderBy: { occurredAt: 'desc' },
@@ -413,7 +440,18 @@ interface DealWithRelations {
   enteredStageAt: Date;
   microObjectiveProgress: unknown;
   contact: Contact;
-  pipeline: { name: string; objectiveType: string };
+  pipeline: {
+    name: string;
+    objectiveType: string;
+    // KAN-963 — Pipeline → Objective binding (KAN-959 + KAN-962). Nullable;
+    // null on legacy fixtures + pre-slice-2a tenants.
+    objective?: {
+      type: string;
+      name: string;
+      successCondition: unknown;
+      subObjectives: unknown;
+    } | null;
+  };
   currentStage: { name: string; outcomeType: 'open' | 'terminal_won' | 'terminal_lost' };
   engagements: Engagement[];
   stageHistory: DealStageHistory[];
@@ -454,6 +492,15 @@ export function buildStateSnapshot(
     moProgressPercent: computeMoProgressPercent(deal.microObjectiveProgress),
     pipelineName: deal.pipeline.name,
     pipelineObjectiveType: deal.pipeline.objectiveType,
+    // KAN-963 — bound Objective (when Pipeline.objectiveId set; null otherwise).
+    boundObjective: deal.pipeline.objective
+      ? {
+          type: deal.pipeline.objective.type,
+          name: deal.pipeline.objective.name,
+          successCondition: deal.pipeline.objective.successCondition,
+          subObjectives: deal.pipeline.objective.subObjectives,
+        }
+      : null,
   };
 }
 
@@ -621,10 +668,30 @@ DO NOT return wait_for_response on this chained call — silence after the custo
 `;
   }
 
+  // KAN-963 (slice 2a PR B) — bound objective block. Renders only when the
+  // Pipeline is bound to an Objective row (via KAN-959 Pipeline.objectiveId +
+  // KAN-962 declaration UI adoption). Threads the declared objective's
+  // successCondition + sub-objectives so Brain can reason about "what counts
+  // as success here" beyond the Pipeline-level objective_type enum. Light
+  // prompt enhancement — NOT a full objective-aware routing rebuild
+  // (slice-4 work that gates stage transitions on objective progress).
+  const boundObjectiveBlock =
+    snapshot.boundObjective
+      ? `
+
+## Bound objective
+This Pipeline serves the tenant's declared objective: **${snapshot.boundObjective.name}** (type: ${snapshot.boundObjective.type}).
+
+Success condition: ${formatBoundCondition(snapshot.boundObjective.successCondition)}
+Sub-objectives: ${formatSubObjectives(snapshot.boundObjective.subObjectives)}
+
+Use this objective intent to inform your next-action choice — but DO NOT override the bounded action vocabulary; reasoning continues to flow through send_follow_up / wait_for_response / advance_stage / escalate_to_human / close_deal_lost / no_action.`
+      : '';
+
   return `${triggerBlock}## Deal context
 Pipeline: ${snapshot.pipelineName} (objective: ${snapshot.pipelineObjectiveType})
 Contact: ${contactName} @ ${company}
-
+${boundObjectiveBlock}
 ## Current Stage
 Name: ${snapshot.currentStageName}
 Outcome type: ${snapshot.currentStageOutcomeType}
@@ -641,6 +708,40 @@ ${transitionsBlock}
 ${knowledge ? `\n## Company knowledge (relevant to this conversation)\n${renderKnowledgeSectionInline(knowledge)}\n` : ''}
 ## Decision required
 Pick the best next action. Respond ONLY with the JSON shape specified in the system prompt.`;
+}
+
+/**
+ * KAN-963 — defensive renderer for Objective.successCondition JSON. The
+ * column is free-shape JSON; renderer prints "(unspecified)" for null/empty
+ * and JSON.stringify for richer values so Brain's prompt can adapt.
+ */
+function formatBoundCondition(condition: unknown): string {
+  if (condition == null) return '(unspecified)';
+  if (typeof condition === 'object' && Object.keys(condition as object).length === 0) {
+    return '(unspecified)';
+  }
+  try {
+    return JSON.stringify(condition);
+  } catch {
+    return '(unrenderable)';
+  }
+}
+
+/**
+ * KAN-963 — defensive renderer for Objective.subObjectives JSON. Empty
+ * arrays + null/undefined render as "(none defined)" so the prompt stays
+ * readable. Each subObj's `name` is shown if available, else the raw item.
+ */
+function formatSubObjectives(subObjs: unknown): string {
+  if (!Array.isArray(subObjs) || subObjs.length === 0) return '(none defined)';
+  return subObjs
+    .map((s, i) => {
+      if (s && typeof s === 'object' && 'name' in s) {
+        return `${i + 1}. ${(s as { name: string }).name}`;
+      }
+      return `${i + 1}. ${JSON.stringify(s)}`;
+    })
+    .join('\n');
 }
 
 // ─────────────────────────────────────────────
