@@ -65,6 +65,9 @@ function buildDealFixture(opts: DealFixtureOpts = {}) {
   return {
     id: DEAL_A,
     tenantId: 'tenant_a',
+    // KAN-963 (slice 2a PR B) — needed for the CustomerLifecycleEvent
+    // writer hook on terminal_won.
+    contactId: 'contact_a',
     pipelineId: PIPELINE_A,
     currentStageId,
     currentStage,
@@ -120,6 +123,21 @@ function makePrismaMock(opts: PrismaMockOpts) {
   const findUniqueDeal = vi.fn(async () => opts.deal);
   const updateDeal = vi.fn(async (args: any) => ({ id: DEAL_A, ...args.data }));
   const createHistory = vi.fn(async () => ({ id: 'dsh_created' }));
+  // KAN-963 (slice 2a PR B) — CustomerLifecycleEvent writer hook is
+  // POST-COMMIT (decoupled from the stage-transition transaction per
+  // Fred's review gate). So these fakes live on `prisma`, NOT inside
+  // the $transaction tx. Failures here cannot roll back the stage
+  // advance — verified by the test that throws from upsertCustomer
+  // and asserts the transition still happened.
+  const upsertCustomer = vi.fn(async (args: any) => ({
+    id: 'cust_test',
+    contactId: args.where.contactId,
+    status: args.create?.status ?? args.update?.status ?? 'active',
+  }));
+  const createLifecycleEvent = vi.fn(async (args: any) => ({
+    id: 'cle_test',
+    ...args.data,
+  }));
 
   const transaction = vi.fn(async (cb: (tx: any) => Promise<unknown>) => {
     const tx = {
@@ -131,10 +149,22 @@ function makePrismaMock(opts: PrismaMockOpts) {
 
   const prisma = {
     deal: { findUnique: findUniqueDeal },
+    customer: { upsert: upsertCustomer },
+    customerLifecycleEvent: { create: createLifecycleEvent },
     $transaction: transaction,
   } as unknown as PrismaClient;
 
-  return { prisma, mocks: { findUniqueDeal, updateDeal, createHistory, transaction } };
+  return {
+    prisma,
+    mocks: {
+      findUniqueDeal,
+      updateDeal,
+      createHistory,
+      transaction,
+      upsertCustomer,
+      createLifecycleEvent,
+    },
+  };
 }
 
 beforeEach(() => {
@@ -494,6 +524,60 @@ describe('evaluateStageTransition — advance_stage to terminal_won (edge)', () 
     const histArgs = mocks.createHistory.mock.calls[0]![0] as { data: Record<string, unknown> };
     expect(histArgs.data.toStageId).toBe(STAGE_WON);
     expect((histArgs.data.metadata as Record<string, unknown>).targetStageOutcomeType).toBe('terminal_won');
+  });
+
+  // KAN-963 (slice 2a PR B) — lifecycle hook decoupling.
+  // The CustomerLifecycleEvent writer runs POST-COMMIT, fire-and-forget.
+  // A failure inside customer.upsert or customerLifecycleEvent.create
+  // MUST NOT roll back the Deal stage transition (the audit layer is
+  // non-load-bearing; deal-won is the truth-of-record).
+  it('KAN-963: customer.upsert FAILURE post-commit does NOT roll back the terminal_won stage transition', async () => {
+    const { prisma, mocks } = makePrismaMock({
+      deal: buildDealFixture({ currentStageId: STAGE_QUOTE_SENT }),
+    });
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecision({ type: 'advance_stage', targetStageId: STAGE_WON, confidence: 0.95 }),
+    );
+    // Force the lifecycle write to throw — simulates FK violation, transient
+    // DB issue, or any other failure on the audit side. Stage transition
+    // must still complete successfully.
+    mocks.upsertCustomer.mockRejectedValueOnce(new Error('simulated customer-upsert failure'));
+
+    const result = await evaluateStageTransition(prisma, DEAL_A);
+
+    // Stage advance committed — the truth-of-record event
+    expect(result.type).toBe('transitioned');
+    expect((result as { toStageId: string }).toStageId).toBe(STAGE_WON);
+    expect(mocks.updateDeal).toHaveBeenCalledTimes(1);
+    expect(mocks.createHistory).toHaveBeenCalledTimes(1);
+
+    // Audit write was attempted but failed; lifecycle event never wrote.
+    // The void/fire-and-forget call may still be in flight after the
+    // synchronous return; wait a microtask for it to settle.
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(mocks.upsertCustomer).toHaveBeenCalledTimes(1);
+    expect(mocks.createLifecycleEvent).not.toHaveBeenCalled();
+  });
+
+  it('KAN-963: customerLifecycleEvent.create FAILURE post-commit also does NOT roll back', async () => {
+    const { prisma, mocks } = makePrismaMock({
+      deal: buildDealFixture({ currentStageId: STAGE_QUOTE_SENT }),
+    });
+    evaluateDealStateMock.mockResolvedValueOnce(
+      buildBrainDecision({ type: 'advance_stage', targetStageId: STAGE_WON, confidence: 0.95 }),
+    );
+    // Customer upsert succeeds; event create fails. Stage advance must
+    // still be committed (Customer row stays — that's the canonical state;
+    // only the audit trail is incomplete).
+    mocks.createLifecycleEvent.mockRejectedValueOnce(new Error('simulated event-create failure'));
+
+    const result = await evaluateStageTransition(prisma, DEAL_A);
+    expect(result.type).toBe('transitioned');
+    expect((result as { toStageId: string }).toStageId).toBe(STAGE_WON);
+
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(mocks.upsertCustomer).toHaveBeenCalledTimes(1);
+    expect(mocks.createLifecycleEvent).toHaveBeenCalledTimes(1);
   });
 });
 

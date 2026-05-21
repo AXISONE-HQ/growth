@@ -571,6 +571,83 @@ export const pipelineMicroObjectivesApi = {
     ),
 };
 
+// KAN-963 (slice 2a PR B) — Objective declaration UX API client.
+// Mirrors the slice-1+2a backend contract:
+//   list({entityScope}) → catalog rows visible to the tenant
+//   propose({entityScope}) → ranked ProposedPipeline[] with sufficiency
+//   adopt({entityScope, selections}) → replace-all per (tenant, entityScope)
+
+export type ObjectiveEntityScope = 'contact' | 'order' | 'company' | 'deal';
+
+export interface ObjectiveCatalogItem {
+  id: string;
+  tenantId: string;
+  name: string;
+  type: string;
+  entityScope: ObjectiveEntityScope | null;
+  source: 'blueprint_generic' | 'blueprint_industry' | 'ai_proposed_from_data' | 'human_authored' | null;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type ObjectivePipelineSegment =
+  | 'new_leads'
+  | 'winback'
+  | 'closed_lost_recovery'
+  | 'cancelled_orders_recovery'
+  | 'inactive_customers_reengagement'
+  | 'other';
+
+export interface ObjectiveProposedStage {
+  name: string;
+  order: number;
+  isInitial: boolean;
+  isTerminal: boolean;
+  outcomeType: 'open' | 'terminal_won' | 'terminal_lost';
+}
+
+export interface ProposedPipeline {
+  objectiveId: string;
+  objectiveType: string;
+  objectiveName: string;
+  segment: ObjectivePipelineSegment;
+  dataSufficiency: 'ready' | 'needs_more_data';
+  evidence: { count: number; description: string; threshold: number };
+  needed: string | null;
+  reason: string;
+  proposedName: string;
+  proposedStages: ObjectiveProposedStage[];
+  suggestedPriority: number;
+}
+
+export interface ObjectiveDeclaration {
+  id: string;
+  tenantId: string;
+  objectiveId: string;
+  entityScope: ObjectiveEntityScope;
+  priority: number;
+  status: string;
+  adoptedAt: string;
+  objective: { id: string; type: string; name: string; entityScope: ObjectiveEntityScope };
+}
+
+export const objectivesApi = {
+  list: (entityScope?: ObjectiveEntityScope) =>
+    trpcQuery<{
+      objectives: ObjectiveCatalogItem[];
+      pagination: { page: number; limit: number; total: number; pages: number };
+    }>('objectives.list', entityScope ? { entityScope, page: 1, limit: 100 } : { page: 1, limit: 100 }),
+  propose: (entityScope: ObjectiveEntityScope) =>
+    trpcQuery<{ proposals: ProposedPipeline[] }>('objectives.propose', { entityScope }),
+  adopt: (entityScope: ObjectiveEntityScope, selections: Array<{ objectiveId: string; priority: number }>) =>
+    trpcMutation<{
+      replaced: number;
+      written: number;
+      declaration: ObjectiveDeclaration[];
+    }>('objectives.adopt', { entityScope, selections }),
+};
+
 // KAN-826: legacy Knowledge Ingestion API (KAN-707 PR A) types REMOVED.
 // `KnowledgeSourceListItem`, `KnowledgeChunkPreview`, `KnowledgeSourceDetail`
 // were tied to the dropped KAN-786 schema (chunkIndex/totalChunks/

@@ -181,6 +181,16 @@ interface PrismaMockState {
   }>;
   rules: AssignmentRuleRow[];
   initialStageId: string | null;
+  /**
+   * KAN-963 (slice 2a PR B) — tier 1.5 primary-objective short-circuit
+   * fixtures. When `primarySelection` is set, the test simulates a tenant
+   * that has declared a primary objective. When `primaryBoundPipeline` is
+   * also set, the tier-1.5 query finds a matching Pipeline + routes there.
+   * When either is null/undefined, tier 1.5 is a no-op and the existing
+   * tiers run (covers the non-regression case).
+   */
+  primarySelection?: { objectiveId: string; objectiveType: string } | null;
+  primaryBoundPipeline?: { pipelineId: string } | null;
 }
 
 function makePrismaMock(state: PrismaMockState) {
@@ -196,6 +206,21 @@ function makePrismaMock(state: PrismaMockState) {
   // DealStageHistory write is covered by the KAN-793 lead-received-push tests.
   // KAN-795: pipeline.findMany no longer called from lead-assignment;
   // pipeline-router loads its own candidates internally.
+  // KAN-963 (slice 2a PR B) — tier-1.5 lookups. loadPrimaryObjectivePipeline
+  // does (tenantObjectiveSelection.findFirst → pipeline.findFirst); fakes
+  // return state values or null based on PrismaMockState.
+  const findFirstSelection = vi.fn(async () =>
+    state.primarySelection
+      ? {
+          objectiveId: state.primarySelection.objectiveId,
+          objective: { id: state.primarySelection.objectiveId, type: state.primarySelection.objectiveType },
+        }
+      : null,
+  );
+  const findFirstPipeline = vi.fn(async () =>
+    state.primaryBoundPipeline ? { id: state.primaryBoundPipeline.pipelineId } : null,
+  );
+
   const prisma: any = {
     contact: {
       findUnique: vi.fn(async () => state.contact),
@@ -208,9 +233,21 @@ function makePrismaMock(state: PrismaMockState) {
     escalation: { create: createEscalation },
     assignmentRule: { findMany: findAssignmentRules },
     stage: { findFirst: findFirstStage },
+    tenantObjectiveSelection: { findFirst: findFirstSelection },
+    pipeline: { findFirst: findFirstPipeline },
   };
 
-  return { prisma: prisma as PrismaClient, mocks: { updateContact, createAuditLog, createEscalation, findAssignmentRules } };
+  return {
+    prisma: prisma as PrismaClient,
+    mocks: {
+      updateContact,
+      createAuditLog,
+      createEscalation,
+      findAssignmentRules,
+      findFirstSelection,
+      findFirstPipeline,
+    },
+  };
 }
 
 function defaultContact(overrides: Partial<PrismaMockState['contact']> = {}) {
@@ -472,5 +509,95 @@ describe('assignLeadToPipeline orchestrator — below-threshold posture branches
     const escArgs = (mocks.createEscalation.mock.calls[0][0] as any).data;
     expect(escArgs.triggerType).toBe('lead_assignment_below_threshold');
     expect(escArgs.status).toBe('open');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// KAN-963 (slice 2a PR B) — Routing tier 1.5: primary-objective
+// short-circuit. Tier 1.5 sits between rules + AI router. When tenant
+// has declared a primary objective AND a Pipeline bound to that objective
+// at segment='new_leads', route there directly. Otherwise no-op (existing
+// tiers continue unchanged — the non-regression invariant).
+// ─────────────────────────────────────────────────────────────────────
+
+describe('KAN-963 — tier 1.5 objective_primary routing', () => {
+  it('declared primary + matching pipeline → mode=objective_primary, AI router skipped', async () => {
+    const { prisma, mocks } = makePrismaMock({
+      contact: defaultContact(),
+      tenant: { aiAssignmentConfidenceThreshold: 0.5 },
+      rules: [],
+      initialStageId: STAGE_INITIAL_HUBSPOT,
+      primarySelection: { objectiveId: 'obj_book', objectiveType: 'book_appointment' },
+      primaryBoundPipeline: { pipelineId: 'pipeline_book_new_leads' },
+    });
+    const out = await assignLeadToPipeline(prisma, CONTACT_ID);
+    expect(out.mode).toBe('objective_primary');
+    if (out.mode === 'objective_primary') {
+      expect(out.pipelineId).toBe('pipeline_book_new_leads');
+      expect(out.objectiveId).toBe('obj_book');
+    }
+    // AI router never consulted (tier 1.5 short-circuited)
+    expect(mocks.findAssignmentRules).toHaveBeenCalledTimes(1); // rules tier still ran
+    // Contact was assigned + audit row written under the new mode
+    expect(mocks.updateContact).toHaveBeenCalledTimes(1);
+    expect(mocks.createAuditLog).toHaveBeenCalledTimes(1);
+    const auditArgs = (mocks.createAuditLog.mock.calls[0][0] as any).data;
+    expect(auditArgs.actionType).toBe('lead_assignment');
+    expect(auditArgs.reasoning).toContain('primary objective book_appointment');
+  });
+
+  it('no declared primary → tier 1.5 is no-op, falls through to AI router (NON-REGRESSION)', async () => {
+    routePipelineForNewLeadMock.mockResolvedValueOnce(
+      routerResponse({ type: 'route', pipelineId: PIPELINE_META, confidence: 0.85 }),
+    );
+    const { prisma, mocks } = makePrismaMock({
+      contact: defaultContact(),
+      tenant: { aiAssignmentConfidenceThreshold: 0.5 },
+      rules: [],
+      initialStageId: STAGE_INITIAL_HUBSPOT,
+      primarySelection: null, // no declaration
+    });
+    const out = await assignLeadToPipeline(prisma, CONTACT_ID);
+    expect(out.mode).toBe('ai_fallback'); // existing behavior preserved
+    // tier-1.5 selection lookup ran but returned null; pipeline lookup never fired
+    expect(mocks.findFirstSelection).toHaveBeenCalledTimes(1);
+    expect(mocks.findFirstPipeline).not.toHaveBeenCalled();
+  });
+
+  it('declared primary but NO matching pipeline (segment=new_leads) → tier 1.5 falls through to AI router', async () => {
+    routePipelineForNewLeadMock.mockResolvedValueOnce(
+      routerResponse({ type: 'route', pipelineId: PIPELINE_META, confidence: 0.85 }),
+    );
+    const { prisma, mocks } = makePrismaMock({
+      contact: defaultContact(),
+      tenant: { aiAssignmentConfidenceThreshold: 0.5 },
+      rules: [],
+      initialStageId: STAGE_INITIAL_HUBSPOT,
+      primarySelection: { objectiveId: 'obj_book', objectiveType: 'book_appointment' },
+      primaryBoundPipeline: null, // declared but unbound — falls through
+    });
+    const out = await assignLeadToPipeline(prisma, CONTACT_ID);
+    expect(out.mode).toBe('ai_fallback');
+    expect(mocks.findFirstSelection).toHaveBeenCalledTimes(1);
+    expect(mocks.findFirstPipeline).toHaveBeenCalledTimes(1);
+  });
+
+  it('explicit rule matches BEFORE tier 1.5 — rules still win', async () => {
+    const { prisma, mocks } = makePrismaMock({
+      contact: defaultContact({ source: 'hubspot' }),
+      tenant: {},
+      rules: [rule('rule_hub', 1, { source: 'hubspot' }, PIPELINE_HUBSPOT)],
+      initialStageId: STAGE_INITIAL_HUBSPOT,
+      // Even with a primary declared, the explicit rule wins
+      primarySelection: { objectiveId: 'obj_book', objectiveType: 'book_appointment' },
+      primaryBoundPipeline: { pipelineId: 'pipeline_book_new_leads' },
+    });
+    const out = await assignLeadToPipeline(prisma, CONTACT_ID);
+    expect(out.mode).toBe('rule');
+    if (out.mode === 'rule') {
+      expect(out.pipelineId).toBe(PIPELINE_HUBSPOT);
+    }
+    // Tier 1.5 was never consulted (rules tier short-circuited first)
+    expect(mocks.findFirstSelection).not.toHaveBeenCalled();
   });
 });
