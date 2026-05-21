@@ -349,7 +349,7 @@ async function writeTransition(
   const triggeredBy = options.triggeredBy ?? 'agent';
   const transitionedAt = new Date();
 
-  return prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
     // Deal.closedAt was dropped in KAN-791 pivot. Closure is signaled by
     // Deal.currentStageId pointing at a Stage with outcomeType IN
     // (terminal_won, terminal_lost). To query "when did this Deal close?",
@@ -384,58 +384,6 @@ async function writeTransition(
       select: { id: true },
     });
 
-    // KAN-963 (slice 2a PR B) — CustomerLifecycleEvent writer hook.
-    // When this transition lands on a terminal_won stage, the Contact has
-    // effectively become a customer. Upsert the Customer row (status='active',
-    // since=now) + append a CustomerLifecycleEvent row capturing the moment.
-    //
-    // Append-only audit: this is the recording layer. No status-automation,
-    // no standards engine, no slicing this slice — just start logging what
-    // naturally happens (per Phase 1 Q3 Option β). Slice 2b/3/4 layers
-    // consume these rows.
-    //
-    // Both writes ride the same $transaction as the Deal stage transition
-    // so a partial commit can't leave a torn lifecycle audit. Best-effort:
-    // if Customer.upsert throws (FK violation, concurrent insert), the
-    // surrounding transaction will roll back — preferable to a half-recorded
-    // state. Stage transition stays atomic.
-    if (targetStage.outcomeType === 'terminal_won') {
-      const customer = await tx.customer.upsert({
-        where: { contactId: deal.contactId },
-        create: {
-          tenantId: deal.tenantId,
-          contactId: deal.contactId,
-          status: 'active',
-          since: transitionedAt,
-        },
-        update: {
-          // Existing Customer row (e.g., seeded from a prior deal win or
-          // sync): keep `since`/`plan`/`mrr` etc. but bump status back to
-          // active if previously churned. No-op if already active.
-          status: 'active',
-        },
-        select: { id: true, status: true },
-      });
-
-      await tx.customerLifecycleEvent.create({
-        data: {
-          tenantId: deal.tenantId,
-          contactId: deal.contactId,
-          customerId: customer.id,
-          eventType: 'created',
-          toStatus: 'active',
-          source: 'deal_won',
-          metadata: {
-            dealId: deal.id,
-            dealStageHistoryId: historyRow.id,
-            fromStageName: deal.currentStage.name,
-            toStageName: targetStage.name,
-            brainEvaluatedAt: brainDecision.evaluatedAt.toISOString(),
-          },
-        },
-      });
-    }
-
     return {
       type: 'transitioned' as const,
       dealId: deal.id,
@@ -449,4 +397,92 @@ async function writeTransition(
       transitionRowId: historyRow.id,
     };
   });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // KAN-963 (slice 2a PR B) — CustomerLifecycleEvent post-commit writer.
+  //
+  // DECOUPLED from the stage-transition transaction (Fred's PR B review
+  // gate, 2026-05-21). The audit-recording layer must NEVER block a
+  // legitimate deal-won event from persisting. If the Customer upsert
+  // or CustomerLifecycleEvent insert fails (FK violation, transient DB
+  // issue, schema drift, anything), the stage transition is already
+  // committed; the lifecycle write is best-effort + WARN-logged.
+  //
+  // Trade-off accepted: lifecycle audit can be missing a row on the
+  // rare failure path (preferable to a Deal stuck mid-transition). The
+  // gap is detectable via downstream counts; slice-2b's daily scheduled
+  // discovery can identify Deals at terminal_won without a corresponding
+  // CustomerLifecycleEvent and surface them for backfill if/when needed.
+  //
+  // Phase-1 Q3 Option β: append-only recording. No status-automation,
+  // no standards engine. Just log what naturally happens — best-effort.
+  // ─────────────────────────────────────────────────────────────────────
+
+  if (result.type === 'transitioned' && targetStage.outcomeType === 'terminal_won') {
+    void recordCustomerLifecycleOnWin(prisma, deal, targetStage, brainDecision, result);
+  }
+
+  return result;
+}
+
+/**
+ * KAN-963 — best-effort Customer + CustomerLifecycleEvent writer. Runs
+ * POST-commit; failures never roll back the stage transition. Awaited
+ * by caller only via `void` (fire-and-forget) so the response path
+ * doesn't block on the audit write either.
+ *
+ * Note: although failures don't roll back, we DO await internally so the
+ * upsert's customer.id is available for the CustomerLifecycleEvent row's
+ * customerId FK. If the upsert succeeds + the event fails, the Customer
+ * row stays in place — that's the right shape (Customer is the canonical
+ * state; the event is the audit trail).
+ */
+async function recordCustomerLifecycleOnWin(
+  prisma: PrismaClient,
+  deal: LoadedDeal,
+  targetStage: LoadedStage,
+  brainDecision: BrainDecision,
+  transition: Extract<StageTransitionResult, { type: 'transitioned' }>,
+): Promise<void> {
+  try {
+    const customer = await prisma.customer.upsert({
+      where: { contactId: deal.contactId },
+      create: {
+        tenantId: deal.tenantId,
+        contactId: deal.contactId,
+        status: 'active',
+        since: new Date(),
+      },
+      update: {
+        // Existing Customer (prior win or sync): bump status back to
+        // active if previously churned. No-op if already active.
+        status: 'active',
+      },
+      select: { id: true, status: true },
+    });
+
+    await prisma.customerLifecycleEvent.create({
+      data: {
+        tenantId: deal.tenantId,
+        contactId: deal.contactId,
+        customerId: customer.id,
+        eventType: 'created',
+        toStatus: 'active',
+        source: 'deal_won',
+        metadata: {
+          dealId: deal.id,
+          dealStageHistoryId: transition.transitionRowId,
+          fromStageName: deal.currentStage.name,
+          toStageName: targetStage.name,
+          brainEvaluatedAt: brainDecision.evaluatedAt.toISOString(),
+        },
+      },
+    });
+  } catch (err) {
+    console.warn(
+      `[stage-transition-engine] kan-963 customer-lifecycle-write-failed-post-commit dealId=${deal.id} contactId=${deal.contactId} err=${(err as Error)?.message ?? String(err)}`,
+    );
+    // Intentionally swallowed: the stage transition is committed; audit
+    // gap is acceptable per the decoupling decision (Fred PR B review).
+  }
 }
