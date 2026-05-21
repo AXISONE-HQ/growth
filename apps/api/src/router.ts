@@ -4007,6 +4007,18 @@ const pipelinesRouter = router({
           message: `Pipeline name "${input.name}" already exists in this tenant`,
         });
       }
+      // KAN-959 — bind new pipelines to an Objective row. Look up the
+      // catalog Objective for this tenant matching `type === input.objectiveType`.
+      // Backward-compat: if no matching Objective exists (e.g., tenant not yet
+      // seeded with catalog rows), Pipeline.objectiveId stays NULL — the
+      // legacy `objectiveType` enum + `objectiveDescription` columns still
+      // carry the metadata. Acceptance bound: new pipelines persist a
+      // non-null objectiveId IFF the catalog exists for the tenant.
+      const matchingObjective: { id: string } | null = await (ctx.prisma as any).objective?.findFirst({
+        where: { tenantId: ctx.tenantId, type: input.objectiveType, isActive: true },
+        select: { id: true },
+      });
+
       const created: any = await (ctx.prisma as any).pipeline?.create({
         data: {
           tenantId: ctx.tenantId,
@@ -4014,6 +4026,8 @@ const pipelinesRouter = router({
           description: input.description ?? null,
           objectiveType: input.objectiveType,
           objectiveDescription: input.objectiveDescription ?? null,
+          // KAN-959 — new column. Null on tenants without the catalog seed.
+          objectiveId: matchingObjective?.id ?? null,
           order: input.order,
           isActive: true,
           stages: {

@@ -267,10 +267,17 @@ router.get('/:id', async (req: Request, res: Response) => {
     const contact = await prisma.contact.findFirst({
       where: { id, tenantId },
       include: {
-        contactStates: {
+        // KAN-959 — repointed from contactStates to contactObjectiveStack.
+        // Same response field name kept for backward compatibility with
+        // the contact-detail consumer; carries forward id/objectiveId/
+        // subObjectives/strategyCurrent/confidenceScore/updatedAt plus
+        // the new priority + status fields.
+        contactObjectiveStack: {
           select: {
             id: true,
             objectiveId: true,
+            priority: true,
+            status: true,
             subObjectives: true,
             strategyCurrent: true,
             confidenceScore: true,
