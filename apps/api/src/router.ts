@@ -1751,10 +1751,33 @@ const brainRouter = router({
 // OBJECTIVES ROUTER
 // ============================================================================
 
+// KAN-962 (slice 2a) — load the proposer via variable-specifier dynamic
+// import to keep cross-rootDir modules out of the static graph
+// (reference_variable_specifier_dynamic_import).
+interface PipelineProposerModule {
+  proposeForTenant: (input: {
+    prisma: unknown;
+    tenantId: string;
+    entityScope: "contact" | "order" | "company" | "deal";
+  }) => Promise<unknown[]>;
+}
+let _pipelineProposerModule: PipelineProposerModule | null = null;
+async function loadPipelineProposer(): Promise<PipelineProposerModule> {
+  if (_pipelineProposerModule) return _pipelineProposerModule;
+  const spec = "../../../packages/api/src/services/pipeline-proposer.js";
+  _pipelineProposerModule = (await import(spec)) as PipelineProposerModule;
+  return _pipelineProposerModule;
+}
+
+const ObjectiveEntityScopeSchema = z.enum(["contact", "order", "company", "deal"]);
+
 const objectivesRouter = router({
   list: protectedProcedure
     .input(
       z.object({
+        // KAN-962 — optional entityScope filter so the declaration UX
+        // can fetch only contact-scoped (or future order-scoped) rows.
+        entityScope: ObjectiveEntityScopeSchema.optional(),
         page: z.number().min(1).default(1),
         limit: z.number().min(1).max(100).default(20),
       })
@@ -1762,16 +1785,35 @@ const objectivesRouter = router({
     .query(async ({ ctx, input }) => {
       const skip = (input.page - 1) * input.limit;
 
-      const where = { tenant_id: ctx.tenantId };
+      const where: Record<string, unknown> = { tenantId: ctx.tenantId };
+      if (input.entityScope) {
+        where.entityScope = input.entityScope;
+      }
 
       const [objectives, total] = await Promise.all([
-        ctx.prisma.objective.findMany({
+        // KAN-962 — surface type/entityScope/source explicitly so the
+        // declaration UX has everything it needs without round-trips.
+        (ctx.prisma as any).objective.findMany({
           where,
           skip,
           take: input.limit,
-          orderBy: { created_at: "desc" },
+          orderBy: { createdAt: "desc" },
+          select: {
+            id: true,
+            tenantId: true,
+            name: true,
+            type: true,
+            entityScope: true,
+            source: true,
+            successCondition: true,
+            subObjectives: true,
+            blueprintId: true,
+            isActive: true,
+            createdAt: true,
+            updatedAt: true,
+          },
         }),
-        ctx.prisma.objective.count({ where }),
+        (ctx.prisma as any).objective.count({ where }),
       ]);
 
       return {
@@ -1783,6 +1825,112 @@ const objectivesRouter = router({
           pages: Math.ceil(total / input.limit),
         },
       };
+    }),
+
+  // KAN-962 (slice 2a) — propose ranked ProposedPipeline[] for the
+  // tenant's catalog at the requested entityScope. Returns deterministic
+  // counts + LLM-or-fallback naming/reasoning. Trigger-agnostic — same
+  // function powers slice-2b's daily scheduled discovery.
+  propose: protectedProcedure
+    .input(
+      z.object({
+        entityScope: ObjectiveEntityScopeSchema,
+      })
+    )
+    .query(async ({ ctx, input }) => {
+      const { proposeForTenant } = await loadPipelineProposer();
+      const proposals = await proposeForTenant({
+        prisma: ctx.prisma,
+        tenantId: ctx.tenantId,
+        entityScope: input.entityScope,
+      });
+      return { proposals };
+    }),
+
+  // KAN-962 (slice 2a) — write the tenant's declaration to
+  // TenantObjectiveSelection. Replace-all per (tenantId, entityScope):
+  // every prior selection for the scope is deleted, then new rows
+  // inserted. Atomic via $transaction so a partial write can't leave
+  // the declaration in a torn state.
+  //
+  // Validates: every objectiveId belongs to the tenant + matches the
+  // requested entityScope (no cross-tenant or cross-scope leakage).
+  adopt: protectedProcedure
+    .input(
+      z.object({
+        entityScope: ObjectiveEntityScopeSchema,
+        selections: z
+          .array(
+            z.object({
+              objectiveId: z.string().uuid(),
+              priority: z.number().int().min(1),
+            })
+          )
+          .min(0),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      // Validate every objectiveId belongs to this tenant + scope.
+      if (input.selections.length > 0) {
+        const objectives: Array<{ id: string }> = await (ctx.prisma as any).objective.findMany({
+          where: {
+            id: { in: input.selections.map((s) => s.objectiveId) },
+            tenantId: ctx.tenantId,
+            entityScope: input.entityScope,
+          },
+          select: { id: true },
+        });
+        const validIds = new Set(objectives.map((o: { id: string }) => o.id));
+        const invalidIds = input.selections
+          .map((s) => s.objectiveId)
+          .filter((id) => !validIds.has(id));
+        if (invalidIds.length > 0) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: `objectiveId(s) not in tenant catalog at scope=${input.entityScope}: ${invalidIds.join(", ")}`,
+          });
+        }
+      }
+
+      return (ctx.prisma as any).$transaction(async (tx: any) => {
+        // Replace-all semantics: delete every prior selection for this
+        // (tenant, entityScope) tuple.
+        const deleted = await tx.tenantObjectiveSelection.deleteMany({
+          where: { tenantId: ctx.tenantId, entityScope: input.entityScope },
+        });
+
+        // Re-insert with user-chosen priorities. createMany skips conflict
+        // detection because the deleteMany above cleared the unique-key space.
+        let writtenCount = 0;
+        if (input.selections.length > 0) {
+          const result = await tx.tenantObjectiveSelection.createMany({
+            data: input.selections.map((s) => ({
+              tenantId: ctx.tenantId,
+              objectiveId: s.objectiveId,
+              entityScope: input.entityScope,
+              priority: s.priority,
+              status: "selected",
+            })),
+          });
+          writtenCount = result.count;
+        }
+
+        const declaration = await tx.tenantObjectiveSelection.findMany({
+          where: { tenantId: ctx.tenantId, entityScope: input.entityScope },
+          orderBy: { priority: "asc" },
+          include: {
+            objective: {
+              select: { id: true, type: true, name: true, entityScope: true },
+            },
+          },
+        });
+
+        return {
+          replaced: deleted.count,
+          written: writtenCount,
+          declaration,
+        };
+      });
     }),
 
   create: protectedProcedure

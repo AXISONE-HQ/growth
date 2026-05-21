@@ -21,3 +21,5 @@ export * from "./account-audit-payload.js";
 export * from "./import-row-committed.js";
 // KAN-959 — Objective Stack shared types (slice 1 of Objectives → AI Pipeline)
 export * from "./objective-stack.js";
+// KAN-962 — Objective + Pipeline proposer shared types (slice 2a)
+export * from "./objective-proposal.js";
