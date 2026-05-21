@@ -477,16 +477,20 @@ export interface MicroObjective {
 
 // KAN-932 / KAN-938 — Pipeline + nested Stage shape for cascading form
 // dropdowns. Backend returns active pipelines with stages ordered ASC.
+// KAN-968 — added objectiveId so the Pipelines board can filter out the
+// objectiveId=null fixture without touching it.
 export interface PipelineWithStages {
   id: string;
   name: string;
   description: string | null;
+  objectiveId: string | null;
   stages: Array<{
     id: string;
     name: string;
     order: number;
     isInitial: boolean;
     isTerminal: boolean;
+    outcomeType: "open" | "terminal_won" | "terminal_lost";
   }>;
 }
 
@@ -1462,6 +1466,34 @@ export interface DealUpdateInput
   contactId?: string;
 }
 
+// KAN-968 — Pipelines kanban board card shape (consumes KAN-967 endpoint).
+export interface BoardDealCard {
+  id: string;
+  name: string;
+  value: string; // Decimal serialized
+  currency: string;
+  currentStageId: string;
+  enteredStageAt: string; // ISO date
+  contact: { firstName: string | null; lastName: string | null };
+  company: { name: string } | null;
+  status: string;
+  probability: number | null;
+  latestDecision: {
+    actionType: string;
+    confidence: number; // 0..1
+  } | null;
+}
+
+export interface BoardStageGroup {
+  stageId: string;
+  deals: BoardDealCard[];
+  truncatedCount: number;
+}
+
+export interface BoardPipelineResult {
+  stages: BoardStageGroup[];
+}
+
 export const dealsApi = {
   list: (input?: {
     search?: string;
@@ -1475,6 +1507,9 @@ export const dealsApi = {
     trpcQuery<CursorPage<DealListItem>>('deals.list', input ?? { limit: 50 }),
   get: (id: string) =>
     trpcQuery<DealDetail>('deals.get', { id }),
+  // KAN-967 — grouped read for the Pipelines kanban board.
+  listByPipeline: (pipelineId: string) =>
+    trpcQuery<BoardPipelineResult>('deals.listByPipeline', { pipelineId }),
   // KAN-938 — Sub-cohort 3.3 CRUD mutations.
   create: (input: DealCreateInput) =>
     trpcMutation<DealDetail>('deals.create', input),

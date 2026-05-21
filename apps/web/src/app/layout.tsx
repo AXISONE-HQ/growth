@@ -22,6 +22,7 @@ import {
   Target,
   Receipt,
   Upload,
+  Workflow,
 } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
 import { AuthProvider, useAuth } from '@/lib/AuthContext';
@@ -54,6 +55,13 @@ const navItems: Array<{
   activePrefix?: string;
 }> = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
+  // KAN-968 — Pipelines (kanban board, read-only) + Objectives promoted to
+  // top-level nav. Both sit near Opportunities since they're the "what is
+  // growth pursuing right now?" surfaces. Objectives stays at its existing
+  // /settings/objectives route (no URL move, matches the Knowledge Center
+  // pattern of top-level link to a settings route).
+  { href: '/pipelines', label: 'Pipelines', icon: Workflow },
+  { href: '/settings/objectives', label: 'Objectives', icon: Target },
   { href: '/opportunities', label: 'Opportunities', icon: Target },
   { href: '/conversations', label: 'Conversations', icon: MessageSquare, demoOnly: true },
   // KAN-884 — CRM cohort 1 PR 2. /companies sits between Opportunities and
@@ -110,6 +118,9 @@ function findActiveHref(pathname: string): string | null {
 const pageTitle: Record<string, string> = {
   '/settings/account/identity': 'Account',
   '/settings/knowledge': 'Knowledge Center',
+  // KAN-968 — Objectives + Pipelines page titles for the top-bar h1 resolver.
+  '/settings/objectives': 'Objectives',
+  '/pipelines': 'Pipelines',
   '/dashboard': 'Dashboard',
   '/opportunities': 'Opportunities',
   '/conversations': 'Conversations',
