@@ -4132,6 +4132,9 @@ const pipelinesRouter = router({
               order: true,
               isInitial: true,
               isTerminal: true,
+              // KAN-968 — outcomeType lets the board distinguish won/lost
+              // terminal stages for the column-header accent treatment.
+              outcomeType: true,
             },
           },
         },
@@ -4141,12 +4144,18 @@ const pipelinesRouter = router({
       id: p.id,
       name: p.name,
       description: p.description ?? null,
+      // KAN-968 — objectiveId surfaced for the Pipelines board's
+      // objective-bound filter (board hides isActive=true pipelines that
+      // aren't bound to an Objective row, i.e. the KAN-793 fixture).
+      // Nullable: legacy fixtures + pre-slice-2a tenants will have null.
+      objectiveId: (p.objectiveId as string | null) ?? null,
       stages: (p.stages ?? []) as Array<{
         id: string;
         name: string;
         order: number;
         isInitial: boolean;
         isTerminal: boolean;
+        outcomeType: "open" | "terminal_won" | "terminal_lost";
       }>,
     }));
   }),
