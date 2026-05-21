@@ -109,12 +109,27 @@ function getOpenAIClient(): OpenAI | null {
 // mirror the canonical signatures in packages/api/src/services/.
 // ─────────────────────────────────────────────
 
+// KAN-965 — local mirror of packages/api/src/services/lead-assignment.ts:70
+// AssignmentResult tagged-union. We can't import the type directly because
+// the variable-specifier dynamic import pattern (reference: KAN-689 cohort,
+// `await import(spec)` with a non-literal spec) deliberately keeps that
+// module out of the static type graph to bypass TS6059. The duplication is
+// the price; the structural-elimination test below (and the new exhaustive
+// switch's `never` default) catches drift between the two.
+type AssignmentResult =
+  | { mode: 'rule'; ruleId: string; pipelineId: string; stageId: string | null }
+  | { mode: 'objective_primary'; pipelineId: string; stageId: string | null; objectiveId: string }
+  | { mode: 'ai_fallback'; pipelineId: string; stageId: string | null; confidence: number; reasoning: string }
+  | { mode: 'default_pipeline'; pipelineId: string; stageId: string | null }
+  | { mode: 'escalated'; escalationId: string }
+  | { mode: 'unassigned'; reason: string };
+
 interface AssignmentModule {
   assignLeadToPipeline: (
     prisma: unknown,
     contactId: string,
     options?: { skipIfAssigned?: boolean; aiConfidenceThresholdOverride?: number },
-  ) => Promise<{ mode: string; pipelineId?: string; stageId?: string | null }>;
+  ) => Promise<AssignmentResult>;
 }
 let _assignmentModule: AssignmentModule | null = null;
 async function loadAssignmentModule(): Promise<AssignmentModule> {
@@ -525,18 +540,34 @@ leadReceivedPushApp.post('/lead-received', async (c) => {
         `[lead-received-push] assigned contactId=${event.contactId} tenantId=${event.tenantId} mode=${assignment.mode}`,
       );
 
-      if (
-        assignment.mode === 'rule' ||
-        assignment.mode === 'ai_fallback' ||
-        assignment.mode === 'default_pipeline'
-      ) {
-        dealId = await writePhase1Deal(event, contact.tenantId, assignment);
-      } else {
-        // Phase 1 posture: ambiguous routing produces Contact-only state.
-        // Phase 2 KAN-794/795 resolves via Customer Decision meta-pipeline.
-        console.warn(
-          `[lead-received-push] phase-1-ambiguous-assignment-deal-skipped contactId=${event.contactId} tenantId=${event.tenantId} mode=${assignment.mode}`,
-        );
+      // KAN-965 — exhaustive switch on the AssignmentResult tagged-union.
+      // Pre-KAN-963 this was an `if (mode === 'rule' | 'ai_fallback' |
+      // 'default_pipeline')` whitelist; tier-1.5 objective_primary (added by
+      // KAN-963) fell through the else branch and silently skipped Deal
+      // creation. The `never` default makes a future-added mode a compile
+      // error rather than a silent-skip regression.
+      switch (assignment.mode) {
+        case 'rule':
+        case 'ai_fallback':
+        case 'default_pipeline':
+        case 'objective_primary':
+          dealId = await writePhase1Deal(event, contact.tenantId, assignment);
+          break;
+        case 'escalated':
+        case 'unassigned':
+          // Phase 1 posture: ambiguous/escalated routing produces
+          // Contact-only state. Phase 2 KAN-794/795 resolves via Customer
+          // Decision meta-pipeline.
+          console.warn(
+            `[lead-received-push] phase-1-ambiguous-assignment-deal-skipped contactId=${event.contactId} tenantId=${event.tenantId} mode=${assignment.mode}`,
+          );
+          break;
+        default: {
+          const _exhaustive: never = assignment;
+          throw new Error(
+            `[lead-received-push] unhandled assignment.mode (exhaustive-switch invariant): ${JSON.stringify(_exhaustive)}`,
+          );
+        }
       }
     }
 

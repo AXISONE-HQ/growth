@@ -526,6 +526,74 @@ describe("KAN-793 — assignment-mode dispatch", () => {
   });
 });
 
+// ─────────────────────────────────────────────
+// KAN-965 — objective_primary reaches writePhase1Deal end-to-end
+//
+// PROD smoke for the KAN-963 routing flip (2026-05-21) showed tier-1.5
+// correctly returning mode='objective_primary' but the Phase-1 Deal-creation
+// gate's hardcoded whitelist excluded that mode → Deal NEVER created.
+// These tests pin the full path: assignment → gate → writePhase1Deal → Deal
+// row written, so the silent-skip cannot regress.
+//
+// The gate is now an exhaustive switch over the AssignmentResult tagged-
+// union; `default: never` makes a future-added mode a compile error rather
+// than a runtime silent-skip.
+// ─────────────────────────────────────────────
+
+describe("KAN-965 — objective_primary mode reaches writePhase1Deal (routing-flip fix)", () => {
+  const OBJECTIVE_PRIMARY_PIPELINE = "pipeline_objective_primary_a";
+  const OBJECTIVE_ID = "obj_book_appt_a";
+
+  it("objective_primary mode → Deal created on the objective-bound Pipeline", async () => {
+    setupHappyPathMocks();
+    assignLeadToPipelineMock.mockResolvedValue({
+      mode: "objective_primary",
+      pipelineId: OBJECTIVE_PRIMARY_PIPELINE,
+      stageId: STAGE_INITIAL,
+      objectiveId: OBJECTIVE_ID,
+    });
+    stageFindFirstMock.mockResolvedValue({ id: STAGE_INITIAL });
+
+    const res = await postEnvelope(buildPushEnvelope());
+    expect(res.status).toBe(200);
+
+    // Deal IS created (regression pin — pre-KAN-965 the else-branch skipped this)
+    expect(dealCreateMock).toHaveBeenCalledOnce();
+
+    // The initial-stage lookup hit the objective-bound Pipeline, not the default one
+    expect(stageFindFirstMock.mock.calls[0]![0]).toMatchObject({
+      where: { pipelineId: OBJECTIVE_PRIMARY_PIPELINE, isInitial: true },
+    });
+
+    // The Deal carries the objective-bound pipelineId
+    const dealArgs = (dealCreateMock.mock.calls[0]![0] as { data: { pipelineId: string; metadata: Record<string, unknown> } }).data;
+    expect(dealArgs.pipelineId).toBe(OBJECTIVE_PRIMARY_PIPELINE);
+
+    // Deal.metadata.assignmentMode stamped as 'objective_primary' for downstream observability
+    expect(dealArgs.metadata).toMatchObject({
+      source: "track_a_email_inbound",
+      assignmentMode: "objective_primary",
+    });
+  });
+
+  it("escalated + unassigned still skip Deal creation (gate refactor preserves sibling semantics)", async () => {
+    // Re-pin the no-Deal branches after the exhaustive-switch refactor —
+    // the test above could've passed even if escalated/unassigned started
+    // writing Deals. This guards against that drift.
+    setupHappyPathMocks();
+    assignLeadToPipelineMock.mockResolvedValue({ mode: "escalated", escalationId: "esc_a" });
+    let res = await postEnvelope(buildPushEnvelope());
+    expect(res.status).toBe(200);
+    expect(dealCreateMock).not.toHaveBeenCalled();
+
+    dealCreateMock.mockClear();
+    assignLeadToPipelineMock.mockResolvedValue({ mode: "unassigned", reason: "no_match" });
+    res = await postEnvelope(buildPushEnvelope());
+    expect(res.status).toBe(200);
+    expect(dealCreateMock).not.toHaveBeenCalled();
+  });
+});
+
 describe("KAN-793 — error + edge cases", () => {
   it("Contact not found → 200 ack+drop (producer invariant violation)", async () => {
     verifyPubsubOidcMock.mockResolvedValue(true);
