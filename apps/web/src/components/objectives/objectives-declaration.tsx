@@ -46,6 +46,7 @@ import {
   objectivesApi,
   type ObjectiveEntityScope,
   type ProposedPipeline,
+  type PipelineCreatedFromProposal,
 } from '@/lib/api';
 
 interface ObjectivesDeclarationProps {
@@ -361,10 +362,32 @@ function SortableRow({ entry }: { entry: SortableEntry }) {
 
 // ─────────────────────────────────────────────────────────────────────
 // "Pipelines growth will run" cards (Phase B).
+// KAN-964 wired the "Create" button to objectives.createPipelineFromProposal.
 // ─────────────────────────────────────────────────────────────────────
 
 function ProposedPipelineCard({ proposal }: { proposal: ProposedPipeline }) {
   const ready = proposal.dataSufficiency === 'ready';
+  const queryClient = useQueryClient();
+
+  const createMutation = useMutation({
+    mutationFn: () =>
+      objectivesApi.createPipelineFromProposal({
+        objectiveId: proposal.objectiveId,
+        segment: proposal.segment,
+        proposedName: proposal.proposedName,
+        proposedStages: proposal.proposedStages,
+      }),
+    onSuccess: () => {
+      // Surface the newly-bound pipeline in any downstream view that lists
+      // tenant pipelines (Phase B card, future /settings/pipelines surface).
+      queryClient.invalidateQueries({ queryKey: ['objectives'] });
+      queryClient.invalidateQueries({ queryKey: ['pipelines'] });
+    },
+  });
+
+  const createdPipeline = createMutation.data?.pipeline as PipelineCreatedFromProposal | undefined;
+  const wasIdempotentHit = createMutation.data?.created === false;
+
   return (
     <Card className={ready ? 'border-green-200' : 'border-amber-200 bg-amber-50/30'}>
       <CardContent className="pt-4 pb-4">
@@ -373,6 +396,12 @@ function ProposedPipelineCard({ proposal }: { proposal: ProposedPipeline }) {
             <div className="flex items-center gap-2">
               <h3 className="font-medium">{proposal.proposedName}</h3>
               <SufficiencyBadge sufficiency={proposal.dataSufficiency} />
+              {createdPipeline ? (
+                <span className="inline-flex items-center gap-1 text-xs font-medium text-indigo-700 bg-indigo-100 px-2 py-0.5 rounded-full">
+                  <CheckCircle2 className="w-3 h-3" />
+                  {wasIdempotentHit ? 'Already created' : 'Created'}
+                </span>
+              ) : null}
             </div>
             <p className="text-sm text-gray-700 mt-1">{proposal.reason}</p>
             {proposal.needed ? (
@@ -382,12 +411,33 @@ function ProposedPipelineCard({ proposal }: { proposal: ProposedPipeline }) {
                 Stages: {proposal.proposedStages.map((s) => s.name).join(' → ')}
               </p>
             )}
+            {createMutation.isError ? (
+              <p className="text-xs text-red-700 mt-2">
+                Couldn&apos;t create: {(createMutation.error as Error).message}
+              </p>
+            ) : null}
           </div>
-          {/* Out-of-scope-for-PR-B: actual "Create pipeline" handoff. The button
-              is a placeholder showing the future state — disabled until the
-              pipeline-create flow accepts proposer output (slice 3 wiring). */}
-          <Button variant="outline" size="sm" disabled title="Pipeline creation lands in slice 3">
-            {ready ? 'Create' : 'Pending data'}
+          <Button
+            variant={ready ? 'default' : 'outline'}
+            size="sm"
+            disabled={!ready || createMutation.isPending || !!createdPipeline}
+            onClick={() => createMutation.mutate()}
+            data-testid={`create-pipeline-${proposal.objectiveType}`}
+            title={
+              ready
+                ? createdPipeline
+                  ? 'Pipeline already exists for this objective + segment'
+                  : 'Create the bound pipeline so new leads route here'
+                : 'Need more data to operate this pipeline'
+            }
+          >
+            {createMutation.isPending
+              ? 'Creating…'
+              : createdPipeline
+                ? 'Created'
+                : ready
+                  ? 'Create'
+                  : 'Pending data'}
           </Button>
         </div>
       </CardContent>

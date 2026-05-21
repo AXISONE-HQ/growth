@@ -1933,6 +1933,128 @@ const objectivesRouter = router({
       });
     }),
 
+  // KAN-964 (slice 2a PR C) — loop-closer: persist a real Pipeline from a
+  // ProposedPipeline shape. Called from the /settings/objectives Phase-B
+  // "Create" button on Ready proposals.
+  //
+  // Idempotent: if a Pipeline already exists at (tenantId, objectiveId,
+  // segment), returns it instead of creating a duplicate. Re-accepting the
+  // same objective+segment is a no-op (returns the existing row).
+  //
+  // The catalog `Objective.type` String can hold 8 values (slice-1 seed);
+  // `Pipeline.objectiveType` is the legacy 4-value enum. Backward-compat
+  // mapping below collapses the broader vocab into the narrower enum so
+  // the existing column stays populated. Taxonomy consolidation deferred
+  // (per slice-1 audit) — eventual drop of `objectiveType` waits on the
+  // `objectiveId` FK being the canonical signal.
+  createPipelineFromProposal: protectedProcedure
+    .input(
+      z.object({
+        objectiveId: z.string().uuid(),
+        segment: z.enum([
+          "new_leads",
+          "winback",
+          "closed_lost_recovery",
+          "cancelled_orders_recovery",
+          "inactive_customers_reengagement",
+          "other",
+        ]),
+        proposedName: z.string().min(1).max(100),
+        proposedStages: z
+          .array(
+            z.object({
+              name: z.string().min(1).max(50),
+              order: z.number().int().min(0),
+              isInitial: z.boolean(),
+              isTerminal: z.boolean(),
+              outcomeType: z.enum(["open", "terminal_won", "terminal_lost"]),
+            }),
+          )
+          .min(1),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      // 1. Validate the Objective belongs to this tenant + read its type
+      //    (used to derive the legacy objectiveType enum for the Pipeline row).
+      const objective: { id: string; type: string; name: string } | null =
+        await (ctx.prisma as any).objective?.findFirst({
+          where: { id: input.objectiveId, tenantId: ctx.tenantId, isActive: true },
+          select: { id: true, type: true, name: true },
+        });
+      if (!objective) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: `Objective ${input.objectiveId} not found in tenant catalog or inactive`,
+        });
+      }
+
+      // 2. Idempotency check — if a Pipeline at (tenantId, objectiveId, segment)
+      //    already exists, return it. Re-accepting same proposal is a no-op.
+      const existing: any = await (ctx.prisma as any).pipeline?.findFirst({
+        where: {
+          tenantId: ctx.tenantId,
+          objectiveId: input.objectiveId,
+          segment: input.segment,
+        },
+        include: { stages: { orderBy: { order: "asc" } } },
+      });
+      if (existing) {
+        return { created: false, pipeline: existing };
+      }
+
+      // 3. Legacy objectiveType mapping. Pipeline.objectiveType is the
+      //    pre-slice-1 enum (4 values); the catalog has 8. Map by closest
+      //    semantic fit so the column stays populated for back-compat with
+      //    every existing reader (pipeline-router, lead-assignment AI tier,
+      //    Brain prompt). The canonical signal going forward is objectiveId.
+      const legacyObjectiveType = ((): string => {
+        switch (objective.type) {
+          case "book_appointment":
+            return "book_appointment";
+          case "sell_online":
+          case "recover_failed_payment":
+            return "buy_online";
+          case "warm_up":
+          case "enrich_lead":
+          case "reactivate":
+            return "warm_up_lead";
+          case "retain_customer":
+          case "upsell":
+            return "send_quote";
+          default:
+            return "warm_up_lead";
+        }
+      })();
+
+      // 4. Create Pipeline + nested Stages in a single round-trip. Inherits
+      //    KAN-959's bound-objective semantics + KAN-962's segment marker.
+      const created: any = await (ctx.prisma as any).pipeline?.create({
+        data: {
+          tenantId: ctx.tenantId,
+          name: input.proposedName,
+          description: `${objective.name} pipeline (proposer-generated).`,
+          isActive: true,
+          order: 0,
+          objectiveType: legacyObjectiveType,
+          objectiveDescription: objective.name,
+          objectiveId: objective.id,
+          segment: input.segment,
+          stages: {
+            create: input.proposedStages.map((s) => ({
+              name: s.name,
+              order: s.order,
+              isInitial: s.isInitial,
+              isTerminal: s.isTerminal,
+              outcomeType: s.outcomeType,
+            })),
+          },
+        },
+        include: { stages: { orderBy: { order: "asc" } } },
+      });
+
+      return { created: true, pipeline: created };
+    }),
+
   create: protectedProcedure
     .input(
       z.object({
