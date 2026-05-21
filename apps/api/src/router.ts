@@ -852,6 +852,12 @@ interface DealsRouterModule {
       cursor?: string;
     },
   ) => Promise<unknown>;
+  // KAN-967 — Pipelines board grouped read.
+  listDealsByPipeline: (
+    prisma: unknown,
+    tenantId: string,
+    input: { pipelineId: string },
+  ) => Promise<unknown>;
   getDealById: (
     prisma: unknown,
     tenantId: string,
@@ -899,6 +905,18 @@ const dealsRouter = router({
     .query(async ({ ctx, input }) => {
       const { getDealById } = await loadDealsModule();
       return getDealById(ctx.prisma, ctx.tenantId, input);
+    }),
+
+  // KAN-967 — Pipelines kanban board grouped read. Returns deals grouped by
+  // stage for one Pipeline, with the AI's latest Decision joined per deal,
+  // capped at 50 cards per stage with a truncatedCount for "+N more".
+  // Tenant-scoping in the underlying raw SQL is explicit (raw queries skip
+  // Prisma tenant middleware) — cross-tenant-isolation pinned by test.
+  listByPipeline: protectedProcedure
+    .input(z.object({ pipelineId: z.string().uuid() }))
+    .query(async ({ ctx, input }) => {
+      const { listDealsByPipeline } = await loadDealsModule();
+      return listDealsByPipeline(ctx.prisma, ctx.tenantId, input);
     }),
 
   // KAN-938 — Sub-cohort 3.3 Deal CRUD. 13 form-eligible fields across 4

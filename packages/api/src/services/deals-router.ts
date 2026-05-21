@@ -204,6 +204,242 @@ export async function listDeals(
   };
 }
 
+// ─────────────────────────────────────────────
+// KAN-967 — Pipelines kanban board grouped read.
+//
+// Returns deals grouped by stage for one Pipeline, with the AI's most-recent
+// Decision joined per deal, capped at 50 cards per stage. Read-only; the board
+// renders this. Mutations live on existing endpoints (create/update/etc.).
+//
+// Tenant scoping in the raw SQL is EXPLICIT + MANDATORY — raw queries skip the
+// Prisma tenant middleware. The `tenant_id = ${tenantId}` predicate is the
+// load-bearing safety check. A cross-tenant-isolation test pins it.
+// ─────────────────────────────────────────────
+
+export interface ListByPipelineInput {
+  pipelineId: string;
+}
+
+export interface DealCard {
+  id: string;
+  name: string;
+  /** Decimal(12,2) serialized as string — matches listDeals' contract. */
+  value: string;
+  currency: string;
+  currentStageId: string;
+  enteredStageAt: Date;
+  contact: { firstName: string | null; lastName: string | null };
+  company: { name: string } | null;
+  status: string;
+  probability: number | null;
+  latestDecision: {
+    actionType: string;
+    confidence: number;
+  } | null;
+}
+
+export interface StageGroup {
+  stageId: string;
+  deals: DealCard[];
+  /** Number of deals over the 50-cap, for the "+N more" UI affordance. */
+  truncatedCount: number;
+}
+
+export interface ListByPipelineResult {
+  stages: StageGroup[];
+}
+
+export const LIST_BY_PIPELINE_PER_STAGE_CAP = 50;
+
+interface DealRow {
+  id: string;
+  name: string;
+  // Prisma returns numeric columns from $queryRaw as Decimal-shaped objects
+  // (string-coercible via toString()). Type as unknown + coerce defensively.
+  value: { toString(): string };
+  currency: string;
+  current_stage_id: string;
+  entered_stage_at: Date;
+  contact_id: string;
+  company_id: string | null;
+  status: string;
+  probability: number | null;
+  stage_total: bigint;
+}
+
+interface DecisionRow {
+  deal_id: string;
+  action_type: string;
+  confidence: number;
+}
+
+export async function listDealsByPipeline(
+  prisma: PrismaClient,
+  tenantId: string,
+  input: ListByPipelineInput,
+): Promise<ListByPipelineResult> {
+  // 1. Verify pipeline ∈ tenant + load ordered stages. Cross-tenant access
+  //    surfaces as NOT_FOUND (no existence leak — mirrors getDealById).
+  const pipeline = await prisma.pipeline.findFirst({
+    where: { id: input.pipelineId, tenantId },
+    select: {
+      id: true,
+      stages: {
+        orderBy: { order: "asc" },
+        select: { id: true },
+      },
+    },
+  });
+  if (!pipeline) {
+    throw new TRPCError({
+      code: "NOT_FOUND",
+      message: "Pipeline not found in tenant catalog",
+    });
+  }
+
+  // 2. Fetch deals with per-stage cap via ROW_NUMBER PARTITION raw query.
+  //    Tenant scoping is EXPLICIT in WHERE; soft-delete via deleted_at IS NULL
+  //    matches listDeals' contract; stage_total in the same window provides
+  //    the truncatedCount without a second count round-trip.
+  const dealRows = await prisma.$queryRaw<DealRow[]>`
+    WITH ranked AS (
+      SELECT
+        d.id,
+        d.name,
+        d.value,
+        d.currency,
+        d.current_stage_id,
+        d.entered_stage_at,
+        d.contact_id,
+        d.company_id,
+        d.status::text AS status,
+        d.probability,
+        ROW_NUMBER() OVER (
+          PARTITION BY d.current_stage_id
+          ORDER BY d.entered_stage_at DESC, d.id
+        ) AS rn,
+        COUNT(*) OVER (PARTITION BY d.current_stage_id) AS stage_total
+      FROM deals d
+      WHERE d.tenant_id = ${tenantId}
+        AND d.pipeline_id = ${input.pipelineId}
+        AND d.deleted_at IS NULL
+    )
+    SELECT
+      id, name, value, currency, current_stage_id, entered_stage_at,
+      contact_id, company_id, status, probability, stage_total
+    FROM ranked
+    WHERE rn <= ${LIST_BY_PIPELINE_PER_STAGE_CAP}
+    ORDER BY current_stage_id, entered_stage_at DESC, id
+  `;
+
+  // Empty-pipeline early return — emit a StageGroup per Stage so the board
+  // can render empty columns in correct order.
+  if (dealRows.length === 0) {
+    return {
+      stages: pipeline.stages.map((s) => ({
+        stageId: s.id,
+        deals: [],
+        truncatedCount: 0,
+      })),
+    };
+  }
+
+  // 3. Hydrate contact + company. Tenant-scoped via Prisma client (the
+  //    upstream raw query already guaranteed deal rows belong to this tenant,
+  //    so contacts + companies pulled by these ids are tenant-correct; the
+  //    explicit tenantId filter is defense-in-depth).
+  const dealIds = dealRows.map((r) => r.id);
+  const contactIds = [...new Set(dealRows.map((r) => r.contact_id))];
+  const companyIds = [
+    ...new Set(
+      dealRows
+        .map((r) => r.company_id)
+        .filter((id): id is string => id !== null),
+    ),
+  ];
+
+  const [contacts, companies] = await Promise.all([
+    prisma.contact.findMany({
+      where: { id: { in: contactIds }, tenantId },
+      select: { id: true, firstName: true, lastName: true },
+    }),
+    companyIds.length > 0
+      ? prisma.company.findMany({
+          where: { id: { in: companyIds }, tenantId },
+          select: { id: true, name: true },
+        })
+      : Promise.resolve([] as Array<{ id: string; name: string }>),
+  ]);
+
+  const contactById = new Map(contacts.map((c) => [c.id, c]));
+  const companyById = new Map(companies.map((c) => [c.id, c]));
+
+  // 4. Latest Decision per deal via DISTINCT ON. Tenant scoping is EXPLICIT
+  //    again (defense-in-depth) — even though dealIds came from a tenant-
+  //    scoped query, the inner JOIN on decisions.tenant_id = ${tenantId}
+  //    means a malicious data shape (e.g., a stage_history row pointing at
+  //    another tenant's Decision via a corrupted decision_id) cannot leak.
+  //    Decision.created_at is the timestamp (no separate decided_at column).
+  const decisionRows =
+    dealIds.length > 0
+      ? await prisma.$queryRaw<DecisionRow[]>`
+          SELECT DISTINCT ON (dsh.deal_id)
+            dsh.deal_id,
+            dec.action_type,
+            dec.confidence
+          FROM deal_stage_history dsh
+          INNER JOIN decisions dec ON dec.id = dsh.decision_id
+          WHERE dsh.deal_id = ANY(${dealIds}::text[])
+            AND dec.tenant_id = ${tenantId}
+          ORDER BY dsh.deal_id, dsh.transitioned_at DESC
+        `
+      : [];
+  const decisionByDealId = new Map(decisionRows.map((d) => [d.deal_id, d]));
+
+  // 5. Group + hydrate. Stage order preserved from pipeline.stages query.
+  const stageGroups: StageGroup[] = pipeline.stages.map((stage) => {
+    const rowsForStage = dealRows.filter(
+      (r) => r.current_stage_id === stage.id,
+    );
+    const cards: DealCard[] = rowsForStage.map((r) => {
+      const contact = contactById.get(r.contact_id);
+      const company = r.company_id
+        ? (companyById.get(r.company_id) ?? null)
+        : null;
+      const decision = decisionByDealId.get(r.id);
+      return {
+        id: r.id,
+        name: r.name,
+        value: r.value.toString(),
+        currency: r.currency,
+        currentStageId: r.current_stage_id,
+        enteredStageAt: r.entered_stage_at,
+        contact: {
+          firstName: contact?.firstName ?? null,
+          lastName: contact?.lastName ?? null,
+        },
+        company: company ? { name: company.name } : null,
+        status: r.status,
+        probability: r.probability,
+        latestDecision: decision
+          ? {
+              actionType: decision.action_type,
+              confidence: decision.confidence,
+            }
+          : null,
+      };
+    });
+    // stage_total carries the same value on every row of the stage (window
+    // function output). Read off the first row; cap-aware truncatedCount =
+    // total - cards.length (clamped to 0 for safety).
+    const stageTotal = Number(rowsForStage[0]?.stage_total ?? 0n);
+    const truncatedCount = Math.max(0, stageTotal - cards.length);
+    return { stageId: stage.id, deals: cards, truncatedCount };
+  });
+
+  return { stages: stageGroups };
+}
+
 export async function getDealById(
   prisma: PrismaClient,
   tenantId: string,
