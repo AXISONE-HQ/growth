@@ -86,6 +86,10 @@ model Tenant {
   knowledgeGapSummaries  KnowledgeGapSummary[]
   aiAgentConfigs         AiAgentConfig[]
   contactObjectiveStack  ContactObjectiveStack[]
+  // KAN-962 (slice 2a) — tenant-level objective declarations
+  objectiveSelections    TenantObjectiveSelection[]
+  // KAN-962 (slice 2a) — customer-lifecycle append-only audit
+  customerLifecycleEvents CustomerLifecycleEvent[]
   agenticShadowDecisions AgenticShadowDecision[]
   leadInboxEvents        LeadInboxEvent[]
   apiKeys                TenantApiKey[]
@@ -352,6 +356,8 @@ model Objective {
   // KAN-959 — MicroObjective reverse-relation. MicroObjective remains a
   // reusable gate definition; per-entity progress lives on the stack row.
   microObjectives        MicroObjective[]
+  // KAN-962 (slice 2a) — tenant-level prioritized selection back-relation
+  tenantSelections       TenantObjectiveSelection[]
 
   @@index([tenantId])
   @@index([tenantId, type])
@@ -375,6 +381,47 @@ enum ObjectiveSource {
   human_authored
 
   @@map("objective_source")
+}
+
+/// KAN-962 (slice 2a) — tenant-level prioritized objective declaration.
+/// Per slice-2 Phase-1 audit Option (ii): clean separation between the
+/// `objectives` catalog (per-tenant inventory of what objectives exist)
+/// and this table (which objectives the tenant has actually selected and
+/// in what priority order, per entity scope).
+///
+/// Unique constraint on `(tenantId, objectiveId, entityScope)`: same
+/// Objective can be selected by multiple tenants AND by the same tenant
+/// for multiple entity scopes (a tenant might rank book_appointment as
+/// primary for contacts AND for orders), but NOT twice for the same
+/// (tenant, objective, scope) tuple.
+///
+/// `priority` is an integer; lower = higher rank. Slice 2a's UI enforces
+/// 1 = primary (single-row per tenant per entity scope, free-tier
+/// gating), but the schema allows 2/3/… for slice-2b+ multi-primary
+/// tiers.
+///
+/// `status='selected'` is the normal state. `'archived'` keeps the row
+/// for audit but excludes from active reads (lead-assignment tier 1.5,
+/// future Brain objective-awareness). `'pending_review'` reserved for
+/// AI-proposed-but-not-yet-adopted cases.
+model TenantObjectiveSelection {
+  id          String                @id @default(uuid())
+  tenantId    String                @map("tenant_id")
+  objectiveId String                @map("objective_id")
+  entityScope ObjectiveEntityScope  @map("entity_scope")
+  priority    Int
+  status      String                @default("selected")
+  adoptedAt   DateTime              @default(now()) @map("adopted_at")
+  createdAt   DateTime              @default(now()) @map("created_at")
+  updatedAt   DateTime              @updatedAt @map("updated_at")
+
+  tenant    Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  objective Objective @relation(fields: [objectiveId], references: [id], onDelete: Restrict)
+
+  @@unique([tenantId, objectiveId, entityScope])
+  @@index([tenantId, entityScope, priority])
+  @@index([tenantId, status])
+  @@map("tenant_objective_selection")
 }
 
 model Decision {
@@ -686,6 +733,14 @@ model Pipeline {
   // `objectiveType` enum + `objectiveDescription` columns remain parallel
   // this slice; consolidation deferred.
   objectiveId              String?       @map("objective_id")
+  // KAN-962 (slice 2a) — segment marker. Distinguishes pipelines that serve
+  // different audiences of the SAME objective (a tenant pursuing
+  // book_appointment may have a `new_leads` pipeline AND a `closed_lost_recovery`
+  // pipeline both bound to the same Objective row). Tier 1.5 routing in
+  // lead-assignment filters on (segment=new_leads, objectiveId=<primary>) so
+  // future winback pipelines never catch fresh inbound. Nullable for back-compat
+  // with KAN-702 fixture + pre-slice-2a pipelines.
+  segment                  PipelineSegment? @map("segment")
   // KAN-704: pipeline-tier auto-approve defaults. Resolution order is
   // Stage.autoApproveMatrix → this column → Tenant.autoApproveEnabled
   // (kill-switch) → platform default (auto-approve-defaults.ts). NULL means
@@ -711,7 +766,24 @@ model Pipeline {
   @@index([tenantId, isActive])
   @@index([tenantId, objectiveType])
   @@index([objectiveId])
+  // KAN-962 — tier 1.5 routing in lead-assignment hits this index every
+  // inbound lead: (tenant, objective_id, segment) is the lookup shape.
+  @@index([tenantId, objectiveId, segment])
   @@map("pipelines")
+}
+
+/// KAN-962 (slice 2a) — segment marker for pipelines that serve different
+/// audiences of the same Objective. New segments append-only; old enum values
+/// never removed (the migration policy mirrors KAN-737 enum-drift discipline).
+enum PipelineSegment {
+  new_leads
+  winback
+  closed_lost_recovery
+  cancelled_orders_recovery
+  inactive_customers_reengagement
+  other
+
+  @@map("pipeline_segment")
 }
 
 model Stage {
@@ -905,11 +977,52 @@ model Customer {
 
   tenant  Tenant  @relation(fields: [tenantId], references: [id])
   contact Contact @relation(fields: [contactId], references: [id])
+  // KAN-962 (slice 2a) — append-only lifecycle audit
+  lifecycleEvents CustomerLifecycleEvent[]
 
   @@index([tenantId])
   @@index([tenantId, status])
   @@index([tenantId, healthScore])
   @@map("customers")
+}
+
+/// KAN-962 (slice 2a) — append-only customer-lifecycle audit. PR A creates
+/// the table; PR B adds the one writer hook (stage-transition-engine.ts
+/// terminal_won → upsert Customer + log eventType='created'). No
+/// status-automation, no standards engine, no slicing this slice — just
+/// start recording what naturally happens so slice-4 (Brain objective-aware
+/// loop) and slice-2b (daily scheduled discovery) have a lifecycle signal
+/// to count.
+///
+/// Append-only: rows never updated/deleted. Status transitions reconstruct
+/// by reading the latest event for (tenantId, contactId).
+model CustomerLifecycleEvent {
+  id         String   @id @default(uuid())
+  tenantId   String   @map("tenant_id")
+  contactId  String   @map("contact_id")
+  /// Customer row id when known (created/upserted at the same moment).
+  /// Nullable for the rare case where lifecycle events log before the
+  /// Customer row exists (defensive — PR B's hook upserts first).
+  customerId String?  @map("customer_id")
+  /// Bounded set: `created` | `activated` | `at_risk_flagged` | `churned`
+  /// | `renewed` | `reactivated`. Free-string in schema to avoid enum
+  /// migration churn; enforce at the writer.
+  eventType  String   @map("event_type")
+  fromStatus String?  @map("from_status")
+  toStatus   String?  @map("to_status")
+  /// What event upstream caused the lifecycle change. Bounded set:
+  /// `deal_won` | `deal_lost` | `order_paid` | `order_cancelled` |
+  /// `manual` | `sync` | `cron`. Free-string at the schema layer.
+  source     String
+  metadata   Json     @default("{}")
+  recordedAt DateTime @default(now()) @map("recorded_at")
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, contactId, recordedAt])
+  @@index([tenantId, eventType, recordedAt])
+  @@map("customer_lifecycle_event")
 }
 
 model Conversation {
