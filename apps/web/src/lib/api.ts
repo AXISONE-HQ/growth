@@ -632,6 +632,15 @@ export interface ObjectiveDeclaration {
   objective: { id: string; type: string; name: string; entityScope: ObjectiveEntityScope };
 }
 
+export interface PipelineCreatedFromProposal {
+  id: string;
+  name: string;
+  objectiveId: string | null;
+  segment: ObjectivePipelineSegment | null;
+  isActive: boolean;
+  stages: Array<{ id: string; name: string; order: number; isInitial: boolean; isTerminal: boolean }>;
+}
+
 export const objectivesApi = {
   list: (entityScope?: ObjectiveEntityScope) =>
     trpcQuery<{
@@ -646,6 +655,20 @@ export const objectivesApi = {
       written: number;
       declaration: ObjectiveDeclaration[];
     }>('objectives.adopt', { entityScope, selections }),
+  // KAN-964 (slice 2a PR C) — accept a Ready proposed pipeline → persists
+  // a real Pipeline bound to the objective at the requested segment.
+  // Idempotent on (tenantId, objectiveId, segment) — re-clicking "Create"
+  // returns the existing pipeline.
+  createPipelineFromProposal: (input: {
+    objectiveId: string;
+    segment: ObjectivePipelineSegment;
+    proposedName: string;
+    proposedStages: ObjectiveProposedStage[];
+  }) =>
+    trpcMutation<{ created: boolean; pipeline: PipelineCreatedFromProposal }>(
+      'objectives.createPipelineFromProposal',
+      input,
+    ),
 };
 
 // KAN-826: legacy Knowledge Ingestion API (KAN-707 PR A) types REMOVED.

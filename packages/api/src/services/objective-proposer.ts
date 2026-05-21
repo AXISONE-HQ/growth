@@ -159,12 +159,19 @@ function fallbackReason(input: ObjectiveProposalInput): string {
   const { objectiveType, segment, segmentCount, sufficiency } = input;
   if (sufficiency === "needs_more_data") {
     // Honest message — the count itself surfaces in the UI separately
-    // via segment-counts.neededMessage; this is the "why we'd run it" line
+    // via segment-counts.neededMessage; this is the "why we'd run it" line.
+    //
+    // KAN-964 — each of the 8 catalog types renders its OWN reason. Slice 2b
+    // PROD smoke caught book_appointment / sell_online / warm_up sharing a
+    // fall-through case → sell_online + warm_up rendered "book-demo flow"
+    // which is wrong for both. Cases are now individual + distinct.
     switch (objectiveType) {
       case "book_appointment":
-      case "sell_online":
-      case "warm_up":
         return "When fresh inbound leads arrive, route them through a structured sequence that ends with a meeting booked.";
+      case "sell_online":
+        return "When fresh inbound leads arrive, route them through a structured checkout/online-purchase flow that converts intent into a sale.";
+      case "warm_up":
+        return "When new leads land with unclear intent, run a structured warm-up sequence that builds context before sales engages.";
       case "enrich_lead":
         return "Identify contacts with thin data and run a structured outreach to fill the gaps before they're handed to sales.";
       case "reactivate":
@@ -179,12 +186,17 @@ function fallbackReason(input: ObjectiveProposalInput): string {
         return `Pursue ${objectiveType} via a structured ${segment} pipeline.`;
     }
   }
-  // ready — emphasize the data signal
+  // ready — emphasize the data signal. Same 8-type-distinct discipline as
+  // the needs_more_data branch above; KAN-964 split the previously-shared
+  // book_appointment / sell_online / warm_up case into individual arms so
+  // each type renders its own type-correct reason string.
   switch (objectiveType) {
     case "book_appointment":
-    case "sell_online":
-    case "warm_up":
       return `${segmentCount} recent leads ready to be routed — a structured book-demo flow converts them faster than ad-hoc.`;
+    case "sell_online":
+      return `${segmentCount} recent leads ready to be routed — a structured online-checkout flow turns intent into a closed sale.`;
+    case "warm_up":
+      return `${segmentCount} recent leads ready to be routed — a structured warm-up sequence builds qualification context before sales engages.`;
     case "enrich_lead":
       return `${segmentCount} contacts have thin data — a structured enrichment flow fills the gaps before sales engages.`;
     case "reactivate":
