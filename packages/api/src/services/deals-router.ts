@@ -374,24 +374,38 @@ export async function listDealsByPipeline(
   const contactById = new Map(contacts.map((c) => [c.id, c]));
   const companyById = new Map(companies.map((c) => [c.id, c]));
 
-  // 4. Latest Decision per deal via DISTINCT ON. Tenant scoping is EXPLICIT
-  //    again (defense-in-depth) — even though dealIds came from a tenant-
-  //    scoped query, the inner JOIN on decisions.tenant_id = ${tenantId}
-  //    means a malicious data shape (e.g., a stage_history row pointing at
-  //    another tenant's Decision via a corrupted decision_id) cannot leak.
-  //    Decision.created_at is the timestamp (no separate decided_at column).
+  // 4. Latest Decision per deal — KAN-970 fix-forward.
+  //
+  //    Originally (KAN-967) we joined deal_stage_history → decisions on
+  //    dsh.decision_id. That path only surfaces decisions that CAUSED a
+  //    stage transition (advance_stage). The Brain's common-case actions —
+  //    send_follow_up / wait_for_response / no_action — never write a
+  //    stage_history row, so they were invisible on the board (the exact
+  //    bug the routing-flip visual smoke caught).
+  //
+  //    Decision has no typed dealId FK; the Brain's KAN-815c writer at
+  //    lead-received-push.ts:1156 stores dealId inside Decision.metadata
+  //    (JSONB). Query directly via the metadata->>'dealId' extractor,
+  //    DISTINCT ON the extracted dealId, latest by Decision.created_at.
+  //
+  //    Tenant scoping stays EXPLICIT (same KAN-967 contract — raw SQL
+  //    bypasses Prisma's tenant middleware, so `dec.tenant_id = ${tenantId}`
+  //    is load-bearing).
+  //
+  //    KAN-971 follow-up: promote dealId to a typed Decision.dealId FK +
+  //    indexed column. JSONB extraction works at AxisOne's scale; doesn't
+  //    scale cleanly without a GIN expression index.
   const decisionRows =
     dealIds.length > 0
       ? await prisma.$queryRaw<DecisionRow[]>`
-          SELECT DISTINCT ON (dsh.deal_id)
-            dsh.deal_id,
+          SELECT DISTINCT ON (dec.metadata->>'dealId')
+            (dec.metadata->>'dealId') AS deal_id,
             dec.action_type,
             dec.confidence
-          FROM deal_stage_history dsh
-          INNER JOIN decisions dec ON dec.id = dsh.decision_id
-          WHERE dsh.deal_id = ANY(${dealIds}::text[])
-            AND dec.tenant_id = ${tenantId}
-          ORDER BY dsh.deal_id, dsh.transitioned_at DESC
+          FROM decisions dec
+          WHERE dec.tenant_id = ${tenantId}
+            AND dec.metadata->>'dealId' = ANY(${dealIds}::text[])
+          ORDER BY dec.metadata->>'dealId', dec.created_at DESC
         `
       : [];
   const decisionByDealId = new Map(decisionRows.map((d) => [d.deal_id, d]));

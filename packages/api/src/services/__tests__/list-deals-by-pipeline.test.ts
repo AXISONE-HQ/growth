@@ -94,7 +94,9 @@ function makePrisma(opts: {
       if (sql.includes("FROM deals")) {
         return opts.dealRows as unknown;
       }
-      if (sql.includes("FROM deal_stage_history")) {
+      // KAN-970 — decisions query now reads directly FROM decisions (not
+      // joined via deal_stage_history), so the mock router-key changes.
+      if (sql.includes("FROM decisions")) {
         return opts.decisionRows as unknown;
       }
       throw new Error(`Unexpected $queryRaw SQL: ${sql.slice(0, 80)}…`);
@@ -276,12 +278,15 @@ describe("KAN-967 — cross-tenant isolation (load-bearing for raw SQL)", () => 
     expect(dealsCall.params[0]).toBe(TENANT_A); // tenantId binding
     expect(dealsCall.params[1]).toBe(PIPELINE_A); // pipelineId binding
 
-    // Decisions query — INNER JOIN + dec.tenant_id filter is defense-in-depth.
+    // Decisions query — KAN-970 sources directly from `decisions` (not the
+    // deal_stage_history join, which only surfaced transition-causing
+    // decisions). Tenant filter stays load-bearing; dealIds match the
+    // metadata->>'dealId' JSONB extractor.
     const decisionsCall = mocks.queryRawCalls[1]!;
-    expect(decisionsCall.sql).toContain("FROM deal_stage_history");
-    expect(decisionsCall.sql).toContain("INNER JOIN decisions");
+    expect(decisionsCall.sql).toContain("FROM decisions");
     expect(decisionsCall.sql).toContain("dec.tenant_id =");
-    expect(decisionsCall.params).toContain(TENANT_A);
+    expect(decisionsCall.sql).toContain("dec.metadata->>'dealId'");
+    expect(decisionsCall.params[0]).toBe(TENANT_A);
   });
 
   it("pipeline lookup is tenant-scoped — wrong tenant gets NOT_FOUND, no leak", async () => {
@@ -413,7 +418,10 @@ describe("KAN-967 — soft-delete + decision-join semantics", () => {
     expect(mocks.queryRawCalls[0]!.sql).toContain("d.deleted_at IS NULL");
   });
 
-  it("decision-join uses DISTINCT ON + ORDER BY transitioned_at DESC (most-recent-per-deal semantics)", async () => {
+  it("decision query uses DISTINCT ON metadata->>'dealId' + ORDER BY created_at DESC (KAN-970 most-recent-per-deal semantics)", async () => {
+    // KAN-970 — query reads from `decisions` directly (not the
+    // deal_stage_history join) so it surfaces non-transition decisions
+    // like send_follow_up / wait_for_response / no_action.
     const { prisma, mocks } = makePrisma({
       pipeline: { id: PIPELINE_A, stages: [{ id: STAGE_NEW }] },
       dealRows: [
@@ -437,9 +445,11 @@ describe("KAN-967 — soft-delete + decision-join semantics", () => {
     });
     await listDealsByPipeline(prisma, TENANT_A, { pipelineId: PIPELINE_A });
     const decisionsCall = mocks.queryRawCalls[1]!;
-    expect(decisionsCall.sql).toMatch(/DISTINCT ON\s*\(\s*dsh\.deal_id\s*\)/i);
     expect(decisionsCall.sql).toMatch(
-      /ORDER BY\s+dsh\.deal_id,\s*dsh\.transitioned_at\s+DESC/i,
+      /DISTINCT ON\s*\(\s*dec\.metadata->>'dealId'\s*\)/i,
+    );
+    expect(decisionsCall.sql).toMatch(
+      /ORDER BY\s+dec\.metadata->>'dealId',\s*dec\.created_at\s+DESC/i,
     );
   });
 
@@ -456,5 +466,165 @@ describe("KAN-967 — soft-delete + decision-join semantics", () => {
     // empty-pipeline early-return.
     expect(mocks.queryRawCalls).toHaveLength(1);
     expect(mocks.queryRawCalls[0]!.sql).toContain("FROM deals");
+  });
+});
+
+// ─────────────────────────────────────────────
+// KAN-970 — non-transition decision visibility regression
+//
+// The routing-flip visual smoke (2026-05-21) caught the original KAN-967
+// query's blind spot: latestDecision joined through deal_stage_history,
+// which only surfaces decisions that CAUSED a stage transition. The
+// Brain's common-case actions — send_follow_up / wait_for_response /
+// no_action — never write a stage_history row, so they were invisible
+// on the board. KAN-970 sources from the `decisions` table directly via
+// metadata->>'dealId'. These tests pin the new visibility contract.
+// ─────────────────────────────────────────────
+
+describe("KAN-970 — non-transition decisions surface on the card (routing-flip regression)", () => {
+  it("send_follow_up decision (no stage_history row) IS surfaced as latestDecision", async () => {
+    // PROD scenario: routing-flip2 deal received a send_follow_up @ 0.82
+    // confidence. No DealStageHistory row was created (the deal stayed in
+    // 'New'). Under the old query, latestDecision was null → card showed
+    // no AI line. Under KAN-970, the decision is surfaced.
+    const { prisma } = makePrisma({
+      pipeline: { id: PIPELINE_A, stages: [{ id: STAGE_NEW }] },
+      dealRows: [
+        {
+          id: "deal_routing_flip2",
+          name: "RoutingFlip2",
+          value: 0,
+          currency: "USD",
+          current_stage_id: STAGE_NEW,
+          entered_stage_at: new Date(),
+          contact_id: "ct_dana",
+          company_id: null,
+          status: "open",
+          probability: null,
+          stage_total: 1n,
+        },
+      ],
+      // Decision row exists; would have been invisible to the OLD
+      // deal_stage_history join because no transition fired. Under KAN-970
+      // it's found via metadata->>'dealId'.
+      decisionRows: [
+        {
+          deal_id: "deal_routing_flip2",
+          action_type: "send_follow_up",
+          confidence: 0.82,
+        },
+      ],
+      contacts: [{ id: "ct_dana", firstName: "Dana", lastName: "RoutingFlip" }],
+      companies: [],
+    });
+
+    const result = await listDealsByPipeline(prisma, TENANT_A, {
+      pipelineId: PIPELINE_A,
+    });
+
+    const card = result.stages[0]!.deals[0]!;
+    // The CORE regression assertion: AI line data is now populated even
+    // though no stage transition fired for this deal.
+    expect(card.latestDecision).not.toBeNull();
+    expect(card.latestDecision).toEqual({
+      actionType: "send_follow_up",
+      confidence: 0.82,
+    });
+  });
+
+  it("decisions query binds dealIds via metadata->>'dealId' = ANY($dealIds::text[]) — not DealStageHistory.deal_id", async () => {
+    // Pin the new binding shape. If a future refactor reverts to joining
+    // through deal_stage_history, this test fails loudly.
+    const { prisma, mocks } = makePrisma({
+      pipeline: { id: PIPELINE_A, stages: [{ id: STAGE_NEW }] },
+      dealRows: [
+        {
+          id: "deal_a",
+          name: "x",
+          value: 0,
+          currency: "USD",
+          current_stage_id: STAGE_NEW,
+          entered_stage_at: new Date(),
+          contact_id: "ct_a",
+          company_id: null,
+          status: "open",
+          probability: null,
+          stage_total: 1n,
+        },
+      ],
+      decisionRows: [],
+      contacts: [{ id: "ct_a", firstName: "A", lastName: "A" }],
+      companies: [],
+    });
+    await listDealsByPipeline(prisma, TENANT_A, { pipelineId: PIPELINE_A });
+
+    const decisionsCall = mocks.queryRawCalls[1]!;
+    // Predicate is JSONB key extraction, NOT a column join
+    expect(decisionsCall.sql).toMatch(
+      /dec\.metadata->>'dealId'\s*=\s*ANY/i,
+    );
+    // No vestigial deal_stage_history reference
+    expect(decisionsCall.sql).not.toContain("deal_stage_history");
+    expect(decisionsCall.sql).not.toContain("dsh.deal_id");
+  });
+
+  it("decisions for a different deal in the same tenant are ignored (DISTINCT ON scoping)", async () => {
+    // Two deals on the same pipeline; only one has a decision. The other
+    // gets latestDecision: null (no fabrication of cross-deal context).
+    const { prisma } = makePrisma({
+      pipeline: { id: PIPELINE_A, stages: [{ id: STAGE_NEW }] },
+      dealRows: [
+        {
+          id: "deal_a",
+          name: "Deal A",
+          value: 0,
+          currency: "USD",
+          current_stage_id: STAGE_NEW,
+          entered_stage_at: new Date(),
+          contact_id: "ct_a",
+          company_id: null,
+          status: "open",
+          probability: null,
+          stage_total: 2n,
+        },
+        {
+          id: "deal_b",
+          name: "Deal B",
+          value: 0,
+          currency: "USD",
+          current_stage_id: STAGE_NEW,
+          entered_stage_at: new Date(),
+          contact_id: "ct_b",
+          company_id: null,
+          status: "open",
+          probability: null,
+          stage_total: 2n,
+        },
+      ],
+      decisionRows: [
+        // Only deal_a has a decision
+        {
+          deal_id: "deal_a",
+          action_type: "send_follow_up",
+          confidence: 0.82,
+        },
+      ],
+      contacts: [
+        { id: "ct_a", firstName: "Alice", lastName: "A" },
+        { id: "ct_b", firstName: "Bob", lastName: "B" },
+      ],
+      companies: [],
+    });
+
+    const result = await listDealsByPipeline(prisma, TENANT_A, {
+      pipelineId: PIPELINE_A,
+    });
+
+    const cards = result.stages[0]!.deals;
+    expect(cards).toHaveLength(2);
+    const cardA = cards.find((c) => c.id === "deal_a")!;
+    const cardB = cards.find((c) => c.id === "deal_b")!;
+    expect(cardA.latestDecision?.actionType).toBe("send_follow_up");
+    expect(cardB.latestDecision).toBeNull();
   });
 });
