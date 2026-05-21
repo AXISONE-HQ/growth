@@ -26,7 +26,8 @@ async function cleanupTestData() {
   await prisma.outcome.deleteMany({
     where: { tenantId: { in: [TENANT_A_ID, TENANT_B_ID] } },
   });
-  await prisma.contactState.deleteMany({
+  // KAN-959 — repointed from contactState (decommissioned) to contactObjectiveStack
+  await prisma.contactObjectiveStack.deleteMany({
     where: { tenantId: { in: [TENANT_A_ID, TENANT_B_ID] } },
   });
   await prisma.pipelineCard.deleteMany({
