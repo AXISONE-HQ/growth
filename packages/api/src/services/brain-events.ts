@@ -330,15 +330,22 @@ async function assembleContactBrainContext(
   // Get tenant context (from cache or assemble)
   const tenantContext = await getCachedTenantContext(tenantId);
 
-  // Fetch contact-specific data in parallel
+  // KAN-959 — raw SQL repointed from contact_states (decommissioned) to
+  // contact_objective_stack. Column shape carries forward: objective_id,
+  // sub_objectives, strategy_current, confidence_score all exist on the
+  // new table. The LIMIT 1 + LEFT JOIN keeps "first stack entry by row
+  // order" semantics — for proper priority-based selection, slice 4 will
+  // route through getActiveByPriority(); this raw query is the legacy
+  // brain-events path that the Brain Service (KAN-794) has superseded.
   const [contactStateResult, historyResult] = await Promise.all([
     prisma.$queryRawUnsafe<any[]>(`
-      SELECT cs.objective_id::text, cs.sub_objectives, cs.strategy_current,
-             cs.confidence_score, c.lifecycle_stage, c.segment,
+      SELECT cos.objective_id::text, cos.sub_objectives, cos.strategy_current,
+             cos.confidence_score, c.lifecycle_stage, c.segment,
              c.email, c.phone, c.data_quality_score
       FROM contacts c
-      LEFT JOIN contact_states cs ON cs.contact_id = c.id
+      LEFT JOIN contact_objective_stack cos ON cos.contact_id = c.id
       WHERE c.id = '${contactId}'::uuid AND c.tenant_id = '${tenantId}'::uuid
+      ORDER BY cos.priority ASC NULLS LAST
       LIMIT 1
     `),
     prisma.$queryRawUnsafe<any[]>(`

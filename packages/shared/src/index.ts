@@ -19,3 +19,5 @@ export * from "./account-audit-payload.js";
 // KAN-913 — Cohort 2.7 commit fanout event. Topic constant + zod
 // payload schema + builder. Publisher is env-gated (IMPORT_EVENTS_ENABLED).
 export * from "./import-row-committed.js";
+// KAN-959 — Objective Stack shared types (slice 1 of Objectives → AI Pipeline)
+export * from "./objective-stack.js";

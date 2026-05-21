@@ -153,7 +153,11 @@ function buildContextDatabase(prisma: PrismaClient): ContextDatabase {
       return c as Record<string, unknown> | null;
     },
     async getContactState(contactId, objectiveId) {
-      const s = await (prisma as any).contactState?.findFirst({
+      // KAN-959 — repointed from contactState to contactObjectiveStack.
+      // The hook signature (interface) keeps the legacy name for the
+      // run-decision-for-contact orchestrator's consumer surface;
+      // implementation reads the new table.
+      const s = await (prisma as any).contactObjectiveStack?.findFirst({
         where: { contactId, objectiveId },
       });
       return (s ?? null) as Record<string, unknown> | null;

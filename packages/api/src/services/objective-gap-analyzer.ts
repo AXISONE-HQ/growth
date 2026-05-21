@@ -644,8 +644,23 @@ export async function analyzeGapsForContact(
     },
   });
 
-  // Fetch contact state for this objective
-  const contactState = await prisma.contactState.findFirstOrThrow({
+  // KAN-959 — repointed from contactState (decommissioned) to
+  // contactObjectiveStack (per-entity narrow table, prioritized + combinable).
+  // The fields read here (id/contactId/objectiveId/subObjectives/
+  // strategyCurrent/confidenceScore/updatedAt) all carry forward unchanged.
+  const contactState = await (prisma as unknown as {
+    contactObjectiveStack: {
+      findFirstOrThrow: (args: unknown) => Promise<{
+        id: string;
+        contactId: string;
+        objectiveId: string;
+        subObjectives: unknown;
+        strategyCurrent: string | null;
+        confidenceScore: number | null;
+        updatedAt: Date;
+      }>;
+    };
+  }).contactObjectiveStack.findFirstOrThrow({
     where: {
       contactId,
       objectiveId,
@@ -670,7 +685,7 @@ export async function analyzeGapsForContact(
     objectiveId: contactState.objectiveId,
     subObjectives: (contactState as any).subObjectives ?? {},
     strategyCurrent: contactState.strategyCurrent,
-    confidenceScore: contactState.confidenceScore,
+    confidenceScore: contactState.confidenceScore ?? 0,
     updatedAt: contactState.updatedAt?.toISOString() ?? new Date().toISOString(),
   });
 
@@ -686,7 +701,12 @@ export async function analyzeAllGapsForContact(
   tenantId: string,
   contactId: string,
 ): Promise<GapReport[]> {
-  const contactStates = await prisma.contactState.findMany({
+  // KAN-959 — repointed from contactState to contactObjectiveStack.
+  const contactStates = await (prisma as unknown as {
+    contactObjectiveStack: {
+      findMany: (args: unknown) => Promise<Array<{ objectiveId: string }>>;
+    };
+  }).contactObjectiveStack.findMany({
     where: { contactId },
   });
 
@@ -859,7 +879,6 @@ export {
 export type {
   SubObjective,
   Objective,
-  ContactState,
   Gap,
   GapReport,
 };

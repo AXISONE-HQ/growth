@@ -13,7 +13,9 @@ import { PrismaClient, Prisma } from '@prisma/client';
 const TENANT_SCOPED_MODELS = [
   'User',
   'Contact',
-  'ContactState',
+  // KAN-959 — ContactState decommissioned; ContactObjectiveStack is the
+  // tenant-scoped successor (per-entity narrow table).
+  'ContactObjectiveStack',
   'BrainSnapshot',
   'Objective',
   'Decision',

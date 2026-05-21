@@ -85,7 +85,7 @@ model Tenant {
   services               Service[]
   knowledgeGapSummaries  KnowledgeGapSummary[]
   aiAgentConfigs         AiAgentConfig[]
-  contactStates          ContactState[]
+  contactObjectiveStack  ContactObjectiveStack[]
   agenticShadowDecisions AgenticShadowDecision[]
   leadInboxEvents        LeadInboxEvent[]
   apiKeys                TenantApiKey[]
@@ -231,9 +231,9 @@ model Contact {
   createdAt         DateTime       @default(now()) @map("created_at")
   updatedAt         DateTime       @updatedAt @map("updated_at")
 
-  tenant          Tenant         @relation(fields: [tenantId], references: [id])
-  contactStates   ContactState[]
-  decisions       Decision[]
+  tenant                Tenant                  @relation(fields: [tenantId], references: [id])
+  contactObjectiveStack ContactObjectiveStack[]
+  decisions             Decision[]
   outcomes        Outcome[]
   customer        Customer?
   conversations   Conversation[]
@@ -262,25 +262,54 @@ model Contact {
   @@map("contacts")
 }
 
-model ContactState {
-  id              String   @id @default(uuid())
-  tenantId        String   @map("tenant_id")
-  contactId       String   @map("contact_id")
-  objectiveId     String   @map("objective_id")
-  subObjectives   Json     @default("[]") @map("sub_objectives")
-  strategyCurrent String?  @map("strategy_current")
-  confidenceScore Float    @default(0) @map("confidence_score")
-  createdAt       DateTime @default(now()) @map("created_at")
-  updatedAt       DateTime @updatedAt @map("updated_at")
+// KAN-959 — ContactState decommissioned (slice 1 of Objectives → AI Pipeline).
+// Replaced by ContactObjectiveStack (per-entity narrow table, prioritized + combinable).
+// Drop gated on empty-row check at migration time; ContactState had 0 writers in code.
+//
+// Slice 1 introduces ContactObjectiveStack. Order/Company variants land in slice 5
+// using the same shape (per-entity narrow tables, not polymorphic). The shared
+// objective-stack-repo at packages/api/src/services/objective-stack-repo.ts
+// keeps cross-entity ops (priority, fallback, gap roll-up) in one place.
+model ContactObjectiveStack {
+  id              String                       @id @default(uuid())
+  tenantId        String                       @map("tenant_id")
+  contactId       String                       @map("contact_id")
+  objectiveId     String                       @map("objective_id")
+  // Lower priority = higher rank. 1 = primary, 2 = secondary, …
+  priority        Int
+  status          ContactObjectiveStackStatus  @default(active)
+  // Per-entity sub-objective progress map. Same shape as legacy
+  // ContactState.subObjectives Json (carried forward unchanged).
+  subObjectives   Json                         @default("[]") @map("sub_objectives")
+  strategyCurrent String?                      @map("strategy_current")
+  confidenceScore Float?                       @map("confidence_score")
+  achievedAt      DateTime?                    @map("achieved_at")
+  blockedReason   String?                      @map("blocked_reason")
+  blockedSinceAt  DateTime?                    @map("blocked_since_at")
+  activatedAt     DateTime                     @default(now()) @map("activated_at")
+  lastEvaluatedAt DateTime                     @default(now()) @map("last_evaluated_at")
+  createdAt       DateTime                     @default(now()) @map("created_at")
+  updatedAt       DateTime                     @updatedAt @map("updated_at")
 
   tenant    Tenant    @relation(fields: [tenantId], references: [id])
-  contact   Contact   @relation(fields: [contactId], references: [id])
+  contact   Contact   @relation(fields: [contactId], references: [id], onDelete: Cascade)
   objective Objective @relation(fields: [objectiveId], references: [id])
 
   @@unique([contactId, objectiveId])
-  @@index([tenantId])
-  @@index([contactId])
-  @@map("contact_states")
+  @@index([tenantId, contactId, priority])
+  @@index([tenantId, status])
+  @@map("contact_objective_stack")
+}
+
+enum ContactObjectiveStackStatus {
+  active
+  paused
+  blocked
+  achieved
+  abandoned
+  superseded
+
+  @@map("contact_objective_stack_status")
 }
 
 // ─────────────────────────────────────────────
@@ -288,25 +317,64 @@ model ContactState {
 // ─────────────────────────────────────────────
 
 model Objective {
-  id               String   @id @default(uuid())
-  tenantId         String   @map("tenant_id")
+  id               String                 @id @default(uuid())
+  tenantId         String                 @map("tenant_id")
   name             String
+  // Free-form string (NOT the ObjectiveType enum — see schema-claims discipline
+  // note in KAN-959). The Pipeline.objectiveType enum is parallel + scoped to
+  // the 4 legacy seed values; the catalog seeded here uses a broader
+  // 8-value vocabulary (book_appointment, sell_online, enrich_lead, warm_up,
+  // reactivate, retain_customer, upsell, recover_failed_payment). Taxonomy
+  // consolidation deferred to a later slice.
   type             String
-  successCondition Json     @map("success_condition")
-  subObjectives    Json     @default("[]") @map("sub_objectives")
-  blueprintId      String?  @map("blueprint_id")
-  isActive         Boolean  @default(true) @map("is_active")
-  createdAt        DateTime @default(now()) @map("created_at")
-  updatedAt        DateTime @updatedAt @map("updated_at")
+  successCondition Json                   @map("success_condition")
+  subObjectives    Json                   @default("[]") @map("sub_objectives")
+  blueprintId      String?                @map("blueprint_id")
+  // KAN-959 — entity scope (which entity type pursues this objective).
+  // Slice 1 writes `contact` only; the column carries all 4 values so slice 5
+  // (Order/Company stacks) can adopt without a migration.
+  entityScope      ObjectiveEntityScope?  @map("entity_scope")
+  // KAN-959 — provenance of the row. blueprint_generic for the catalog seed;
+  // future slices add the other values when the AI proposer + human-authored
+  // paths land.
+  source           ObjectiveSource?
+  isActive         Boolean                @default(true) @map("is_active")
+  createdAt        DateTime               @default(now()) @map("created_at")
+  updatedAt        DateTime               @updatedAt @map("updated_at")
 
-  tenant        Tenant         @relation(fields: [tenantId], references: [id])
-  blueprint     Blueprint?     @relation(fields: [blueprintId], references: [id])
-  contactStates ContactState[]
-  outcomes      Outcome[]
+  tenant                 Tenant                    @relation(fields: [tenantId], references: [id])
+  blueprint              Blueprint?                @relation(fields: [blueprintId], references: [id])
+  contactObjectiveStack  ContactObjectiveStack[]
+  outcomes               Outcome[]
+  // KAN-959 — Pipeline.objectiveId binding (Pipeline → Objective; Pipeline =
+  // the structured path to its bound Objective).
+  pipelines              Pipeline[]
+  // KAN-959 — MicroObjective reverse-relation. MicroObjective remains a
+  // reusable gate definition; per-entity progress lives on the stack row.
+  microObjectives        MicroObjective[]
 
   @@index([tenantId])
   @@index([tenantId, type])
+  @@index([tenantId, entityScope])
   @@map("objectives")
+}
+
+enum ObjectiveEntityScope {
+  contact
+  order
+  company
+  deal
+
+  @@map("objective_entity_scope")
+}
+
+enum ObjectiveSource {
+  blueprint_generic
+  blueprint_industry
+  ai_proposed_from_data
+  human_authored
+
+  @@map("objective_source")
 }
 
 model Decision {
@@ -612,6 +680,12 @@ model Pipeline {
   order                    Int           @default(0)
   objectiveType            ObjectiveType @map("objective_type")
   objectiveDescription     String?       @map("objective_description")
+  // KAN-959 — Pipeline binds to an Objective row (Pipeline = the path to the
+  // Objective). Nullable during slice 1: the fixture pipeline (KAN-702 Verify
+  // Pipeline) stays NULL per Phase 1 strict-fixture decision. The legacy
+  // `objectiveType` enum + `objectiveDescription` columns remain parallel
+  // this slice; consolidation deferred.
+  objectiveId              String?       @map("objective_id")
   // KAN-704: pipeline-tier auto-approve defaults. Resolution order is
   // Stage.autoApproveMatrix → this column → Tenant.autoApproveEnabled
   // (kill-switch) → platform default (auto-approve-defaults.ts). NULL means
@@ -630,10 +704,13 @@ model Pipeline {
   contacts         Contact[]                @relation("ContactCurrentPipeline")
   // KAN-791 — Deal lifecycle relation
   deals            Deal[]
+  // KAN-959 — Objective binding
+  objective        Objective?               @relation(fields: [objectiveId], references: [id], onDelete: SetNull)
 
   @@index([tenantId])
   @@index([tenantId, isActive])
   @@index([tenantId, objectiveType])
+  @@index([objectiveId])
   @@map("pipelines")
 }
 
@@ -676,22 +753,29 @@ model Stage {
 }
 
 model MicroObjective {
-  id                 String   @id @default(uuid())
+  id                 String     @id @default(uuid())
   // Nullable for platform defaults (KAN-701 seeds 5 platform-default MOs).
-  tenantId           String?  @map("tenant_id")
+  tenantId           String?    @map("tenant_id")
   name               String
   description        String?
-  completionCriteria Json     @default("{}") @map("completion_criteria")
-  isDefault          Boolean  @default(false) @map("is_default")
-  order              Int      @default(0)
-  createdAt          DateTime @default(now()) @map("created_at")
-  updatedAt          DateTime @updatedAt @map("updated_at")
+  completionCriteria Json       @default("{}") @map("completion_criteria")
+  isDefault          Boolean    @default(false) @map("is_default")
+  order              Int        @default(0)
+  // KAN-959 — reverse-relation to an Objective row. MicroObjective remains
+  // a reusable gate definition shared across objectives; per-entity progress
+  // lives on ContactObjectiveStack.subObjectives. The PipelineMicroObjective
+  // join below stays for backward compatibility with the wizard UX.
+  objectiveId        String?    @map("objective_id")
+  createdAt          DateTime   @default(now()) @map("created_at")
+  updatedAt          DateTime   @updatedAt @map("updated_at")
 
   tenant    Tenant?                  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  objective Objective?               @relation(fields: [objectiveId], references: [id], onDelete: SetNull)
   pipelines PipelineMicroObjective[]
 
   @@index([tenantId])
   @@index([isDefault])
+  @@index([objectiveId])
   @@map("micro_objectives")
 }
 

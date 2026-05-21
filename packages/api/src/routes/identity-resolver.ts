@@ -297,29 +297,40 @@ async function mergeContacts(
     );
 
     // 5. Transfer all relations from secondary to primary
-    // Handle contactStates: if both have state for same objective, keep primary's
+    // KAN-959 — repointed from contactState to contactObjectiveStack
+    // (decommissioned). Dedup logic preserved: if both have an entry for the
+    // same objective, keep primary's. Primary's priority/status are preserved
+    // — secondary's redundant rows are deleted, not merged (no business rule
+    // for combining priorities/strategies during merge today).
+    const txStack = (tx as any).contactObjectiveStack;
     const [primaryStates, secondaryStates] = await Promise.all([
-      tx.contactState.findMany({ where: { contactId: primaryId }, select: { objectiveId: true } }),
-      tx.contactState.findMany({ where: { contactId: secondaryId }, select: { id: true, objectiveId: true } }),
+      txStack.findMany({ where: { contactId: primaryId }, select: { objectiveId: true } }),
+      txStack.findMany({ where: { contactId: secondaryId }, select: { id: true, objectiveId: true } }),
     ]);
 
-    const primaryObjectiveIds = new Set(primaryStates.map((s) => s.objectiveId));
-    const statesToTransfer = secondaryStates.filter((s) => !primaryObjectiveIds.has(s.objectiveId));
-    const statesToDelete = secondaryStates.filter((s) => primaryObjectiveIds.has(s.objectiveId));
+    const primaryObjectiveIds = new Set(
+      (primaryStates as Array<{ objectiveId: string }>).map((s) => s.objectiveId),
+    );
+    const statesToTransfer = (secondaryStates as Array<{ id: string; objectiveId: string }>).filter(
+      (s) => !primaryObjectiveIds.has(s.objectiveId),
+    );
+    const statesToDelete = (secondaryStates as Array<{ id: string; objectiveId: string }>).filter(
+      (s) => primaryObjectiveIds.has(s.objectiveId),
+    );
 
-    // Transfer non-conflicting contact states
+    // Transfer non-conflicting stack entries
     let contactStatesTransferred = 0;
     if (statesToTransfer.length > 0) {
-      const result = await tx.contactState.updateMany({
+      const result = await txStack.updateMany({
         where: { id: { in: statesToTransfer.map((s) => s.id) } },
         data: { contactId: primaryId },
       });
-      contactStatesTransferred = result.count;
+      contactStatesTransferred = (result as { count: number }).count;
     }
 
-    // Delete conflicting contact states (primary wins)
+    // Delete conflicting stack entries (primary wins)
     if (statesToDelete.length > 0) {
-      await tx.contactState.deleteMany({
+      await txStack.deleteMany({
         where: { id: { in: statesToDelete.map((s) => s.id) } },
       });
     }
