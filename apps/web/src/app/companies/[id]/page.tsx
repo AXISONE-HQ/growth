@@ -2,23 +2,20 @@
 
 /**
  * KAN-884 — /companies/[id] detail page (read-only).
+ * KAN-989 Phase C.5 — converged onto shared DetailPageShell + FieldRow +
+ * LinkedEntityRow + SectionCard primitives. Every section + field
+ * preserved. TZ-safe dates via @/lib/fmt-date. Cross-links navigate to
+ * /customers/[id], /opportunities/[id], /orders/[id].
  *
- * Mirrors the DS v1 inline-token pattern from /settings/account/identity.
- * 7 cards (info / billing / mailing / tax / contacts / deals / orders).
- * Cards are unconditionally rendered for V1 — empty sections show a "—"
- * placeholder rather than hiding, so the page rhythm stays consistent
- * across companies with varying levels of completeness. Exception: the
- * mailing card collapses to a "Same as billing" hint when mailing fields
- * are all blank AND billing is populated (saves vertical space for the
- * common B2C case where there's only one address).
- *
- * pageTitle map in layout.tsx falls through to "Dashboard" for [id]
- * routes — known KAN-878 limitation. We set document.title on mount so
- * the browser tab is at least correct.
+ * Layout:
+ *   - Header: name + StatusBadge (lifecycle) + Edit, "Back to Companies"
+ *   - Main slot (1.4fr): Company info + Description + Billing/Mailing
+ *     addresses + Tax & compliance
+ *   - Side slot (1fr): Linked contacts / deals / orders
  */
 
 import { useQuery } from '@tanstack/react-query';
-import { ArrowLeft, Building2, Pencil } from 'lucide-react';
+import { Building2, Pencil } from 'lucide-react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useEffect } from 'react';
@@ -27,14 +24,22 @@ import { AddressBlock, isAddressEmpty } from '@/components/ui/address-block';
 import { MoneyDisplay } from '@/components/ui/money-display';
 import { StatusBadge } from '@/components/ui/status-badge';
 import {
+  DetailPageShell,
+  FieldRow,
+  LinkedEntityRow,
+  SectionCard,
+} from '@/components/ui/detail-page-shell';
+import {
   COMPANY_SIZE_LABELS,
   TAX_ID_TYPE_LABELS,
   enumLabel,
 } from '@/lib/enum-labels';
 
-const SECTION_HEADER_STYLE = { color: 'var(--ds-ink-primary)' } as const;
-const MUTED_STYLE = { color: 'var(--ds-ink-tertiary)' } as const;
-const LABEL_STYLE = { color: 'var(--ds-ink-secondary)' } as const;
+function initials(name: string): string {
+  const parts = name.trim().split(/\s+/);
+  const i = (parts[0]?.[0] ?? '') + (parts[1]?.[0] ?? '');
+  return i.toUpperCase() || 'CO';
+}
 
 export default function CompanyDetailPage() {
   const params = useParams<{ id: string }>();
@@ -51,28 +56,24 @@ export default function CompanyDetailPage() {
   }, [company]);
 
   if (!id) return null;
-
-  if (isLoading) return <SkeletonCards />;
+  if (isLoading) return <SkeletonShell />;
 
   if (isError) {
     const message = (error as Error)?.message ?? 'Unknown error';
     const isNotFound = /not found/i.test(message);
     return (
-      <div className="max-w-4xl mx-auto px-6 py-8">
-        <Link
-          href="/companies"
-          className="inline-flex items-center gap-1 text-sm text-gray-600 hover:text-gray-900 mb-4"
-        >
-          <ArrowLeft className="w-4 h-4" /> Back to Companies
-        </Link>
-        <div className="bg-white border rounded-lg p-12 text-center">
-          <Building2 className="w-8 h-8 mx-auto text-gray-300" />
-          <h2 className="text-lg font-semibold mt-3" style={SECTION_HEADER_STYLE}>
-            {isNotFound ? 'Company not found' : 'Failed to load company'}
-          </h2>
-          <p className="text-sm mt-1" style={MUTED_STYLE}>{message}</p>
-        </div>
-      </div>
+      <DetailPageShell
+        backHref="/companies"
+        backLabel="Back to Companies"
+        title={isNotFound ? 'Company not found' : 'Failed to load company'}
+        logoMark={Building2}
+        mainSlot={
+          <SectionCard title="Error">
+            <p className="text-body text-muted-foreground">{message}</p>
+          </SectionCard>
+        }
+        sideSlot={null}
+      />
     );
   }
 
@@ -96,251 +97,242 @@ export default function CompanyDetailPage() {
   };
   const billingEmpty = isAddressEmpty(billingAddr);
   const mailingEmpty = isAddressEmpty(mailingAddr);
+  const showTax = !!(company.taxId || company.businessRegistrationNumber || company.isTaxExempt);
 
   return (
-    <div className="max-w-4xl mx-auto px-6 py-8 space-y-4">
-      <Link
-        href="/companies"
-        className="inline-flex items-center gap-1 text-sm text-gray-600 hover:text-gray-900"
-      >
-        <ArrowLeft className="w-4 h-4" /> Back to Companies
-      </Link>
-
-      {/* Card 1 — Company info */}
-      <section className="bg-white border rounded-lg p-6">
-        <div className="flex items-start justify-between mb-4">
-          <div>
-            <h1 className="text-xl font-semibold" style={SECTION_HEADER_STYLE}>{company.name}</h1>
-            {company.legalName && company.legalName !== company.name ? (
-              <p className="text-sm mt-0.5" style={MUTED_STYLE}>{company.legalName}</p>
-            ) : null}
-          </div>
-          <div className="flex items-center gap-3">
-            <StatusBadge kind="company-lifecycle" value={company.lifecycleStage} />
-            {/* KAN-937 — Sub-cohort 3.2 Edit affordance */}
-            <Link
-              href={`/companies/${company.id}/edit`}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-md border"
-              style={{
-                backgroundColor: 'var(--ds-surface-default)',
-                borderColor: 'var(--ds-border-default)',
-                color: 'var(--ds-ink-secondary)',
-              }}
-            >
-              <Pencil className="w-3.5 h-3.5" />
-              Edit
-            </Link>
-          </div>
-        </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3 text-sm">
-          <Field label="Domain" value={company.domain} />
-          <Field label="Website" value={company.website} link={company.website} />
-          <Field label="Industry" value={company.industry} />
-          <Field label="Size" value={enumLabel(COMPANY_SIZE_LABELS, company.sizeRange)} />
-          <Field label="Phone" value={company.phone} />
-          <Field label="Email" value={company.email} link={company.email ? `mailto:${company.email}` : null} />
-          <Field
-            label="Annual revenue"
-            value={
-              company.annualRevenue ? (
-                <MoneyDisplay value={company.annualRevenue} currency="USD" />
-              ) : null
-            }
-          />
-        </div>
-        {company.description ? (
-          <p className="mt-4 text-sm" style={LABEL_STYLE}>{company.description}</p>
-        ) : null}
-      </section>
-
-      {/* Card 2 — Billing address */}
-      <section className="bg-white border rounded-lg p-6">
-        <h2 className="text-sm font-semibold mb-3" style={SECTION_HEADER_STYLE}>Billing address</h2>
-        {billingEmpty ? (
-          <p className="text-sm" style={MUTED_STYLE}>No billing address on file</p>
-        ) : (
-          <AddressBlock {...billingAddr} className="text-sm" />
-        )}
-      </section>
-
-      {/* Card 3 — Mailing address */}
-      <section className="bg-white border rounded-lg p-6">
-        <h2 className="text-sm font-semibold mb-3" style={SECTION_HEADER_STYLE}>Mailing address</h2>
-        {mailingEmpty && !billingEmpty ? (
-          <p className="text-sm" style={MUTED_STYLE}>Same as billing</p>
-        ) : mailingEmpty ? (
-          <p className="text-sm" style={MUTED_STYLE}>No mailing address on file</p>
-        ) : (
-          <AddressBlock {...mailingAddr} className="text-sm" />
-        )}
-      </section>
-
-      {/* Card 4 — Tax & compliance */}
-      <section className="bg-white border rounded-lg p-6">
-        <h2 className="text-sm font-semibold mb-3" style={SECTION_HEADER_STYLE}>Tax & compliance</h2>
-        {!company.taxId && !company.businessRegistrationNumber && !company.isTaxExempt ? (
-          <p className="text-sm" style={MUTED_STYLE}>No tax info on file</p>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3 text-sm">
-            <Field
-              label="Tax ID"
+    <DetailPageShell
+      backHref="/companies"
+      backLabel="Back to Companies"
+      title={company.name}
+      logoMark={initials(company.name)}
+      subtitle={
+        company.legalName && company.legalName !== company.name
+          ? company.legalName
+          : undefined
+      }
+      headerBadge={<StatusBadge kind="company-lifecycle" value={company.lifecycleStage} />}
+      headerAction={
+        <Link
+          href={`/companies/${company.id}/edit`}
+          className="inline-flex items-center gap-1.5 rounded-[var(--ds-radius-pill)] border border-border bg-card px-3 py-1.5 text-label text-foreground transition-colors hover:bg-[var(--ds-surface-sunken)]"
+        >
+          <Pencil className="h-3.5 w-3.5" />
+          Edit
+        </Link>
+      }
+      mainSlot={
+        <div className="space-y-4">
+          <SectionCard title="Company info">
+            <FieldRow label="Domain" value={company.domain ?? '—'} />
+            <FieldRow
+              label="Website"
               value={
-                company.taxId
-                  ? `${company.taxId}${company.taxIdType ? ` (${enumLabel(TAX_ID_TYPE_LABELS, company.taxIdType)})` : ''}`
-                  : null
+                company.website ? (
+                  <a
+                    href={company.website}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-[var(--ds-violet-500)] hover:underline"
+                  >
+                    {company.website}
+                  </a>
+                ) : (
+                  '—'
+                )
               }
             />
-            <Field label="Registration #" value={company.businessRegistrationNumber} />
-            <Field label="Incorporation" value={company.incorporationJurisdiction} />
-            {company.isTaxExempt ? (
-              <Field
-                label="Tax exempt"
-                value={
-                  <span className="inline-flex items-center gap-2">
-                    <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
-                      Exempt
-                    </span>
-                    {company.taxExemptionCertificate ? (
-                      <span style={MUTED_STYLE} className="text-xs">
-                        Cert: {company.taxExemptionCertificate}
+            <FieldRow label="Industry" value={company.industry ?? '—'} />
+            <FieldRow
+              label="Size"
+              value={enumLabel(COMPANY_SIZE_LABELS, company.sizeRange) ?? '—'}
+            />
+            <FieldRow label="Phone" value={company.phone ?? '—'} />
+            <FieldRow
+              label="Email"
+              value={
+                company.email ? (
+                  <a
+                    href={`mailto:${company.email}`}
+                    className="text-[var(--ds-violet-500)] hover:underline"
+                  >
+                    {company.email}
+                  </a>
+                ) : (
+                  '—'
+                )
+              }
+            />
+            <FieldRow
+              label="Annual revenue"
+              value={
+                company.annualRevenue ? (
+                  <MoneyDisplay value={company.annualRevenue} currency="USD" />
+                ) : (
+                  '—'
+                )
+              }
+            />
+          </SectionCard>
+
+          {company.description ? (
+            <SectionCard title="Description">
+              <p className="text-body text-foreground">{company.description}</p>
+            </SectionCard>
+          ) : null}
+
+          <SectionCard title="Billing address">
+            {billingEmpty ? (
+              <p className="text-body text-muted-foreground">No billing address on file</p>
+            ) : (
+              <AddressBlock {...billingAddr} className="text-body text-foreground" />
+            )}
+          </SectionCard>
+
+          <SectionCard title="Mailing address">
+            {mailingEmpty && !billingEmpty ? (
+              <p className="text-body text-muted-foreground">Same as billing</p>
+            ) : mailingEmpty ? (
+              <p className="text-body text-muted-foreground">No mailing address on file</p>
+            ) : (
+              <AddressBlock {...mailingAddr} className="text-body text-foreground" />
+            )}
+          </SectionCard>
+
+          <SectionCard title="Tax & compliance">
+            {!showTax ? (
+              <p className="text-body text-muted-foreground">No tax info on file</p>
+            ) : (
+              <>
+                <FieldRow
+                  label="Tax ID"
+                  value={
+                    company.taxId
+                      ? `${company.taxId}${
+                          company.taxIdType
+                            ? ` (${enumLabel(TAX_ID_TYPE_LABELS, company.taxIdType)})`
+                            : ''
+                        }`
+                      : '—'
+                  }
+                />
+                <FieldRow
+                  label="Registration #"
+                  value={company.businessRegistrationNumber ?? '—'}
+                />
+                <FieldRow
+                  label="Incorporation"
+                  value={company.incorporationJurisdiction ?? '—'}
+                />
+                {company.isTaxExempt ? (
+                  <FieldRow
+                    label="Tax exempt"
+                    value={
+                      <span className="inline-flex items-center gap-2">
+                        <span className="rounded-[var(--ds-radius-pill)] bg-[var(--ds-emerald-100)] px-2 py-0.5 text-caption font-medium text-[var(--ds-emerald-700)]">
+                          Exempt
+                        </span>
+                        {company.taxExemptionCertificate ? (
+                          <span className="text-caption text-muted-foreground">
+                            Cert: {company.taxExemptionCertificate}
+                          </span>
+                        ) : null}
                       </span>
-                    ) : null}
-                  </span>
-                }
-              />
-            ) : null}
-          </div>
-        )}
-      </section>
+                    }
+                  />
+                ) : null}
+              </>
+            )}
+          </SectionCard>
+        </div>
+      }
+      sideSlot={
+        <div className="space-y-4">
+          <SectionCard title="Linked contacts" count={company._count.contacts}>
+            {company.contacts.length === 0 ? (
+              <p className="text-body text-muted-foreground">No linked contacts</p>
+            ) : (
+              <div>
+                {company.contacts.map((c) => {
+                  const name =
+                    [c.firstName, c.lastName].filter(Boolean).join(' ').trim() ||
+                    c.email ||
+                    'Unknown';
+                  return (
+                    <LinkedEntityRow
+                      key={c.id}
+                      href={`/customers/${c.id}`}
+                      iconLabel={(c.firstName?.[0] ?? c.email?.[0] ?? '?').toUpperCase()}
+                      name={name}
+                      meta={c.email ?? undefined}
+                    />
+                  );
+                })}
+              </div>
+            )}
+          </SectionCard>
 
-      {/* Card 5 — Linked Contacts */}
-      <section className="bg-white border rounded-lg p-6">
-        <h2 className="text-sm font-semibold mb-3" style={SECTION_HEADER_STYLE}>
-          Linked contacts{' '}
-          <span style={MUTED_STYLE} className="font-normal">
-            ({company._count.contacts})
-          </span>
-        </h2>
-        {company.contacts.length === 0 ? (
-          <p className="text-sm" style={MUTED_STYLE}>No linked contacts</p>
-        ) : (
-          <ul className="divide-y divide-gray-100">
-            {company.contacts.map((c) => {
-              const name = [c.firstName, c.lastName].filter(Boolean).join(' ').trim() || c.email || 'Unknown';
-              return (
-                <li key={c.id} className="py-2 text-sm">
-                  <Link href={`/customers/${c.id}`} className="flex items-center justify-between hover:bg-gray-50 -mx-2 px-2 py-1 rounded">
-                    <div>
-                      <span className="font-medium">{name}</span>
-                      {c.email ? (
-                        <span style={MUTED_STYLE} className="ml-2 text-xs">{c.email}</span>
-                      ) : null}
-                    </div>
-                    <StatusBadge kind="contact-lifecycle" value={c.lifecycleStage} />
-                  </Link>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </section>
+          <SectionCard title="Linked deals" count={company._count.deals}>
+            {company.deals.length === 0 ? (
+              <p className="text-body text-muted-foreground">No linked deals</p>
+            ) : (
+              <div>
+                {company.deals.map((d) => (
+                  <LinkedEntityRow
+                    key={d.id}
+                    href={`/opportunities/${d.id}`}
+                    iconLabel="$"
+                    name={d.name}
+                    meta={
+                      <span className="inline-flex items-center gap-2">
+                        <MoneyDisplay value={d.value} currency={d.currency} />
+                        <StatusBadge kind="deal-status" value={d.status} />
+                      </span>
+                    }
+                  />
+                ))}
+              </div>
+            )}
+          </SectionCard>
 
-      {/* Card 6 — Linked Deals */}
-      <section className="bg-white border rounded-lg p-6">
-        <h2 className="text-sm font-semibold mb-3" style={SECTION_HEADER_STYLE}>
-          Linked deals{' '}
-          <span style={MUTED_STYLE} className="font-normal">
-            ({company._count.deals})
-          </span>
-        </h2>
-        {company.deals.length === 0 ? (
-          <p className="text-sm" style={MUTED_STYLE}>No linked deals</p>
-        ) : (
-          <ul className="divide-y divide-gray-100">
-            {company.deals.map((d) => (
-              <li key={d.id} className="py-2 text-sm">
-                <Link href={`/opportunities/${d.id}`} className="flex items-center justify-between hover:bg-gray-50 -mx-2 px-2 py-1 rounded">
-                  <span className="font-medium">{d.name}</span>
-                  <div className="flex items-center gap-3">
-                    <MoneyDisplay value={d.value} currency={d.currency} className="tabular-nums" />
-                    <StatusBadge kind="deal-status" value={d.status} />
-                  </div>
-                </Link>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-
-      {/* Card 7 — Linked Orders */}
-      <section className="bg-white border rounded-lg p-6">
-        <h2 className="text-sm font-semibold mb-3" style={SECTION_HEADER_STYLE}>
-          Linked orders{' '}
-          <span style={MUTED_STYLE} className="font-normal">
-            ({company._count.orders})
-          </span>
-        </h2>
-        {company.orders.length === 0 ? (
-          <p className="text-sm" style={MUTED_STYLE}>No linked orders</p>
-        ) : (
-          <ul className="divide-y divide-gray-100">
-            {company.orders.map((o) => (
-              <li key={o.id} className="py-2 text-sm">
-                <Link href={`/orders/${o.id}`} className="flex items-center justify-between hover:bg-gray-50 -mx-2 px-2 py-1 rounded">
-                  <span className="font-medium">{o.orderNumber}</span>
-                  <div className="flex items-center gap-3">
-                    <MoneyDisplay value={o.grandTotal} currency={o.currency} className="tabular-nums" />
-                    <StatusBadge kind="order-status" value={o.status} />
-                  </div>
-                </Link>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-    </div>
+          <SectionCard title="Linked orders" count={company._count.orders}>
+            {company.orders.length === 0 ? (
+              <p className="text-body text-muted-foreground">No linked orders</p>
+            ) : (
+              <div>
+                {company.orders.map((o) => (
+                  <LinkedEntityRow
+                    key={o.id}
+                    href={`/orders/${o.id}`}
+                    iconLabel="#"
+                    name={o.orderNumber}
+                    meta={
+                      <span className="inline-flex items-center gap-2">
+                        <MoneyDisplay value={o.grandTotal} currency={o.currency} />
+                        <StatusBadge kind="order-status" value={o.status} />
+                      </span>
+                    }
+                  />
+                ))}
+              </div>
+            )}
+          </SectionCard>
+        </div>
+      }
+    />
   );
 }
 
-function Field({
-  label,
-  value,
-  link,
-}: {
-  label: string;
-  value: React.ReactNode | null | undefined;
-  link?: string | null;
-}) {
-  const display = value === null || value === undefined || value === '' ? '—' : value;
+function SkeletonShell() {
   return (
-    <div>
-      <div className="text-xs" style={MUTED_STYLE}>{label}</div>
-      <div className="mt-0.5">
-        {link && display !== '—' ? (
-          <a
-            href={link}
-            target={link.startsWith('mailto:') ? undefined : '_blank'}
-            rel="noopener noreferrer"
-            className="text-indigo-600 hover:underline"
-          >
-            {display}
-          </a>
-        ) : (
-          <span style={LABEL_STYLE}>{display}</span>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function SkeletonCards() {
-  return (
-    <div className="max-w-4xl mx-auto px-6 py-8 space-y-4">
+    <div className="mx-auto max-w-6xl px-6 py-8 space-y-4">
       {[0, 1, 2].map((i) => (
-        <div key={i} className="bg-white border rounded-lg p-6 space-y-3">
-          <div className="h-5 w-1/3 bg-gray-200 rounded animate-pulse" />
-          <div className="h-4 w-2/3 bg-gray-100 rounded animate-pulse" />
-          <div className="h-4 w-1/2 bg-gray-100 rounded animate-pulse" />
+        <div
+          key={i}
+          className="rounded-[var(--ds-radius-card)] border border-border bg-card p-6 shadow-[var(--ds-shadow-card)]"
+        >
+          <div className="h-5 w-1/3 animate-pulse rounded bg-muted" />
+          <div className="mt-3 h-4 w-2/3 animate-pulse rounded bg-muted/60" />
+          <div className="mt-2 h-4 w-1/2 animate-pulse rounded bg-muted/60" />
         </div>
       ))}
     </div>

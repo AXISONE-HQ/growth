@@ -182,13 +182,16 @@ describe("KAN-887 — ContactDetailPage", () => {
   it("Not-found: renders error card when route throws 'not found'", async () => {
     getByIdMock.mockRejectedValue(new Error("Contact not found"));
     wrap(<ContactDetailPage />);
-    // Title h2 + muted error message both render "Contact not found", so
-    // use getAllByText. Confirm the h2 specifically renders the heading.
+    // KAN-989 Phase C.5 — error state now flows through DetailPageShell.
+    // The "Contact not found" string surfaces as the H1 shell title; the
+    // body of the Error SectionCard repeats the raw error message, so
+    // getAllByText finds ≥1 match. We pin the H1 specifically to assert
+    // the heading rendered.
     await waitFor(() => {
       expect(screen.getAllByText("Contact not found").length).toBeGreaterThan(0);
     });
     const heading = screen.getAllByText("Contact not found").find(
-      (el) => el.tagName === "H2",
+      (el) => el.tagName === "H1",
     );
     expect(heading).toBeTruthy();
     const back = screen.getByText(/Back to Customers/).closest("a");

@@ -38,6 +38,17 @@ export interface DetailPageShellProps {
   /** Logo mark — string initials (rendered in the violet-tinted square)
    *  OR a Lucide icon component. */
   logoMark: string | LucideIcon;
+  /** Subtitle line rendered under the title (e.g., "Deal ID: cmp...",
+   *  "Placed 9/30/2026"). Optional. */
+  subtitle?: React.ReactNode;
+  /** Status badge slot — renders inline to the right of the title row.
+   *  KAN-989 C.5 — added so the 4 detail pages can surface their
+   *  entity-specific status (deal-status / order-status / contact-lifecycle
+   *  / company-lifecycle) without going through metricStrip. */
+  headerBadge?: React.ReactNode;
+  /** Primary action slot on the far right (e.g., Edit button). KAN-989
+   *  C.5 — rendered alongside metricStrip when both are present. */
+  headerAction?: React.ReactNode;
   /** Slot for a metric strip on the right of the header. */
   metricStrip?: React.ReactNode;
   /** Main column (1.4fr). Caller composes Cards + FieldRows + sections. */
@@ -52,6 +63,9 @@ export function DetailPageShell({
   backLabel = "Back",
   title,
   logoMark,
+  subtitle,
+  headerBadge,
+  headerAction,
   metricStrip,
   mainSlot,
   sideSlot,
@@ -60,6 +74,7 @@ export function DetailPageShell({
   const isIconLogo = typeof logoMark !== "string";
   const LogoIcon = isIconLogo ? logoMark : null;
   const logoInitials = isIconLogo ? null : logoMark;
+  const hasRightCluster = metricStrip || headerAction;
   return (
     <div className={cn("mx-auto max-w-6xl px-6 py-8", className)}>
       {backHref ? (
@@ -72,17 +87,30 @@ export function DetailPageShell({
         </Link>
       ) : null}
 
-      <header className="mb-4 flex items-center justify-between gap-3.5">
-        <div className="flex items-center gap-3.5">
+      <header className="mb-4 flex items-start justify-between gap-3.5">
+        <div className="flex min-w-0 items-center gap-3.5">
           <div
             aria-hidden="true"
             className="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-[13px] bg-[var(--ds-violet-100)] text-[15px] font-semibold text-[var(--ds-violet-500)]"
           >
             {LogoIcon ? <LogoIcon className="h-5 w-5" /> : logoInitials}
           </div>
-          <h1 className="text-h2 text-foreground">{title}</h1>
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <h1 className="text-h2 text-foreground">{title}</h1>
+              {headerBadge ? <div className="flex-shrink-0">{headerBadge}</div> : null}
+            </div>
+            {subtitle ? (
+              <div className="mt-0.5 text-caption text-muted-foreground">{subtitle}</div>
+            ) : null}
+          </div>
         </div>
-        {metricStrip ? <div className="flex-shrink-0">{metricStrip}</div> : null}
+        {hasRightCluster ? (
+          <div className="flex flex-shrink-0 items-center gap-3">
+            {metricStrip}
+            {headerAction}
+          </div>
+        ) : null}
       </header>
 
       <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[1.4fr_1fr]">
@@ -121,6 +149,56 @@ export function FieldRow({ label, value, className }: FieldRowProps) {
     >
       <span className="text-muted-foreground">{label}</span>
       <span className="text-right font-medium text-foreground">{value}</span>
+    </div>
+  );
+}
+
+/**
+ * KAN-989 — SectionCard primitive for detail-page section blocks.
+ *
+ * Wraps a Card with a consistent header row: title + optional count
+ * pill ("(5)") on the left, optional headerRight slot. Matches the
+ * pattern that the 4 detail pages used to duplicate inline.
+ *
+ * Use inside DetailPageShell mainSlot / sideSlot. Card uses B.1
+ * tokens (rounded-card, hairline border, --ds-shadow-card).
+ */
+export interface SectionCardProps {
+  title: string;
+  /** Renders as `({count})` next to the title in muted weight. */
+  count?: number;
+  headerRight?: React.ReactNode;
+  /** Card body. */
+  children: React.ReactNode;
+  className?: string;
+}
+
+export function SectionCard({
+  title,
+  count,
+  headerRight,
+  children,
+  className,
+}: SectionCardProps) {
+  return (
+    <div
+      className={cn(
+        "rounded-[var(--ds-radius-card)] border border-border bg-card p-5 shadow-[var(--ds-shadow-card)]",
+        className,
+      )}
+    >
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <h2 className="text-h3 text-foreground">
+          {title}
+          {count !== undefined ? (
+            <span className="ml-1.5 text-muted-foreground" style={{ fontWeight: 400 }}>
+              ({count})
+            </span>
+          ) : null}
+        </h2>
+        {headerRight ? <div className="flex-shrink-0">{headerRight}</div> : null}
+      </div>
+      {children}
     </div>
   );
 }
