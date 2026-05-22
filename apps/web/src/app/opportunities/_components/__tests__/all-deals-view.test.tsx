@@ -63,11 +63,12 @@ describe("KAN-886 — AllDealsView", () => {
   it("renders status filter chips: All + Open + Won + Lost", () => {
     dealsListMock.mockResolvedValue({ items: [], nextCursor: null, totalCount: 0 });
     wrap(<AllDealsView />);
-    // chips are buttons
-    expect(screen.getByRole("button", { name: "All" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Open" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Won" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Lost" })).toBeInTheDocument();
+    // KAN-988 — DataTable namespaces chip aria-labels as
+    // "{filter.label}: {opt.label}" so cross-filter "All" chips disambiguate.
+    expect(screen.getByRole("button", { name: "Status: All" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Status: Open" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Status: Won" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Status: Lost" })).toBeInTheDocument();
   });
 
   it("renders a 6-column header — Name / Status / Value / Contact / Company / Expected close", async () => {
