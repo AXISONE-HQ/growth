@@ -257,7 +257,7 @@ body {
 /* ─────────────────────────────────────────────────────────────────────────
  * KAN-973 — pastel semantic chip utility classes.
  *
- * Replaces the deleted .conf-*/.strategy-*/.channel-badge legacy rules. The
+ * Replaces the deleted .conf- / .strategy- / .channel-badge legacy rules. The
  * new chip system is named by SEMANTIC SHAPE (ai / amber / green / teal /
  * rose / positive / muted), not by domain (confidence/strategy/channel).
  * Each consumer picks the chip that matches the meaning it wants to
