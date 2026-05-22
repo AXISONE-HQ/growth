@@ -251,7 +251,28 @@ export function DataTable<T>({
                       "border-b border-border last:border-b-0 transition-colors hover:bg-[#FAFAFE]",
                       onRowClick && "cursor-pointer",
                     )}
-                    onClick={onRowClick ? () => onRowClick(row.original) : undefined}
+                    onClick={
+                      onRowClick
+                        ? (e: React.MouseEvent<HTMLTableRowElement>) => {
+                            // KAN-988 visual smoke caught: per-cell
+                            // `onClick={(e) => e.stopPropagation()}` on
+                            // Next.js <Link> doesn't reliably halt the
+                            // row-level click — both navigations fire and the
+                            // row's push wins (deal page instead of company).
+                            // Defense lives here: skip row nav when the click
+                            // originated inside any interactive descendant.
+                            const t = e.target as HTMLElement;
+                            if (
+                              t.closest(
+                                'a, button, input, select, textarea, label, [role="button"], [role="link"]',
+                              )
+                            ) {
+                              return;
+                            }
+                            onRowClick(row.original);
+                          }
+                        : undefined
+                    }
                   >
                     {row.getVisibleCells().map((cell) => {
                       const col = columns.find((c) => c.id === cell.column.id);
