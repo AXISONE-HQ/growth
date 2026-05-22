@@ -2,20 +2,30 @@
 
 /**
  * KAN-884 — /orders/[id] detail page (read-only).
+ * KAN-989 Phase C.5 — converged onto shared DetailPageShell + FieldRow +
+ * LinkedEntityRow + SectionCard primitives. Every section + field
+ * preserved. TZ-safe dates via @/lib/fmt-date. Cross-links navigate to
+ * /customers/[id], /companies/[id], /opportunities/[id].
  *
- * Cards: info / money / line items / customer / deal / attribution / notes.
- * Optional cards (deal, attribution, notes) hide entirely when their
- * payload is empty — these aren't always relevant, so collapsing keeps
+ * Layout:
+ *   - Header: "Order {orderNumber}" + StatusBadge + Edit; "Placed {date}"
+ *     subtitle; "Back to Orders"
+ *   - Main slot (1.4fr): Order info + Money breakdown + Line items +
+ *     Attribution (conditional) + Notes (conditional)
+ *   - Side slot (1fr): Customer + Linked deal (conditional)
+ *
+ * Optional cards (deal, attribution, notes) still hide when their
+ * payload is empty — they aren't always relevant, so collapsing keeps
  * the page rhythm tight.
  *
  * lineItems is JSONB on the backend. We render defensively: if the parsed
  * value isn't an array of {name, quantity, unitPrice, total?}, fall back
- * to a JSON dump in a <pre>. Producers (KAN-2/3 cohort — Stripe/Shopify
- * webhooks) will land in a separate cohort and may evolve the shape.
+ * to a JSON dump in a <pre>. Producers (Stripe/Shopify webhooks) may
+ * evolve the shape.
  */
 
 import { useQuery } from '@tanstack/react-query';
-import { ArrowLeft, Pencil, Receipt } from 'lucide-react';
+import { Pencil, Receipt } from 'lucide-react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useEffect } from 'react';
@@ -23,15 +33,18 @@ import { ordersApi } from '@/lib/api';
 import { MoneyDisplay } from '@/components/ui/money-display';
 import { StatusBadge } from '@/components/ui/status-badge';
 import {
+  DetailPageShell,
+  FieldRow,
+  LinkedEntityRow,
+  SectionCard,
+} from '@/components/ui/detail-page-shell';
+import { fmtDateTime } from '@/lib/fmt-date';
+import {
   ORDER_SOURCE_LABELS,
   PAYMENT_METHOD_LABELS,
   PAYMENT_PROVIDER_LABELS,
   enumLabel,
 } from '@/lib/enum-labels';
-
-const SECTION_HEADER_STYLE = { color: 'var(--ds-ink-primary)' } as const;
-const MUTED_STYLE = { color: 'var(--ds-ink-tertiary)' } as const;
-const LABEL_STYLE = { color: 'var(--ds-ink-secondary)' } as const;
 
 interface LineItem {
   name?: unknown;
@@ -44,17 +57,6 @@ interface LineItem {
 function parseLineItems(raw: unknown): LineItem[] | null {
   if (!Array.isArray(raw)) return null;
   return raw as LineItem[];
-}
-
-/** KAN-945 Q10 — TZ-safe date rendering. Previously called
- *  `new Date(iso).toLocaleString()` without a `timeZone` option, which
- *  shifted the rendered date by the browser's UTC offset (KAN-943 class).
- *  Explicit `timeZone: 'UTC'` aligns the detail-page display with the
- *  edit-form's UTC-day pre-population. Broader Company/Customer audit
- *  stays in KAN-943 scope. */
-function fmtDate(iso: string | null | undefined): string {
-  if (!iso) return '—';
-  return new Date(iso).toLocaleString('en-US', { timeZone: 'UTC' });
 }
 
 export default function OrderDetailPage() {
@@ -72,28 +74,24 @@ export default function OrderDetailPage() {
   }, [order]);
 
   if (!id) return null;
-
-  if (isLoading) return <SkeletonCards />;
+  if (isLoading) return <SkeletonShell />;
 
   if (isError) {
     const message = (error as Error)?.message ?? 'Unknown error';
     const isNotFound = /not found/i.test(message);
     return (
-      <div className="max-w-4xl mx-auto px-6 py-8">
-        <Link
-          href="/orders"
-          className="inline-flex items-center gap-1 text-sm text-gray-600 hover:text-gray-900 mb-4"
-        >
-          <ArrowLeft className="w-4 h-4" /> Back to Orders
-        </Link>
-        <div className="bg-white border rounded-lg p-12 text-center">
-          <Receipt className="w-8 h-8 mx-auto text-gray-300" />
-          <h2 className="text-lg font-semibold mt-3" style={SECTION_HEADER_STYLE}>
-            {isNotFound ? 'Order not found' : 'Failed to load order'}
-          </h2>
-          <p className="text-sm mt-1" style={MUTED_STYLE}>{message}</p>
-        </div>
-      </div>
+      <DetailPageShell
+        backHref="/orders"
+        backLabel="Back to Orders"
+        title={isNotFound ? 'Order not found' : 'Failed to load order'}
+        logoMark={Receipt}
+        mainSlot={
+          <SectionCard title="Error">
+            <p className="text-body text-muted-foreground">{message}</p>
+          </SectionCard>
+        }
+        sideSlot={null}
+      />
     );
   }
 
@@ -108,250 +106,217 @@ export default function OrderDetailPage() {
   const showNotes = !!(order.customerNotes || order.internalNotes);
 
   return (
-    <div className="max-w-4xl mx-auto px-6 py-8 space-y-4">
-      <Link
-        href="/orders"
-        className="inline-flex items-center gap-1 text-sm text-gray-600 hover:text-gray-900"
-      >
-        <ArrowLeft className="w-4 h-4" /> Back to Orders
-      </Link>
+    <DetailPageShell
+      backHref="/orders"
+      backLabel="Back to Orders"
+      title={`Order ${order.orderNumber}`}
+      logoMark={Receipt}
+      subtitle={`Placed ${fmtDateTime(order.placedAt)}`}
+      headerBadge={<StatusBadge kind="order-status" value={order.status} />}
+      headerAction={
+        <Link
+          href={`/orders/${order.id}/edit`}
+          className="inline-flex items-center gap-1.5 rounded-[var(--ds-radius-pill)] border border-border bg-card px-3 py-1.5 text-label text-foreground transition-colors hover:bg-[var(--ds-surface-sunken)]"
+        >
+          <Pencil className="h-3.5 w-3.5" />
+          Edit
+        </Link>
+      }
+      mainSlot={
+        <div className="space-y-4">
+          <SectionCard title="Order info">
+            <FieldRow
+              label="Source"
+              value={enumLabel(ORDER_SOURCE_LABELS, order.source) ?? '—'}
+            />
+            <FieldRow
+              label="Payment method"
+              value={enumLabel(PAYMENT_METHOD_LABELS, order.paymentMethod) ?? '—'}
+            />
+            <FieldRow
+              label="Payment provider"
+              value={enumLabel(PAYMENT_PROVIDER_LABELS, order.paymentProvider) ?? '—'}
+            />
+            <FieldRow label="Provider order ID" value={order.providerOrderId ?? '—'} />
+            <FieldRow label="Paid" value={order.paidAt ? fmtDateTime(order.paidAt) : '—'} />
+            <FieldRow
+              label="Refunded"
+              value={order.refundedAt ? fmtDateTime(order.refundedAt) : '—'}
+            />
+            <FieldRow
+              label="Cancelled"
+              value={order.cancelledAt ? fmtDateTime(order.cancelledAt) : '—'}
+            />
+          </SectionCard>
 
-      {/* Card 1 — Order info */}
-      <section className="bg-white border rounded-lg p-6">
-        <div className="flex items-start justify-between mb-4">
-          <div>
-            <h1 className="text-xl font-semibold" style={SECTION_HEADER_STYLE}>
-              Order {order.orderNumber}
-            </h1>
-            <p className="text-sm mt-0.5" style={MUTED_STYLE}>
-              Placed {fmtDate(order.placedAt)}
-            </p>
-          </div>
-          <div className="flex items-center gap-3">
-            <StatusBadge kind="order-status" value={order.status} />
-            {/* KAN-945 — Sub-cohort 3.4 Edit affordance. Placed in Card 1
-                header next to status (mirrors KAN-937/938 pattern). Row-
-                level Edit avoided — list's orderNumber cell already navigates
-                to detail via Link, and per-row Edit would compete. */}
-            <Link
-              href={`/orders/${order.id}/edit`}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-md border"
-              style={{
-                backgroundColor: 'var(--ds-surface-default)',
-                borderColor: 'var(--ds-border-default)',
-                color: 'var(--ds-ink-secondary)',
-              }}
-            >
-              <Pencil className="w-3.5 h-3.5" />
-              Edit
-            </Link>
-          </div>
+          <SectionCard title="Money">
+            <FieldRow
+              label="Subtotal"
+              value={<MoneyDisplay value={order.totalAmount} currency={order.currency} />}
+            />
+            <FieldRow
+              label="Tax"
+              value={<MoneyDisplay value={order.taxAmount} currency={order.currency} />}
+            />
+            <FieldRow
+              label="Discount"
+              value={
+                <span className="tabular-nums">
+                  −<MoneyDisplay value={order.discountAmount} currency={order.currency} />
+                </span>
+              }
+            />
+            <FieldRow
+              label={'Grand total'}
+              value={
+                <span className="text-body-lg font-medium">
+                  <MoneyDisplay value={order.grandTotal} currency={order.currency} />
+                </span>
+              }
+            />
+          </SectionCard>
+
+          <SectionCard title="Line items">
+            {lineItems === null ? (
+              <div className="text-body text-muted-foreground">
+                <p className="mb-2">Line items shape unexpected — showing raw payload:</p>
+                <pre className="overflow-x-auto rounded bg-[var(--ds-surface-sunken)] p-3 text-caption font-mono">
+                  {JSON.stringify(order.lineItems, null, 2)}
+                </pre>
+              </div>
+            ) : lineItems.length === 0 ? (
+              <p className="text-body text-muted-foreground">No line items</p>
+            ) : (
+              <table className="w-full text-body">
+                <thead>
+                  <tr className="text-left text-caption uppercase text-muted-foreground">
+                    <th className="pb-2 font-medium">Item</th>
+                    <th className="pb-2 font-medium">SKU</th>
+                    <th className="pb-2 text-right font-medium">Qty</th>
+                    <th className="pb-2 text-right font-medium">Unit</th>
+                    <th className="pb-2 text-right font-medium">Total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {lineItems.map((li, i) => (
+                    <tr key={i} className="border-t border-border">
+                      <td className="py-2 text-foreground">
+                        {typeof li.name === 'string' ? li.name : '—'}
+                      </td>
+                      <td className="py-2 text-caption text-muted-foreground">
+                        {typeof li.sku === 'string' ? li.sku : '—'}
+                      </td>
+                      <td className="py-2 text-right tabular-nums text-foreground">
+                        {typeof li.quantity === 'number' ? li.quantity : '—'}
+                      </td>
+                      <td className="py-2 text-right tabular-nums text-foreground">
+                        <MoneyDisplay
+                          value={li.unitPrice as string | number | null}
+                          currency={order.currency}
+                        />
+                      </td>
+                      <td className="py-2 text-right tabular-nums text-foreground">
+                        <MoneyDisplay
+                          value={li.total as string | number | null}
+                          currency={order.currency}
+                        />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </SectionCard>
+
+          {showAttribution ? (
+            <SectionCard title="Attribution">
+              <FieldRow label="First source" value={order.attributionFirstSource ?? '—'} />
+              <FieldRow label="Last source" value={order.attributionLastSource ?? '—'} />
+            </SectionCard>
+          ) : null}
+
+          {showNotes ? (
+            <SectionCard title="Notes">
+              <div className="space-y-3">
+                {order.customerNotes ? (
+                  <div>
+                    <div className="text-caption text-muted-foreground">From customer</div>
+                    <p className="mt-1 whitespace-pre-wrap text-body text-foreground">
+                      {order.customerNotes}
+                    </p>
+                  </div>
+                ) : null}
+                {order.internalNotes ? (
+                  <div>
+                    <div className="text-caption text-muted-foreground">Internal</div>
+                    <p className="mt-1 whitespace-pre-wrap text-body text-foreground">
+                      {order.internalNotes}
+                    </p>
+                  </div>
+                ) : null}
+              </div>
+            </SectionCard>
+          ) : null}
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3 text-sm">
-          <Field label="Source" value={enumLabel(ORDER_SOURCE_LABELS, order.source)} />
-          <Field label="Payment method" value={enumLabel(PAYMENT_METHOD_LABELS, order.paymentMethod)} />
-          <Field label="Payment provider" value={enumLabel(PAYMENT_PROVIDER_LABELS, order.paymentProvider)} />
-          <Field label="Provider order ID" value={order.providerOrderId} />
-          <Field label="Paid" value={order.paidAt ? fmtDate(order.paidAt) : null} />
-          <Field label="Refunded" value={order.refundedAt ? fmtDate(order.refundedAt) : null} />
-          <Field label="Cancelled" value={order.cancelledAt ? fmtDate(order.cancelledAt) : null} />
-        </div>
-      </section>
-
-      {/* Card 2 — Money breakdown */}
-      <section className="bg-white border rounded-lg p-6">
-        <h2 className="text-sm font-semibold mb-3" style={SECTION_HEADER_STYLE}>Money</h2>
-        <dl className="space-y-2 text-sm">
-          <MoneyRow label="Subtotal" value={order.totalAmount} currency={order.currency} />
-          <MoneyRow label="Tax" value={order.taxAmount} currency={order.currency} />
-          <MoneyRow
-            label="Discount"
-            value={order.discountAmount}
-            currency={order.currency}
-            negative
-          />
-          <div className="border-t pt-2 flex items-center justify-between text-base font-semibold">
-            <span style={SECTION_HEADER_STYLE}>Grand total</span>
-            <span style={SECTION_HEADER_STYLE} className="tabular-nums">
-              <MoneyDisplay value={order.grandTotal} currency={order.currency} />
-            </span>
-          </div>
-        </dl>
-      </section>
-
-      {/* Card 3 — Line items */}
-      <section className="bg-white border rounded-lg p-6">
-        <h2 className="text-sm font-semibold mb-3" style={SECTION_HEADER_STYLE}>Line items</h2>
-        {lineItems === null ? (
-          <div className="text-sm" style={MUTED_STYLE}>
-            <p className="mb-2">Line items shape unexpected — showing raw payload:</p>
-            <pre className="text-xs bg-gray-50 p-3 rounded overflow-x-auto">
-              {JSON.stringify(order.lineItems, null, 2)}
-            </pre>
-          </div>
-        ) : lineItems.length === 0 ? (
-          <p className="text-sm" style={MUTED_STYLE}>No line items</p>
-        ) : (
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-xs uppercase text-left" style={MUTED_STYLE}>
-                <th className="pb-2 font-medium">Item</th>
-                <th className="pb-2 font-medium">SKU</th>
-                <th className="pb-2 font-medium text-right">Qty</th>
-                <th className="pb-2 font-medium text-right">Unit</th>
-                <th className="pb-2 font-medium text-right">Total</th>
-              </tr>
-            </thead>
-            <tbody>
-              {lineItems.map((li, i) => (
-                <tr key={i} className="border-t">
-                  <td className="py-2">{typeof li.name === 'string' ? li.name : '—'}</td>
-                  <td className="py-2 text-xs" style={MUTED_STYLE}>
-                    {typeof li.sku === 'string' ? li.sku : '—'}
-                  </td>
-                  <td className="py-2 text-right tabular-nums">
-                    {typeof li.quantity === 'number' ? li.quantity : '—'}
-                  </td>
-                  <td className="py-2 text-right tabular-nums">
-                    <MoneyDisplay value={li.unitPrice as string | number | null} currency={order.currency} />
-                  </td>
-                  <td className="py-2 text-right tabular-nums">
-                    <MoneyDisplay value={li.total as string | number | null} currency={order.currency} />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </section>
-
-      {/* Card 4 — Customer */}
-      <section className="bg-white border rounded-lg p-6">
-        <h2 className="text-sm font-semibold mb-3" style={SECTION_HEADER_STYLE}>Customer</h2>
-        <div className="space-y-2 text-sm">
-          <div>
-            <Link href={`/customers/${order.contact.id}`} className="font-medium text-indigo-600 hover:underline">
-              {contactName}
-            </Link>
-            {order.contact.email ? (
-              <span style={MUTED_STYLE} className="ml-2 text-xs">{order.contact.email}</span>
-            ) : null}
-          </div>
-          {order.company ? (
+      }
+      sideSlot={
+        <div className="space-y-4">
+          <SectionCard title="Customer">
             <div>
-              <Link href={`/companies/${order.company.id}`} className="text-indigo-600 hover:underline">
-                {order.company.name}
-              </Link>
-            </div>
-          ) : (
-            <p style={MUTED_STYLE} className="text-xs">
-              No linked company (direct purchase)
-            </p>
-          )}
-        </div>
-      </section>
-
-      {/* Card 5 — Deal (conditional) */}
-      {order.deal ? (
-        <section className="bg-white border rounded-lg p-6">
-          <h2 className="text-sm font-semibold mb-3" style={SECTION_HEADER_STYLE}>Linked deal</h2>
-          <div className="flex items-center justify-between text-sm">
-            <Link href={`/opportunities/${order.deal.id}`} className="font-medium text-indigo-600 hover:underline">
-              {order.deal.name}
-            </Link>
-            <div className="flex items-center gap-3">
-              <MoneyDisplay
-                value={order.deal.value}
-                currency={order.deal.currency}
-                className="tabular-nums"
+              <LinkedEntityRow
+                href={`/customers/${order.contact.id}`}
+                iconLabel={
+                  (order.contact.firstName?.[0] ?? order.contact.email?.[0] ?? '?').toUpperCase()
+                }
+                name={contactName}
+                meta={order.contact.email ?? undefined}
               />
-              <StatusBadge kind="deal-status" value={order.deal.status} />
+              {order.company ? (
+                <LinkedEntityRow
+                  href={`/companies/${order.company.id}`}
+                  iconLabel={(order.company.name[0] ?? 'C').toUpperCase()}
+                  name={order.company.name}
+                />
+              ) : (
+                <p className="border-t border-border py-2.5 text-caption text-muted-foreground first:border-t-0">
+                  No linked company (direct purchase)
+                </p>
+              )}
             </div>
-          </div>
-        </section>
-      ) : null}
+          </SectionCard>
 
-      {/* Card 6 — Attribution (conditional) */}
-      {showAttribution ? (
-        <section className="bg-white border rounded-lg p-6">
-          <h2 className="text-sm font-semibold mb-3" style={SECTION_HEADER_STYLE}>Attribution</h2>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3 text-sm">
-            <Field label="First source" value={order.attributionFirstSource} />
-            <Field label="Last source" value={order.attributionLastSource} />
-          </div>
-        </section>
-      ) : null}
-
-      {/* Card 7 — Notes (conditional) */}
-      {showNotes ? (
-        <section className="bg-white border rounded-lg p-6">
-          <h2 className="text-sm font-semibold mb-3" style={SECTION_HEADER_STYLE}>Notes</h2>
-          <div className="space-y-3 text-sm">
-            {order.customerNotes ? (
-              <div>
-                <div className="text-xs mb-1" style={MUTED_STYLE}>From customer</div>
-                <p style={LABEL_STYLE} className="whitespace-pre-wrap">{order.customerNotes}</p>
-              </div>
-            ) : null}
-            {order.internalNotes ? (
-              <div>
-                <div className="text-xs mb-1" style={MUTED_STYLE}>Internal</div>
-                <p style={LABEL_STYLE} className="whitespace-pre-wrap">{order.internalNotes}</p>
-              </div>
-            ) : null}
-          </div>
-        </section>
-      ) : null}
-    </div>
+          {order.deal ? (
+            <SectionCard title="Linked deal">
+              <LinkedEntityRow
+                href={`/opportunities/${order.deal.id}`}
+                iconLabel="$"
+                name={order.deal.name}
+                meta={
+                  <span className="inline-flex items-center gap-2">
+                    <MoneyDisplay value={order.deal.value} currency={order.deal.currency} />
+                    <StatusBadge kind="deal-status" value={order.deal.status} />
+                  </span>
+                }
+              />
+            </SectionCard>
+          ) : null}
+        </div>
+      }
+    />
   );
 }
 
-function Field({
-  label,
-  value,
-}: {
-  label: string;
-  value: React.ReactNode | null | undefined;
-}) {
-  const display = value === null || value === undefined || value === '' ? '—' : value;
+function SkeletonShell() {
   return (
-    <div>
-      <div className="text-xs" style={MUTED_STYLE}>{label}</div>
-      <div className="mt-0.5" style={LABEL_STYLE}>{display}</div>
-    </div>
-  );
-}
-
-function MoneyRow({
-  label,
-  value,
-  currency,
-  negative = false,
-}: {
-  label: string;
-  value: string;
-  currency: string;
-  negative?: boolean;
-}) {
-  return (
-    <div className="flex items-center justify-between">
-      <span style={LABEL_STYLE}>{label}</span>
-      <span className="tabular-nums" style={LABEL_STYLE}>
-        {negative ? '−' : ''}
-        <MoneyDisplay value={value} currency={currency} />
-      </span>
-    </div>
-  );
-}
-
-function SkeletonCards() {
-  return (
-    <div className="max-w-4xl mx-auto px-6 py-8 space-y-4">
+    <div className="mx-auto max-w-6xl px-6 py-8 space-y-4">
       {[0, 1, 2].map((i) => (
-        <div key={i} className="bg-white border rounded-lg p-6 space-y-3">
-          <div className="h-5 w-1/3 bg-gray-200 rounded animate-pulse" />
-          <div className="h-4 w-2/3 bg-gray-100 rounded animate-pulse" />
-          <div className="h-4 w-1/2 bg-gray-100 rounded animate-pulse" />
+        <div
+          key={i}
+          className="rounded-[var(--ds-radius-card)] border border-border bg-card p-6 shadow-[var(--ds-shadow-card)]"
+        >
+          <div className="h-5 w-1/3 animate-pulse rounded bg-muted" />
+          <div className="mt-3 h-4 w-2/3 animate-pulse rounded bg-muted/60" />
+          <div className="mt-2 h-4 w-1/2 animate-pulse rounded bg-muted/60" />
         </div>
       ))}
     </div>
