@@ -1021,20 +1021,21 @@ export interface ContactUpdateInput extends Partial<ContactCreateInput> {
 }
 
 export const contactsApi = {
+  // KAN-980 — KAN-882 cursor convergence. Return shape now matches the other
+  // three list endpoints (deals/companies/orders): `{ items, nextCursor,
+  // totalCount }`. Old `{ items, total, limit, offset }` retired.
   list: (input?: {
     search?: string;
     lifecycleStage?: string;
     source?: string;
     companyId?: string;
     limit?: number;
-    offset?: number;
+    cursor?: string;
   }) =>
-    trpcQuery<{
-      items: ContactListItem[];
-      total: number;
-      limit: number;
-      offset: number;
-    }>('contacts.list', input ?? {}),
+    trpcQuery<CursorPage<ContactListItem>>(
+      'contacts.list',
+      input ?? { limit: 50 },
+    ),
   getById: (id: string) =>
     trpcQuery<ContactDetail>('contacts.getById', { id }),
   // KAN-934 — Cohort 3.1 CRUD mutations.

@@ -21,6 +21,10 @@
 import { TRPCError } from '@trpc/server';
 import type { PrismaClient } from '@prisma/client';
 import { assertCompanyInTenant } from './canonical-lookups.js';
+// KAN-980 — contacts.list converged to cursor pagination per the canonical
+// helper at _pagination.ts. Mirrors deals.list / companies.list / orders.list.
+// Closes the KAN-882 convergence ticket.
+import { buildCursorWhere, decodeCursor, encodeCursor } from './_pagination.js';
 
 // KAN-938 — `assertCompanyInTenant` lifted to canonical-lookups.ts for reuse
 // across Cohort 3.x manual-CRUD procedures (Deal, Order). Re-exported here
@@ -31,12 +35,13 @@ export { assertCompanyInTenant };
 export interface ListInput {
   search?: string;
   lifecycleStage?: string;
-  // KAN-883 — Read-layer extensions (filters added to the existing
-  // offset/limit shape; convergence to cursor pagination tracked in KAN-882).
   source?: string;
   companyId?: string;
+  // KAN-980 (KAN-882 convergence) — cursor pagination replaces offset/limit.
+  // Cursor encoded via _pagination.encodeCursor; first page is `cursor:
+  // undefined`. Mirrors deals.list / companies.list / orders.list.
   limit?: number;
-  offset?: number;
+  cursor?: string;
 }
 
 export interface CreateInput {
@@ -90,34 +95,42 @@ export async function listContacts(
   input: ListInput,
 ) {
   const limit = clampLimit(input.limit);
-  const offset = Math.max(0, input.offset ?? 0);
+  const cursor = decodeCursor(input.cursor);
 
-  const where: Record<string, unknown> = { tenantId };
-  if (input.lifecycleStage) {
-    where.lifecycleStage = input.lifecycleStage;
-  }
-  if (input.source) {
-    where.source = input.source;
-  }
-  if (input.companyId) {
-    where.companyId = input.companyId;
-  }
-  if (input.search) {
-    // Search OR across firstName / lastName / email — `name` doesn't exist
-    // in the schema, so we expand to all human-identifying fields.
-    where.OR = [
-      { firstName: { contains: input.search, mode: 'insensitive' as const } },
-      { lastName: { contains: input.search, mode: 'insensitive' as const } },
-      { email: { contains: input.search, mode: 'insensitive' as const } },
-    ];
-  }
+  // Build base WHERE — tenant scope is the load-bearing predicate (Prisma's
+  // explicit tenantId filter is the same gate every contacts query uses).
+  const baseWhere: Record<string, unknown> = { tenantId };
+  if (input.lifecycleStage) baseWhere.lifecycleStage = input.lifecycleStage;
+  if (input.source) baseWhere.source = input.source;
+  if (input.companyId) baseWhere.companyId = input.companyId;
+  const searchOr = input.search
+    ? [
+        { firstName: { contains: input.search, mode: 'insensitive' as const } },
+        { lastName: { contains: input.search, mode: 'insensitive' as const } },
+        { email: { contains: input.search, mode: 'insensitive' as const } },
+      ]
+    : null;
 
-  const [rows, total] = await Promise.all([
+  // Compose cursor + search via AND so the OR-groups don't clobber each
+  // other. Same defensive shape as listDeals (KAN-883 OR-clobber lesson).
+  const where: Record<string, unknown> = { ...baseWhere };
+  const andClauses: Array<Record<string, unknown>> = [];
+  if (cursor) andClauses.push(buildCursorWhere(cursor));
+  if (searchOr) andClauses.push({ OR: searchOr });
+  if (andClauses.length > 0) where.AND = andClauses;
+
+  const totalCountWhere: Record<string, unknown> = { ...baseWhere };
+  if (searchOr) totalCountWhere.OR = searchOr;
+
+  // Fetch limit+1 to detect hasNext; canonical pattern from deals.list.
+  const [rowsPlusOne, totalCount] = await Promise.all([
     prisma.contact.findMany({
       where,
-      orderBy: { createdAt: 'desc' },
-      skip: offset,
-      take: limit,
+      // ORDER BY createdAt DESC, id DESC — id tiebreaker is critical for
+      // stable ordering when multiple rows share a millisecond createdAt
+      // (high-write loads). Matches the _pagination.ts invariant.
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: limit + 1,
       select: {
         id: true,
         email: true,
@@ -149,14 +162,21 @@ export async function listContacts(
         },
       },
     }),
-    prisma.contact.count({ where }),
+    prisma.contact.count({ where: totalCountWhere }),
   ]);
 
+  const hasNext = rowsPlusOne.length > limit;
+  const items = hasNext ? rowsPlusOne.slice(0, limit) : rowsPlusOne;
+  const last = items[items.length - 1];
+  const nextCursor =
+    hasNext && last
+      ? encodeCursor({ id: last.id, createdAt: last.createdAt })
+      : null;
+
   return {
-    items: rows,
-    total,
-    limit,
-    offset,
+    items,
+    nextCursor,
+    totalCount,
   };
 }
 
