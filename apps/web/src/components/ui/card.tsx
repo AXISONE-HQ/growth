@@ -1,9 +1,21 @@
 import * as React from "react";
 import { cn } from "@/lib/utils";
 
+// KAN-976 Phase B.1 — Card restyle: 18px radius (--ds-radius-card), hairline
+// border (border-border → #ECEDF3 via Phase A rewire), card shadow (hairline
+// + soft via --ds-shadow-card). Container is bg-card (white via Phase A) +
+// text-card-foreground (ink #1B1E2B via Phase A). Restyle only — props +
+// composition unchanged.
 export const Card = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
   ({ className, ...props }, ref) => (
-    <div ref={ref} className={cn("rounded-lg border bg-card text-card-foreground shadow-sm", className)} {...props} />
+    <div
+      ref={ref}
+      className={cn(
+        "rounded-[var(--ds-radius-card)] border bg-card text-card-foreground shadow-[var(--ds-shadow-card)]",
+        className,
+      )}
+      {...props}
+    />
   ),
 );
 Card.displayName = "Card";
