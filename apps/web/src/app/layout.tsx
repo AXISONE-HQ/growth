@@ -13,27 +13,24 @@ import {
   BookOpen,
   Building2,
   Settings,
-  LogOut,
-  Shield,
-  ChevronDown,
   Target,
   Receipt,
   Upload,
   Workflow,
 } from 'lucide-react';
-import { useState, useRef, useEffect } from 'react';
 import { AuthProvider, useAuth } from '@/lib/AuthContext';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { Toaster } from 'sonner';
 import { queryClient } from '@/lib/query-client';
 import { isDemoMode } from '@/lib/demo-mode';
 import { DemoModeBanner } from '@/components/demo-mode-banner';
-// KAN-977 Phase B.2 — TopNav lifted from the inline AppShell header into a
-// shared component. AIStatusIndicator import retired from this file (it's
-// now an internal of TopNav). The sidebar's logo/brand + user-footer drop-
-// down stay here for Phase B.2 — Phase B.3 (IconRail rewrite) handles
-// moving brand + account into the TopNav per the prototype.
+// KAN-978 Phase B.3 — IconRail rewrite (240px dark → 72px white icon-only)
+// + brand mark and account dropdown migrated to TopNav. The old sidebar
+// component is gone; its responsibilities split between IconRail (nav)
+// + TopNav (brand + account). useState/useRef/useEffect + LogOut/Shield/
+// ChevronDown imports retired (now internals of AccountMenu).
 import { TopNav } from '@/components/ui/top-nav';
+import { IconRail, type IconRailItem } from '@/components/ui/icon-rail';
 
 // KAN-718 nav surgery:
 //   - /pipelines (mock) → redirect to /settings/pipelines (KAN-702 real)
@@ -55,6 +52,8 @@ const navItems: Array<{
   badge?: number;
   demoOnly?: boolean;
   activePrefix?: string;
+  /** KAN-978 — pin to the bottom of the IconRail (Settings pattern). */
+  pinBottom?: boolean;
 }> = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   // KAN-968 — Pipelines (kanban board, read-only) + Objectives promoted to
@@ -88,7 +87,9 @@ const navItems: Array<{
     icon: Building2,
     activePrefix: '/settings/account',
   },
-  { href: '/settings', label: 'Settings', icon: Settings },
+  // KAN-978 — Settings pinned to the IconRail bottom per the prototype's
+  // .spacer + bottom-pinned `.rbtn` pattern. The route stays /settings.
+  { href: '/settings', label: 'Settings', icon: Settings, pinBottom: true },
 ];
 
 // Pick the single nav item to highlight for the current pathname.
@@ -156,8 +157,6 @@ function AppShell({ children }: { children: React.ReactNode }) {
   const { user, loading, logout } = useAuth();
   const currentTitle = resolveTitle(pathname);
   const isLoginPage = pathname === '/login';
-  const [userMenuOpen, setUserMenuOpen] = useState(false);
-  const menuRef = useRef<HTMLDivElement>(null);
 
   // Allow login page without auth
   if (pathname === '/login') {
@@ -165,7 +164,6 @@ function AppShell({ children }: { children: React.ReactNode }) {
   }
 
   const handleLogout = async () => {
-    setUserMenuOpen(false);
     await logout();
     router.push('/login');
   };
@@ -173,9 +171,9 @@ function AppShell({ children }: { children: React.ReactNode }) {
   // Loading spinner
   if (loading) {
     return (
-      <div className="flex items-center justify-center min-h-screen bg-white">
+      <div className="flex items-center justify-center min-h-screen bg-background">
         <div className="animate-spin">
-          <Activity className="w-8 h-8 text-indigo-600" />
+          <Activity className="w-8 h-8 text-primary" />
         </div>
       </div>
     );
@@ -192,118 +190,37 @@ function AppShell({ children }: { children: React.ReactNode }) {
     return null;
   }
 
+  // KAN-978 Phase B.3 — visible items for the IconRail. Demo-only items
+  // hide when DEMO_MODE is off; adminOnly items hide from non-admins.
+  // Filter once here so the IconRail stays a pure rendering primitive.
+  const activeHref = findActiveHref(pathname);
+  const visibleNavItems: IconRailItem[] = navItems
+    .filter((item) => !(item.demoOnly && !isDemoMode()))
+    .filter((item) => !('adminOnly' in item && item.adminOnly && user.role !== 'admin'))
+    .map(({ href, label, icon, badge, pinBottom }) => ({
+      href,
+      label,
+      icon,
+      badge,
+      pinBottom,
+    }));
+
+  // KAN-978 — new shell shape per prototype: TopNav full-width on top
+  // (sticky), then a flex row below with IconRail (sticky top-16) on the
+  // left and main content filling the rest. The prior `fixed`-position
+  // sidebar with `ml-60` main-margin is gone — IconRail is a flow element
+  // inside the flex row.
   return (
-    <div className="flex min-h-screen">
-      {/* Sidebar */}
-      <nav className="fixed top-0 left-0 bottom-0 w-60 bg-black border-r border-slate-800 flex flex-col z-50">
-        {/* Logo */}
-        <div className="px-6 py-5 border-b border-white/10 flex items-center gap-2.5">
-          <div className="w-7 h-7 rounded-lg bg-indigo-500 flex items-center justify-center">
-            <Activity className="w-4 h-4 text-white" />
-          </div>
-          <span className="text-white font-semibold text-base tracking-tight">growth</span>
-        </div>
-
-        {/* Navigation */}
-        <div className="flex-1 p-3 flex flex-col gap-0.5">
-          {(() => {
-            const activeHref = findActiveHref(pathname);
-            return navItems.map((item) => {
-              const Icon = item.icon;
-              const isActive = activeHref === item.href;
-
-            // KAN-718: hide demo-only routes when DEMO_MODE is off (prod default).
-            if (item.demoOnly && !isDemoMode()) {
-              return null;
-            }
-
-            // Hide admin-only items from members
-            if ('adminOnly' in item && item.adminOnly && user.role !== 'admin') {
-              return null;
-            }
-
-            return (
-              <Link
-                key={item.href}
-                href={item.href}
-                className={`flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-sm transition-all ${
-                  isActive
-                    ? 'bg-indigo-500 text-white'
-                    : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'
-                }`}
-              >
-                <Icon className="w-[18px] h-[18px] flex-shrink-0" />
-                {item.label}
-                {item.badge && (
-                  <span className="ml-auto text-[11px] font-semibold px-[7px] py-[2px] rounded-full bg-red-500 text-white">
-                    {item.badge}
-                  </span>
-                )}
-              </Link>
-            );
-            });
-          })()}
-        </div>
-
-        {/* User Footer */}
-        <div className="p-4 border-t border-white/10" ref={menuRef}>
-          <div className="relative">
-            <button
-              onClick={() => setUserMenuOpen(!userMenuOpen)}
-              className="w-full flex items-center gap-2.5 p-2 rounded-lg hover:bg-slate-800 transition-colors"
-            >
-              <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center text-white text-[13px] font-semibold">
-                {user.initials}
-              </div>
-              <div className="flex-1 text-left">
-                <div className="text-[13px] font-medium text-white">{user.displayName || user.email}</div>
-                <div className="text-[11px] text-white/50 flex items-center gap-1">
-                  {user.role === 'admin' && <Shield className="w-3 h-3" />}
-                  {user.role === 'admin' ? 'Admin' : 'Member'} &middot; {user.company}
-                </div>
-              </div>
-              <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform ${userMenuOpen ? 'rotate-180' : ''}`} />
-            </button>
-
-            {/* Dropdown Menu */}
-            {userMenuOpen && (
-              <div className="absolute bottom-full left-0 right-0 mb-2 bg-slate-900 border border-slate-700 rounded-lg shadow-xl overflow-hidden">
-                <div className="px-3 py-2 border-b border-slate-700">
-                  <div className="text-[12px] text-slate-400">{user.email}</div>
-                </div>
-                {user.role === 'admin' && (
-                  <Link
-                    href="/settings"
-                    onClick={() => setUserMenuOpen(false)}
-                    className="flex items-center gap-2 px-3 py-2.5 text-sm text-slate-300 hover:bg-slate-800 transition-colors"
-                  >
-                    <Settings className="w-4 h-4" />
-                    Settings
-                  </Link>
-                )}
-                <button
-                  onClick={handleLogout}
-                  className="w-full flex items-center gap-2 px-3 py-2.5 text-sm text-red-400 hover:bg-slate-800 transition-colors"
-                >
-                  <LogOut className="w-4 h-4" />
-                  Sign out
-                </button>
-              </div>
-            )}
-          </div>
-        </div>
-      </nav>
-
-      {/* Main Content */}
-      <main className="ml-60 flex-1 min-h-screen">
-        {/* KAN-718: top-of-page demo-mode disclaimer when NEXT_PUBLIC_DEMO_MODE is on */}
-        <DemoModeBanner />
-        {/* KAN-977 — TopNav lifted into a shared component (was inline header
-         * at this location). Same content shape; restyled per Phase A tokens. */}
-        <TopNav title={currentTitle} />
-
-        {children}
-      </main>
+    <div className="min-h-screen bg-background">
+      <TopNav title={currentTitle} user={user} onSignOut={handleLogout} />
+      <div className="flex">
+        <IconRail items={visibleNavItems} activeHref={activeHref} />
+        <main className="min-w-0 flex-1">
+          {/* KAN-718: top-of-page demo-mode disclaimer when NEXT_PUBLIC_DEMO_MODE is on */}
+          <DemoModeBanner />
+          {children}
+        </main>
+      </div>
     </div>
   );
 }
