@@ -71,31 +71,31 @@ const brainLayers = [
 const decisions = [
   {
     type: 'ai', headline: 'Follow-up SMS to', contact: 'Sarah Chen',
-    strategy: 'Direct Conversion', strategyClass: 'strategy-direct', channel: 'SMS',
-    confidence: 87, confClass: 'conf-high', time: '2m ago',
+    strategy: 'Direct Conversion', strategyClass: 'ds-chip-base ds-chip-green', channel: 'SMS',
+    confidence: 87, confClass: 'ds-chip-base ds-chip-green', time: '2m ago',
     reasoning: 'Budget confirmed ($12K). Timeline Q2. Decision maker reached. Missing: pricing tolerance. 3 of 5 sub-objectives complete â direct path to booking selected.',
   },
   {
     type: 'ai', headline: 'Re-engagement email to', contact: 'Mark Thompson',
-    strategy: 'Re-engagement', strategyClass: 'strategy-reengage', channel: 'Email',
-    confidence: 71, confClass: 'conf-normal', time: '8m ago',
+    strategy: 'Re-engagement', strategyClass: 'ds-chip-base ds-chip-amber', channel: 'Email',
+    confidence: 71, confClass: 'ds-chip-base ds-chip-ai', time: '8m ago',
     reasoning: 'Contact dormant 34 days. Previously showed interest in enterprise plan. New angle: reference recent case study in similar industry.',
   },
   {
     type: 'ai', headline: 'Qualification questions to', contact: 'Emma Davis',
-    strategy: 'Guided Assistance', strategyClass: 'strategy-guided', channel: 'Email',
-    confidence: 62, confClass: 'conf-normal', time: '14m ago',
+    strategy: 'Guided Assistance', strategyClass: 'ds-chip-base ds-chip-ai', channel: 'Email',
+    confidence: 62, confClass: 'ds-chip-base ds-chip-amber', time: '14m ago',
     reasoning: 'New inbound lead from website form. Need identified (HR consulting) but budget and timeline unknown. Guided approach: ask qualifying questions before direct conversion attempt.',
   },
   {
     type: 'human', headline: 'Escalated:', contact: 'James Rivera â deal value $28,000',
-    confidence: 34, confClass: 'conf-critical', time: '22m ago',
+    confidence: 34, confClass: 'ds-chip-base ds-chip-rose', time: '22m ago',
     note: 'Above $15K threshold â human review',
   },
   {
     type: 'ai', headline: 'Book meeting for', contact: 'Lisa Park',
-    strategy: 'Direct Conversion', strategyClass: 'strategy-direct', channel: 'Calendar',
-    confidence: 94, confClass: 'conf-high', time: '31m ago',
+    strategy: 'Direct Conversion', strategyClass: 'ds-chip-base ds-chip-green', channel: 'Calendar',
+    confidence: 94, confClass: 'ds-chip-base ds-chip-green', time: '31m ago',
     reasoning: 'All 5 sub-objectives complete. Budget: $8K. Timeline: this month. Decision maker confirmed. Direct path â send calendar link with 3 available slots this week.',
   },
 ];
@@ -282,7 +282,7 @@ export default function DashboardPage() {
                       <span className={`text-[11px] font-medium px-2 py-0.5 rounded ${d.strategyClass}`}>{d.strategy}</span>
                     )}
                     {d.channel && (
-                      <span className="channel-badge">{d.channel}</span>
+                      <span className="ds-chip-base ds-chip-muted">{d.channel}</span>
                     )}
                     {d.note && (
                       <span className="text-[12px] text-gray-500">{d.note}</span>
