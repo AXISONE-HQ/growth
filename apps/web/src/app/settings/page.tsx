@@ -1,10 +1,36 @@
 'use client';
 
+/**
+ * /settings — main settings hub (6 sub-tabs).
+ * KAN-990 Phase C.6 — restyled dark/slate → light DS v1 tokens. Pill
+ * Tabs (KAN-976 B.1) for sub-nav, SectionCard (KAN-989 C.5) for panels,
+ * FieldRow for label/value rows. All mutations preserved — every save,
+ * toggle, connect/disconnect, invite, security-update path still fires
+ * the exact same settingsApi calls.
+ */
+
 import {
-  Brain, Shield, Mail, Phone, MessageCircle, MessagesSquare,
-  Key, Users, Bell, Globe, Database, CheckCircle,
-  Lock, Plug, Loader2, RefreshCw, X, AlertCircle,
-  UserPlus, Link2, Megaphone
+  Brain,
+  Shield,
+  Mail,
+  Phone,
+  MessageCircle,
+  MessagesSquare,
+  Key,
+  Users,
+  Bell,
+  Globe,
+  Database,
+  CheckCircle,
+  Lock,
+  Plug,
+  Loader2,
+  RefreshCw,
+  X,
+  AlertCircle,
+  UserPlus,
+  Link2,
+  Megaphone,
 } from 'lucide-react';
 import { useState, useEffect, useCallback } from 'react';
 import {
@@ -17,8 +43,11 @@ import {
   type NotificationPrefs,
   type SecuritySetting,
 } from '@/lib/api';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
+import { Button } from '@/components/ui/button';
+import { SectionCard } from '@/components/ui/detail-page-shell';
 
-/* âââ Helpers ââââââââââââââââââââââââââââââââââââââââââââââââ */
+// — Helpers —
 function timeAgo(dateStr: string | null): string {
   if (!dateStr) return 'Never';
   const diff = Date.now() - new Date(dateStr).getTime();
@@ -30,56 +59,73 @@ function timeAgo(dateStr: string | null): string {
   return `${Math.floor(hrs / 24)}d ago`;
 }
 
-function Toggle({ enabled, onChange, disabled }: { enabled: boolean; onChange: () => void; disabled?: boolean }) {
+function Toggle({
+  enabled,
+  onChange,
+  disabled,
+}: {
+  enabled: boolean;
+  onChange: () => void;
+  disabled?: boolean;
+}) {
   return (
     <button
       onClick={onChange}
       disabled={disabled}
-      className={`w-11 h-6 rounded-full transition-colors flex items-center ${
-        enabled ? 'bg-indigo-500 justify-end' : 'bg-gray-300 justify-start'
-      } ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+      aria-pressed={enabled}
+      className={`flex h-6 w-11 items-center rounded-full transition-colors ${
+        enabled
+          ? '[background-image:var(--ds-accent-gradient)] justify-end'
+          : 'bg-[var(--ds-border-default)] justify-start'
+      } ${disabled ? 'cursor-not-allowed opacity-50' : ''}`}
     >
-      <div className="w-5 h-5 bg-white rounded-full shadow mx-0.5" />
+      <div className="mx-0.5 h-5 w-5 rounded-full bg-card shadow" />
     </button>
   );
 }
 
-function StatusBadge({ status }: { status: string }) {
+function ChannelStatusBadge({ status }: { status: string }) {
   const styles: Record<string, string> = {
-    connected: 'bg-emerald-50 text-emerald-700',
-    disconnected: 'bg-gray-100 text-gray-500',
-    syncing: 'bg-blue-50 text-blue-600',
-    error: 'bg-red-50 text-red-600',
-    pending: 'bg-amber-50 text-amber-600',
+    connected: 'bg-[var(--ds-emerald-100)] text-[var(--ds-emerald-700)]',
+    disconnected: 'bg-[var(--ds-surface-sunken)] text-muted-foreground',
+    syncing: 'bg-[var(--ds-violet-100)] text-[var(--ds-violet-500)]',
+    error: 'bg-[var(--ds-danger-soft)] text-[var(--ds-danger-text)]',
+    pending: 'bg-[var(--ds-warning-soft)] text-[var(--ds-warning-text)]',
   };
   return (
-    <span className={`text-xs px-2.5 py-1 rounded-full font-medium flex items-center gap-1 ${styles[status] || styles.disconnected}`}>
-      {status === 'connected' && <CheckCircle className="w-3 h-3" />}
-      {status === 'syncing' && <Loader2 className="w-3 h-3 animate-spin" />}
-      {status === 'error' && <AlertCircle className="w-3 h-3" />}
+    <span
+      className={`inline-flex items-center gap-1 rounded-[var(--ds-radius-pill)] px-2.5 py-1 text-caption font-medium ${styles[status] || styles.disconnected}`}
+    >
+      {status === 'connected' && <CheckCircle className="h-3 w-3" />}
+      {status === 'syncing' && <Loader2 className="h-3 w-3 animate-spin" />}
+      {status === 'error' && <AlertCircle className="h-3 w-3" />}
       {status.charAt(0).toUpperCase() + status.slice(1)}
     </span>
   );
 }
 
-function SaveButton({ saving, dirty, onClick }: { saving: boolean; dirty: boolean; onClick: () => void }) {
+function SaveButton({
+  saving,
+  dirty,
+  onClick,
+}: {
+  saving: boolean;
+  dirty: boolean;
+  onClick: () => void;
+}) {
   return (
-    <button
+    <Button
       onClick={onClick}
       disabled={saving || !dirty}
-      className={`text-xs px-4 py-2 rounded-lg font-medium transition-colors flex items-center gap-1.5 ${
-        dirty
-          ? 'bg-indigo-500 text-white hover:bg-indigo-600'
-          : 'bg-gray-100 text-gray-400 cursor-not-allowed'
-      }`}
+      variant={dirty ? 'gradient' : 'outline'}
+      size="sm"
     >
-      {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : null}
-      {saving ? 'Savingâ¦' : 'Save Changes'}
-    </button>
+      {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+      {saving ? 'Saving…' : 'Save changes'}
+    </Button>
   );
 }
 
-/* âââ Main Component âââââââââââââââââââââââââââââââââââââââââ */
 export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState('ai');
   const [loading, setLoading] = useState(true);
@@ -87,21 +133,28 @@ export default function SettingsPage() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
-  // ââ AI Config state ââ
+  // AI Config state
   const [aiConfig, setAiConfig] = useState<AIConfig | null>(null);
   const [aiDirty, setAiDirty] = useState(false);
   const [confidenceThreshold, setConfidenceThreshold] = useState(70);
   const [autoApprove, setAutoApprove] = useState(true);
   const [dailyLimit, setDailyLimit] = useState(200);
   const [strategies, setStrategies] = useState({
-    directConversion: true, guidedAssistance: true, trustBuilding: true, reengagement: true,
+    directConversion: true,
+    guidedAssistance: true,
+    trustBuilding: true,
+    reengagement: true,
   });
   const [guardrails, setGuardrails] = useState({
-    toneValidator: true, accuracyCheck: true, hallucinationFilter: true,
-    complianceCheck: true, injectionDefense: true, confidenceGate: true,
+    toneValidator: true,
+    accuracyCheck: true,
+    hallucinationFilter: true,
+    complianceCheck: true,
+    injectionDefense: true,
+    confidenceGate: true,
   });
 
-  // ââ Channels state ââ
+  // Channels state
   const [channels, setChannels] = useState<CommunicationChannel[]>([]);
   // KAN-474: messenger Test-Connection result for inline page-name display
   // and the token_expired → Reconnect CTA branch.
@@ -112,55 +165,54 @@ export default function SettingsPage() {
     pageName?: string;
   } | null>(null);
 
-  // ââ Integrations state ââ
+  // Integrations state
   const [integrations, setIntegrations] = useState<Integration[]>([]);
-
-  // Available integrations catalog (static list â actual connection status comes from API)
-  // -- Integration sub-tab state --
   const [integrationSubTab, setIntegrationSubTab] = useState<'crm_erp' | 'leads' | 'productivity'>('crm_erp');
 
   const integrationCatalog = [
     { provider: 'HubSpot', category: 'crm' as const, subTab: 'crm_erp' as const, icon: Link2 },
     { provider: 'Meta Lead Ads', category: 'advertising' as const, subTab: 'leads' as const, icon: Megaphone },
   ];
-
   const integrationSubTabs = [
     { id: 'crm_erp' as const, label: 'CRM / ERP' },
     { id: 'leads' as const, label: 'Leads' },
   ];
 
-  // ââ Team state ââ
+  // Team state
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [invitations, setInvitations] = useState<Invitation[]>([]);
   const [showInvite, setShowInvite] = useState(false);
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole, setInviteRole] = useState<'owner' | 'admin' | 'agent' | 'viewer'>('viewer');
 
-  // ââ Notifications state ââ
+  // Notifications state
   const [notifPrefs, setNotifPrefs] = useState<NotificationPrefs>({
-    escalation: true, daily_digest: true, weekly_report: true, brain_update: false,
+    escalation: true,
+    daily_digest: true,
+    weekly_report: true,
+    brain_update: false,
   });
 
-  // ââ Security state ââ
+  // Security state
   const [security, setSecurity] = useState<SecuritySetting | null>(null);
 
   const roleColors: Record<string, string> = {
-    owner: 'bg-indigo-50 text-indigo-700',
-    admin: 'bg-purple-50 text-purple-700',
-    agent: 'bg-emerald-50 text-emerald-700',
-    viewer: 'bg-gray-100 text-gray-600',
+    owner: 'bg-[var(--ds-violet-100)] text-[var(--ds-violet-500)]',
+    admin: 'bg-[var(--ds-violet-100)] text-[var(--ds-violet-700)]',
+    agent: 'bg-[var(--ds-emerald-100)] text-[var(--ds-emerald-700)]',
+    viewer: 'bg-[var(--ds-surface-sunken)] text-muted-foreground',
   };
 
   const tabs = [
     { id: 'ai', label: 'AI Configuration', icon: Brain },
     { id: 'channels', label: 'Channels', icon: Mail },
     { id: 'integrations', label: 'Integrations', icon: Plug },
-    { id: 'team', label: 'Team & Roles', icon: Users },
+    { id: 'team', label: 'Team & roles', icon: Users },
     { id: 'notifications', label: 'Notifications', icon: Bell },
     { id: 'security', label: 'Security', icon: Shield },
   ];
 
-  /* ââ Flash messages âââââââââââââââââââââââââââââââââââââââ */
+  // Flash messages
   const flash = useCallback((msg: string) => {
     setSuccess(msg);
     setTimeout(() => setSuccess(null), 3000);
@@ -171,7 +223,7 @@ export default function SettingsPage() {
     setTimeout(() => setError(null), 5000);
   }, []);
 
-  /* ââ Data loaders âââââââââââââââââââââââââââââââââââââââââ */
+  // Data loaders
   const loadAI = useCallback(async () => {
     try {
       const data = await settingsApi.getAIConfig();
@@ -182,17 +234,25 @@ export default function SettingsPage() {
       if (data.strategyPermissions) setStrategies(data.strategyPermissions as typeof strategies);
       if (data.guardrailSettings) setGuardrails(data.guardrailSettings as typeof guardrails);
       setAiDirty(false);
-    } catch (e: any) { flashError(e.message); }
+    } catch (e: any) {
+      flashError(e.message);
+    }
   }, [flashError]);
 
   const loadChannels = useCallback(async () => {
-    try { setChannels(await settingsApi.listChannels()); }
-    catch (e: any) { flashError(e.message); }
+    try {
+      setChannels(await settingsApi.listChannels());
+    } catch (e: any) {
+      flashError(e.message);
+    }
   }, [flashError]);
 
   const loadIntegrations = useCallback(async () => {
-    try { setIntegrations(await settingsApi.listIntegrations()); }
-    catch (e: any) { flashError(e.message); }
+    try {
+      setIntegrations(await settingsApi.listIntegrations());
+    } catch (e: any) {
+      flashError(e.message);
+    }
   }, [flashError]);
 
   const loadTeam = useCallback(async () => {
@@ -200,17 +260,25 @@ export default function SettingsPage() {
       const data = await settingsApi.listTeam();
       setMembers(data.members);
       setInvitations(data.invitations);
-    } catch (e: any) { flashError(e.message); }
+    } catch (e: any) {
+      flashError(e.message);
+    }
   }, [flashError]);
 
   const loadNotifications = useCallback(async () => {
-    try { setNotifPrefs(await settingsApi.getNotifications()); }
-    catch (e: any) { flashError(e.message); }
+    try {
+      setNotifPrefs(await settingsApi.getNotifications());
+    } catch (e: any) {
+      flashError(e.message);
+    }
   }, [flashError]);
 
   const loadSecurity = useCallback(async () => {
-    try { setSecurity(await settingsApi.getSecurity()); }
-    catch (e: any) { flashError(e.message); }
+    try {
+      setSecurity(await settingsApi.getSecurity());
+    } catch (e: any) {
+      flashError(e.message);
+    }
   }, [flashError]);
 
   // Load data for active tab
@@ -219,20 +287,31 @@ export default function SettingsPage() {
     setError(null);
     const load = async () => {
       switch (activeTab) {
-        case 'ai': await loadAI(); break;
-        case 'channels': await loadChannels(); break;
-        case 'integrations': await loadIntegrations(); break;
-        case 'team': await loadTeam(); break;
-        case 'notifications': await loadNotifications(); break;
-        case 'security': await loadSecurity(); break;
+        case 'ai':
+          await loadAI();
+          break;
+        case 'channels':
+          await loadChannels();
+          break;
+        case 'integrations':
+          await loadIntegrations();
+          break;
+        case 'team':
+          await loadTeam();
+          break;
+        case 'notifications':
+          await loadNotifications();
+          break;
+        case 'security':
+          await loadSecurity();
+          break;
       }
       setLoading(false);
     };
     load();
   }, [activeTab, loadAI, loadChannels, loadIntegrations, loadTeam, loadNotifications, loadSecurity]);
 
-
-  /*  Meta OAuth redirect handling  */
+  // Meta OAuth redirect handling
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     if (params.get('meta_success') === 'connected') {
@@ -250,9 +329,9 @@ export default function SettingsPage() {
       const msgs: Record<string, string> = {
         denied: 'Facebook Messenger permissions were denied',
         missing_params: 'OAuth callback missing parameters',
-        invalid_state: 'Invalid OAuth state — please try again',
+        invalid_state: 'Invalid OAuth state — try again',
         no_pages: 'No Facebook Pages found on your account',
-        exchange_failed: 'Failed to connect — please try again',
+        exchange_failed: 'Failed to connect — try again',
       };
       setError(msgs[messengerError] || 'Messenger connection failed: ' + messengerError);
       setActiveTab('integrations');
@@ -264,9 +343,9 @@ export default function SettingsPage() {
       const messages: Record<string, string> = {
         denied: 'Facebook permissions were denied',
         missing_params: 'OAuth callback missing parameters',
-        invalid_state: 'Invalid OAuth state  please try again',
+        invalid_state: 'Invalid OAuth state — try again',
         no_pages: 'No Facebook Pages found on your account',
-        exchange_failed: 'Failed to connect  please try again',
+        exchange_failed: 'Failed to connect — try again',
       };
       setError(messages[metaError] || `Meta connection failed: ${metaError}`);
       setActiveTab('integrations');
@@ -274,32 +353,43 @@ export default function SettingsPage() {
     }
   }, []);
 
-  /* ââ Mutations ââââââââââââââââââââââââââââââââââââââââââââ */
+  // Mutations
   const saveAI = async () => {
     setSaving(true);
     try {
       await settingsApi.updateAIConfig({
-        confidenceThreshold, autoApproveEnabled: autoApprove, dailyActionLimit: dailyLimit,
-        strategyPermissions: strategies, guardrailSettings: guardrails,
+        confidenceThreshold,
+        autoApproveEnabled: autoApprove,
+        dailyActionLimit: dailyLimit,
+        strategyPermissions: strategies,
+        guardrailSettings: guardrails,
       });
       setAiDirty(false);
       flash('AI configuration saved');
-    } catch (e: any) { flashError(e.message); }
+    } catch (e: any) {
+      flashError(e.message);
+    }
     setSaving(false);
   };
 
-  const toggleNotification = async (type: 'escalation' | 'daily_digest' | 'weekly_report' | 'brain_update') => {
+  const toggleNotification = async (
+    type: 'escalation' | 'daily_digest' | 'weekly_report' | 'brain_update',
+  ) => {
     setSaving(true);
     try {
       const updated = await settingsApi.updateNotification({ type, enabled: !notifPrefs[type] });
       setNotifPrefs(updated);
       flash('Notification preference updated');
-    } catch (e: any) { flashError(e.message); }
+    } catch (e: any) {
+      flashError(e.message);
+    }
     setSaving(false);
   };
 
-  const connectIntegration = async (provider: string, category: 'crm' | 'payments' | 'calendar' | 'commerce' | 'advertising' | 'messaging' | 'other') => {
-    // Meta Lead Ads uses OAuth  redirect to the authorize endpoint
+  const connectIntegration = async (
+    provider: string,
+    category: 'crm' | 'payments' | 'calendar' | 'commerce' | 'advertising' | 'messaging' | 'other',
+  ) => {
     if (provider === 'Meta Lead Ads') {
       const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
       window.location.href = `${apiBase}/api/integrations/meta/authorize`;
@@ -311,7 +401,9 @@ export default function SettingsPage() {
       await settingsApi.connectIntegration({ provider, category });
       await loadIntegrations();
       flash(`${provider} connected`);
-    } catch (e: any) { flashError(e.message); }
+    } catch (e: any) {
+      flashError(e.message);
+    }
     setSaving(false);
   };
 
@@ -321,7 +413,9 @@ export default function SettingsPage() {
       await settingsApi.disconnectIntegration(id);
       await loadIntegrations();
       flash(`${name} disconnected`);
-    } catch (e: any) { flashError(e.message); }
+    } catch (e: any) {
+      flashError(e.message);
+    }
     setSaving(false);
   };
 
@@ -331,7 +425,9 @@ export default function SettingsPage() {
       await settingsApi.syncIntegration(id);
       await loadIntegrations();
       flash(`${name} synced`);
-    } catch (e: any) { flashError(e.message); }
+    } catch (e: any) {
+      flashError(e.message);
+    }
     setSaving(false);
   };
 
@@ -345,7 +441,9 @@ export default function SettingsPage() {
       setInviteRole('viewer');
       await loadTeam();
       flash('Invitation sent');
-    } catch (e: any) { flashError(e.message); }
+    } catch (e: any) {
+      flashError(e.message);
+    }
     setSaving(false);
   };
 
@@ -355,7 +453,9 @@ export default function SettingsPage() {
       await settingsApi.removeMember(id);
       await loadTeam();
       flash('Member removed');
-    } catch (e: any) { flashError(e.message); }
+    } catch (e: any) {
+      flashError(e.message);
+    }
     setSaving(false);
   };
 
@@ -365,7 +465,9 @@ export default function SettingsPage() {
       await settingsApi.cancelInvite(id);
       await loadTeam();
       flash('Invitation cancelled');
-    } catch (e: any) { flashError(e.message); }
+    } catch (e: any) {
+      flashError(e.message);
+    }
     setSaving(false);
   };
 
@@ -375,234 +477,314 @@ export default function SettingsPage() {
       const updated = await settingsApi.updateSecurity({ [field]: value });
       setSecurity(updated);
       flash('Security setting updated');
-    } catch (e: any) { flashError(e.message); }
+    } catch (e: any) {
+      flashError(e.message);
+    }
     setSaving(false);
   };
 
-  /* ââ Helper: get integration status from API data âââââââââ */
   const getIntegrationStatus = (provider: string) => {
     return integrations.find((i) => i.provider === provider);
   };
 
   const channelIcons: Record<string, { icon: typeof Mail; color: string }> = {
-    email: { icon: Mail, color: 'bg-indigo-50 text-indigo-600' },
-    sms: { icon: Phone, color: 'bg-emerald-50 text-emerald-600' },
-    whatsapp: { icon: MessageCircle, color: 'bg-green-50 text-green-600' },
-    messenger: { icon: MessagesSquare, color: 'bg-blue-50 text-blue-600' },
+    email: { icon: Mail, color: 'bg-[var(--ds-violet-100)] text-[var(--ds-violet-500)]' },
+    sms: { icon: Phone, color: 'bg-[var(--ds-emerald-100)] text-[var(--ds-emerald-700)]' },
+    whatsapp: { icon: MessageCircle, color: 'bg-[var(--ds-emerald-100)] text-[var(--ds-emerald-700)]' },
+    messenger: { icon: MessagesSquare, color: 'bg-[var(--ds-violet-100)] text-[var(--ds-violet-500)]' },
   };
 
   return (
-    <div className="p-6">
-      {/* Header */}
-      <h1 className="text-xl font-bold text-gray-900 mb-1">Settings</h1>
-      <p className="text-sm text-gray-500 mb-5">Configure your growth workspace</p>
+    <div className="mx-auto max-w-6xl px-6 py-8">
+      <header className="mb-5">
+        <h1 className="text-h1 text-foreground">Settings</h1>
+        <p className="mt-1 text-body text-muted-foreground">Configure your growth workspace</p>
+      </header>
 
-      {/* Horizontal Tabs */}
-      <div className="border-b border-gray-200 mb-6">
-        <div className="flex gap-1">
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
+        <TabsList className="mb-6 flex-wrap h-auto">
           {tabs.map((tab) => (
-            <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
-              className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px ${
-                activeTab === tab.id
-                  ? 'border-indigo-500 text-indigo-700'
-                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-              }`}
-            >
-              <tab.icon className="w-4 h-4" />
+            <TabsTrigger key={tab.id} value={tab.id} className="gap-2">
+              <tab.icon className="h-4 w-4" />
               {tab.label}
-            </button>
+            </TabsTrigger>
           ))}
-        </div>
-      </div>
+        </TabsList>
 
-      {/* Content */}
-      <div className="max-w-3xl">
-        {/* Toast Messages */}
-        {success && (
-          <div className="mb-4 flex items-center gap-2 px-4 py-2.5 bg-emerald-50 border border-emerald-200 rounded-lg text-sm text-emerald-700">
-            <CheckCircle className="w-4 h-4" /> {success}
-          </div>
-        )}
-        {error && (
-          <div className="mb-4 flex items-center gap-2 px-4 py-2.5 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
-            <AlertCircle className="w-4 h-4" /> {error}
-          </div>
-        )}
-
-        {/* Loading skeleton */}
-        {loading && (
-          <div className="flex items-center justify-center py-20">
-            <Loader2 className="w-6 h-6 text-indigo-500 animate-spin" />
-            <span className="ml-2 text-sm text-gray-500">Loading settingsâ¦</span>
-          </div>
-        )}
-
-        {/* âââ AI Configuration âââ */}
-        {!loading && activeTab === 'ai' && (
-          <div className="flex flex-col gap-6">
-            <div className="bg-white border border-gray-200 rounded-xl p-6">
-              <div className="flex items-center justify-between mb-1">
-                <h2 className="text-base font-semibold text-gray-900">AI Decision Controls</h2>
-                <SaveButton saving={saving} dirty={aiDirty} onClick={saveAI} />
-              </div>
-              <p className="text-sm text-gray-500 mb-6">Control how autonomously the AI operates across all pipelines</p>
-
-              {/* Confidence Threshold */}
-              <div className="mb-6">
-                <label className="text-sm font-medium text-gray-700 mb-2 block">
-                  Global Confidence Threshold: <strong className="text-indigo-500">{confidenceThreshold}%</strong>
-                </label>
-                <p className="text-xs text-gray-500 mb-3">Actions below this confidence level will be escalated for human review</p>
-                <input type="range" min="20" max="95" value={confidenceThreshold}
-                  onChange={(e) => { setConfidenceThreshold(Number(e.target.value)); setAiDirty(true); }}
-                  className="w-full h-2 bg-gray-200 rounded-full appearance-none cursor-pointer accent-indigo-500"
-                />
-                <div className="flex justify-between mt-1 text-[10px] text-gray-400">
-                  <span>20% (More autonomous)</span>
-                  <span>95% (More human review)</span>
-                </div>
-              </div>
-
-              {/* Auto-approve toggle */}
-              <div className="flex items-center justify-between p-4 bg-gray-50 rounded-xl mb-4">
-                <div>
-                  <div className="text-sm font-medium text-gray-900">Auto-approve high-confidence actions</div>
-                  <div className="text-xs text-gray-500">Actions above {confidenceThreshold}% confidence execute without human review</div>
-                </div>
-                <Toggle enabled={autoApprove} onChange={() => { setAutoApprove(!autoApprove); setAiDirty(true); }} />
-              </div>
-
-              {/* Daily Limit */}
-              <div className="flex items-center justify-between p-4 bg-gray-50 rounded-xl">
-                <div>
-                  <div className="text-sm font-medium text-gray-900">Daily action limit</div>
-                  <div className="text-xs text-gray-500">Maximum AI-initiated actions per day</div>
-                </div>
-                <input type="number" value={dailyLimit}
-                  onChange={(e) => { setDailyLimit(Number(e.target.value)); setAiDirty(true); }}
-                  className="w-24 px-3 py-1.5 text-sm text-right border border-gray-200 rounded-lg focus:border-indigo-500 outline-none"
-                />
-              </div>
+        <div className="max-w-3xl">
+          {success ? (
+            <div className="mb-4 flex items-center gap-2 rounded-[var(--ds-radius-input)] border border-[var(--ds-emerald-100)] bg-[var(--ds-emerald-100)] px-4 py-2.5 text-body text-[var(--ds-emerald-700)]">
+              <CheckCircle className="h-4 w-4" /> {success}
             </div>
+          ) : null}
+          {error ? (
+            <div className="mb-4 flex items-center gap-2 rounded-[var(--ds-radius-input)] border border-[var(--ds-danger-soft)] bg-[var(--ds-danger-soft)] px-4 py-2.5 text-body text-[var(--ds-danger-text)]">
+              <AlertCircle className="h-4 w-4" /> {error}
+            </div>
+          ) : null}
 
-            {/* Strategy Permissions */}
-            <div className="bg-white border border-gray-200 rounded-xl p-6">
-              <h2 className="text-base font-semibold text-gray-900 mb-1">Strategy Permissions</h2>
-              <p className="text-sm text-gray-500 mb-4">Enable or disable AI strategies globally</p>
-              <div className="flex flex-col gap-3">
-                {([
-                  { key: 'directConversion', name: 'Direct Conversion', desc: 'Push toward conversion for high-intent contacts' },
-                  { key: 'guidedAssistance', name: 'Guided Assistance', desc: 'Educational approach for evaluating contacts' },
-                  { key: 'trustBuilding', name: 'Trust Building', desc: 'Relationship-building for early-stage or at-risk contacts' },
-                  { key: 'reengagement', name: 'Re-engagement', desc: 'Win-back dormant or churned contacts' },
-                ] as const).map((s) => (
-                  <div key={s.key} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+          {loading ? (
+            <div className="flex items-center justify-center py-20">
+              <Loader2 className="h-6 w-6 animate-spin text-[var(--ds-violet-500)]" />
+              <span className="ml-2 text-body text-muted-foreground">Loading settings…</span>
+            </div>
+          ) : null}
+
+          {/* — AI Configuration — */}
+          <TabsContent value="ai" className="mt-0">
+            {!loading && (
+              <div className="flex flex-col gap-6">
+                <SectionCard
+                  title="AI decision controls"
+                  headerRight={<SaveButton saving={saving} dirty={aiDirty} onClick={saveAI} />}
+                >
+                  <p className="mb-6 text-body text-muted-foreground">
+                    Control how autonomously the AI operates across all pipelines
+                  </p>
+
+                  <div className="mb-6">
+                    <label className="mb-2 block text-label text-foreground">
+                      Global confidence threshold:{' '}
+                      <strong className="text-[var(--ds-violet-500)]">
+                        {confidenceThreshold}%
+                      </strong>
+                    </label>
+                    <p className="mb-3 text-caption text-muted-foreground">
+                      Actions below this confidence level will be escalated for human review
+                    </p>
+                    <input
+                      type="range"
+                      min="20"
+                      max="95"
+                      value={confidenceThreshold}
+                      onChange={(e) => {
+                        setConfidenceThreshold(Number(e.target.value));
+                        setAiDirty(true);
+                      }}
+                      className="h-2 w-full cursor-pointer appearance-none rounded-full bg-[var(--ds-surface-sunken)] accent-[var(--ds-violet-500)]"
+                    />
+                    <div className="mt-1 flex justify-between text-micro text-muted-foreground">
+                      <span>20% (More autonomous)</span>
+                      <span>95% (More human review)</span>
+                    </div>
+                  </div>
+
+                  <div className="mb-4 flex items-center justify-between rounded-[var(--ds-radius-input)] bg-[var(--ds-surface-sunken)] p-4">
                     <div>
-                      <div className="text-sm font-medium text-gray-900">{s.name}</div>
-                      <div className="text-xs text-gray-500">{s.desc}</div>
+                      <div className="text-label text-foreground">
+                        Auto-approve high-confidence actions
+                      </div>
+                      <div className="text-caption text-muted-foreground">
+                        Actions above {confidenceThreshold}% confidence execute without human
+                        review
+                      </div>
                     </div>
                     <Toggle
-                      enabled={strategies[s.key]}
-                      onChange={() => { setStrategies({ ...strategies, [s.key]: !strategies[s.key] }); setAiDirty(true); }}
+                      enabled={autoApprove}
+                      onChange={() => {
+                        setAutoApprove(!autoApprove);
+                        setAiDirty(true);
+                      }}
                     />
                   </div>
-                ))}
-              </div>
-            </div>
 
-            {/* Guardrails */}
-            <div className="bg-white border border-gray-200 rounded-xl p-6">
-              <h2 className="text-base font-semibold text-gray-900 mb-1">Guardrails</h2>
-              <p className="text-sm text-gray-500 mb-4">Safety checks applied before every AI action</p>
-              <div className="grid grid-cols-2 gap-3">
-                {([
-                  { key: 'toneValidator', name: 'Tone Validator', desc: 'Checks brand voice compliance' },
-                  { key: 'accuracyCheck', name: 'Accuracy Check', desc: 'Validates against Company Truth' },
-                  { key: 'hallucinationFilter', name: 'Hallucination Filter', desc: 'Ensures claims grounded in context' },
-                  { key: 'complianceCheck', name: 'Compliance (CAN-SPAM/CASL)', desc: 'Legal compliance enforcement' },
-                  { key: 'injectionDefense', name: 'Injection Defense', desc: 'Blocks prompt injection attempts' },
-                  { key: 'confidenceGate', name: 'Confidence Gate', desc: 'Threshold-based auto-escalation' },
-                ] as const).map((g) => (
-                  <div key={g.key} className="flex items-start gap-3 p-3 bg-gray-50 rounded-lg">
-                    <CheckCircle className={`w-4 h-4 mt-0.5 flex-shrink-0 ${guardrails[g.key] ? 'text-emerald-500' : 'text-gray-300'}`} />
-                    <div className="flex-1">
-                      <div className="text-sm font-medium text-gray-900">{g.name}</div>
-                      <div className="text-xs text-gray-500">{g.desc}</div>
+                  <div className="flex items-center justify-between rounded-[var(--ds-radius-input)] bg-[var(--ds-surface-sunken)] p-4">
+                    <div>
+                      <div className="text-label text-foreground">Daily action limit</div>
+                      <div className="text-caption text-muted-foreground">
+                        Maximum AI-initiated actions per day
+                      </div>
                     </div>
-                    <Toggle
-                      enabled={guardrails[g.key]}
-                      onChange={() => { setGuardrails({ ...guardrails, [g.key]: !guardrails[g.key] }); setAiDirty(true); }}
+                    <input
+                      type="number"
+                      value={dailyLimit}
+                      onChange={(e) => {
+                        setDailyLimit(Number(e.target.value));
+                        setAiDirty(true);
+                      }}
+                      className="w-24 rounded-[var(--ds-radius-input)] border border-border bg-card px-3 py-1.5 text-right text-body text-foreground outline-none focus:border-[var(--ds-violet-500)]"
                     />
                   </div>
-                ))}
+                </SectionCard>
+
+                <SectionCard title="Strategy permissions">
+                  <p className="mb-4 text-body text-muted-foreground">
+                    Enable or disable AI strategies globally
+                  </p>
+                  <div className="flex flex-col gap-3">
+                    {(
+                      [
+                        {
+                          key: 'directConversion',
+                          name: 'Direct conversion',
+                          desc: 'Push toward conversion for high-intent contacts',
+                        },
+                        {
+                          key: 'guidedAssistance',
+                          name: 'Guided assistance',
+                          desc: 'Educational approach for evaluating contacts',
+                        },
+                        {
+                          key: 'trustBuilding',
+                          name: 'Trust building',
+                          desc: 'Relationship-building for early-stage or at-risk contacts',
+                        },
+                        {
+                          key: 'reengagement',
+                          name: 'Re-engagement',
+                          desc: 'Win-back dormant or churned contacts',
+                        },
+                      ] as const
+                    ).map((s) => (
+                      <div
+                        key={s.key}
+                        className="flex items-center justify-between rounded-[var(--ds-radius-input)] bg-[var(--ds-surface-sunken)] p-3"
+                      >
+                        <div>
+                          <div className="text-label text-foreground">{s.name}</div>
+                          <div className="text-caption text-muted-foreground">{s.desc}</div>
+                        </div>
+                        <Toggle
+                          enabled={strategies[s.key]}
+                          onChange={() => {
+                            setStrategies({ ...strategies, [s.key]: !strategies[s.key] });
+                            setAiDirty(true);
+                          }}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </SectionCard>
+
+                <SectionCard title="Guardrails">
+                  <p className="mb-4 text-body text-muted-foreground">
+                    Safety checks applied before every AI action
+                  </p>
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                    {(
+                      [
+                        { key: 'toneValidator', name: 'Tone validator', desc: 'Checks brand voice compliance' },
+                        { key: 'accuracyCheck', name: 'Accuracy check', desc: 'Validates against Company Truth' },
+                        {
+                          key: 'hallucinationFilter',
+                          name: 'Hallucination filter',
+                          desc: 'Ensures claims grounded in context',
+                        },
+                        {
+                          key: 'complianceCheck',
+                          name: 'Compliance (CAN-SPAM/CASL)',
+                          desc: 'Legal compliance enforcement',
+                        },
+                        {
+                          key: 'injectionDefense',
+                          name: 'Injection defense',
+                          desc: 'Blocks prompt injection attempts',
+                        },
+                        {
+                          key: 'confidenceGate',
+                          name: 'Confidence gate',
+                          desc: 'Threshold-based auto-escalation',
+                        },
+                      ] as const
+                    ).map((g) => (
+                      <div
+                        key={g.key}
+                        className="flex items-start gap-3 rounded-[var(--ds-radius-input)] bg-[var(--ds-surface-sunken)] p-3"
+                      >
+                        <CheckCircle
+                          className={`mt-0.5 h-4 w-4 flex-shrink-0 ${guardrails[g.key] ? 'text-[var(--ds-emerald-500)]' : 'text-[var(--ds-ink-tertiary)]'}`}
+                        />
+                        <div className="flex-1">
+                          <div className="text-label text-foreground">{g.name}</div>
+                          <div className="text-caption text-muted-foreground">{g.desc}</div>
+                        </div>
+                        <Toggle
+                          enabled={guardrails[g.key]}
+                          onChange={() => {
+                            setGuardrails({ ...guardrails, [g.key]: !guardrails[g.key] });
+                            setAiDirty(true);
+                          }}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </SectionCard>
               </div>
-            </div>
-          </div>
-        )}
+            )}
+          </TabsContent>
 
-        {/* âââ Channels âââ */}
-        {!loading && activeTab === 'channels' && (
-          <div className="flex flex-col gap-6">
-            <div className="bg-white border border-gray-200 rounded-xl p-6">
-              <h2 className="text-base font-semibold text-gray-900 mb-1">Communication Channels</h2>
-              <p className="text-sm text-gray-500 mb-6">Configure channels the AI can use to reach contacts</p>
+          {/* — Channels — */}
+          <TabsContent value="channels" className="mt-0">
+            {!loading && (
+              <SectionCard title="Communication channels">
+                <p className="mb-6 text-body text-muted-foreground">
+                  Configure channels the AI can use to reach contacts
+                </p>
+                <div className="flex flex-col gap-4">
+                  {(['email', 'sms', 'whatsapp', 'messenger'] as const).map((type) => {
+                    const ch = channels.find((c) => c.type === type);
+                    const iconInfo = channelIcons[type];
+                    const Icon = iconInfo.icon;
+                    const isConnected = ch?.status === 'connected';
 
-              <div className="flex flex-col gap-4">
-                {(['email', 'sms', 'whatsapp', 'messenger'] as const).map((type) => {
-                  const ch = channels.find((c) => c.type === type);
-                  const iconInfo = channelIcons[type];
-                  const Icon = iconInfo.icon;
-                  const isConnected = ch?.status === 'connected';
-
-                  return (
-                    <div key={type} className={`p-4 border rounded-xl ${ch ? 'border-gray-200' : 'border-gray-200 border-dashed'}`}>
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-3">
-                          <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${iconInfo.color}`}>
-                            <Icon className="w-5 h-5" />
-                          </div>
-                          <div>
-                            <div className="text-sm font-semibold text-gray-900 capitalize">{type}</div>
-                            <div className="text-xs text-gray-500">
-                              {ch
-                                ? type === 'messenger' && (ch.config?.pageName as string | undefined)
-                                  ? `Connected as ${ch.config.pageName as string} · ${isConnected ? 'Active' : ch.status}`
-                                  : `${ch.provider} · ${isConnected ? 'Active' : ch.status}`
-                                : 'Not configured'}
+                    return (
+                      <div
+                        key={type}
+                        className={`rounded-[var(--ds-radius-input)] border p-4 ${ch ? 'border-border' : 'border-dashed border-border'}`}
+                      >
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-3">
+                            <div className={`flex h-10 w-10 items-center justify-center rounded-lg ${iconInfo.color}`}>
+                              <Icon className="h-5 w-5" />
+                            </div>
+                            <div>
+                              <div className="text-label text-foreground capitalize">{type}</div>
+                              <div className="text-caption text-muted-foreground">
+                                {ch
+                                  ? type === 'messenger' && (ch.config?.pageName as string | undefined)
+                                    ? `Connected as ${ch.config.pageName as string} · ${isConnected ? 'Active' : ch.status}`
+                                    : `${ch.provider} · ${isConnected ? 'Active' : ch.status}`
+                                  : 'Not configured'}
+                              </div>
                             </div>
                           </div>
+                          <div className="flex items-center gap-2">
+                            {ch && <ChannelStatusBadge status={ch.status} />}
+                            {!ch && (
+                              <Button
+                                variant="gradient"
+                                size="sm"
+                                onClick={() => {
+                                  if (type === 'messenger') {
+                                    const apiBase =
+                                      process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
+                                    window.open(
+                                      `${apiBase}/api/integrations/messenger/authorize`,
+                                      '_blank',
+                                    );
+                                    return;
+                                  }
+                                  settingsApi
+                                    .updateChannel({
+                                      type: type as 'email' | 'sms' | 'whatsapp',
+                                      provider: type === 'email' ? 'Resend' : 'Twilio',
+                                      status: 'disconnected',
+                                    })
+                                    .then(loadChannels)
+                                    .then(() => flash(`${type} channel added`));
+                                }}
+                              >
+                                Configure
+                              </Button>
+                            )}
+                          </div>
                         </div>
-                        <div className="flex items-center gap-2">
-                          {ch && <StatusBadge status={ch.status} />}
-                          {!ch && (
+                        {ch && (
+                          <div className="mt-3 flex items-center gap-2 text-caption text-muted-foreground">
+                            {ch.lastTestedAt && <span>Last tested: {timeAgo(ch.lastTestedAt)}</span>}
                             <button
-                    onClick={() => {
-                      if (type === 'messenger') {
-                        const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
-                        window.open(`${apiBase}/api/integrations/messenger/authorize`, '_blank');
-                        return;
-                      }
-                      settingsApi.updateChannel({
-                        type: type as 'email' | 'sms' | 'whatsapp', provider: type === 'email' ? 'Resend' : 'Twilio', status: 'disconnected',
-                      }).then(loadChannels).then(() => flash(`${type} channel added`));
-                    }}
-                              className="text-xs bg-indigo-500 text-white px-3 py-1.5 rounded-lg font-medium hover:bg-indigo-600 transition-colors"
-                            >
-                              Configure
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                      {ch && (
-                        <div className="mt-3 flex items-center gap-2 text-xs text-gray-400">
-                          {ch.lastTestedAt && <span>Last tested: {timeAgo(ch.lastTestedAt)}</span>}
-                          <button
-                            onClick={() =>
-                              settingsApi
-                                .testChannel(type)
-                                .then((res) => {
+                              onClick={() =>
+                                settingsApi.testChannel(type).then((res) => {
                                   loadChannels();
                                   if (type === 'messenger') {
                                     setMessengerTestResult(
@@ -617,320 +799,431 @@ export default function SettingsPage() {
                                   if (res.success) flash(res.message || `${type} test successful`);
                                   else setError(res.message || `${type} test failed`);
                                 })
-                            }
-                            className="text-indigo-500 hover:text-indigo-700 font-medium flex items-center gap-1"
-                          >
-                            <RefreshCw className="w-3 h-3" /> Test Connection
-                          </button>
-                          {/* KAN-474 Reconnect CTA — surfaces when the most recent
-                              messenger test came back token_expired. Re-runs the
-                              same OAuth popup as the initial Configure flow. */}
-                          {type === 'messenger' &&
-                            messengerTestResult?.reason === 'token_expired' && (
-                              <button
-                                onClick={() => {
-                                  const apiBase =
-                                    process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
-                                  window.open(
-                                    `${apiBase}/api/integrations/messenger/authorize`,
-                                    '_blank',
-                                  );
-                                }}
-                                className="text-amber-600 hover:text-amber-700 font-medium"
+                              }
+                              className="flex items-center gap-1 font-medium text-[var(--ds-violet-500)] hover:text-[var(--ds-violet-700)]"
+                            >
+                              <RefreshCw className="h-3 w-3" /> Test connection
+                            </button>
+                            {/* KAN-474 Reconnect CTA */}
+                            {type === 'messenger' &&
+                              messengerTestResult?.reason === 'token_expired' && (
+                                <button
+                                  onClick={() => {
+                                    const apiBase =
+                                      process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
+                                    window.open(
+                                      `${apiBase}/api/integrations/messenger/authorize`,
+                                      '_blank',
+                                    );
+                                  }}
+                                  className="font-medium text-[var(--ds-warning-text)] hover:text-[var(--ds-warning)]"
+                                >
+                                  Reconnect
+                                </button>
+                              )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </SectionCard>
+            )}
+          </TabsContent>
+
+          {/* — Integrations — */}
+          <TabsContent value="integrations" className="mt-0">
+            {!loading && (
+              <SectionCard title="Integrations">
+                <p className="mb-4 text-body text-muted-foreground">
+                  Connect your tools to power the AI loop
+                </p>
+
+                {/* Integration sub-tabs — pill row */}
+                <Tabs
+                  value={integrationSubTab}
+                  onValueChange={(v) => setIntegrationSubTab(v as typeof integrationSubTab)}
+                  className="mb-6"
+                >
+                  <TabsList>
+                    {integrationSubTabs.map((st) => (
+                      <TabsTrigger key={st.id} value={st.id}>
+                        {st.label}
+                      </TabsTrigger>
+                    ))}
+                  </TabsList>
+                </Tabs>
+
+                <div className="flex flex-col gap-3">
+                  {integrationCatalog
+                    .filter((cat) => cat.subTab === integrationSubTab)
+                    .map((cat) => {
+                      const live = getIntegrationStatus(cat.provider);
+                      const isConnected = live?.status === 'connected';
+
+                      return (
+                        <div
+                          key={cat.provider}
+                          className="flex items-center justify-between rounded-[var(--ds-radius-input)] border border-border p-4"
+                        >
+                          <div className="flex items-center gap-3">
+                            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[var(--ds-surface-sunken)]">
+                              <cat.icon className="h-5 w-5 text-muted-foreground" />
+                            </div>
+                            <div>
+                              <div className="text-label text-foreground">{cat.provider}</div>
+                              <div className="text-caption text-muted-foreground capitalize">
+                                {cat.category}
+                              </div>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-3">
+                            {live?.lastSyncAt && (
+                              <span className="text-micro text-muted-foreground">
+                                Synced {timeAgo(live.lastSyncAt)}
+                              </span>
+                            )}
+                            {isConnected ? (
+                              <div className="flex items-center gap-2">
+                                <button
+                                  onClick={() => syncIntegration(live!.id, cat.provider)}
+                                  disabled={saving}
+                                  className="flex items-center gap-1 text-caption font-medium text-[var(--ds-violet-500)] hover:text-[var(--ds-violet-700)]"
+                                >
+                                  <RefreshCw className={`h-3 w-3 ${saving ? 'animate-spin' : ''}`} /> Sync
+                                </button>
+                                <ChannelStatusBadge status="connected" />
+                                <button
+                                  onClick={() => disconnectIntegration(live!.id, cat.provider)}
+                                  disabled={saving}
+                                  className="text-muted-foreground hover:text-[var(--ds-danger-text)]"
+                                >
+                                  <X className="h-3.5 w-3.5" />
+                                </button>
+                              </div>
+                            ) : live?.status === 'disconnected' ? (
+                              <Button
+                                variant="gradient"
+                                size="sm"
+                                onClick={() => connectIntegration(cat.provider, cat.category)}
+                                disabled={saving}
                               >
                                 Reconnect
-                              </button>
+                              </Button>
+                            ) : (
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => connectIntegration(cat.provider, cat.category)}
+                                disabled={saving}
+                              >
+                                Connect
+                              </Button>
                             )}
+                          </div>
                         </div>
-                      )}
+                      );
+                    })}
+                </div>
+              </SectionCard>
+            )}
+          </TabsContent>
+
+          {/* — Team & roles — */}
+          <TabsContent value="team" className="mt-0">
+            {!loading && (
+              <SectionCard
+                title="Team & roles"
+                headerRight={
+                  <Button
+                    variant="gradient"
+                    size="sm"
+                    onClick={() => setShowInvite(true)}
+                  >
+                    <UserPlus className="h-3 w-3" /> Invite member
+                  </Button>
+                }
+              >
+                <p className="mb-6 text-body text-muted-foreground">
+                  Manage who has access and what they can do
+                </p>
+
+                {showInvite && (
+                  <div className="mb-4 rounded-[var(--ds-radius-input)] border border-[var(--ds-violet-100)] bg-[var(--ds-violet-100)]/40 p-4">
+                    <div className="mb-3 flex items-center justify-between">
+                      <span className="text-label text-foreground">Send invitation</span>
+                      <button
+                        onClick={() => setShowInvite(false)}
+                        className="text-muted-foreground hover:text-foreground"
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
                     </div>
-                  );
-                })}
-              </div>
-            </div>
-          </div>
-        )}
+                    <div className="flex gap-2">
+                      <input
+                        type="email"
+                        value={inviteEmail}
+                        onChange={(e) => setInviteEmail(e.target.value)}
+                        placeholder="email@example.com"
+                        className="flex-1 rounded-[var(--ds-radius-input)] border border-border bg-card px-3 py-2 text-body text-foreground outline-none focus:border-[var(--ds-violet-500)]"
+                      />
+                      <select
+                        value={inviteRole}
+                        onChange={(e) => setInviteRole(e.target.value as typeof inviteRole)}
+                        className="rounded-[var(--ds-radius-input)] border border-border bg-card px-3 py-2 text-body text-foreground outline-none focus:border-[var(--ds-violet-500)]"
+                      >
+                        <option value="viewer">Viewer</option>
+                        <option value="agent">Agent</option>
+                        <option value="admin">Admin</option>
+                        <option value="owner">Owner</option>
+                      </select>
+                      <Button
+                        variant="gradient"
+                        size="sm"
+                        onClick={inviteMember}
+                        disabled={saving || !inviteEmail}
+                      >
+                        {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Send'}
+                      </Button>
+                    </div>
+                  </div>
+                )}
 
-        {/* âââ Integrations âââ */}
-        {!loading && activeTab === 'integrations' && (
-          <div className="bg-white border border-gray-200 rounded-xl p-6">
-            <h2 className="text-base font-semibold text-gray-900 mb-1">Integrations</h2>
-            <p className="text-sm text-gray-500 mb-4">Connect your tools to power the AI loop</p>
-
-            {/* Integration Sub-tabs */}
-            <div className="flex gap-1 mb-6 border-b border-gray-100">
-              {integrationSubTabs.map((st) => (
-                <button
-                  key={st.id}
-                  onClick={() => setIntegrationSubTab(st.id)}
-                  className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px ${
-                    integrationSubTab === st.id
-                      ? 'border-indigo-500 text-indigo-700'
-                      : 'border-transparent text-gray-400 hover:text-gray-600 hover:border-gray-300'
-                  }`}
-                >
-                  {st.label}
-                </button>
-              ))}
-            </div>
-
-            <div className="flex flex-col gap-3">
-              {integrationCatalog.filter((cat) => cat.subTab === integrationSubTab).map((cat) => {
-                const live = getIntegrationStatus(cat.provider);
-                const isConnected = live?.status === 'connected';
-
-                return (
-                  <div key={cat.provider} className="flex items-center justify-between p-4 border border-gray-200 rounded-xl">
-                    <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 bg-gray-50 rounded-lg flex items-center justify-center "><cat.icon className="w-5 h-5 text-gray-600" /></div>
-                      <div>
-                        <div className="text-sm font-semibold text-gray-900">{cat.provider}</div>
-                        <div className="text-xs text-gray-500 capitalize">{cat.category}</div>
+                <div className="flex flex-col gap-3">
+                  {members.map((m) => (
+                    <div
+                      key={m.id}
+                      className="flex items-center justify-between rounded-[var(--ds-radius-input)] border border-border p-4"
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="flex h-9 w-9 items-center justify-center rounded-full bg-[var(--ds-violet-100)] text-caption font-medium text-[var(--ds-violet-500)]">
+                          {(m.name || m.email).slice(0, 2).toUpperCase()}
+                        </div>
+                        <div>
+                          <div className="text-label text-foreground">{m.name || m.email}</div>
+                          <div className="text-caption text-muted-foreground">{m.email}</div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={`rounded-[var(--ds-radius-pill)] px-2.5 py-1 text-micro font-medium capitalize ${roleColors[m.role]}`}
+                        >
+                          {m.role}
+                        </span>
+                        {m.role !== 'owner' && (
+                          <button
+                            onClick={() => removeMember(m.id)}
+                            disabled={saving}
+                            className="text-muted-foreground hover:text-[var(--ds-danger-text)]"
+                          >
+                            <X className="h-3.5 w-3.5" />
+                          </button>
+                        )}
                       </div>
                     </div>
-                    <div className="flex items-center gap-3">
-                      {live?.lastSyncAt && <span className="text-[11px] text-gray-400">Synced {timeAgo(live.lastSyncAt)}</span>}
-                      {isConnected ? (
-                        <div className="flex items-center gap-2">
-                          <button
-                            onClick={() => syncIntegration(live!.id, cat.provider)}
-                            disabled={saving}
-                            className="text-xs text-indigo-500 hover:text-indigo-700 font-medium flex items-center gap-1"
-                          >
-                            <RefreshCw className={`w-3 h-3 ${saving ? 'animate-spin' : ''}`} /> Sync
-                          </button>
-                          <StatusBadge status="connected" />
-                          <button
-                            onClick={() => disconnectIntegration(live!.id, cat.provider)}
-                            disabled={saving}
-                            className="text-xs text-gray-400 hover:text-red-500"
-                          >
-                            <X className="w-3.5 h-3.5" />
-                          </button>
+                  ))}
+
+                  {invitations.map((inv) => (
+                    <div
+                      key={inv.id}
+                      className="flex items-center justify-between rounded-[var(--ds-radius-input)] border border-[var(--ds-warning-soft)] bg-[var(--ds-warning-soft)]/40 p-4"
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="flex h-9 w-9 items-center justify-center rounded-full bg-[var(--ds-warning-soft)] text-caption font-medium text-[var(--ds-warning-text)]">
+                          {inv.email.slice(0, 2).toUpperCase()}
                         </div>
-                      ) : live?.status === 'disconnected' ? (
-                        <button
-                          onClick={() => connectIntegration(cat.provider, cat.category)}
-                          disabled={saving}
-                          className="text-xs bg-indigo-500 text-white px-3 py-1.5 rounded-lg font-medium hover:bg-indigo-600 transition-colors"
+                        <div>
+                          <div className="text-label text-foreground">{inv.email}</div>
+                          <div className="text-caption text-muted-foreground">
+                            Invited · Expires {timeAgo(inv.expiresAt)}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={`rounded-[var(--ds-radius-pill)] px-2.5 py-1 text-micro font-medium capitalize ${roleColors[inv.role]}`}
                         >
-                          Reconnect
-                        </button>
-                      ) : (
+                          {inv.role}
+                        </span>
+                        <ChannelStatusBadge status="pending" />
                         <button
-                          onClick={() => connectIntegration(cat.provider, cat.category)}
+                          onClick={() => cancelInvite(inv.id)}
                           disabled={saving}
-                          className="text-xs bg-white border border-gray-200 text-gray-600 px-3 py-1.5 rounded-lg font-medium hover:bg-gray-50 transition-colors"
+                          className="text-muted-foreground hover:text-[var(--ds-danger-text)]"
                         >
-                          Connect
+                          <X className="h-3.5 w-3.5" />
                         </button>
-                      )}
+                      </div>
                     </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
+                  ))}
 
-        {/* âââ Team & Roles âââ */}
-        {!loading && activeTab === 'team' && (
-          <div className="bg-white border border-gray-200 rounded-xl p-6">
-            <div className="flex items-center justify-between mb-6">
-              <div>
-                <h2 className="text-base font-semibold text-gray-900">Team & Roles</h2>
-                <p className="text-sm text-gray-500 mt-0.5">Manage who has access and what they can do</p>
-              </div>
-              <button
-                onClick={() => setShowInvite(true)}
-                className="text-xs bg-indigo-500 text-white px-3 py-1.5 rounded-lg font-medium hover:bg-indigo-600 transition-colors flex items-center gap-1.5"
-              >
-                <UserPlus className="w-3 h-3" /> Invite Member
-              </button>
-            </div>
-
-            {/* Invite Modal */}
-            {showInvite && (
-              <div className="mb-4 p-4 bg-indigo-50 border border-indigo-200 rounded-xl">
-                <div className="flex items-center justify-between mb-3">
-                  <span className="text-sm font-medium text-gray-900">Send Invitation</span>
-                  <button onClick={() => setShowInvite(false)} className="text-gray-400 hover:text-gray-600"><X className="w-4 h-4" /></button>
+                  {members.length === 0 && invitations.length === 0 && (
+                    <div className="py-8 text-center text-body text-muted-foreground">
+                      No team members yet. Invite someone to get started.
+                    </div>
+                  )}
                 </div>
-                <div className="flex gap-2">
-                  <input
-                    type="email" value={inviteEmail} onChange={(e) => setInviteEmail(e.target.value)}
-                    placeholder="email@example.com"
-                    className="flex-1 px-3 py-2 text-sm border border-gray-200 rounded-lg focus:border-indigo-500 outline-none bg-white"
-                  />
-                  <select
-                    value={inviteRole} onChange={(e) => setInviteRole(e.target.value as typeof inviteRole)}
-                    className="px-3 py-2 text-sm border border-gray-200 rounded-lg bg-white focus:border-indigo-500 outline-none"
-                  >
-                    <option value="viewer">Viewer</option>
-                    <option value="agent">Agent</option>
-                    <option value="admin">Admin</option>
-                    <option value="owner">Owner</option>
-                  </select>
-                  <button
-                    onClick={inviteMember} disabled={saving || !inviteEmail}
-                    className="px-4 py-2 text-sm bg-indigo-500 text-white rounded-lg font-medium hover:bg-indigo-600 disabled:opacity-50"
-                  >
-                    {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Send'}
-                  </button>
-                </div>
-              </div>
+              </SectionCard>
             )}
+          </TabsContent>
 
-            {/* Members */}
-            <div className="flex flex-col gap-3">
-              {members.map((m) => (
-                <div key={m.id} className="flex items-center justify-between p-4 border border-gray-200 rounded-xl">
-                  <div className="flex items-center gap-3">
-                    <div className="w-9 h-9 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center text-xs font-semibold">
-                      {(m.name || m.email).slice(0, 2).toUpperCase()}
+          {/* — Notifications — */}
+          <TabsContent value="notifications" className="mt-0">
+            {!loading && (
+              <SectionCard title="Notification preferences">
+                <p className="mb-6 text-body text-muted-foreground">
+                  Choose what alerts and reports you receive
+                </p>
+                <div className="flex flex-col gap-4">
+                  {(
+                    [
+                      {
+                        key: 'escalation' as const,
+                        label: 'Escalation alerts',
+                        desc: 'Get notified when the AI escalates a contact for human review',
+                      },
+                      {
+                        key: 'daily_digest' as const,
+                        label: 'Daily digest',
+                        desc: 'Summary of all AI actions, decisions, and outcomes from the day',
+                      },
+                      {
+                        key: 'weekly_report' as const,
+                        label: 'Weekly performance report',
+                        desc: 'Strategy performance, conversion rates, and pipeline health',
+                      },
+                      {
+                        key: 'brain_update' as const,
+                        label: 'Brain update notifications',
+                        desc: 'Get notified when the Business Brain completes a learning cycle',
+                      },
+                    ]
+                  ).map((n) => (
+                    <div
+                      key={n.key}
+                      className="flex items-center justify-between rounded-[var(--ds-radius-input)] bg-[var(--ds-surface-sunken)] p-4"
+                    >
+                      <div>
+                        <div className="text-label text-foreground">{n.label}</div>
+                        <div className="text-caption text-muted-foreground">{n.desc}</div>
+                      </div>
+                      <Toggle
+                        enabled={!!notifPrefs[n.key]}
+                        onChange={() => toggleNotification(n.key)}
+                        disabled={saving}
+                      />
                     </div>
-                    <div>
-                      <div className="text-sm font-medium text-gray-900">{m.name || m.email}</div>
-                      <div className="text-xs text-gray-500">{m.email}</div>
+                  ))}
+                </div>
+              </SectionCard>
+            )}
+          </TabsContent>
+
+          {/* — Security — */}
+          <TabsContent value="security" className="mt-0">
+            {!loading && security && (
+              <SectionCard title="Security & compliance">
+                <p className="mb-6 text-body text-muted-foreground">
+                  Data protection and access controls
+                </p>
+                <div className="flex flex-col gap-3">
+                  <div className="flex items-center justify-between rounded-[var(--ds-radius-input)] border border-border p-4">
+                    <div className="flex items-center gap-3">
+                      <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[var(--ds-surface-sunken)]">
+                        <Shield className="h-4 w-4 text-muted-foreground" />
+                      </div>
+                      <div>
+                        <div className="text-label text-foreground">Two-factor authentication</div>
+                        <div className="text-caption text-muted-foreground">
+                          Require 2FA for all team members
+                        </div>
+                      </div>
                     </div>
+                    <Toggle
+                      enabled={security.twoFactorEnabled}
+                      onChange={() => updateSecurity('twoFactorEnabled', !security.twoFactorEnabled)}
+                      disabled={saving}
+                    />
                   </div>
-                  <div className="flex items-center gap-2">
-                    <span className={`text-[11px] px-2.5 py-1 rounded-full font-medium capitalize ${roleColors[m.role]}`}>{m.role}</span>
-                    {m.role !== 'owner' && (
-                      <button onClick={() => removeMember(m.id)} disabled={saving} className="text-gray-400 hover:text-red-500">
-                        <X className="w-3.5 h-3.5" />
-                      </button>
-                    )}
+
+                  <div className="flex items-center justify-between rounded-[var(--ds-radius-input)] border border-border p-4">
+                    <div className="flex items-center gap-3">
+                      <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[var(--ds-surface-sunken)]">
+                        <Key className="h-4 w-4 text-muted-foreground" />
+                      </div>
+                      <div>
+                        <div className="text-label text-foreground">SSO (SAML)</div>
+                        <div className="text-caption text-muted-foreground">
+                          Single sign-on via your identity provider
+                        </div>
+                      </div>
+                    </div>
+                    <Toggle
+                      enabled={security.ssoEnabled}
+                      onChange={() => updateSecurity('ssoEnabled', !security.ssoEnabled)}
+                      disabled={saving}
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between rounded-[var(--ds-radius-input)] border border-border p-4">
+                    <div className="flex items-center gap-3">
+                      <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[var(--ds-surface-sunken)]">
+                        <Lock className="h-4 w-4 text-muted-foreground" />
+                      </div>
+                      <div>
+                        <div className="text-label text-foreground">Data encryption</div>
+                        <div className="text-caption text-muted-foreground">
+                          AES-256 at rest, TLS 1.3 in transit
+                        </div>
+                      </div>
+                    </div>
+                    <span className="rounded-[var(--ds-radius-pill)] bg-[var(--ds-emerald-100)] px-2.5 py-1 text-caption font-medium text-[var(--ds-emerald-700)]">
+                      Always active
+                    </span>
+                  </div>
+
+                  <div className="flex items-center justify-between rounded-[var(--ds-radius-input)] border border-border p-4">
+                    <div className="flex items-center gap-3">
+                      <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[var(--ds-surface-sunken)]">
+                        <Database className="h-4 w-4 text-muted-foreground" />
+                      </div>
+                      <div>
+                        <div className="text-label text-foreground">Audit log retention</div>
+                        <div className="text-caption text-muted-foreground">
+                          Immutable logs · {Math.round(security.auditRetentionDays / 365)}{' '}
+                          year{security.auditRetentionDays > 365 ? 's' : ''}
+                        </div>
+                      </div>
+                    </div>
+                    <span className="rounded-[var(--ds-radius-pill)] bg-[var(--ds-emerald-100)] px-2.5 py-1 text-caption font-medium text-[var(--ds-emerald-700)]">
+                      {security.auditRetentionDays} days
+                    </span>
+                  </div>
+
+                  <div className="flex items-center justify-between rounded-[var(--ds-radius-input)] border border-border p-4">
+                    <div className="flex items-center gap-3">
+                      <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[var(--ds-surface-sunken)]">
+                        <Globe className="h-4 w-4 text-muted-foreground" />
+                      </div>
+                      <div>
+                        <div className="text-label text-foreground">GDPR compliance</div>
+                        <div className="text-caption text-muted-foreground">
+                          Data processing agreement on file
+                        </div>
+                      </div>
+                    </div>
+                    <Toggle
+                      enabled={security.gdprCompliant}
+                      onChange={() => updateSecurity('gdprCompliant', !security.gdprCompliant)}
+                      disabled={saving}
+                    />
                   </div>
                 </div>
-              ))}
-
-              {/* Pending Invitations */}
-              {invitations.map((inv) => (
-                <div key={inv.id} className="flex items-center justify-between p-4 border border-amber-200 bg-amber-50/30 rounded-xl">
-                  <div className="flex items-center gap-3">
-                    <div className="w-9 h-9 rounded-full bg-amber-100 text-amber-600 flex items-center justify-center text-xs font-semibold">
-                      {inv.email.slice(0, 2).toUpperCase()}
-                    </div>
-                    <div>
-                      <div className="text-sm font-medium text-gray-900">{inv.email}</div>
-                      <div className="text-xs text-gray-500">Invited Â· Expires {timeAgo(inv.expiresAt)}</div>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className={`text-[11px] px-2.5 py-1 rounded-full font-medium capitalize ${roleColors[inv.role]}`}>{inv.role}</span>
-                    <StatusBadge status="pending" />
-                    <button onClick={() => cancelInvite(inv.id)} disabled={saving} className="text-gray-400 hover:text-red-500">
-                      <X className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                </div>
-              ))}
-
-              {members.length === 0 && invitations.length === 0 && (
-                <div className="text-center py-8 text-sm text-gray-400">No team members yet. Invite someone to get started.</div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* âââ Notifications âââ */}
-        {!loading && activeTab === 'notifications' && (
-          <div className="bg-white border border-gray-200 rounded-xl p-6">
-            <h2 className="text-base font-semibold text-gray-900 mb-1">Notification Preferences</h2>
-            <p className="text-sm text-gray-500 mb-6">Choose what alerts and reports you receive</p>
-            <div className="flex flex-col gap-4">
-              {([
-                { key: 'escalation' as const, label: 'Escalation alerts', desc: 'Get notified when the AI escalates a contact for human review' },
-                { key: 'daily_digest' as const, label: 'Daily digest', desc: 'Summary of all AI actions, decisions, and outcomes from the day' },
-                { key: 'weekly_report' as const, label: 'Weekly performance report', desc: 'Strategy performance, conversion rates, and pipeline health' },
-                { key: 'brain_update' as const, label: 'Brain update notifications', desc: 'Get notified when the Business Brain completes a learning cycle' },
-              ]).map((n) => (
-                <div key={n.key} className="flex items-center justify-between p-4 bg-gray-50 rounded-xl">
-                  <div>
-                    <div className="text-sm font-medium text-gray-900">{n.label}</div>
-                    <div className="text-xs text-gray-500">{n.desc}</div>
-                  </div>
-                  <Toggle enabled={!!notifPrefs[n.key]} onChange={() => toggleNotification(n.key)} disabled={saving} />
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* âââ Security âââ */}
-        {!loading && activeTab === 'security' && security && (
-          <div className="flex flex-col gap-6">
-            <div className="bg-white border border-gray-200 rounded-xl p-6">
-              <h2 className="text-base font-semibold text-gray-900 mb-1">Security & Compliance</h2>
-              <p className="text-sm text-gray-500 mb-6">Data protection and access controls</p>
-              <div className="flex flex-col gap-3">
-                {/* 2FA */}
-                <div className="flex items-center justify-between p-4 border border-gray-200 rounded-xl">
-                  <div className="flex items-center gap-3">
-                    <div className="w-9 h-9 bg-gray-50 rounded-lg flex items-center justify-center"><Shield className="w-4 h-4 text-gray-600" /></div>
-                    <div>
-                      <div className="text-sm font-medium text-gray-900">Two-factor authentication</div>
-                      <div className="text-xs text-gray-500">Require 2FA for all team members</div>
-                    </div>
-                  </div>
-                  <Toggle enabled={security.twoFactorEnabled} onChange={() => updateSecurity('twoFactorEnabled', !security.twoFactorEnabled)} disabled={saving} />
-                </div>
-
-                {/* SSO */}
-                <div className="flex items-center justify-between p-4 border border-gray-200 rounded-xl">
-                  <div className="flex items-center gap-3">
-                    <div className="w-9 h-9 bg-gray-50 rounded-lg flex items-center justify-center"><Key className="w-4 h-4 text-gray-600" /></div>
-                    <div>
-                      <div className="text-sm font-medium text-gray-900">SSO (SAML)</div>
-                      <div className="text-xs text-gray-500">Single sign-on via your identity provider</div>
-                    </div>
-                  </div>
-                  <Toggle enabled={security.ssoEnabled} onChange={() => updateSecurity('ssoEnabled', !security.ssoEnabled)} disabled={saving} />
-                </div>
-
-                {/* Encryption â always on */}
-                <div className="flex items-center justify-between p-4 border border-gray-200 rounded-xl">
-                  <div className="flex items-center gap-3">
-                    <div className="w-9 h-9 bg-gray-50 rounded-lg flex items-center justify-center"><Lock className="w-4 h-4 text-gray-600" /></div>
-                    <div>
-                      <div className="text-sm font-medium text-gray-900">Data encryption</div>
-                      <div className="text-xs text-gray-500">AES-256 at rest, TLS 1.3 in transit</div>
-                    </div>
-                  </div>
-                  <span className="text-xs bg-emerald-50 text-emerald-700 px-2.5 py-1 rounded-full font-medium">Always Active</span>
-                </div>
-
-                {/* Audit Log Retention */}
-                <div className="flex items-center justify-between p-4 border border-gray-200 rounded-xl">
-                  <div className="flex items-center gap-3">
-                    <div className="w-9 h-9 bg-gray-50 rounded-lg flex items-center justify-center"><Database className="w-4 h-4 text-gray-600" /></div>
-                    <div>
-                      <div className="text-sm font-medium text-gray-900">Audit log retention</div>
-                      <div className="text-xs text-gray-500">Immutable logs â {Math.round(security.auditRetentionDays / 365)} year{security.auditRetentionDays > 365 ? 's' : ''}</div>
-                    </div>
-                  </div>
-                  <span className="text-xs bg-emerald-50 text-emerald-700 px-2.5 py-1 rounded-full font-medium">
-                    {security.auditRetentionDays} days
-                  </span>
-                </div>
-
-                {/* GDPR */}
-                <div className="flex items-center justify-between p-4 border border-gray-200 rounded-xl">
-                  <div className="flex items-center gap-3">
-                    <div className="w-9 h-9 bg-gray-50 rounded-lg flex items-center justify-center"><Globe className="w-4 h-4 text-gray-600" /></div>
-                    <div>
-                      <div className="text-sm font-medium text-gray-900">GDPR compliance</div>
-                      <div className="text-xs text-gray-500">Data processing agreement on file</div>
-                    </div>
-                  </div>
-                  <Toggle enabled={security.gdprCompliant} onChange={() => updateSecurity('gdprCompliant', !security.gdprCompliant)} disabled={saving} />
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
+              </SectionCard>
+            )}
+          </TabsContent>
+        </div>
+      </Tabs>
     </div>
   );
 }
