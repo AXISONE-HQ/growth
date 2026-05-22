@@ -39,6 +39,12 @@ export interface MetricCardProps {
    * negative renders a rose "↓ N%" chip; zero renders a muted "· 0%".
    */
   delta?: number;
+  /**
+   * Optional free-form subtitle rendered below the value (and below the
+   * trend chip if both are present). Use when the trend doesn't fit a
+   * ±N% shape (e.g., "+23 this week" or "from 3.1 min").
+   */
+  subtitle?: string;
   icon?: LucideIcon;
   loading?: boolean;
   className?: string;
@@ -48,6 +54,7 @@ export function MetricCard({
   label,
   value,
   delta,
+  subtitle,
   icon: Icon,
   loading = false,
   className,
@@ -88,6 +95,14 @@ export function MetricCard({
             {value}
           </div>
           {delta !== undefined ? <TrendChip delta={delta} /> : null}
+          {subtitle ? (
+            <div
+              className="text-caption mt-1"
+              style={{ color: "var(--ds-ink-tertiary)" }}
+            >
+              {subtitle}
+            </div>
+          ) : null}
         </>
       )}
     </div>
