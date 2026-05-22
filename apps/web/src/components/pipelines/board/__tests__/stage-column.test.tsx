@@ -145,8 +145,13 @@ describe("KAN-968 — StageColumn truncatedCount overflow", () => {
   });
 });
 
-describe("KAN-968 — terminal-stage accent treatment", () => {
-  it("terminal_won → emerald left-border accent", () => {
+describe("KAN-968 — terminal-stage accent treatment (KAN-987 Phase C.3b)", () => {
+  // C.3b — tests now assert on the header's data-accent attribute (won /
+  // lost / open) rather than the underlying class string. The class
+  // migrated dark→light (border-emerald-500/50 → border-[var(--ds-emerald-500)])
+  // but the semantic is the same. Data-attribute is the contract;
+  // class is the rendering of that contract.
+  it("terminal_won → header carries data-accent='won' with emerald left-border", () => {
     const { container } = render(
       <StageColumn
         stage={{ id: "stg_won", name: "Demo Held", isInitial: false, isTerminal: true }}
@@ -156,10 +161,12 @@ describe("KAN-968 — terminal-stage accent treatment", () => {
         now={NOW}
       />,
     );
-    expect(container.querySelector(".border-emerald-500\\/50")).toBeInTheDocument();
+    const header = container.querySelector('[data-accent="won"]');
+    expect(header).toBeInTheDocument();
+    expect(header?.className).toMatch(/ds-emerald-500/);
   });
 
-  it("terminal_lost → red left-border accent", () => {
+  it("terminal_lost → header carries data-accent='lost' with danger left-border", () => {
     const { container } = render(
       <StageColumn
         stage={{ id: "stg_lost", name: "No-show", isInitial: false, isTerminal: true }}
@@ -169,10 +176,12 @@ describe("KAN-968 — terminal-stage accent treatment", () => {
         now={NOW}
       />,
     );
-    expect(container.querySelector(".border-red-500\\/50")).toBeInTheDocument();
+    const header = container.querySelector('[data-accent="lost"]');
+    expect(header).toBeInTheDocument();
+    expect(header?.className).toMatch(/ds-danger/);
   });
 
-  it("open → no accent border (no semantic noise on regular stages)", () => {
+  it("open → header carries data-accent='open' with no accent class (no semantic noise on regular stages)", () => {
     const { container } = render(
       <StageColumn
         stage={STAGE}
@@ -182,7 +191,9 @@ describe("KAN-968 — terminal-stage accent treatment", () => {
         now={NOW}
       />,
     );
-    expect(container.querySelector(".border-emerald-500\\/50")).not.toBeInTheDocument();
-    expect(container.querySelector(".border-red-500\\/50")).not.toBeInTheDocument();
+    const header = container.querySelector('[data-accent="open"]');
+    expect(header).toBeInTheDocument();
+    expect(header?.className).not.toMatch(/ds-emerald-500/);
+    expect(header?.className).not.toMatch(/ds-danger/);
   });
 });

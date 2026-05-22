@@ -1,5 +1,8 @@
 /**
  * KAN-968 — Per-pipeline kanban board.
+ * KAN-987 Phase C.3b — board surface migrated dark→light. Skeleton +
+ * error block now consume token classes (bg-card / border-border /
+ * --ds-danger-soft). Confidence chip migration was C.3 (KAN-986).
  *
  * Renders the columns of a single Pipeline (one tab worth of content):
  *   - one column per Stage in Stage.order
@@ -46,12 +49,12 @@ export function PipelineBoard({ pipeline, now }: PipelineBoardProps) {
         {pipeline.stages.map((stage) => (
           <div
             key={stage.id}
-            className="w-72 shrink-0 animate-pulse rounded-md bg-slate-900/50 p-3"
+            className="w-72 shrink-0 animate-pulse rounded-[var(--ds-radius-card)] border border-border bg-card p-3"
           >
-            <div className="mb-3 h-4 w-24 rounded bg-slate-800" />
+            <div className="mb-3 h-4 w-24 rounded bg-muted" />
             <div className="space-y-2">
-              <div className="h-16 rounded bg-slate-800/60" />
-              <div className="h-16 rounded bg-slate-800/60" />
+              <div className="h-16 rounded bg-muted/60" />
+              <div className="h-16 rounded bg-muted/60" />
             </div>
           </div>
         ))}
@@ -63,7 +66,7 @@ export function PipelineBoard({ pipeline, now }: PipelineBoardProps) {
     return (
       <div
         role="alert"
-        className="rounded-md border border-red-500/30 bg-red-500/5 p-4 text-sm text-red-300"
+        className="rounded-[var(--ds-radius-input)] border border-[var(--ds-danger-soft)] bg-[var(--ds-danger-soft)] p-4 text-sm text-[var(--ds-danger-text)]"
       >
         Failed to load board: {error instanceof Error ? error.message : "Unknown error"}
       </div>
