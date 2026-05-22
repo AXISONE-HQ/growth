@@ -64,3 +64,47 @@ jobs:
         working-directory: packages/db
       - name: Build
         run: npm run build
+
+  # KAN-975 — dedicated Next.js production-build gate.
+  #
+  # Why this exists: the `build` job above runs `turbo run build` across all
+  # workspaces. The apps/api workspace has chronic typecheck-baseline errors
+  # (KAN-474 / KAN-689 / KAN-702 cohorts) that fail FIRST in topo-order, so
+  # apps/web's `next build` is NEVER REACHED under turbo. PostCSS / CSS /
+  # Next-specific build errors slipped through to Cloud Run Deploy. KAN-974
+  # was the concrete bite (a CSS comment-terminator that broke deploy after
+  # CI green).
+  #
+  # This job mirrors apps/web/Dockerfile's build sequence exactly: build
+  # @growth/shared (workspace dependency), then `next build` apps/web. It
+  # does NOT depend on lint-and-typecheck/test, so a CSS-only PR gets the
+  # signal fast. Independent of the apps/api baseline.
+  #
+  # NEXT_PUBLIC_API_URL is set to a placeholder — next build bakes it into
+  # the client bundle at build time but the build itself succeeds with any
+  # value. The placeholder avoids accidentally hardcoding the prod URL into
+  # CI runs.
+  #
+  # Memory: feedback_ci_build_is_tsc_not_next_build.md. Sibling to
+  # feedback_smoke_as_real_gate_kan_965_integration_seam and
+  # feedback_visual_gate_as_real_gate_for_ui_slices.
+  web-build:
+    name: Web Build (next build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      - run: npm ci
+      - name: Generate Prisma Client
+        run: npx prisma generate
+        working-directory: packages/db
+      - name: Build @growth/shared (apps/web dependency)
+        run: npm run build --workspace=@growth/shared
+      - name: Build apps/web (next build — PostCSS + Tailwind exercised)
+        run: npm run build --workspace=@growth/web
+        env:
+          NEXT_PUBLIC_API_URL: https://placeholder.growth.local
+          NODE_OPTIONS: --max-old-space-size=4096
