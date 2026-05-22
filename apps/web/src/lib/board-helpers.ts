@@ -47,16 +47,34 @@ export function confidencePercent(score: number): number {
   return Math.round(score * 100);
 }
 
+// KAN-986 Phase C.3 — migrated from raw Tailwind dark-theme classes
+// (`text-emerald-300 bg-emerald-500/15 ring-emerald-500/30` etc., which
+// were illegible on the new white canvas) to the design-system tokens
+// established in Phase A + B.1. The four tiers map onto the same pastel
+// chip palette as `<Badge variant="green|ai|amber|rose">` so confidence
+// chips visually rhyme with every other semantic chip in the app while
+// keeping the four tiers distinctly readable.
+//
+// HARD REQUIREMENT (standing): the four tiers MUST remain visually
+// distinct (green / indigo / amber / rose). The test at
+// __tests__/board-helpers.test.ts pins distinctness in three ways:
+//   1. Each tier returns a class string referencing its tier-specific
+//      --ds-* token
+//   2. All four tier strings are pairwise unequal
+//   3. The DataTable/board confidence-badge data-confidence-level
+//      attribute (deal-card.tsx) still emits high/good/uncertain/low
+//      verbatim, so accessibility-driven tests can target the tier name
+//      independently of the visual class.
 export function confidenceClasses(level: ConfidenceLevel): string {
   switch (level) {
     case "high":
-      return "text-emerald-300 bg-emerald-500/15 ring-1 ring-emerald-500/30";
+      return "bg-[var(--ds-emerald-100)] text-[var(--ds-emerald-700)]";
     case "good":
-      return "text-indigo-300 bg-indigo-500/15 ring-1 ring-indigo-500/30";
+      return "bg-[var(--ds-violet-100)] text-[var(--ds-violet-500)]";
     case "uncertain":
-      return "text-yellow-300 bg-yellow-500/15 ring-1 ring-yellow-500/30";
+      return "bg-[var(--ds-warning-soft)] text-[var(--ds-warning-text)]";
     case "low":
-      return "text-red-300 bg-red-500/15 ring-1 ring-red-500/30";
+      return "bg-[var(--ds-danger-soft)] text-[var(--ds-danger-text)]";
   }
 }
 
