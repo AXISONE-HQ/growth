@@ -13,9 +13,6 @@ import {
   BookOpen,
   Building2,
   Settings,
-  Search,
-  Pause,
-  Bell,
   LogOut,
   Shield,
   ChevronDown,
@@ -31,7 +28,12 @@ import { Toaster } from 'sonner';
 import { queryClient } from '@/lib/query-client';
 import { isDemoMode } from '@/lib/demo-mode';
 import { DemoModeBanner } from '@/components/demo-mode-banner';
-import { AIStatusIndicator } from '@/components/growth/ai-status-indicator';
+// KAN-977 Phase B.2 — TopNav lifted from the inline AppShell header into a
+// shared component. AIStatusIndicator import retired from this file (it's
+// now an internal of TopNav). The sidebar's logo/brand + user-footer drop-
+// down stay here for Phase B.2 — Phase B.3 (IconRail rewrite) handles
+// moving brand + account into the TopNav per the prototype.
+import { TopNav } from '@/components/ui/top-nav';
 
 // KAN-718 nav surgery:
 //   - /pipelines (mock) → redirect to /settings/pipelines (KAN-702 real)
@@ -296,40 +298,9 @@ function AppShell({ children }: { children: React.ReactNode }) {
       <main className="ml-60 flex-1 min-h-screen">
         {/* KAN-718: top-of-page demo-mode disclaimer when NEXT_PUBLIC_DEMO_MODE is on */}
         <DemoModeBanner />
-        {/* Top Bar */}
-        <header className="flex items-center justify-between px-8 py-3 border-b border-gray-200 bg-white sticky top-0 z-40">
-          <div className="flex items-center gap-4">
-            <h1 className="text-lg font-semibold text-gray-900">{currentTitle}</h1>
-            {/* DS v1 alignment cohort — AIStatusIndicator replaces the inline
-             * pill. Hardcoded status="active" until system-health backend wires
-             * up (future ticket alongside Decision Feed surface, Sprint 12+). */}
-            <AIStatusIndicator status="active" />
-          </div>
-
-          <div className="flex-1 max-w-[480px] mx-6">
-            <div className="flex items-center gap-2 px-3.5 py-2 rounded-lg border border-gray-200 bg-gray-50 focus-within:border-indigo-500 focus-within:bg-white focus-within:ring-[3px] focus-within:ring-indigo-500/10 transition-all">
-              <Search className="w-4 h-4 text-gray-400 flex-shrink-0" />
-              <input
-                type="text"
-                placeholder="Search contacts, decisions, actions..."
-                className="border-none bg-transparent outline-none text-sm font-[inherit] text-gray-900 w-full placeholder:text-gray-400"
-              />
-              <span className="text-[11px] text-gray-400 border border-gray-200 rounded px-1.5 py-[1px] flex-shrink-0">
-                ⌘K
-              </span>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-3">
-            <button className="relative p-2 rounded-lg hover:bg-gray-100 transition-colors">
-              <Bell className="w-5 h-5 text-gray-500" />
-              <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-red-500 rounded-full" />
-            </button>
-            <button className="p-2 rounded-lg hover:bg-gray-100 transition-colors">
-              <Pause className="w-5 h-5 text-gray-500" />
-            </button>
-          </div>
-        </header>
+        {/* KAN-977 — TopNav lifted into a shared component (was inline header
+         * at this location). Same content shape; restyled per Phase A tokens. */}
+        <TopNav title={currentTitle} />
 
         {children}
       </main>
