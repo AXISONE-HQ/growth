@@ -78,20 +78,46 @@ function contact(overrides: Partial<FakeContact> = {}): FakeContact {
   };
 }
 
+// KAN-980 — evalWhere mirrors the deals-router test pattern. Supports
+// AND/OR composition + lt/contains operators so the new cursor-based
+// pagination's WHERE clause (cursor + search composed via AND) is
+// honored by the fake.
 function whereMatches(c: FakeContact, where: Record<string, unknown>): boolean {
-  if (where.tenantId && c.tenantId !== where.tenantId) return false;
-  if (where.lifecycleStage && c.lifecycleStage !== where.lifecycleStage) return false;
-  // KAN-883 read-layer filters
-  if (where.source && c.source !== where.source) return false;
-  if (where.companyId && c.companyId !== where.companyId) return false;
-  const or = where.OR as Array<Record<string, { contains: string }>> | undefined;
-  if (or) {
-    const anyMatch = or.some((cond) => {
-      const [field, m] = Object.entries(cond)[0];
-      const val = (c as unknown as Record<string, string | null>)[field];
-      return typeof val === "string" && val.toLowerCase().includes(m.contains.toLowerCase());
-    });
-    if (!anyMatch) return false;
+  for (const [key, val] of Object.entries(where)) {
+    if (key === "AND") {
+      const clauses = val as Array<Record<string, unknown>>;
+      if (!clauses.every((cl) => whereMatches(c, cl))) return false;
+      continue;
+    }
+    if (key === "OR") {
+      const clauses = val as Array<Record<string, unknown>>;
+      if (!clauses.some((cl) => whereMatches(c, cl))) return false;
+      continue;
+    }
+    const fieldVal = (c as unknown as Record<string, unknown>)[key];
+    if (val instanceof Date) {
+      if (!(fieldVal instanceof Date) || fieldVal.getTime() !== val.getTime()) return false;
+    } else if (val === null) {
+      if (fieldVal !== null) return false;
+    } else if (typeof val === "object" && val !== null) {
+      const op = val as Record<string, unknown>;
+      if ("lt" in op) {
+        if (fieldVal === null || fieldVal === undefined) return false;
+        const opVal = op.lt as Date | string;
+        if (opVal instanceof Date) {
+          if (!(fieldVal instanceof Date) || fieldVal.getTime() >= opVal.getTime()) return false;
+        } else if (typeof fieldVal === "string") {
+          if (!(fieldVal < opVal)) return false;
+        } else {
+          return false;
+        }
+      } else if ("contains" in op) {
+        if (typeof fieldVal !== "string") return false;
+        if (!fieldVal.toLowerCase().includes((op.contains as string).toLowerCase())) return false;
+      }
+    } else if (fieldVal !== val) {
+      return false;
+    }
   }
   return true;
 }
@@ -108,15 +134,25 @@ function makePrisma(rows: FakeContact[], companies: FakeCompany[] = []) {
       }) => companies.find((c) => c.id === where.id && c.tenantId === where.tenantId) ?? null,
     },
     contact: {
+      // KAN-980 — cursor convergence. orderBy [createdAt DESC, id DESC] +
+      // take (no skip). hasNext detection lives in the service via take+1.
       findMany: async ({
         where,
-        skip = 0,
         take = 50,
       }: {
         where: Record<string, unknown>;
-        skip?: number;
         take?: number;
-      }) => rows.filter((r) => whereMatches(r, where)).slice(skip, skip + take),
+        orderBy?: unknown;
+      }) => {
+        const matched = rows.filter((r) => whereMatches(r, where));
+        matched.sort((a, b) => {
+          const aT = a.createdAt.getTime();
+          const bT = b.createdAt.getTime();
+          if (aT !== bT) return bT - aT;
+          return a.id < b.id ? 1 : -1;
+        });
+        return matched.slice(0, take);
+      },
       count: async ({ where }: { where: Record<string, unknown> }) =>
         rows.filter((r) => whereMatches(r, where)).length,
       findFirst: async ({
@@ -157,7 +193,8 @@ describe("KAN-718 Day 10 — listContacts", () => {
     const prisma = makePrisma(data);
     const result = await listContacts(prisma, TENANT_A, {});
     expect(result.items.map((i) => i.id)).toEqual(["a"]);
-    expect(result.total).toBe(1);
+    expect(result.totalCount).toBe(1);
+    expect(result.nextCursor).toBeNull();
   });
 
   it("filters by lifecycleStage", async () => {
@@ -226,16 +263,70 @@ describe("KAN-718 Day 10 — listContacts", () => {
     expect(result.items.map((i) => i.id)).toEqual(["a"]);
   });
 
-  it("paginates via limit + offset", async () => {
-    const data = Array.from({ length: 5 }, (_, i) => contact({ id: `c${i}` }));
+  // KAN-980 — KAN-882 cursor convergence. Mirrors deals-router cursor tests:
+  // page 1 fetches limit rows + nextCursor; page 2 uses the cursor and
+  // returns the remainder. Stable ordering via createdAt DESC + id DESC.
+  it("paginates via limit + cursor (KAN-882 convergence)", async () => {
+    // Distinct createdAt timestamps so cursor's createdAt-based `lt` can
+    // disambiguate cleanly.
+    const data = Array.from({ length: 5 }, (_, i) =>
+      contact({
+        id: `c${i}`,
+        createdAt: new Date(`2026-04-29T18:00:${String(10 + i).padStart(2, "0")}Z`),
+      }),
+    );
     const prisma = makePrisma(data);
 
-    const page1 = await listContacts(prisma, TENANT_A, { limit: 2, offset: 0 });
+    const page1 = await listContacts(prisma, TENANT_A, { limit: 2 });
     expect(page1.items).toHaveLength(2);
-    expect(page1.total).toBe(5);
+    expect(page1.totalCount).toBe(5);
+    expect(page1.nextCursor).not.toBeNull();
+    // Newest-first ordering: c4 (created at :14) then c3 (:13)
+    expect(page1.items.map((i) => i.id)).toEqual(["c4", "c3"]);
 
-    const page2 = await listContacts(prisma, TENANT_A, { limit: 2, offset: 4 });
-    expect(page2.items).toHaveLength(1);
+    const page2 = await listContacts(prisma, TENANT_A, {
+      limit: 2,
+      cursor: page1.nextCursor!,
+    });
+    expect(page2.items.map((i) => i.id)).toEqual(["c2", "c1"]);
+    expect(page2.nextCursor).not.toBeNull();
+
+    const page3 = await listContacts(prisma, TENANT_A, {
+      limit: 2,
+      cursor: page2.nextCursor!,
+    });
+    expect(page3.items.map((i) => i.id)).toEqual(["c0"]);
+    expect(page3.nextCursor).toBeNull(); // last page
+  });
+
+  it("cursor + search compose via AND — search filter applies past the cursor", async () => {
+    const data = [
+      contact({
+        id: "alpha",
+        firstName: "Acme",
+        createdAt: new Date("2026-04-29T18:00:14Z"),
+      }),
+      contact({
+        id: "beta",
+        firstName: "Beta",
+        createdAt: new Date("2026-04-29T18:00:13Z"),
+      }),
+      contact({
+        id: "gamma",
+        firstName: "Acme",
+        createdAt: new Date("2026-04-29T18:00:12Z"),
+      }),
+    ];
+    const prisma = makePrisma(data);
+    const page1 = await listContacts(prisma, TENANT_A, { limit: 1, search: "acme" });
+    expect(page1.items.map((i) => i.id)).toEqual(["alpha"]);
+    const page2 = await listContacts(prisma, TENANT_A, {
+      limit: 5,
+      search: "acme",
+      cursor: page1.nextCursor!,
+    });
+    // Beta must NOT leak past the cursor; only Acme rows older than alpha.
+    expect(page2.items.map((i) => i.id)).toEqual(["gamma"]);
   });
 });
 

@@ -294,8 +294,10 @@ interface ContactsRouterModule {
       // the Customers UI can scope to a Company badge or filter by source.
       source?: string;
       companyId?: string;
+      // KAN-980 — KAN-882 cursor convergence. `offset` retired in favor of
+      // `cursor` (canonical opaque token from _pagination.ts).
       limit?: number;
-      offset?: number;
+      cursor?: string;
     },
   ) => Promise<unknown>;
   getContactById: (prisma: unknown, tenantId: string, id: string) => Promise<unknown>;
@@ -347,8 +349,12 @@ const contactsRouter = router({
         // reject anything truly invalid.
         source: z.string().optional(),
         companyId: z.string().cuid().optional(),
+        // KAN-980 — KAN-882 cursor convergence. Offset/limit retired in
+        // favor of the canonical cursor shape shared with deals/companies/
+        // orders. Old `offset` param removed; clients on the old shape will
+        // 400 (no soft-fallback — UI lands together in this PR).
         limit: z.number().min(1).max(200).default(50),
-        offset: z.number().min(0).default(0),
+        cursor: z.string().optional(),
       }),
     )
     .query(async ({ ctx, input }) => {
