@@ -5,30 +5,24 @@
 /**
  * MetricStrip — top-of-dashboard KPI summary. 4–6 metrics in a horizontal row.
  *
- * Spec: docs/design-system/v1.md Part 3 §8.
+ * KAN-979 Phase B.4 — internal rewrite. Strip now renders <MetricCard>
+ * children per the prototype's `.metric` shape (each cell is a standalone
+ * card with its own border + shadow + padding). The prior grid-gap-px
+ * hairline pattern is replaced with real gap-4 between cards. Existing
+ * `<MetricStrip metrics={...}>` API preserved — no caller changes.
  *
- * **Anatomy** (per spec):
- *   - Each cell has a label (text-caption, ink-tertiary) above a value
- *     (text-h2, ink-primary, tabular-nums)
- *   - Optional delta below value (±N% with up/down arrow, emerald-700 if
- *     positive, danger-text if negative)
- *   - Grid layout with 1px hairline gaps showing through (border-subtle bg
- *     bleeds through grid gap-px) — borders not shadows per spec Part 1
+ * **Anatomy** (post-B.4):
+ *   - Each cell is a <MetricCard> (bg-card, border, --ds-radius-card,
+ *     --ds-shadow-card) — see metric-card.tsx for the per-card contract
+ *   - Strip wraps the cells in role="list" with role="listitem" per cell
+ *     so the prior accessibility contract is preserved
  *
- * **DS v1 compliance:**
- *   - Color via `var(--ds-*)` tokens — zero hex
- *   - Type scale: .text-caption labels + .text-h2 values (per spec Part 1)
- *   - .tabular-nums on every value cell so columns align
- *   - Sentence case labels — caller's responsibility
- *
- * **Loading state:** when `loading` is true, renders skeleton cells matching
- * the final shape per spec Part 4 (surface-sunken bg, no shimmer).
- *
- * **Accessibility:** `role="list"` on the grid, `role="listitem"` on each cell.
- * Each cell has `aria-label="{label}: {value}"` so screen readers don't read
- * the label and value as separate disjointed announcements.
+ * **Accessibility:** `role="list"` on the grid, `role="listitem"` on each
+ * cell. MetricCard surfaces its own `aria-label="{label}: {value}"` for
+ * screen-reader continuity.
  */
 import * as React from "react";
+import { MetricCard } from "./metric-card";
 
 export interface MetricStripCell {
   label: string;
@@ -50,7 +44,12 @@ export function MetricStrip({
   className,
 }: MetricStripProps): React.ReactElement {
   const cells = loading
-    ? Array.from({ length: metrics.length || 4 }, (_, i) => ({ label: "", value: "", _skeleton: true, _idx: i }))
+    ? Array.from({ length: metrics.length || 4 }, (_, i) => ({
+        label: "",
+        value: "",
+        _skeleton: true,
+        _idx: i,
+      }))
     : metrics.map((m, i) => ({ ...m, _skeleton: false, _idx: i }));
 
   return (
@@ -58,83 +57,24 @@ export function MetricStrip({
       role="list"
       aria-label="Knowledge center metrics"
       className={[
-        "grid gap-px rounded-xl overflow-hidden border",
+        "grid gap-4",
         gridColsClass(cells.length),
         className ?? "",
       ]
         .filter(Boolean)
         .join(" ")}
-      style={{
-        backgroundColor: "var(--ds-border-subtle)",
-        borderColor: "var(--ds-border-subtle)",
-      }}
     >
       {cells.map((cell) => (
-        <div
-          key={cell._idx}
-          role="listitem"
-          aria-label={cell._skeleton ? "Loading metric" : `${cell.label}: ${cell.value}`}
-          className="p-4 flex flex-col gap-1"
-          style={{ backgroundColor: "var(--ds-surface-raised)" }}
-        >
-          {cell._skeleton ? (
-            <SkeletonCell />
-          ) : (
-            <>
-              <div
-                className="text-caption"
-                style={{ color: "var(--ds-ink-tertiary)" }}
-              >
-                {cell.label}
-              </div>
-              <div
-                className="text-h2 tabular-nums"
-                style={{ color: "var(--ds-ink-primary)" }}
-              >
-                {cell.value}
-              </div>
-              {cell.delta !== undefined ? <DeltaRow delta={cell.delta} /> : null}
-            </>
-          )}
+        <div key={cell._idx} role="listitem">
+          <MetricCard
+            label={cell._skeleton ? "" : (cell as MetricStripCell).label}
+            value={cell._skeleton ? "" : (cell as MetricStripCell).value}
+            delta={cell._skeleton ? undefined : (cell as MetricStripCell).delta}
+            loading={cell._skeleton}
+          />
         </div>
       ))}
     </div>
-  );
-}
-
-function DeltaRow({ delta }: { delta: number }): React.ReactElement {
-  const positive = delta > 0;
-  const arrow = positive ? "↑" : delta < 0 ? "↓" : "·";
-  return (
-    <div
-      className="text-caption tabular-nums"
-      style={{
-        color: positive
-          ? "var(--ds-emerald-700)"
-          : delta < 0
-            ? "var(--ds-danger-text)"
-            : "var(--ds-ink-tertiary)",
-      }}
-    >
-      {arrow} {Math.abs(delta)}%
-    </div>
-  );
-}
-
-function SkeletonCell(): React.ReactElement {
-  return (
-    <>
-      <div
-        className="rounded h-3 w-20"
-        style={{ backgroundColor: "var(--ds-surface-sunken)" }}
-        aria-hidden="true"
-      />
-      <div
-        className="rounded h-7 w-16 mt-1"
-        style={{ backgroundColor: "var(--ds-surface-sunken)" }}
-        aria-hidden="true"
-      />
-    </>
   );
 }
 
