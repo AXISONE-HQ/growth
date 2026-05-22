@@ -46,102 +46,132 @@
   --amber-400: #FBBF24;
 
   /* ─────────────────────────────────────────────────────────────────────────
-   * Growth Design System v1 — foundation tokens
+   * Growth Design System — foundation tokens (KAN-973 — Phase A)
    *
-   * Source of truth: docs/design-system/v1.md (Part 1: AxisOne Master Brand).
-   * KAN-829 sub-cohort 2 added the partial subset; this expansion completes
-   * the foundation per Part 1 color tables + adds the type scale, motion
-   * tokens, tabular-nums utility, and ring-offset token referenced by every
-   * focus-visible style across the codebase.
+   * Reskin to the LoopAI/Clinexa-inspired palette: white canvas, ink/muted/
+   * faint typographic hierarchy, pastel semantic chips, purple→blue gradient
+   * accent. The --ds-* names are preserved from the prior palette so every
+   * existing token-aware consumer picks up the new look automatically — this
+   * is the load-bearing rewire of Phase A.
    *
-   * KAN-842 (PROMOTION CANDIDATE component lift) tracks the consolidation
-   * into a Tailwind config extension + extraction to a separate tokens.css.
-   * For now everything lives inline so the cohort is self-contained.
+   * Source of truth: growth_prototype.html (Fred's locked tokens) +
+   * KAN-972 epic acceptance.
    * ───────────────────────────────────────────────────────────────────────── */
 
-  /* — Surfaces (spec Part 1 §Surfaces) — */
-  --ds-surface-base:    #FBF9F4;
+  /* — Surfaces — white canvas; raised stays white; sunken is the cool input
+   * background that the prototype's .search uses. */
+  --ds-surface-base:    #FFFFFF;
   --ds-surface-raised:  #FFFFFF;
-  --ds-surface-sunken:  #F4F0E6;
-  --ds-surface-overlay: rgba(31, 20, 50, 0.40);
+  --ds-surface-sunken:  #F5F6FB;
+  --ds-surface-overlay: rgba(20, 22, 40, 0.40);
 
-  /* — Ink / text (spec Part 1 §Ink) — */
-  --ds-ink-primary:    #1F1432;
-  --ds-ink-secondary:  #4A3F5C;
-  --ds-ink-tertiary:   #8A7F9C;
-  --ds-ink-disabled:   #C4B8D4;
+  /* — Ink / text (LoopAI three-tier hierarchy: ink / muted / faint) — */
+  --ds-ink-primary:    #1B1E2B;
+  --ds-ink-secondary:  #6B7186;
+  --ds-ink-tertiary:   #9AA0B4;
+  --ds-ink-disabled:   #C4C7D4;
   --ds-ink-on-accent:  #FFFFFF;
 
-  /* — Borders (spec Part 1 §Borders) — */
-  --ds-border-subtle:  #ECE6D9;
-  --ds-border-default: #DDD3C0;
-  --ds-border-strong:  #BCB1A0;
+  /* — Borders — hairline #ECEDF3 is the canonical line color. */
+  --ds-border-subtle:  #ECEDF3;
+  --ds-border-default: #DDDFEA;
+  --ds-border-strong:  #C3C6D4;
 
-  /* — Brand: violet ramp (spec Part 1 §Brand accents) — */
-  --ds-violet-50:  #F5F2FE;
-  --ds-violet-100: #EEEAFC;
-  --ds-violet-500: #5C3FE5;
-  --ds-violet-600: #4A30C7;
-  --ds-violet-700: #3B249E;
-  --ds-violet-900: #1F1432;
+  /* — Brand: violet ramp (paired with blue via --ds-accent-gradient).
+   * Pastel pair #ECEAFD / #5A4FD4 is the indigo chip; #7C6FF0 is the
+   * gradient start. */
+  --ds-violet-50:  #F5F3FE;
+  --ds-violet-100: #ECEAFD;
+  --ds-violet-500: #5A4FD4;
+  --ds-violet-600: #4A41B8;
+  --ds-violet-700: #3B348E;
+  --ds-violet-900: #1B1E2B;
 
-  /* — Brand: emerald ramp (spec Part 1 §Brand accents) — */
-  --ds-emerald-50:  #EAFAF3;
-  --ds-emerald-100: #DCF4EB;
-  --ds-emerald-500: #0EA882;
-  --ds-emerald-700: #0A6B52;
+  /* — Brand: emerald / positive — #2FB87A is the "positive" accent,
+   * paired with pastel #E4F7EE / text #1F7A45. */
+  --ds-emerald-50:  #EDFBF4;
+  --ds-emerald-100: #E4F7EE;
+  --ds-emerald-500: #2FB87A;
+  --ds-emerald-700: #1F7A45;
 
-  /* — Semantic: warning + danger (spec Part 1 §Semantic colors) — */
-  --ds-warning:      #D97706;
-  --ds-warning-soft: #FCEFD9;
-  --ds-warning-text: #92590E;
-  --ds-danger:       #C73E3E;
-  --ds-danger-soft:  #F8E1E1;
-  --ds-danger-text:  #8E2424;
+  /* — Teal — new pastel pair (no teal in prior DS). Used for "review"
+   * status chips and similar non-success neutral-positive signals. */
+  --ds-teal-50:  #EAF7F5;
+  --ds-teal-100: #E1F4F1;
+  --ds-teal-500: #1A9D8E;
+  --ds-teal-700: #127E72;
 
-  /* — Focus-ring offset (spec Part 6 §Accessibility) —
-   * Spec line 602: focus-visible:ring-offset-stone-50. Stone-50 is Tailwind's
-   * #FAFAF9, functionally equivalent to surface-base in light mode. Components
-   * reference [--tw-ring-offset-color:var(--ds-ring-offset)] to keep the ring
-   * offset surface-aware without a Tailwind config change. */
+  /* — Semantic: warning + danger — pastel chip pairs. --ds-danger now uses
+   * the rose tone #B23A60 / #FCE9EE (was wine-red). */
+  --ds-warning:      #B5800F;
+  --ds-warning-soft: #FCF1DA;
+  --ds-warning-text: #9A6B12;
+  --ds-danger:       #B23A60;
+  --ds-danger-soft:  #FCE9EE;
+  --ds-danger-text:  #B23A60;
+
+  /* — Accent gradient — purple→blue, used by primary button, active nav
+   * (icon rail), logo mark, assistant spark. The .bg-gradient-primary
+   * utility class below is the canonical consumer surface. */
+  --ds-accent-gradient: linear-gradient(135deg, #7C6FF0 0%, #5B8DEF 100%);
+
+  /* — Component radii — card 18 / pill 999 / input 12 / icon-button 13. */
+  --ds-radius-card:  18px;
+  --ds-radius-pill:  999px;
+  --ds-radius-input: 12px;
+  --ds-radius-icon:  13px;
+
+  /* — Focus-ring offset (white surface-base) — */
   --ds-ring-offset: var(--ds-surface-base);
 
   /* ─────────────────────────────────────────────────────────────────────────
-   * Motion tokens (spec Part 1 §Motion). Consumed via inline
-   * `style={{ transition: 'var(--motion-default)' }}` or the .motion-* utility
-   * classes below. prefers-reduced-motion handled at consumer level for
-   * transforms; the .motion-pulse keyframe block respects it natively.
+   * Motion tokens — unchanged from prior DS. Consumed via .motion-* utility
+   * classes below.
    * ───────────────────────────────────────────────────────────────────────── */
   --motion-instant: 100ms ease-out;
   --motion-quick:   150ms ease-out;
   --motion-default: 200ms cubic-bezier(0.4, 0, 0.2, 1);
   --motion-slow:    350ms cubic-bezier(0.4, 0, 0.2, 1);
 
-  /* — Elevation (spec Part 1 §Elevation) — borders, not shadows.
-   * --ds-shadow-overlay reserved for modals + popovers + command palette. */
-  --ds-shadow-subtle:  0 1px 2px rgba(31, 20, 50, 0.06), 0 0 0 0.5px rgba(31, 20, 50, 0.04);
-  --ds-shadow-overlay: 0 12px 32px rgba(31, 20, 50, 0.12), 0 4px 8px rgba(31, 20, 50, 0.08);
+  /* — Elevation — hairline + soft shadow on white surfaces. --ds-shadow-card
+   * is the canonical "Card" elevation (prototype: .card / .metric / .dcard).
+   * --ds-shadow-subtle retained for any consumer that still wants the
+   * micro-elevation; --ds-shadow-overlay reserved for modals/popovers. */
+  --ds-shadow-card:    0 1px 2px rgba(20, 22, 40, 0.05), 0 6px 22px rgba(20, 22, 40, 0.06);
+  --ds-shadow-subtle:  0 1px 2px rgba(20, 22, 40, 0.05);
+  --ds-shadow-overlay: 0 12px 32px rgba(20, 22, 40, 0.14), 0 4px 8px rgba(20, 22, 40, 0.08);
 
-  /* shadcn-ui design tokens (HSL components, no `hsl()` wrapper — Tailwind composes them) */
+  /* ─────────────────────────────────────────────────────────────────────────
+   * shadcn-ui design tokens (HSL components, no hsl() wrapper — Tailwind
+   * composes them). KAN-973 rewires these to the new palette so every
+   * consumer of bg-primary / text-foreground / border / muted etc. across
+   * the codebase picks up the new look without per-call-site changes. This
+   * is the high-leverage step.
+   *
+   * HSL values: ink #1B1E2B → (228, 19%, 14%); muted #6B7186 → (227, 9%, 47%);
+   * line #ECEDF3 → (231, 23%, 94%); sunken #F5F6FB → (231, 36%, 97%);
+   * violet-500 #5A4FD4 → (245, 64%, 57%). Computed once; bake at the
+   * token-layer level so shadcn primitives just work.
+   * ───────────────────────────────────────────────────────────────────────── */
   --background: 0 0% 100%;
-  --foreground: 222.2 84% 4.9%;
+  --foreground: 228 19% 14%;
   --card: 0 0% 100%;
-  --card-foreground: 222.2 84% 4.9%;
+  --card-foreground: 228 19% 14%;
   --popover: 0 0% 100%;
-  --popover-foreground: 222.2 84% 4.9%;
-  --primary: 222.2 47.4% 11.2%;
-  --primary-foreground: 210 40% 98%;
-  --secondary: 210 40% 96.1%;
-  --secondary-foreground: 222.2 47.4% 11.2%;
-  --muted: 210 40% 96.1%;
-  --muted-foreground: 215.4 16.3% 46.9%;
-  --accent: 210 40% 96.1%;
-  --accent-foreground: 222.2 47.4% 11.2%;
-  --destructive: 0 84.2% 60.2%;
-  --destructive-foreground: 210 40% 98%;
-  --border: 214.3 31.8% 91.4%;
-  --input: 214.3 31.8% 91.4%;
-  --ring: 222.2 84% 4.9%;
+  --popover-foreground: 228 19% 14%;
+  --primary: 245 64% 57%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 231 36% 97%;
+  --secondary-foreground: 228 19% 14%;
+  --muted: 231 36% 97%;
+  --muted-foreground: 227 9% 47%;
+  --accent: 231 36% 97%;
+  --accent-foreground: 228 19% 14%;
+  --destructive: 343 50% 46%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 231 23% 94%;
+  --input: 231 23% 94%;
+  --ring: 245 64% 57%;
   --radius: 0.5rem;
 }
 
@@ -212,28 +242,57 @@ body {
   animation: pulse 2s ease-in-out infinite;
 }
 
-/* Confidence badge colors (legacy — pre-DS Decision Feed era). Tracked
- * separately for retirement (filed at this cohort's close-out gate). */
-.conf-high { color: #059669; background: #ECFDF5; }
-.conf-normal { color: #D97706; background: #FFFBEB; }
-.conf-low { color: #DC2626; background: #FEF2F2; }
-.conf-critical { color: #DC2626; background: #FEF2F2; }
-
-/* Strategy badge colors (legacy) */
-.strategy-direct { background: #ECFDF5; color: #059669; }
-.strategy-reengage { background: #FEF3C7; color: #D97706; }
-.strategy-guided { background: #EEF2FF; color: #4F46E5; }
-.strategy-trust { background: #FEF2F2; color: #DC2626; }
-
-/* Channel badge (legacy) */
-.channel-badge {
-  font-size: 11px;
-  font-weight: 500;
-  padding: 2px 8px;
-  border-radius: 4px;
-  background: #F3F4F6;
-  color: #6B7280;
+/* ─────────────────────────────────────────────────────────────────────────
+ * KAN-973 — primary accent gradient utility.
+ *
+ * Used by: primary button, IconRail active state, logo mark, assistant
+ * spark, dashboard "hi" bars on charts. Single utility class to avoid the
+ * `style={{ background: 'var(--ds-accent-gradient)' }}` boilerplate at
+ * every consumer site.
+ * ───────────────────────────────────────────────────────────────────────── */
+.bg-gradient-primary {
+  background: var(--ds-accent-gradient);
 }
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * KAN-973 — pastel semantic chip utility classes.
+ *
+ * Replaces the deleted .conf-*/.strategy-*/.channel-badge legacy rules. The
+ * new chip system is named by SEMANTIC SHAPE (ai / amber / green / teal /
+ * rose / positive / muted), not by domain (confidence/strategy/channel).
+ * Each consumer picks the chip that matches the meaning it wants to
+ * convey; cross-domain reuse is encouraged.
+ *
+ * Phase B will lift these into the Badge component's CVA variants so
+ * components consume them via <Badge variant="ai"> instead of raw class
+ * strings; until then, the utility-class form is the canonical surface.
+ *
+ * Confidence-tier mapping (preserved per KAN-973 hard requirement):
+ *   85+   → .ds-chip-green   (high)
+ *   65–84 → .ds-chip-ai      (good — indigo)
+ *   40–64 → .ds-chip-amber   (uncertain)
+ *   <40   → .ds-chip-rose    (low)
+ * Note: the Pipelines board (KAN-968 board-helpers.ts) still uses raw
+ * Tailwind classes (text-emerald-300 / bg-emerald-500/15 etc.) — that
+ * migration is Phase C work and unchanged by Phase A.
+ * ───────────────────────────────────────────────────────────────────────── */
+.ds-chip-base {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  font-weight: 500;
+  padding: 4px 11px;
+  border-radius: var(--ds-radius-pill);
+  white-space: nowrap;
+}
+.ds-chip-ai       { background: var(--ds-violet-100);  color: var(--ds-violet-500); }
+.ds-chip-amber    { background: var(--ds-warning-soft); color: var(--ds-warning-text); }
+.ds-chip-green    { background: var(--ds-emerald-100); color: var(--ds-emerald-700); }
+.ds-chip-teal     { background: var(--ds-teal-100);    color: var(--ds-teal-700); }
+.ds-chip-rose     { background: var(--ds-danger-soft); color: var(--ds-danger-text); }
+.ds-chip-positive { background: var(--ds-emerald-100); color: var(--ds-emerald-700); }
+.ds-chip-muted    { background: #EEF0F6;               color: var(--ds-ink-secondary); }
 
 /* Scrollbar styling — DS-aligned (uses --ds-border-* tokens) */
 ::-webkit-scrollbar {
