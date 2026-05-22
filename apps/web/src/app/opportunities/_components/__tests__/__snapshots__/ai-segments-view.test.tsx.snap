@@ -2,48 +2,48 @@
 
 exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 1: empty — 'No opportunities right now' + scan count 1`] = `
 <main
-  class="min-h-screen bg-slate-900 p-8"
+  class="min-h-screen bg-background p-8"
 >
   <header
     class="mb-8"
   >
     <h1
-      class="text-3xl font-bold text-slate-50"
+      class="text-h1 text-foreground"
     >
       Opportunities
     </h1>
     <p
-      class="text-slate-400 mt-1"
+      class="mt-1 text-muted-foreground"
     >
       growth scans your contacts for revenue patterns you haven't worked.
     </p>
   </header>
   <div
-    class="max-w-4xl mx-auto rounded-xl border border-slate-700 bg-slate-800 p-8 text-center"
+    class="rounded-[var(--ds-radius-card)] border bg-card text-card-foreground shadow-[var(--ds-shadow-card)] mx-auto max-w-4xl p-8 text-center"
   >
     <div
-      class="w-12 h-12 mx-auto mb-4 rounded-full bg-slate-700 flex items-center justify-center"
+      class="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-[var(--ds-surface-sunken)]"
     >
       <span
-        class="text-slate-400 text-xl"
+        class="text-xl text-muted-foreground"
       >
         ✓
       </span>
     </div>
     <h2
-      class="text-xl font-semibold text-slate-100"
+      class="text-h2 text-foreground"
     >
       No opportunities right now
     </h2>
     <p
-      class="text-slate-400 mt-2 max-w-md mx-auto"
+      class="mx-auto mt-2 max-w-md text-muted-foreground"
     >
       We scanned 
       5
        contacts and didn't find any signals above threshold. New opportunities appear as contacts go dormant or new leads arrive unworked.
     </p>
     <button
-      class="mt-6 px-4 py-2 text-sm font-medium text-white bg-indigo-500 rounded-lg hover:bg-indigo-400"
+      class="inline-flex items-center justify-center gap-2 whitespace-nowrap text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 [background-image:var(--ds-accent-gradient)] text-primary-foreground shadow-[var(--ds-shadow-card)] hover:opacity-95 h-9 rounded-full px-4 mt-6"
     >
       Scan again
     </button>
@@ -53,22 +53,22 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 1: empty �
 
 exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 2: found — header copy + opportunity card structure 1`] = `
 <main
-  class="min-h-screen bg-slate-900 p-8"
+  class="min-h-screen bg-background p-8"
 >
   <header
-    class="mb-8 max-w-4xl mx-auto"
+    class="mx-auto mb-8 max-w-4xl"
   >
     <div
       class="flex items-baseline justify-between"
     >
       <div>
         <h1
-          class="text-3xl font-bold text-slate-50"
+          class="text-h1 text-foreground"
         >
           Opportunities
         </h1>
         <p
-          class="text-slate-400 mt-1"
+          class="mt-1 text-muted-foreground"
         >
           growth found 
           1
@@ -82,22 +82,22 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 2: found �
       </div>
       <button
         aria-label="Rescan opportunities"
-        class="text-sm text-slate-400 hover:text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 focus:ring-offset-slate-900 rounded px-2 py-1"
+        class="rounded-[var(--ds-radius-pill)] px-2 py-1 text-sm text-muted-foreground transition-colors hover:text-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
       >
         ↻ Rescan
       </button>
     </div>
   </header>
   <div
-    class="max-w-4xl mx-auto space-y-6"
+    class="mx-auto max-w-4xl space-y-6"
   >
     <article
       aria-label="Opportunity: Reactivate dormant leads"
-      class="rounded-xl border border-slate-700 bg-slate-800 overflow-hidden"
+      class="overflow-hidden rounded-[var(--ds-radius-card)] border border-border bg-card text-card-foreground shadow-[var(--ds-shadow-card)]"
       role="article"
     >
       <div
-        class="p-6 border-b border-slate-700"
+        class="border-b border-border p-6"
       >
         <div
           class="flex items-start justify-between gap-4"
@@ -106,25 +106,21 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 2: found �
             class="flex-1"
           >
             <div
-              class="flex items-center gap-2 mb-2"
+              class="rounded-full border px-2.5 py-0.5 text-xs transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 border-transparent bg-[var(--ds-violet-100)] text-[var(--ds-violet-500)] font-medium mb-2 inline-flex items-center gap-2 uppercase tracking-wide"
             >
               <span
                 aria-hidden="true"
-                class="w-2 h-2 rounded-full bg-indigo-400"
+                class="h-2 w-2 rounded-full bg-[var(--ds-violet-500)]"
               />
-              <span
-                class="text-xs font-medium text-indigo-400 uppercase tracking-wide"
-              >
-                AI-identified opportunity
-              </span>
+              AI-identified opportunity
             </div>
             <h2
-              class="text-xl font-semibold text-slate-50"
+              class="text-h2 text-foreground"
             >
               Reactivate dormant leads
             </h2>
             <p
-              class="text-slate-300 mt-2"
+              class="mt-2 text-muted-foreground"
             >
               7 contacts went 30+ days without engagement.
             </p>
@@ -133,12 +129,12 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 2: found �
             class="shrink-0 text-right"
           >
             <div
-              class="text-3xl font-bold text-slate-50"
+              class="text-h1 tabular-nums text-foreground"
             >
               7
             </div>
             <div
-              class="text-xs text-slate-400"
+              class="text-caption text-muted-foreground"
             >
               contacts
             </div>
@@ -146,10 +142,10 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 2: found �
         </div>
       </div>
       <div
-        class="px-6 py-4 border-b border-slate-700"
+        class="border-b border-border px-6 py-4"
       >
         <h3
-          class="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-3"
+          class="text-micro mb-3 uppercase tracking-wide text-muted-foreground"
         >
           Contacts in this segment
         </h3>
@@ -163,23 +159,23 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 2: found �
               class="flex items-center gap-3"
             >
               <div
-                class="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center text-slate-300 text-xs font-medium"
+                class="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--ds-violet-100)] text-xs font-medium text-[var(--ds-violet-500)]"
               >
                 SA
               </div>
               <span
-                class="text-slate-100"
+                class="text-foreground"
               >
                 Sample One
               </span>
               <span
-                class="text-slate-500 font-mono text-xs"
+                class="text-mono-sm text-muted-foreground"
               >
                 s1@example.com
               </span>
             </div>
             <span
-              class="text-xs text-slate-400"
+              class="text-caption text-muted-foreground"
             >
               lead
             </span>
@@ -191,29 +187,29 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 2: found �
               class="flex items-center gap-3"
             >
               <div
-                class="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center text-slate-300 text-xs font-medium"
+                class="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--ds-violet-100)] text-xs font-medium text-[var(--ds-violet-500)]"
               >
                 SA
               </div>
               <span
-                class="text-slate-100"
+                class="text-foreground"
               >
                 Sample Two
               </span>
               <span
-                class="text-slate-500 font-mono text-xs"
+                class="text-mono-sm text-muted-foreground"
               >
                 s2@example.com
               </span>
             </div>
             <span
-              class="text-xs text-slate-400"
+              class="text-caption text-muted-foreground"
             >
               mql
             </span>
           </li>
           <li
-            class="text-xs text-slate-500 pl-11"
+            class="text-caption pl-11 text-muted-foreground"
           >
             + 
             5
@@ -222,30 +218,30 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 2: found �
         </ul>
       </div>
       <div
-        class="px-6 py-4 border-b border-slate-700"
+        class="border-b border-border px-6 py-4"
       >
         <div
           class="flex items-center justify-between"
         >
           <h3
-            class="text-xs font-semibold text-slate-400 uppercase tracking-wide"
+            class="text-micro uppercase tracking-wide text-muted-foreground"
           >
             What growth will do
           </h3>
           <button
             aria-expanded="false"
-            class="text-xs text-slate-400 hover:text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 rounded px-1"
+            class="rounded px-1 text-xs text-muted-foreground transition-colors hover:text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
           >
             ▼ Show reasoning
           </button>
         </div>
         <p
-          class="text-sm text-slate-300 mt-2 font-medium"
+          class="mt-2 text-sm font-medium text-foreground"
         >
           Dormant Reactivation — 3-touch
         </p>
         <p
-          class="text-xs text-slate-500 mt-1"
+          class="text-caption mt-1 text-muted-foreground"
         >
           Email + SMS + Email over 5 days.
         </p>
@@ -256,7 +252,7 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 2: found �
             class="flex items-start gap-3 text-sm"
           >
             <span
-              class="shrink-0 w-6 h-6 rounded-full bg-indigo-950 text-indigo-300 text-xs font-medium flex items-center justify-center mt-0.5"
+              class="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[var(--ds-violet-100)] text-xs font-medium text-[var(--ds-violet-500)]"
             >
               1
             </span>
@@ -264,7 +260,7 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 2: found �
               class="flex-1"
             >
               <span
-                class="text-slate-100"
+                class="text-foreground"
               >
                 Day 
                 0
@@ -272,7 +268,7 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 2: found �
                 ask open question
               </span>
               <span
-                class="ml-2 text-xs text-slate-500 uppercase tracking-wide"
+                class="text-micro ml-2 uppercase tracking-wide text-muted-foreground"
               >
                 email
               </span>
@@ -282,7 +278,7 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 2: found �
             class="flex items-start gap-3 text-sm"
           >
             <span
-              class="shrink-0 w-6 h-6 rounded-full bg-indigo-950 text-indigo-300 text-xs font-medium flex items-center justify-center mt-0.5"
+              class="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[var(--ds-violet-100)] text-xs font-medium text-[var(--ds-violet-500)]"
             >
               2
             </span>
@@ -290,7 +286,7 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 2: found �
               class="flex-1"
             >
               <span
-                class="text-slate-100"
+                class="text-foreground"
               >
                 Day 
                 2
@@ -298,7 +294,7 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 2: found �
                 soft check in
               </span>
               <span
-                class="ml-2 text-xs text-slate-500 uppercase tracking-wide"
+                class="text-micro ml-2 uppercase tracking-wide text-muted-foreground"
               >
                 sms
               </span>
@@ -308,7 +304,7 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 2: found �
             class="flex items-start gap-3 text-sm"
           >
             <span
-              class="shrink-0 w-6 h-6 rounded-full bg-indigo-950 text-indigo-300 text-xs font-medium flex items-center justify-center mt-0.5"
+              class="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[var(--ds-violet-100)] text-xs font-medium text-[var(--ds-violet-500)]"
             >
               3
             </span>
@@ -316,7 +312,7 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 2: found �
               class="flex-1"
             >
               <span
-                class="text-slate-100"
+                class="text-foreground"
               >
                 Day 
                 5
@@ -324,7 +320,7 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 2: found �
                 final value offer
               </span>
               <span
-                class="ml-2 text-xs text-slate-500 uppercase tracking-wide"
+                class="text-micro ml-2 uppercase tracking-wide text-muted-foreground"
               >
                 email
               </span>
@@ -333,23 +329,23 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 2: found �
         </ol>
       </div>
       <div
-        class="px-6 py-4 bg-slate-800 border-t border-slate-700 flex items-center justify-between gap-4 flex-wrap"
+        class="flex flex-wrap items-center justify-between gap-4 border-t border-border px-6 py-4"
       >
         <p
-          class="text-xs text-slate-500"
+          class="text-caption text-muted-foreground"
         >
           Preview sends no real messages. Launch dispatches via your connected channels.
         </p>
         <div
-          class="flex gap-3 shrink-0"
+          class="flex shrink-0 gap-3"
         >
           <button
-            class="px-4 py-2 text-sm font-medium border border-slate-600 text-slate-200 rounded-lg hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            class="inline-flex items-center justify-center gap-2 whitespace-nowrap text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 border border-border bg-background hover:bg-accent hover:text-accent-foreground h-9 rounded-full px-4"
           >
             Preview messages
           </button>
           <button
-            class="px-4 py-2 text-sm font-medium text-white bg-indigo-500 rounded-lg hover:bg-indigo-400 disabled:opacity-50 disabled:cursor-not-allowed"
+            class="inline-flex items-center justify-center gap-2 whitespace-nowrap text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 [background-image:var(--ds-accent-gradient)] text-primary-foreground shadow-[var(--ds-shadow-card)] hover:opacity-95 h-9 rounded-full px-4"
           >
             Launch for 7
           </button>
@@ -362,22 +358,22 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 2: found �
 
 exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 3: launched — success banner appears after launch 1`] = `
 <main
-  class="min-h-screen bg-slate-900 p-8"
+  class="min-h-screen bg-background p-8"
 >
   <header
-    class="mb-8 max-w-4xl mx-auto"
+    class="mx-auto mb-8 max-w-4xl"
   >
     <div
       class="flex items-baseline justify-between"
     >
       <div>
         <h1
-          class="text-3xl font-bold text-slate-50"
+          class="text-h1 text-foreground"
         >
           Opportunities
         </h1>
         <p
-          class="text-slate-400 mt-1"
+          class="mt-1 text-muted-foreground"
         >
           growth found 
           1
@@ -391,7 +387,7 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 3: launched
       </div>
       <button
         aria-label="Rescan opportunities"
-        class="text-sm text-slate-400 hover:text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 focus:ring-offset-slate-900 rounded px-2 py-1"
+        class="rounded-[var(--ds-radius-pill)] px-2 py-1 text-sm text-muted-foreground transition-colors hover:text-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
       >
         ↻ Rescan
       </button>
@@ -399,36 +395,41 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 3: launched
   </header>
   <div
     aria-live="polite"
-    class="max-w-4xl mx-auto mb-6 rounded-xl border border-emerald-800 bg-emerald-950 p-5"
+    class="mx-auto mb-6 max-w-4xl rounded-[var(--ds-radius-card)] border p-5"
     role="status"
+    style="background-color: var(--ds-emerald-100); border-color: var(--ds-emerald-500);"
   >
     <div
       class="flex items-start justify-between gap-4"
     >
       <div>
         <div
-          class="flex items-center gap-2 mb-1"
+          class="mb-1 flex items-center gap-2"
         >
           <span
             aria-hidden="true"
-            class="w-2 h-2 rounded-full bg-emerald-400"
+            class="h-2 w-2 rounded-full"
+            style="background-color: var(--ds-emerald-500);"
           />
           <span
-            class="text-xs font-medium text-emerald-300 uppercase tracking-wide"
+            class="text-micro uppercase tracking-wide"
+            style="color: var(--ds-emerald-700);"
           >
             Launched
           </span>
         </div>
         <p
-          class="text-emerald-50 font-medium"
+          class="font-medium"
+          style="color: var(--ds-emerald-700);"
         >
           7 contacts enrolled — first message queued.
         </p>
         <p
-          class="text-emerald-200 text-sm mt-1"
+          class="mt-1 text-sm"
+          style="color: var(--ds-emerald-700);"
         >
           <a
-            class="underline hover:text-emerald-100"
+            class="underline hover:opacity-80"
             href="/audit"
           >
             View decisions in audit log →
@@ -437,22 +438,23 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 3: launched
       </div>
       <button
         aria-label="Dismiss"
-        class="text-emerald-400 hover:text-emerald-200 text-lg leading-none"
+        class="text-lg leading-none transition-opacity hover:opacity-70"
+        style="color: var(--ds-emerald-700);"
       >
         ×
       </button>
     </div>
   </div>
   <div
-    class="max-w-4xl mx-auto space-y-6"
+    class="mx-auto max-w-4xl space-y-6"
   >
     <article
       aria-label="Opportunity: Reactivate dormant leads"
-      class="rounded-xl border border-slate-700 bg-slate-800 overflow-hidden"
+      class="overflow-hidden rounded-[var(--ds-radius-card)] border border-border bg-card text-card-foreground shadow-[var(--ds-shadow-card)]"
       role="article"
     >
       <div
-        class="p-6 border-b border-slate-700"
+        class="border-b border-border p-6"
       >
         <div
           class="flex items-start justify-between gap-4"
@@ -461,25 +463,21 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 3: launched
             class="flex-1"
           >
             <div
-              class="flex items-center gap-2 mb-2"
+              class="rounded-full border px-2.5 py-0.5 text-xs transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 border-transparent bg-[var(--ds-violet-100)] text-[var(--ds-violet-500)] font-medium mb-2 inline-flex items-center gap-2 uppercase tracking-wide"
             >
               <span
                 aria-hidden="true"
-                class="w-2 h-2 rounded-full bg-indigo-400"
+                class="h-2 w-2 rounded-full bg-[var(--ds-violet-500)]"
               />
-              <span
-                class="text-xs font-medium text-indigo-400 uppercase tracking-wide"
-              >
-                AI-identified opportunity
-              </span>
+              AI-identified opportunity
             </div>
             <h2
-              class="text-xl font-semibold text-slate-50"
+              class="text-h2 text-foreground"
             >
               Reactivate dormant leads
             </h2>
             <p
-              class="text-slate-300 mt-2"
+              class="mt-2 text-muted-foreground"
             >
               7 contacts went 30+ days without engagement.
             </p>
@@ -488,12 +486,12 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 3: launched
             class="shrink-0 text-right"
           >
             <div
-              class="text-3xl font-bold text-slate-50"
+              class="text-h1 tabular-nums text-foreground"
             >
               7
             </div>
             <div
-              class="text-xs text-slate-400"
+              class="text-caption text-muted-foreground"
             >
               contacts
             </div>
@@ -501,10 +499,10 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 3: launched
         </div>
       </div>
       <div
-        class="px-6 py-4 border-b border-slate-700"
+        class="border-b border-border px-6 py-4"
       >
         <h3
-          class="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-3"
+          class="text-micro mb-3 uppercase tracking-wide text-muted-foreground"
         >
           Contacts in this segment
         </h3>
@@ -518,23 +516,23 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 3: launched
               class="flex items-center gap-3"
             >
               <div
-                class="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center text-slate-300 text-xs font-medium"
+                class="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--ds-violet-100)] text-xs font-medium text-[var(--ds-violet-500)]"
               >
                 SA
               </div>
               <span
-                class="text-slate-100"
+                class="text-foreground"
               >
                 Sample One
               </span>
               <span
-                class="text-slate-500 font-mono text-xs"
+                class="text-mono-sm text-muted-foreground"
               >
                 s1@example.com
               </span>
             </div>
             <span
-              class="text-xs text-slate-400"
+              class="text-caption text-muted-foreground"
             >
               lead
             </span>
@@ -546,29 +544,29 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 3: launched
               class="flex items-center gap-3"
             >
               <div
-                class="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center text-slate-300 text-xs font-medium"
+                class="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--ds-violet-100)] text-xs font-medium text-[var(--ds-violet-500)]"
               >
                 SA
               </div>
               <span
-                class="text-slate-100"
+                class="text-foreground"
               >
                 Sample Two
               </span>
               <span
-                class="text-slate-500 font-mono text-xs"
+                class="text-mono-sm text-muted-foreground"
               >
                 s2@example.com
               </span>
             </div>
             <span
-              class="text-xs text-slate-400"
+              class="text-caption text-muted-foreground"
             >
               mql
             </span>
           </li>
           <li
-            class="text-xs text-slate-500 pl-11"
+            class="text-caption pl-11 text-muted-foreground"
           >
             + 
             5
@@ -577,30 +575,30 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 3: launched
         </ul>
       </div>
       <div
-        class="px-6 py-4 border-b border-slate-700"
+        class="border-b border-border px-6 py-4"
       >
         <div
           class="flex items-center justify-between"
         >
           <h3
-            class="text-xs font-semibold text-slate-400 uppercase tracking-wide"
+            class="text-micro uppercase tracking-wide text-muted-foreground"
           >
             What growth will do
           </h3>
           <button
             aria-expanded="false"
-            class="text-xs text-slate-400 hover:text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 rounded px-1"
+            class="rounded px-1 text-xs text-muted-foreground transition-colors hover:text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
           >
             ▼ Show reasoning
           </button>
         </div>
         <p
-          class="text-sm text-slate-300 mt-2 font-medium"
+          class="mt-2 text-sm font-medium text-foreground"
         >
           Dormant Reactivation — 3-touch
         </p>
         <p
-          class="text-xs text-slate-500 mt-1"
+          class="text-caption mt-1 text-muted-foreground"
         >
           Email + SMS + Email over 5 days.
         </p>
@@ -611,7 +609,7 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 3: launched
             class="flex items-start gap-3 text-sm"
           >
             <span
-              class="shrink-0 w-6 h-6 rounded-full bg-indigo-950 text-indigo-300 text-xs font-medium flex items-center justify-center mt-0.5"
+              class="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[var(--ds-violet-100)] text-xs font-medium text-[var(--ds-violet-500)]"
             >
               1
             </span>
@@ -619,7 +617,7 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 3: launched
               class="flex-1"
             >
               <span
-                class="text-slate-100"
+                class="text-foreground"
               >
                 Day 
                 0
@@ -627,7 +625,7 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 3: launched
                 ask open question
               </span>
               <span
-                class="ml-2 text-xs text-slate-500 uppercase tracking-wide"
+                class="text-micro ml-2 uppercase tracking-wide text-muted-foreground"
               >
                 email
               </span>
@@ -637,7 +635,7 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 3: launched
             class="flex items-start gap-3 text-sm"
           >
             <span
-              class="shrink-0 w-6 h-6 rounded-full bg-indigo-950 text-indigo-300 text-xs font-medium flex items-center justify-center mt-0.5"
+              class="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[var(--ds-violet-100)] text-xs font-medium text-[var(--ds-violet-500)]"
             >
               2
             </span>
@@ -645,7 +643,7 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 3: launched
               class="flex-1"
             >
               <span
-                class="text-slate-100"
+                class="text-foreground"
               >
                 Day 
                 2
@@ -653,7 +651,7 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 3: launched
                 soft check in
               </span>
               <span
-                class="ml-2 text-xs text-slate-500 uppercase tracking-wide"
+                class="text-micro ml-2 uppercase tracking-wide text-muted-foreground"
               >
                 sms
               </span>
@@ -663,7 +661,7 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 3: launched
             class="flex items-start gap-3 text-sm"
           >
             <span
-              class="shrink-0 w-6 h-6 rounded-full bg-indigo-950 text-indigo-300 text-xs font-medium flex items-center justify-center mt-0.5"
+              class="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[var(--ds-violet-100)] text-xs font-medium text-[var(--ds-violet-500)]"
             >
               3
             </span>
@@ -671,7 +669,7 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 3: launched
               class="flex-1"
             >
               <span
-                class="text-slate-100"
+                class="text-foreground"
               >
                 Day 
                 5
@@ -679,7 +677,7 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 3: launched
                 final value offer
               </span>
               <span
-                class="ml-2 text-xs text-slate-500 uppercase tracking-wide"
+                class="text-micro ml-2 uppercase tracking-wide text-muted-foreground"
               >
                 email
               </span>
@@ -688,23 +686,23 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 3: launched
         </ol>
       </div>
       <div
-        class="px-6 py-4 bg-slate-800 border-t border-slate-700 flex items-center justify-between gap-4 flex-wrap"
+        class="flex flex-wrap items-center justify-between gap-4 border-t border-border px-6 py-4"
       >
         <p
-          class="text-xs text-slate-500"
+          class="text-caption text-muted-foreground"
         >
           Preview sends no real messages. Launch dispatches via your connected channels.
         </p>
         <div
-          class="flex gap-3 shrink-0"
+          class="flex shrink-0 gap-3"
         >
           <button
-            class="px-4 py-2 text-sm font-medium border border-slate-600 text-slate-200 rounded-lg hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            class="inline-flex items-center justify-center gap-2 whitespace-nowrap text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 border border-border bg-background hover:bg-accent hover:text-accent-foreground h-9 rounded-full px-4"
           >
             Preview messages
           </button>
           <button
-            class="px-4 py-2 text-sm font-medium text-white bg-indigo-500 rounded-lg hover:bg-indigo-400 disabled:opacity-50 disabled:cursor-not-allowed"
+            class="inline-flex items-center justify-center gap-2 whitespace-nowrap text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 [background-image:var(--ds-accent-gradient)] text-primary-foreground shadow-[var(--ds-shadow-card)] hover:opacity-95 h-9 rounded-full px-4"
           >
             Launch for 7
           </button>
