@@ -19,6 +19,7 @@ import {
   formatStageAge,
   contactDisplayName,
   formatMoney,
+  type ConfidenceLevel,
 } from "../board-helpers";
 
 describe("KAN-968 — humanizeActionType (PRD-locked map)", () => {
@@ -58,11 +59,24 @@ describe("KAN-968 — confidenceLevel bucket boundaries", () => {
     expect(confidencePercent(0.823)).toBe(82);
     expect(confidencePercent(0.826)).toBe(83);
   });
-  it("confidenceClasses returns a non-empty class string for every tier (drift pin)", () => {
-    expect(confidenceClasses("high")).toMatch(/emerald/);
-    expect(confidenceClasses("good")).toMatch(/indigo/);
-    expect(confidenceClasses("uncertain")).toMatch(/yellow/);
-    expect(confidenceClasses("low")).toMatch(/red/);
+  // KAN-986 — confidenceClasses migrated from raw Tailwind dark-theme
+  // (text-emerald-300 etc.) to the design-system pastel tokens
+  // (--ds-emerald-100 / --ds-violet-100 / --ds-warning-soft / --ds-danger-soft).
+  // Test now pins each tier to its --ds-* token AND adds an explicit
+  // pairwise-distinctness assertion to enforce the standing hard
+  // requirement: the four tiers must remain visually distinguishable.
+  it("confidenceClasses references the tier-specific --ds-* token", () => {
+    expect(confidenceClasses("high")).toMatch(/ds-emerald/);
+    expect(confidenceClasses("good")).toMatch(/ds-violet/);
+    expect(confidenceClasses("uncertain")).toMatch(/ds-warning/);
+    expect(confidenceClasses("low")).toMatch(/ds-danger/);
+  });
+
+  it("KAN-986 hard requirement — all 4 tier class strings are pairwise distinct", () => {
+    const tiers: ConfidenceLevel[] = ["high", "good", "uncertain", "low"];
+    const classes = tiers.map(confidenceClasses);
+    const unique = new Set(classes);
+    expect(unique.size).toBe(4);
   });
 });
 
