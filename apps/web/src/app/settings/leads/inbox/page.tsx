@@ -136,8 +136,8 @@ export default function LeadInboxSettingsPage() {
               </Button>
             </div>
           ) : (
-            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-              No inbox address yet — click "Regenerate" below to create one.
+            <div className="rounded-[var(--ds-radius-input)] border border-[var(--ds-warning-soft)] bg-[var(--ds-warning-soft)] px-3 py-2 text-body text-[var(--ds-warning-text)]">
+              No inbox address yet — click &quot;Regenerate&quot; below to create one.
             </div>
           )}
           <div className="flex items-center justify-between pt-2">
