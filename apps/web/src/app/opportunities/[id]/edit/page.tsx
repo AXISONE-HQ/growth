@@ -47,7 +47,7 @@ export default function EditOpportunityPage() {
   if (!deal) {
     return (
       <div className="max-w-4xl mx-auto p-6">
-        <p className="text-sm">Deal not found.</p>
+        <p className="text-sm">Lead not found.</p>
       </div>
     );
   }

@@ -243,7 +243,7 @@ export function OpportunityForm({
   const createMutation = useMutation<DealDetail, Error, OpportunityFormValues>({
     mutationFn: (formValues) => dealsApi.create(formToCreateInput(formValues)),
     onSuccess: (saved) => {
-      toast.success('Deal created.');
+      toast.success('Lead created.');
       void queryClient.invalidateQueries({ queryKey: ['deals'] });
       router.push(`/opportunities/${saved.id}`);
     },
@@ -262,7 +262,7 @@ export function OpportunityForm({
     mutationFn: ({ id, values: formValues }) =>
       dealsApi.update({ id, ...formToCreateInput(formValues) }),
     onSuccess: (saved) => {
-      toast.success('Deal saved.');
+      toast.success('Lead saved.');
       void queryClient.invalidateQueries({ queryKey: ['deals'] });
       void queryClient.invalidateQueries({ queryKey: ['deals', 'get', saved.id] });
       router.push(`/opportunities/${saved.id}`);
@@ -329,10 +329,10 @@ export function OpportunityForm({
       onSave={handleSave}
       errors={serverErrors.length > 0 ? serverErrors : undefined}
     >
-      {/* Card 1 — Core Deal */}
+      {/* Card 1 — Core Lead (KAN-991 D.1 — display label) */}
       <Card>
         <CardHeader>
-          <CardTitle>Core Deal</CardTitle>
+          <CardTitle>Core Lead</CardTitle>
         </CardHeader>
         <CardContent className="grid grid-cols-2 gap-4">
           <div className="col-span-2">

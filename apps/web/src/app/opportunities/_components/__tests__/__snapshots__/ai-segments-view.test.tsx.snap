@@ -112,7 +112,7 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 2: found �
                 aria-hidden="true"
                 class="h-2 w-2 rounded-full bg-[var(--ds-violet-500)]"
               />
-              AI-identified opportunity
+              AI-identified lead
             </div>
             <h2
               class="text-h2 text-foreground"
@@ -469,7 +469,7 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 3: launched
                 aria-hidden="true"
                 class="h-2 w-2 rounded-full bg-[var(--ds-violet-500)]"
               />
-              AI-identified opportunity
+              AI-identified lead
             </div>
             <h2
               class="text-h2 text-foreground"

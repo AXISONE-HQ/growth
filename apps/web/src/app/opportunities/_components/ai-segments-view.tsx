@@ -295,7 +295,7 @@ function OpportunityCard({
                   className="h-2 w-2 rounded-full bg-[var(--ds-violet-500)]"
                   aria-hidden="true"
                 />
-                AI-identified opportunity
+                AI-identified lead
               </Badge>
               <h2 className="text-h2 text-foreground">{opportunity.displayName}</h2>
               <p className="mt-2 text-muted-foreground">{opportunity.reasoning}</p>

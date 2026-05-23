@@ -12,9 +12,11 @@
  *      single-file page.tsx into `_components/ai-segments-view.tsx`
  *      with regression-protection snapshot tests.
  *
- *   2. All Deals — flat enumeration of `deals.list` from KAN-883.
+ *   2. All Leads — flat enumeration of `deals.list` from KAN-883.
  *      6-column sortable table with status filter + name search.
  *      Net-new; complements (does not replace) AI Segments.
+ *      (KAN-991 D.1 — display label renamed from "All Deals" to
+ *      "All Leads"; tab value stays "all-deals" — internal id.)
  *
  * Tab state: internal useState. No URL persistence in V1 — sharing a
  * specific tab via URL is trivial to add later (?tab=all-deals) if
@@ -40,7 +42,7 @@ export default function OpportunitiesPage() {
       <div className="bg-white border-b border-gray-200 px-6 py-3">
         <Tabs value={tab} onValueChange={(v) => setTab(v as TabValue)}>
           <TabsList>
-            <TabsTrigger value="all-deals">All Deals</TabsTrigger>
+            <TabsTrigger value="all-deals">All Leads</TabsTrigger>
             <TabsTrigger value="ai-segments">AI Segments</TabsTrigger>
           </TabsList>
           <TabsContent value="all-deals">
