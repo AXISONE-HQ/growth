@@ -194,7 +194,9 @@ describe("KAN-887 — ContactDetailPage", () => {
       (el) => el.tagName === "H1",
     );
     expect(heading).toBeTruthy();
-    const back = screen.getByText(/Back to Customers/).closest("a");
+    // KAN-991 Phase D.1 — display label renamed Customers→Contacts.
+    // Route /customers stays.
+    const back = screen.getByText(/Back to Contacts/).closest("a");
     expect(back).toHaveAttribute("href", "/customers");
   });
 });

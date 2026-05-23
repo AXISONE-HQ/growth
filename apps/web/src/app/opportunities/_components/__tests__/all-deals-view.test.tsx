@@ -53,10 +53,11 @@ describe("KAN-886 — AllDealsView", () => {
     });
     wrap(<AllDealsView />);
     await waitFor(() => {
-      expect(screen.getByText(/No deals yet/i)).toBeInTheDocument();
+      // KAN-991 Phase D.1 — display copy renamed deals→leads.
+      expect(screen.getByText(/No leads yet/i)).toBeInTheDocument();
     });
     expect(
-      screen.getByText(/Deals will appear here as the AI works your pipeline/i),
+      screen.getByText(/Leads will appear here as the AI works your pipeline/i),
     ).toBeInTheDocument();
   });
 

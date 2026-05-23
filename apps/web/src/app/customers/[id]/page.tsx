@@ -9,7 +9,7 @@
  *
  * Layout:
  *   - Header: display name + StatusBadge (lifecycle) + Edit; "Contact
- *     ID: ..." subtitle; "Back to Customers"
+ *     ID: ..." subtitle; "Back to Contacts"
  *   - Main slot (1.4fr): Identity (Email/Phone/Segment/Data quality) +
  *     Lifecycle & source + Address + Customer status (conditional) +
  *     Recent engagements + Recent outcomes + Recent decisions + Recent
@@ -83,7 +83,7 @@ export default function ContactDetailPage() {
     return (
       <DetailPageShell
         backHref="/customers"
-        backLabel="Back to Customers"
+        backLabel="Back to Contacts"
         title={isNotFound ? 'Contact not found' : 'Failed to load contact'}
         logoMark={Users}
         mainSlot={
@@ -110,7 +110,7 @@ export default function ContactDetailPage() {
   return (
     <DetailPageShell
       backHref="/customers"
-      backLabel="Back to Customers"
+      backLabel="Back to Contacts"
       title={displayName(contact)}
       logoMark={initials(contact)}
       subtitle={`Contact ID: ${contact.id}`}

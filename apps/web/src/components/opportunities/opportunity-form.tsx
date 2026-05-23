@@ -316,9 +316,9 @@ export function OpportunityForm({
 
   return (
     <EntityFormShell
-      title={mode === 'create' ? 'New deal' : 'Edit deal'}
+      title={mode === 'create' ? 'New lead' : 'Edit lead'}
       breadcrumb={[
-        { label: 'Opportunities', href: '/opportunities' },
+        { label: 'Leads', href: '/opportunities' },
         ...(mode === 'edit' && dealId
           ? [{ label: 'Edit', href: `/opportunities/${dealId}/edit` }]
           : [{ label: 'New', href: '/opportunities/new' }]),
