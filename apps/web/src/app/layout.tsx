@@ -32,20 +32,29 @@ import { DemoModeBanner } from '@/components/demo-mode-banner';
 import { TopNav } from '@/components/ui/top-nav';
 import { IconRail, type IconRailItem } from '@/components/ui/icon-rail';
 
-// KAN-718 nav surgery:
-//   - /pipelines (mock) → redirect to /settings/pipelines (KAN-702 real)
-//   - /pipelines/create (mock) → redirect to /settings/pipelines/new
-//   - /audit-log (literal dupe of /audit) → deleted; /audit kept
-//   - /competitors (broken imports, no API) → deleted
-//   - /conversations (V1+ feature, no backend) → demoOnly flag; visible in
-//     dev/staging for sales demos, hidden in prod
-// KAN-878 — `activePrefix` lets an item's sidebar-highlight scope differ
-// from its href. Account points at /settings/account/identity (the first
-// tab) but should light up on every /settings/account/* sub-tab. Resolution
-// is longest-prefix-wins via `findActiveHref` below, so the broader
-// Settings item correctly yields to Account (and to Knowledge Center) when
-// the path lives under their respective prefixes.
-const navItems: Array<{
+// KAN-992 Phase D.2 — IA reorg: rail trimmed to target-8 + Settings
+// pinned-bottom. Movers (Objectives / Imports / Audit Log / Knowledge
+// Center / Account) carry `hideFromRail: true` and stay in the array
+// so findActiveHref + the pageTitle longest-prefix resolver still
+// behave correctly when the user navigates to their routes directly
+// (or via D.3's Settings sub-tabs). Order matches the founder's locked
+// target rail (top section), with Messages dropping its demoOnly flag
+// to render in prod (clicks → existing "Messages — coming soon" page
+// from KAN-991 D.1).
+//
+// History context:
+// KAN-718 nav surgery: /pipelines mock → redirect to /settings/pipelines;
+//   /pipelines/create → /settings/pipelines/new; /audit-log dupe → deleted;
+//   /competitors broken → deleted; /conversations demoOnly flag.
+// KAN-878 — activePrefix lets an item's rail-highlight scope differ from
+//   its href (e.g., Account active on every /settings/account/* sub-tab).
+//   Longest-prefix-wins via findActiveHref. Even hideFromRail items still
+//   participate in the resolver so direct nav to a hidden route gets the
+//   right active state (rail just renders no highlight for hidden items).
+// Exported for KAN-992 D.2 rail-order regression test (apps/web/src/app/
+// __tests__/nav-items.test.ts). Pin the target-8 order + hideFromRail
+// invariant so a future edit can't silently churn the rail.
+export const navItems: Array<{
   href: string;
   label: string;
   icon: typeof LayoutDashboard;
@@ -54,49 +63,48 @@ const navItems: Array<{
   activePrefix?: string;
   /** KAN-978 — pin to the bottom of the IconRail (Settings pattern). */
   pinBottom?: boolean;
+  /** KAN-992 Phase D.2 — exclude from rail render. Item still participates
+   *  in findActiveHref + pageTitle resolution, so direct nav to the route
+   *  (or D.3's Settings sub-tab) still resolves correctly. */
+  hideFromRail?: boolean;
 }> = [
+  // Target-8 rail (ordered, founder-locked):
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  // KAN-968 — Pipelines (kanban board, read-only) + Objectives promoted to
-  // top-level nav. Both sit near Opportunities since they're the "what is
-  // growth pursuing right now?" surfaces. Objectives stays at its existing
-  // /settings/objectives route (no URL move, matches the Knowledge Center
-  // pattern of top-level link to a settings route).
   { href: '/pipelines', label: 'Pipelines', icon: Workflow },
-  { href: '/settings/objectives', label: 'Objectives', icon: Target },
   // KAN-991 Phase D.1 — display label renamed Opportunities → Leads. Route
   // stays /opportunities, entity stays Deal, route literal stays.
   { href: '/opportunities', label: 'Leads', icon: Target },
-  // KAN-991 Phase D.1 — display label renamed Conversations → Messages.
-  // Route stays /conversations. demoOnly flag stays here; the prod
-  // visibility flip is D.2.
-  { href: '/conversations', label: 'Messages', icon: MessageSquare, demoOnly: true },
-  // KAN-884 — CRM cohort 1 PR 2. /companies sits between Opportunities and
-  // Customers (orgs → people they belong to); /orders sits after Customers
-  // and before Escalations (transactional outcomes from those people).
-  // activePrefix lets /companies/abc + /orders/xyz keep their parent entry
-  // highlighted via the existing KAN-878 longest-prefix-wins resolver.
-  { href: '/companies', label: 'Companies', icon: Building2, activePrefix: '/companies' },
   // KAN-991 Phase D.1 — display label renamed Customers → Contacts. Route
   // stays /customers, entity stays Contact, route literal stays (31 refs).
   { href: '/customers', label: 'Contacts', icon: Users },
+  // KAN-884 — /companies sits in the org → person → transaction flow.
+  // activePrefix keeps /companies/abc highlighted on the parent entry.
+  { href: '/companies', label: 'Companies', icon: Building2, activePrefix: '/companies' },
   { href: '/orders', label: 'Orders', icon: Receipt, activePrefix: '/orders' },
-  // KAN-901 — Ingestion Cohort 2.1b. /imports sits between Orders and
-  // Escalations: data flows in via Imports → transactional outcomes flow
-  // out via Orders/Escalations. activePrefix keeps /imports/[id] on the
-  // parent (longest-prefix-wins resolver).
-  { href: '/imports', label: 'Imports', icon: Upload, activePrefix: '/imports' },
   { href: '/escalations', label: 'Escalations', icon: AlertTriangle },
-  { href: '/audit', label: 'Audit Log', icon: FileText },
-  { href: '/settings/knowledge', label: 'Knowledge Center', icon: BookOpen },
+  // KAN-991 + KAN-992 — display label renamed Conversations → Messages
+  // (D.1); demoOnly flag DROPPED (D.2) so Messages renders in prod.
+  // Clicking → /conversations → existing "Messages — coming soon" page.
+  { href: '/conversations', label: 'Messages', icon: MessageSquare },
+
+  // Bottom-pinned:
+  // KAN-978 — Settings pinned to IconRail bottom per the prototype's
+  // .spacer + bottom-pinned `.rbtn` pattern.
+  { href: '/settings', label: 'Settings', icon: Settings, pinBottom: true },
+
+  // KAN-992 Phase D.2 — movers (off the rail, still active in resolver).
+  // D.3 (KAN-993) wires these as Settings sub-tabs via router-push.
+  { href: '/settings/objectives', label: 'Objectives', icon: Target, hideFromRail: true },
+  { href: '/imports', label: 'Imports', icon: Upload, activePrefix: '/imports', hideFromRail: true },
+  { href: '/audit', label: 'Audit Log', icon: FileText, hideFromRail: true },
+  { href: '/settings/knowledge', label: 'Knowledge Center', icon: BookOpen, hideFromRail: true },
   {
     href: '/settings/account/identity',
     label: 'Account',
     icon: Building2,
     activePrefix: '/settings/account',
+    hideFromRail: true,
   },
-  // KAN-978 — Settings pinned to the IconRail bottom per the prototype's
-  // .spacer + bottom-pinned `.rbtn` pattern. The route stays /settings.
-  { href: '/settings', label: 'Settings', icon: Settings, pinBottom: true },
 ];
 
 // Pick the single nav item to highlight for the current pathname.
@@ -127,6 +135,11 @@ function findActiveHref(pathname: string): string | null {
 // data still consumes the route).
 const pageTitle: Record<string, string> = {
   '/settings/account/identity': 'Account',
+  // KAN-992 Phase D.2 — '/settings/account' prefix added so the 5 Account
+  // sub-tab routes (contact/hours/identity/legal/payments) all resolve to
+  // "Account" via longest-prefix-wins. Mirrors navItems' activePrefix:
+  // '/settings/account' for the Account rail entry (hideFromRail in D.2).
+  '/settings/account': 'Account',
   '/settings/knowledge': 'Knowledge Center',
   // KAN-968 — Objectives + Pipelines page titles for the top-bar h1 resolver.
   '/settings/objectives': 'Objectives',
@@ -199,9 +212,12 @@ function AppShell({ children }: { children: React.ReactNode }) {
 
   // KAN-978 Phase B.3 — visible items for the IconRail. Demo-only items
   // hide when DEMO_MODE is off; adminOnly items hide from non-admins.
-  // Filter once here so the IconRail stays a pure rendering primitive.
+  // KAN-992 Phase D.2 — `hideFromRail` filters movers (Objectives /
+  // Imports / Audit / Knowledge / Account) that still live in navItems
+  // so findActiveHref + pageTitle keep resolving them on direct nav.
   const activeHref = findActiveHref(pathname);
   const visibleNavItems: IconRailItem[] = navItems
+    .filter((item) => !item.hideFromRail)
     .filter((item) => !(item.demoOnly && !isDemoMode()))
     .filter((item) => !('adminOnly' in item && item.adminOnly && user.role !== 'admin'))
     .map(({ href, label, icon, badge, pinBottom }) => ({

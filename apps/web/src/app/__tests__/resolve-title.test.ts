@@ -71,4 +71,20 @@ describe("KAN-cohort-3.5 — resolveTitle (longest-prefix match)", () => {
     // Ensures the `startsWith(prefix + '/')` guard works.
     expect(resolveTitle("/companies-archive")).toBe("Dashboard");
   });
+
+  // KAN-992 Phase D.2 — hideFromRail invariant. The 5 movers (Objectives /
+  // Imports / Audit Log / Knowledge Center / Account) stay in navItems
+  // with hideFromRail:true so direct navigation to their routes still
+  // resolves a sensible page title (and findActiveHref still resolves
+  // them for the rail-active-state logic, which renders nothing for
+  // hidden items but doesn't crash). This test pins that contract.
+  it("KAN-992 D.2 — hidden-from-rail routes still resolve their page title (direct nav)", () => {
+    expect(resolveTitle("/settings/objectives")).toBe("Objectives");
+    expect(resolveTitle("/imports")).toBe("Data Imports");
+    expect(resolveTitle("/imports/abc-123")).toBe("Data Imports");
+    expect(resolveTitle("/audit")).toBe("Audit Log");
+    expect(resolveTitle("/settings/knowledge")).toBe("Knowledge Center");
+    expect(resolveTitle("/settings/account/identity")).toBe("Account");
+    expect(resolveTitle("/settings/account/contact")).toBe("Account");
+  });
 });
