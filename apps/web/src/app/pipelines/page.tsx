@@ -40,17 +40,18 @@ export default function PipelinesPage() {
   });
 
   if (isLoading) {
+    // KAN-995 — light skeleton matching the board's C.3b treatment.
     return (
       <div className="space-y-4">
-        <div className="h-10 w-64 animate-pulse rounded-md bg-slate-800/60" />
+        <div className="h-10 w-64 animate-pulse rounded bg-muted" />
         <div className="flex gap-4 overflow-x-auto pb-4">
           {[0, 1, 2, 3].map((i) => (
             <div
               key={i}
-              className="w-72 shrink-0 animate-pulse rounded-md bg-slate-900/50 p-3"
+              className="w-72 shrink-0 animate-pulse rounded-[var(--ds-radius-card)] border border-border bg-card p-3"
             >
-              <div className="mb-3 h-4 w-24 rounded bg-slate-800" />
-              <div className="h-16 rounded bg-slate-800/60" />
+              <div className="mb-3 h-4 w-24 rounded bg-muted" />
+              <div className="h-16 rounded bg-muted/60" />
             </div>
           ))}
         </div>
@@ -59,10 +60,11 @@ export default function PipelinesPage() {
   }
 
   if (isError) {
+    // KAN-995 — light error block matching the board's C.3b treatment.
     return (
       <div
         role="alert"
-        className="rounded-md border border-red-500/30 bg-red-500/5 p-4 text-sm text-red-300"
+        className="rounded-[var(--ds-radius-input)] border border-[var(--ds-danger-soft)] bg-[var(--ds-danger-soft)] p-4 text-sm text-[var(--ds-danger-text)]"
       >
         Failed to load pipelines: {error instanceof Error ? error.message : "Unknown error"}
       </div>
@@ -99,16 +101,20 @@ export default function PipelinesPage() {
   return (
     <div className="space-y-4">
       <Tabs defaultValue={defaultValue} className="w-full">
+        {/* KAN-995 — pipeline-selector TabsList: drop the slate-900 strip
+            override and let the canonical B.1 pill TabsList styling apply
+            (bg-muted container, gradient-active triggers). Keep h-auto +
+            flex-wrap so multi-pipeline strips can wrap; keep justify-start
+            so triggers cluster left rather than centering. */}
         <TabsList
           data-testid="pipeline-tabs"
-          className="flex h-auto flex-wrap justify-start gap-1 bg-slate-900/50 p-1"
+          className="h-auto flex-wrap justify-start"
         >
           {boardPipelines.map((p) => (
             <TabsTrigger
               key={p.id}
               value={p.id}
               data-testid="pipeline-tab"
-              className="data-[state=active]:bg-slate-700 data-[state=active]:text-slate-100"
             >
               {p.name}
             </TabsTrigger>
