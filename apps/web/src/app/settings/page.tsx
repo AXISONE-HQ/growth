@@ -31,7 +31,16 @@ import {
   UserPlus,
   Link2,
   Megaphone,
+  // KAN-993 Phase D.3 — icons for the 5 mover sub-tabs + the
+  // navigation-affordance chevron.
+  Target,
+  BookOpen,
+  Upload,
+  FileText,
+  Building2,
+  ChevronRight,
 } from 'lucide-react';
+import Link from 'next/link';
 import { useState, useEffect, useCallback } from 'react';
 import {
   settingsApi,
@@ -210,6 +219,22 @@ export default function SettingsPage() {
     { id: 'team', label: 'Team & roles', icon: Users },
     { id: 'notifications', label: 'Notifications', icon: Bell },
     { id: 'security', label: 'Security', icon: Shield },
+  ];
+
+  // KAN-993 Phase D.3 — mover sub-tabs surfaced inside Settings via
+  // router-push links. The 5 entries were removed from the IconRail in
+  // D.2 (KAN-992) but their routes are unchanged. These render as
+  // pill-styled <Link> items in a separate <nav aria-label="More
+  // settings"> below the Radix TabsList — clicking navigates to the
+  // existing route (some leave the Settings shell — accepted Option-B
+  // tradeoff). The Radix tablist semantics stay pure (6 inline tabs);
+  // these are explicitly navigation links, not tab triggers.
+  const moverLinks = [
+    { href: '/settings/objectives', label: 'Objectives', icon: Target },
+    { href: '/settings/knowledge', label: 'Knowledge Center', icon: BookOpen },
+    { href: '/imports', label: 'Data Imports', icon: Upload },
+    { href: '/audit', label: 'Audit Log', icon: FileText },
+    { href: '/settings/account/identity', label: 'Account', icon: Building2 },
   ];
 
   // Flash messages
@@ -502,7 +527,7 @@ export default function SettingsPage() {
       </header>
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-        <TabsList className="mb-6 flex-wrap h-auto">
+        <TabsList className="mb-2 flex-wrap h-auto">
           {tabs.map((tab) => (
             <TabsTrigger key={tab.id} value={tab.id} className="gap-2">
               <tab.icon className="h-4 w-4" />
@@ -510,6 +535,29 @@ export default function SettingsPage() {
             </TabsTrigger>
           ))}
         </TabsList>
+
+        {/* KAN-993 D.3 — mover sub-tabs (router-push, navigates away from
+            /settings; not Radix tab triggers). Pill-styled <Link> items
+            in their own <nav aria-label="More settings"> landmark.
+            ChevronRight signals "navigates away". */}
+        <nav
+          aria-label="More settings"
+          data-testid="settings-mover-nav"
+          className="mb-6 inline-flex flex-wrap items-center gap-1 rounded-full bg-muted p-1"
+        >
+          {moverLinks.map((m) => (
+            <Link
+              key={m.href}
+              href={m.href}
+              data-testid={`settings-mover-${m.label.toLowerCase().replace(/\s+/g, '-')}`}
+              className="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-full px-4 py-1.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-card hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+            >
+              <m.icon className="h-4 w-4" />
+              {m.label}
+              <ChevronRight className="h-3.5 w-3.5 opacity-60" aria-hidden="true" />
+            </Link>
+          ))}
+        </nav>
 
         <div className="max-w-3xl">
           {success ? (

@@ -137,6 +137,53 @@ describe("KAN-990 — SettingsPage (DS v1 restyle)", () => {
     expect(active[0]?.textContent).toMatch(/AI Configuration/i);
   });
 
+  // KAN-993 Phase D.3 — mover sub-tab nav (the 5 items removed from the
+  // rail in D.2 surfaced inside Settings via router-push Links).
+  it("KAN-993 D.3 — renders the 5 mover sub-tabs in the 'More settings' nav", () => {
+    render(<SettingsPage />);
+    const nav = screen.getByRole("navigation", { name: /More settings/i });
+    expect(nav).toBeInTheDocument();
+    // Links inside the nav landmark, not 'tab' role — these navigate, they
+    // don't switch panels.
+    const links = nav.querySelectorAll("a");
+    expect(links.length).toBe(5);
+  });
+
+  it("KAN-993 D.3 — each mover sub-tab points at its existing route (no route churn)", () => {
+    render(<SettingsPage />);
+    const nav = screen.getByRole("navigation", { name: /More settings/i });
+    const linksByLabel = Object.fromEntries(
+      Array.from(nav.querySelectorAll("a")).map((a) => [a.textContent?.replace(/\s+/g, " ").trim(), a.getAttribute("href")]),
+    );
+    // textContent includes label + chevron; assert by partial label match
+    // against the href map.
+    const findHref = (labelPart: string): string | null | undefined => {
+      const entry = Object.entries(linksByLabel).find(([k]) => k?.includes(labelPart));
+      return entry?.[1];
+    };
+    expect(findHref("Objectives")).toBe("/settings/objectives");
+    expect(findHref("Knowledge Center")).toBe("/settings/knowledge");
+    expect(findHref("Data Imports")).toBe("/imports");
+    expect(findHref("Audit Log")).toBe("/audit");
+    expect(findHref("Account")).toBe("/settings/account/identity");
+  });
+
+  it("KAN-993 D.3 — mover items render as <a> (Links), NOT as Radix tab triggers", () => {
+    render(<SettingsPage />);
+    // The 5 mover items must NOT be reachable via getAllByRole('tab') —
+    // that's reserved for Radix's 6 inline tabs.
+    const tabs = screen.getAllByRole("tab");
+    expect(tabs.length).toBe(6);
+    // No tab has the mover labels.
+    const tabLabels = tabs.map((t) => t.textContent?.replace(/\s+/g, " ").trim() ?? "");
+    expect(tabLabels.some((l) => l.includes("Objectives"))).toBe(false);
+    expect(tabLabels.some((l) => l.includes("Knowledge Center"))).toBe(false);
+    expect(tabLabels.some((l) => l.includes("Data Imports"))).toBe(false);
+    expect(tabLabels.some((l) => l.includes("Audit Log"))).toBe(false);
+    // "Account" label intentionally not asserted negative here — other tabs
+    // could in theory mention it; we already pinned the count + href above.
+  });
+
   it("Tab labels use sentence case (DS v1 — 'Team & roles' not 'Team & Roles')", () => {
     render(<SettingsPage />);
     // 'Team & roles' is the migrated copy; the old label was 'Team & Roles'.
