@@ -9,7 +9,7 @@
  *
  * Layout:
  *   - Header: deal.name + StatusBadge + Edit; "Deal ID: ..." subtitle;
- *     "Back to Opportunities"
+ *     "Back to Leads"
  *   - Main slot (1.4fr): Identity (Value/Probability/Expected close) +
  *     Pipeline progress + Stage history + Outcome (conditional) +
  *     Products discussed + Raw data
@@ -93,8 +93,8 @@ export default function DealDetailPage() {
     return (
       <DetailPageShell
         backHref="/opportunities"
-        backLabel="Back to Opportunities"
-        title={isNotFound ? 'Deal not found' : 'Failed to load deal'}
+        backLabel="Back to Leads"
+        title={isNotFound ? 'Lead not found' : 'Failed to load lead'}
         logoMark={Target}
         mainSlot={
           <SectionCard title="Error">
@@ -114,10 +114,10 @@ export default function DealDetailPage() {
   return (
     <DetailPageShell
       backHref="/opportunities"
-      backLabel="Back to Opportunities"
+      backLabel="Back to Leads"
       title={deal.name}
       logoMark={Target}
-      subtitle={`Deal ID: ${deal.id}`}
+      subtitle={`Lead ID: ${deal.id}`}
       headerBadge={<StatusBadge kind="deal-status" value={deal.status} />}
       headerAction={
         <Link

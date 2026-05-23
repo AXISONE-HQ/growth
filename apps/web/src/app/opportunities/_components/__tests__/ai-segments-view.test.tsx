@@ -88,11 +88,14 @@ function wireQuery(opportunities: typeof SAMPLE_OPPORTUNITY[] | [], totalContact
 }
 
 describe("KAN-886 — AiSegmentsView regression snapshots", () => {
-  it("Sub-state 1: empty — 'No opportunities right now' + scan count", async () => {
+  // KAN-991 Phase D.1 — display copy renamed opportunity→lead. The empty
+  // h2 now reads "No leads right now"; the found-state header reads
+  // "growth found 1 lead across 12 contacts." Route + entity unchanged.
+  it("Sub-state 1: empty — 'No leads right now' + scan count", async () => {
     wireQuery([], 5);
     const { container } = render(<AiSegmentsView />);
     await waitFor(() => {
-      expect(screen.getByText(/No opportunities right now/i)).toBeInTheDocument();
+      expect(screen.getByText(/No leads right now/i)).toBeInTheDocument();
     });
     // Verify the count copy renders the scanned-contact count
     expect(
@@ -107,9 +110,9 @@ describe("KAN-886 — AiSegmentsView regression snapshots", () => {
     await waitFor(() => {
       expect(screen.getByText("Reactivate dormant leads")).toBeInTheDocument();
     });
-    // Header copy: "growth found N opportunit{y|ies} across X contacts."
+    // Header copy: "growth found N lead{|s} across X contacts."
     expect(
-      screen.getByText(/growth found 1 opportunity across 12 contacts\./i),
+      screen.getByText(/growth found 1 lead across 12 contacts\./i),
     ).toBeInTheDocument();
     // Playbook + sample contacts render
     expect(screen.getByText("Dormant Reactivation — 3-touch")).toBeInTheDocument();

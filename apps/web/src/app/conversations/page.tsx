@@ -47,10 +47,10 @@ export default function ConversationsPage() {
             <MessageSquare className="w-6 h-6 text-gray-400" />
           </div>
           <h1 className="text-xl font-semibold text-gray-900 mb-2">
-            Conversations — coming soon
+            Messages — coming soon
           </h1>
           <p className="text-sm text-gray-500 max-w-md mx-auto">
-            The unified inbox for AI-handled conversations across email, SMS,
+            The unified inbox for AI-handled messages across email, SMS,
             and WhatsApp will land in a future release. Until then, individual
             channel histories are visible from each contact's detail view.
           </p>
@@ -80,7 +80,7 @@ export default function ConversationsPage() {
         {/* Header */}
         <div className="px-4 pt-4 pb-3 border-b border-gray-100">
           <div className="flex items-center justify-between mb-3">
-            <h2 className="text-lg font-semibold text-gray-900">Conversations</h2>
+            <h2 className="text-lg font-semibold text-gray-900">Messages</h2>
             <span className="text-xs bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded-full font-medium">
               {activeConversations.length} active
             </span>

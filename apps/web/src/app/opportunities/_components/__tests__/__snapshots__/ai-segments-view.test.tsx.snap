@@ -1,6 +1,6 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
-exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 1: empty — 'No opportunities right now' + scan count 1`] = `
+exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 1: empty — 'No leads right now' + scan count 1`] = `
 <main
   class="min-h-screen bg-background p-8"
 >
@@ -10,7 +10,7 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 1: empty �
     <h1
       class="text-h1 text-foreground"
     >
-      Opportunities
+      Leads
     </h1>
     <p
       class="mt-1 text-muted-foreground"
@@ -33,14 +33,14 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 1: empty �
     <h2
       class="text-h2 text-foreground"
     >
-      No opportunities right now
+      No leads right now
     </h2>
     <p
       class="mx-auto mt-2 max-w-md text-muted-foreground"
     >
       We scanned 
       5
-       contacts and didn't find any signals above threshold. New opportunities appear as contacts go dormant or new leads arrive unworked.
+       contacts and didn't find any signals above threshold. New leads appear as contacts go dormant or arrive unworked.
     </p>
     <button
       class="inline-flex items-center justify-center gap-2 whitespace-nowrap text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 [background-image:var(--ds-accent-gradient)] text-primary-foreground shadow-[var(--ds-shadow-card)] hover:opacity-95 h-9 rounded-full px-4 mt-6"
@@ -65,7 +65,7 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 2: found �
         <h1
           class="text-h1 text-foreground"
         >
-          Opportunities
+          Leads
         </h1>
         <p
           class="mt-1 text-muted-foreground"
@@ -73,7 +73,7 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 2: found �
           growth found 
           1
            
-          opportunity
+          lead
            across
            
           12
@@ -81,7 +81,7 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 2: found �
         </p>
       </div>
       <button
-        aria-label="Rescan opportunities"
+        aria-label="Rescan leads"
         class="rounded-[var(--ds-radius-pill)] px-2 py-1 text-sm text-muted-foreground transition-colors hover:text-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
       >
         ↻ Rescan
@@ -370,7 +370,7 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 3: launched
         <h1
           class="text-h1 text-foreground"
         >
-          Opportunities
+          Leads
         </h1>
         <p
           class="mt-1 text-muted-foreground"
@@ -378,7 +378,7 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 3: launched
           growth found 
           1
            
-          opportunity
+          lead
            across
            
           12
@@ -386,7 +386,7 @@ exports[`KAN-886 — AiSegmentsView regression snapshots > Sub-state 3: launched
         </p>
       </div>
       <button
-        aria-label="Rescan opportunities"
+        aria-label="Rescan leads"
         class="rounded-[var(--ds-radius-pill)] px-2 py-1 text-sm text-muted-foreground transition-colors hover:text-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
       >
         ↻ Rescan

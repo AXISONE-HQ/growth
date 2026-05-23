@@ -152,7 +152,7 @@ export function AiSegmentsView() {
     return (
       <main className="min-h-screen bg-background p-8">
         <header className="mb-8">
-          <h1 className="text-h1 text-foreground">Opportunities</h1>
+          <h1 className="text-h1 text-foreground">Leads</h1>
           <p className="mt-1 text-muted-foreground">growth is scanning your contacts…</p>
         </header>
         <div className="mx-auto max-w-4xl">
@@ -167,7 +167,7 @@ export function AiSegmentsView() {
     return (
       <main className="min-h-screen bg-background p-8">
         <header className="mb-8">
-          <h1 className="text-h1 text-foreground">Opportunities</h1>
+          <h1 className="text-h1 text-foreground">Leads</h1>
         </header>
         <div
           className="mx-auto max-w-4xl rounded-[var(--ds-radius-card)] border p-6"
@@ -177,7 +177,7 @@ export function AiSegmentsView() {
           }}
         >
           <p style={{ color: 'var(--ds-danger-text)' }}>
-            Couldn&apos;t scan opportunities: {error?.message ?? 'unknown error'}.
+            Couldn&apos;t scan leads: {error?.message ?? 'unknown error'}.
           </p>
           <Button onClick={() => refetch()} variant="gradient" size="sm" className="mt-4">
             Try again
@@ -195,7 +195,7 @@ export function AiSegmentsView() {
     return (
       <main className="min-h-screen bg-background p-8">
         <header className="mb-8">
-          <h1 className="text-h1 text-foreground">Opportunities</h1>
+          <h1 className="text-h1 text-foreground">Leads</h1>
           <p className="mt-1 text-muted-foreground">
             growth scans your contacts for revenue patterns you haven&apos;t worked.
           </p>
@@ -204,11 +204,10 @@ export function AiSegmentsView() {
           <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-[var(--ds-surface-sunken)]">
             <span className="text-xl text-muted-foreground">✓</span>
           </div>
-          <h2 className="text-h2 text-foreground">No opportunities right now</h2>
+          <h2 className="text-h2 text-foreground">No leads right now</h2>
           <p className="mx-auto mt-2 max-w-md text-muted-foreground">
             We scanned {summary?.totalContacts ?? 0} contacts and didn&apos;t find any signals
-            above threshold. New opportunities appear as contacts go dormant or new leads
-            arrive unworked.
+            above threshold. New leads appear as contacts go dormant or arrive unworked.
           </p>
           <Button onClick={() => refetch()} variant="gradient" size="sm" className="mt-6">
             Scan again
@@ -224,17 +223,17 @@ export function AiSegmentsView() {
       <header className="mx-auto mb-8 max-w-4xl">
         <div className="flex items-baseline justify-between">
           <div>
-            <h1 className="text-h1 text-foreground">Opportunities</h1>
+            <h1 className="text-h1 text-foreground">Leads</h1>
             <p className="mt-1 text-muted-foreground">
               growth found {opportunities.length}{' '}
-              {opportunities.length === 1 ? 'opportunity' : 'opportunities'} across{' '}
+              {opportunities.length === 1 ? 'lead' : 'leads'} across{' '}
               {summary?.totalContacts ?? 0} contacts.
             </p>
           </div>
           <button
             onClick={() => refetch()}
             className="rounded-[var(--ds-radius-pill)] px-2 py-1 text-sm text-muted-foreground transition-colors hover:text-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
-            aria-label="Rescan opportunities"
+            aria-label="Rescan leads"
           >
             ↻ Rescan
           </button>

@@ -63,15 +63,22 @@ const navItems: Array<{
   // pattern of top-level link to a settings route).
   { href: '/pipelines', label: 'Pipelines', icon: Workflow },
   { href: '/settings/objectives', label: 'Objectives', icon: Target },
-  { href: '/opportunities', label: 'Opportunities', icon: Target },
-  { href: '/conversations', label: 'Conversations', icon: MessageSquare, demoOnly: true },
+  // KAN-991 Phase D.1 — display label renamed Opportunities → Leads. Route
+  // stays /opportunities, entity stays Deal, route literal stays.
+  { href: '/opportunities', label: 'Leads', icon: Target },
+  // KAN-991 Phase D.1 — display label renamed Conversations → Messages.
+  // Route stays /conversations. demoOnly flag stays here; the prod
+  // visibility flip is D.2.
+  { href: '/conversations', label: 'Messages', icon: MessageSquare, demoOnly: true },
   // KAN-884 — CRM cohort 1 PR 2. /companies sits between Opportunities and
   // Customers (orgs → people they belong to); /orders sits after Customers
   // and before Escalations (transactional outcomes from those people).
   // activePrefix lets /companies/abc + /orders/xyz keep their parent entry
   // highlighted via the existing KAN-878 longest-prefix-wins resolver.
   { href: '/companies', label: 'Companies', icon: Building2, activePrefix: '/companies' },
-  { href: '/customers', label: 'Customers', icon: Users },
+  // KAN-991 Phase D.1 — display label renamed Customers → Contacts. Route
+  // stays /customers, entity stays Contact, route literal stays (31 refs).
+  { href: '/customers', label: 'Contacts', icon: Users },
   { href: '/orders', label: 'Orders', icon: Receipt, activePrefix: '/orders' },
   // KAN-901 — Ingestion Cohort 2.1b. /imports sits between Orders and
   // Escalations: data flows in via Imports → transactional outcomes flow
@@ -125,11 +132,11 @@ const pageTitle: Record<string, string> = {
   '/settings/objectives': 'Objectives',
   '/pipelines': 'Pipelines',
   '/dashboard': 'Dashboard',
-  '/opportunities': 'Opportunities',
-  '/conversations': 'Conversations',
+  '/opportunities': 'Leads',
+  '/conversations': 'Messages',
   '/escalations': 'Escalations',
   '/companies': 'Companies',
-  '/customers': 'Customers',
+  '/customers': 'Contacts',
   '/orders': 'Orders',
   '/imports': 'Data Imports',
   '/audit': 'Audit Log',

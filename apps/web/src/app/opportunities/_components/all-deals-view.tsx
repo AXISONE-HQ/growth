@@ -149,12 +149,12 @@ export function AllDealsView() {
   return (
     <div className="mx-auto max-w-6xl px-6 py-6">
       <DataTable
-        title="All deals"
+        title="All leads"
         headerAction={
           <Button asChild variant="gradient" size="sm">
             <Link href="/opportunities/new">
               <Plus className="h-4 w-4" />
-              New deal
+              New lead
             </Link>
           </Button>
         }
@@ -163,7 +163,7 @@ export function AllDealsView() {
         getRowKey={(d) => d.id}
         searchValue={searchInput}
         onSearchChange={setSearchInput}
-        searchPlaceholder="Search by deal name..."
+        searchPlaceholder="Search by lead name..."
         filters={filters}
         filterValues={{ status: statusFilter }}
         onFilterChange={(id, v) => {
@@ -180,8 +180,8 @@ export function AllDealsView() {
         emptyState={
           <EmptyState
             icon={Target}
-            heading="No deals yet"
-            body="Deals will appear here as the AI works your pipeline."
+            heading="No leads yet"
+            body="Leads will appear here as the AI works your pipeline."
           />
         }
         totalCount={totalCount}

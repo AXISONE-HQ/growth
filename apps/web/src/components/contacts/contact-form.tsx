@@ -246,9 +246,9 @@ export function ContactForm({
 
   return (
     <EntityFormShell
-      title={mode === 'create' ? 'New customer' : 'Edit customer'}
+      title={mode === 'create' ? 'New contact' : 'Edit contact'}
       breadcrumb={[
-        { label: 'Customers', href: '/customers' },
+        { label: 'Contacts', href: '/customers' },
         ...(mode === 'edit' && contactId
           ? [{ label: 'Edit', href: `/customers/${contactId}/edit` }]
           : [{ label: 'New', href: '/customers/new' }]),

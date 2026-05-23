@@ -12,7 +12,8 @@
  *   - Search debounced 300ms on firstName / lastName / email
  *   - Lifecycle + Source filter chips
  *   - Row click → /customers/[id]
- *   - "+ New customer" header action
+ *   - "+ New contact" header action (KAN-991 D.1 — display label
+ *     Customers→Contacts; route /customers stays)
  *   - Empty / loading / error states
  *
  * Behavior changed (KAN-882 convergence):
@@ -229,12 +230,12 @@ export default function CustomersPage() {
   return (
     <div className="mx-auto max-w-6xl px-6 py-8">
       <DataTable
-        title="Customers"
+        title="Contacts"
         headerAction={
           <Button asChild variant="gradient" size="sm">
             <Link href="/customers/new">
               <Plus className="h-4 w-4" />
-              New customer
+              New contact
             </Link>
           </Button>
         }

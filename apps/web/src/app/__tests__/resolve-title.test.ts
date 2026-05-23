@@ -15,32 +15,40 @@ import { describe, it, expect } from "vitest";
 import { resolveTitle } from "../layout";
 
 describe("KAN-cohort-3.5 — resolveTitle (longest-prefix match)", () => {
+  // KAN-991 Phase D.1 — display labels renamed Opportunities→Leads,
+  // Customers→Contacts. Routes (/opportunities, /customers) stay; only
+  // the pageTitle map values change. resolveTitle returns the display
+  // title now.
   it("list routes resolve to entity title (exact match)", () => {
     expect(resolveTitle("/companies")).toBe("Companies");
-    expect(resolveTitle("/customers")).toBe("Customers");
-    expect(resolveTitle("/opportunities")).toBe("Opportunities");
+    expect(resolveTitle("/customers")).toBe("Contacts");
+    expect(resolveTitle("/opportunities")).toBe("Leads");
     expect(resolveTitle("/orders")).toBe("Orders");
   });
 
   it("detail routes resolve via prefix match (pre-3.5 fell through to Dashboard)", () => {
     expect(resolveTitle("/companies/abc-123")).toBe("Companies");
-    expect(resolveTitle("/customers/u_42")).toBe("Customers");
-    expect(resolveTitle("/opportunities/deal-77")).toBe("Opportunities");
+    expect(resolveTitle("/customers/u_42")).toBe("Contacts");
+    expect(resolveTitle("/opportunities/deal-77")).toBe("Leads");
     expect(resolveTitle("/orders/ord-9")).toBe("Orders");
   });
 
   it("new routes resolve via prefix match", () => {
     expect(resolveTitle("/companies/new")).toBe("Companies");
-    expect(resolveTitle("/customers/new")).toBe("Customers");
-    expect(resolveTitle("/opportunities/new")).toBe("Opportunities");
+    expect(resolveTitle("/customers/new")).toBe("Contacts");
+    expect(resolveTitle("/opportunities/new")).toBe("Leads");
     expect(resolveTitle("/orders/new")).toBe("Orders");
   });
 
   it("edit routes resolve via prefix match (the previously-broken case)", () => {
     expect(resolveTitle("/companies/abc-123/edit")).toBe("Companies");
-    expect(resolveTitle("/customers/u_42/edit")).toBe("Customers");
-    expect(resolveTitle("/opportunities/deal-77/edit")).toBe("Opportunities");
+    expect(resolveTitle("/customers/u_42/edit")).toBe("Contacts");
+    expect(resolveTitle("/opportunities/deal-77/edit")).toBe("Leads");
     expect(resolveTitle("/orders/ord-9/edit")).toBe("Orders");
+  });
+
+  it("KAN-991 Phase D.1 — /conversations resolves to 'Messages'", () => {
+    expect(resolveTitle("/conversations")).toBe("Messages");
   });
 
   it("longest match wins — /settings/account/identity beats /settings", () => {
