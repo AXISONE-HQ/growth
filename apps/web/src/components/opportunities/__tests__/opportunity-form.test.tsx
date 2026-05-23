@@ -150,7 +150,8 @@ describe('KAN-938 — OpportunityForm', () => {
 
   it('(1) renders all 4 cards + key fields in create mode', async () => {
     renderWithProviders(<OpportunityForm mode="create" />);
-    expect(screen.getByText('Core Deal')).toBeInTheDocument();
+    // KAN-991 Phase D.1 — display label renamed Deal→Lead.
+    expect(screen.getByText('Core Lead')).toBeInTheDocument();
     expect(screen.getByText(/status.*outcomes/i)).toBeInTheDocument();
     expect(screen.getByText(/pipeline.*stage/i)).toBeInTheDocument();
     expect(screen.getByText('Relationships')).toBeInTheDocument();
