@@ -1994,5 +1994,42 @@ export const audienceApi = {
    */
   propose: (nl: string) =>
     trpcMutation<AudienceProposeResult>('audience.propose', { nl }),
+
+  /**
+   * KAN-1001 Slice 3a — commit a validated proposal into Campaign +
+   * Pipeline + Stages + initial CampaignMembership snapshot. INERT:
+   * no Decision Engine handoff, no sends. `idempotencyKey` is a
+   * client-generated UUID that guards against double-submit; the same
+   * key + name within a 5-minute window returns the existing IDs
+   * without re-writing.
+   */
+  commit: (input: {
+    proposal: CampaignProposalShape;
+    edits?: {
+      name?: string;
+      windowStartUtc?: string | null;
+      windowEndUtc?: string | null;
+    };
+    idempotencyKey: string;
+  }) =>
+    trpcMutation<CampaignCommitResult>('audience.commit', input),
+
+  /** KAN-1001 Slice 3a — archive a committed campaign (hides it +
+   *  prevents further admits). Audit-logged. */
+  archive: (campaignId: string) =>
+    trpcMutation<{ campaignId: string; status: 'archived'; archivedAt: string }>(
+      'audience.archive',
+      { campaignId },
+    ),
+};
+
+export type CampaignCommitResult = {
+  alreadyExisted: boolean;
+  campaignId: string;
+  pipelineId: string;
+  stageIds: string[];
+  audienceCount: number;
+  membershipStatus: 'materialized_sync' | 'deferred_async';
+  membershipSnapshotCountSync: number;
 };
 

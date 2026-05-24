@@ -76,6 +76,18 @@ export interface LLMCompleteFn {
 export interface AudiencePrisma {
   contact: {
     count: (args: { where: Record<string, unknown> }) => Promise<number>;
+    // KAN-1001 Slice 3a — contact-ID materialization for CampaignMembership
+    // snapshot at commit time. Paginated via `take` + `cursor` so large
+    // audiences stream in batches (called from the async materialization
+    // worker; sync path uses a single fetch with a low `take`).
+    findMany: (args: {
+      where: Record<string, unknown>;
+      select: { id: true };
+      take?: number;
+      cursor?: { id: string };
+      skip?: number;
+      orderBy?: { id: 'asc' | 'desc' };
+    }) => Promise<Array<{ id: string }>>;
   };
   // KAN-1000 Slice 2 — historical value sum + objective catalog read.
   order: {
@@ -532,6 +544,63 @@ export async function textToSegment(
   });
 
   return result;
+}
+
+// ─────────────────────────────────────────────
+// KAN-1001 Slice 3a — contact-ID materialization (read-only)
+// ─────────────────────────────────────────────
+
+export interface FindAudienceContactIdsInput {
+  conditions: AudienceConditions;
+  /** Hard cap on returned IDs. Sync materialization passes the
+   *  MEMBERSHIP_SYNC_LIMIT; async worker passes a per-batch size. */
+  limit: number;
+  /** Pagination cursor (Contact.id of the last row from the previous
+   *  page). Omit on first page. */
+  cursorContactId?: string;
+}
+
+export interface FindAudienceContactIdsResult {
+  contactIds: string[];
+  /** True when `contactIds.length === limit` — caller paginates by
+   *  passing the last id back as cursorContactId. */
+  hasMore: boolean;
+}
+
+/**
+ * KAN-1001 Slice 3a — return matched contact IDs (paginated).
+ *
+ * Same where-tree builder as `countAudience`; same tenant-scoping at the
+ * outer level (cross-tenant isolation invariant preserved). Returns IDs
+ * only (no projection of PII) — Slice 3a is INERT, so the caller writes
+ * the IDs to CampaignMembership and that's the entire surface; no
+ * decisioning, no sending, no LLM-grounding here.
+ */
+export async function findAudienceContactIds(
+  prisma: AudiencePrisma,
+  tenantId: string,
+  input: FindAudienceContactIdsInput,
+): Promise<FindAudienceContactIdsResult> {
+  const conditions = AudienceConditionsSchema.parse(input.conditions);
+  const innerWhere = conditionsToWhere(conditions);
+  const where: Record<string, unknown> = {
+    AND: [{ tenantId }, innerWhere],
+  };
+
+  const rows = await prisma.contact.findMany({
+    where,
+    select: { id: true },
+    take: input.limit,
+    orderBy: { id: 'asc' },
+    ...(input.cursorContactId
+      ? { cursor: { id: input.cursorContactId }, skip: 1 }
+      : {}),
+  });
+
+  return {
+    contactIds: rows.map((r) => r.id),
+    hasMore: rows.length === input.limit,
+  };
 }
 
 // ─────────────────────────────────────────────
