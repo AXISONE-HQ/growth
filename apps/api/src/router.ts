@@ -5873,6 +5873,26 @@ async function loadCampaignCommitModule(): Promise<CampaignCommitModule> {
   return _campaignCommitModule;
 }
 
+// KAN-1007 SAE PR3 — pubsub-client loader for the durable materialize
+// publish path. Variable-specifier dynamic import (same cross-rootDir
+// posture as the campaign-commit + audience modules above).
+interface PubSubClientModule {
+  getPubSubClient: () => {
+    publish: (
+      topic: string,
+      data: Buffer,
+      attributes?: Record<string, string>,
+    ) => Promise<string>;
+  };
+}
+let _pubsubClientModule: PubSubClientModule | null = null;
+async function loadPubSubClientModule(): Promise<PubSubClientModule> {
+  if (_pubsubClientModule) return _pubsubClientModule;
+  const spec = "../../../packages/api/src/lib/pubsub-client.js";
+  _pubsubClientModule = (await import(spec)) as PubSubClientModule;
+  return _pubsubClientModule;
+}
+
 let _audienceModule: AudienceRouterModule | null = null;
 async function loadAudienceModule(): Promise<AudienceRouterModule> {
   if (_audienceModule) return _audienceModule;
@@ -6001,8 +6021,11 @@ const audienceRouter = router({
       }),
     )
     .mutation(async ({ ctx, input }) => {
-      const { commitCampaign, materializeAudienceSnapshot } =
-        await loadCampaignCommitModule();
+      // KAN-1007 — only commitCampaign needed at the tRPC layer; the
+      // materializeAudienceSnapshot worker now runs inside the
+      // /pubsub/campaign-materialize subscriber, invoked by Pub/Sub
+      // delivery instead of the previous fire-and-forget call here.
+      const { commitCampaign } = await loadCampaignCommitModule();
       // Hooks:
       //   auditLog.writeInTx → tx.auditLog.create (in-tx, atomic rollback)
       //   materializeAsync.kickOff → in-process Promise (fire-and-forget,
@@ -6035,37 +6058,64 @@ const audienceRouter = router({
             campaignId: string;
             conditions: unknown;
           }): void => {
-            // Fire-and-forget — must NOT block the request. Structured
-            // log emits regardless of success/fail so ops can correlate
-            // a commit response with its later materialization.
-            void materializeAudienceSnapshot(ctx.prisma, a)
-              .then((res) => {
-                // eslint-disable-next-line no-console
-                console.log(
+            // KAN-1007 SAE PR3 — swapped from in-process fire-and-forget
+            // (KAN-1002 in-process worker, fragile to container restart)
+            // to durable Pub/Sub publish (folds KAN-1003). The subscriber
+            // at /pubsub/campaign-materialize invokes the same
+            // materializeAudienceSnapshot() function the in-process worker
+            // used; Pub/Sub at-least-once + ack/nack gives the durability
+            // the in-process approach lacked. Container restart mid-
+            // pagination → Pub/Sub redelivers → skipDuplicates on the
+            // CampaignMembership @@unique keeps the snapshot idempotent.
+            void (async () => {
+              try {
+                const { getPubSubClient } = await loadPubSubClientModule();
+                const data = Buffer.from(
                   JSON.stringify({
-                    type: 'campaign_materialize_async',
-                    status: 'success',
                     tenantId: a.tenantId,
                     campaignId: a.campaignId,
-                    totalContactsScanned: res.totalContactsScanned,
-                    totalMembershipInserted: res.totalMembershipInserted,
-                    batchCount: res.batchCount,
+                    conditions: a.conditions,
                   }),
                 );
-              })
-              .catch((err: unknown) => {
+                const messageId = await getPubSubClient().publish(
+                  'campaign.materialize',
+                  data,
+                  {
+                    tenantId: a.tenantId,
+                    campaignId: a.campaignId,
+                  },
+                );
                 // eslint-disable-next-line no-console
                 console.log(
                   JSON.stringify({
                     type: 'campaign_materialize_async',
-                    status: 'failed',
+                    status: 'published',
+                    tenantId: a.tenantId,
+                    campaignId: a.campaignId,
+                    messageId,
+                    durableTransport: 'pubsub',
+                  }),
+                );
+              } catch (err: unknown) {
+                // eslint-disable-next-line no-console
+                console.log(
+                  JSON.stringify({
+                    type: 'campaign_materialize_async',
+                    status: 'publish_failed',
                     tenantId: a.tenantId,
                     campaignId: a.campaignId,
                     error:
                       err instanceof Error ? err.message : String(err),
                   }),
                 );
-              });
+                // Intentionally no rethrow — fire-and-forget contract
+                // (kickOff is `: void`). audienceEvaluatedAt stays NULL
+                // until materialization completes; PR5's activation gate
+                // refuses any campaign with NULL audienceEvaluatedAt, so
+                // a lost publish blocks activation rather than firing
+                // a partial run.
+              }
+            })();
           },
         },
       };
