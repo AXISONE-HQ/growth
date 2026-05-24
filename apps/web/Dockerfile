@@ -34,6 +34,10 @@ COPY apps/web ./apps/web
 RUN npm run build --workspace=@growth/shared
 # Build apps/web's Next.js production bundle.
 ENV NEXT_PUBLIC_API_URL=https://growth-api-1086551891973.us-central1.run.app
+# KAN-997 — Campaign Layer Slice 1 internal demo gate. Founder OK'd
+# flag-on in prod: no nav entry, no commit button, read-only,
+# direct-URL only at /settings/campaign-demo. Slice 2 retires the flag.
+ENV NEXT_PUBLIC_CAMPAIGN_LAYER_DEMO=true
 RUN npm run build --workspace=@growth/web
 
 FROM node:20-alpine AS runtime

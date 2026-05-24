@@ -5797,6 +5797,103 @@ export const accountRouter = router({
 //
 // Inlined here (no separate service file) — single procedure with simple
 // prisma query, matches pipelines.listWithStages precedent.
+// ─────────────────────────────────────────────
+// KAN-997 — Campaign Layer Slice 1: text-to-segment (read-only).
+// audience.count + audience.textToSegment tRPC procedures.
+// Module loaded via variable-specifier dynamic import to bypass TS6059
+// cross-rootDir (packages/api/src/services lives outside apps/api/src
+// rootDir; same pattern as loadDealsModule above).
+// ─────────────────────────────────────────────
+interface AudienceRouterModule {
+  countAudience: (
+    prisma: unknown,
+    tenantId: string,
+    input: { conditions: unknown },
+  ) => Promise<{ count: number; isThin: boolean }>;
+  textToSegment: (
+    prisma: unknown,
+    tenantId: string,
+    input: { nl: string; todayUtc?: Date },
+    llm: unknown,
+  ) => Promise<unknown>;
+}
+let _audienceModule: AudienceRouterModule | null = null;
+async function loadAudienceModule(): Promise<AudienceRouterModule> {
+  if (_audienceModule) return _audienceModule;
+  const spec = "../../../packages/api/src/services/audience-router.js";
+  _audienceModule = (await import(spec)) as AudienceRouterModule;
+  return _audienceModule;
+}
+
+// LLM client wrapper — matches the LLMCompleteFn shape the audience
+// module expects. Real llm-client imported the same way (variable
+// specifier) so the apps/api tsc rootDir doesn't complain.
+interface LlmClientModule {
+  complete: (input: {
+    tenantId: string;
+    tier: 'reasoning' | 'cheap';
+    systemPrompt?: string;
+    userPrompt: string;
+    callerTag?: string;
+    jsonMode?: boolean;
+    maxTokens?: number;
+  }) => Promise<{
+    text: string;
+    model: string;
+    inputTokens: number;
+    outputTokens: number;
+    latencyMs: number;
+  }>;
+}
+let _llmModule: LlmClientModule | null = null;
+async function loadLlmModule(): Promise<LlmClientModule> {
+  if (_llmModule) return _llmModule;
+  const spec = "../../../packages/api/src/services/llm-client.js";
+  _llmModule = (await import(spec)) as LlmClientModule;
+  return _llmModule;
+}
+
+const audienceRouter = router({
+  // Direct count — exposed for Slice 2 manual filter builder + future
+  // API consumers. Slice 1 UI doesn't call this directly; textToSegment
+  // calls it internally after LLM extraction.
+  count: protectedProcedure
+    .input(
+      z.object({
+        // Conditions arrive as raw JSON; the service-side schema parse
+        // (AudienceConditionsSchema.parse inside countAudience) validates
+        // shape. Keeping it z.unknown() here means we don't double-import
+        // the AudienceConditions zod schema into the tRPC layer (which
+        // would re-introduce the cross-rootDir issue).
+        conditions: z.unknown(),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      const { countAudience } = await loadAudienceModule();
+      return countAudience(ctx.prisma, ctx.tenantId, input);
+    }),
+
+  // NL → audience_conditions + count, single round-trip.
+  textToSegment: protectedProcedure
+    .input(
+      z.object({
+        nl: z.string().min(1).max(2000),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const [{ textToSegment }, llmModule] = await Promise.all([
+        loadAudienceModule(),
+        loadLlmModule(),
+      ]);
+      return textToSegment(
+        ctx.prisma,
+        ctx.tenantId,
+        { nl: input.nl },
+        llmModule.complete,
+      );
+    }),
+});
+
 const usersRouter = router({
   list: protectedProcedure
     .input(
@@ -5859,6 +5956,8 @@ export const appRouter = router({
   observability: observabilityRouter,
   // KAN-852 — Account Page Cohort 1
   account: accountRouter,
+  // KAN-997 — Campaign Layer Slice 1 — text-to-segment (read-only).
+  audience: audienceRouter,
 });
 
 export type AppRouter = typeof appRouter;
