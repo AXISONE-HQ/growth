@@ -36,12 +36,17 @@ import {
   DollarSign,
   CheckCircle2,
   Rocket,
+  Zap,
+  Pause,
+  AlertOctagon,
 } from 'lucide-react';
 import {
   audienceApi,
   type AudienceProposeResult,
+  type CampaignActivateResult,
   type CampaignCommitResult,
   type CampaignFirstAction,
+  type CampaignPauseResult,
   type CampaignProposalShape,
 } from '@/lib/api';
 import { Button } from '@/components/ui/button';
@@ -142,6 +147,16 @@ export default function CampaignsPage() {
     }
   >({
     mutationFn: (input) => audienceApi.commit(input),
+  });
+
+  // KAN-1010 SAE PR5 — activate the just-committed campaign. M1 closer.
+  const activateMutation = useMutation<CampaignActivateResult, Error, string>({
+    mutationFn: (campaignId) => audienceApi.activate(campaignId),
+  });
+
+  // KAN-1010 SAE PR5 — pause an active campaign. Stop lever.
+  const pauseMutation = useMutation<CampaignPauseResult, Error, string>({
+    mutationFn: (campaignId) => audienceApi.pause(campaignId),
   });
 
   if (!FLAG_ON) {
@@ -489,7 +504,17 @@ function ProposalPreview({
           separate gated PR (SAE PR3). KAN-1004 SAE PR1 corrected the
           button copy from "Activate" → "Commit" to match semantics. */}
       {commitResult ? (
-        <CommitSuccessCard result={commitResult} />
+        <CommitSuccessCard
+          result={commitResult}
+          activateResult={activateMutation.data}
+          activateError={activateMutation.error}
+          activatePending={activateMutation.isPending}
+          onActivate={() => activateMutation.mutate(commitResult.campaignId)}
+          pauseResult={pauseMutation.data}
+          pauseError={pauseMutation.error}
+          pausePending={pauseMutation.isPending}
+          onPause={() => pauseMutation.mutate(commitResult.campaignId)}
+        />
       ) : (
         <div className="rounded-[var(--ds-radius-card)] border border-border bg-card p-5">
           <div className="flex items-start gap-3">
@@ -534,54 +559,265 @@ function ProposalPreview({
   );
 }
 
-function CommitSuccessCard({ result }: { result: CampaignCommitResult }) {
+function CommitSuccessCard({
+  result,
+  activateResult,
+  activateError,
+  activatePending,
+  onActivate,
+  pauseResult,
+  pauseError,
+  pausePending,
+  onPause,
+}: {
+  result: CampaignCommitResult;
+  activateResult: CampaignActivateResult | undefined;
+  activateError: Error | null;
+  activatePending: boolean;
+  onActivate: () => void;
+  pauseResult: CampaignPauseResult | undefined;
+  pauseError: Error | null;
+  pausePending: boolean;
+  onPause: () => void;
+}) {
   const materializedSync = result.membershipStatus === 'materialized_sync';
+  // KAN-1010 — derived engine-handoff state. Drives the activate/pause
+  // affordance below.
+  const isActivated =
+    activateResult?.kind === 'activated' || activateResult?.kind === 'already_active';
+  const isPaused = pauseResult?.kind === 'paused';
+  // The audience must be evaluated before activate can fire (PR3 interlock).
+  // Async-materialize means the snapshot is still in-flight — surface this.
+  const audienceNotEvaluated = !materializedSync && !isActivated;
+
   return (
-    <div className="rounded-[var(--ds-radius-card)] border border-[var(--ds-emerald-100)] bg-[var(--ds-emerald-100)]/40 p-5">
+    <>
+      {/* Commit success card */}
+      <div className="rounded-[var(--ds-radius-card)] border border-[var(--ds-emerald-100)] bg-[var(--ds-emerald-100)]/40 p-5">
+        <div className="flex items-start gap-3">
+          <CheckCircle2 className="mt-0.5 h-5 w-5 flex-shrink-0 text-[var(--ds-emerald-700)]" />
+          <div className="flex-1">
+            <div className="text-label text-foreground">
+              {result.alreadyExisted ? 'Campaign already committed' : 'Campaign committed'}
+            </div>
+            <div className="mt-1 text-caption text-muted-foreground">
+              {result.alreadyExisted ? (
+                <>
+                  A campaign with this name was committed within the last 5 minutes —
+                  returning the existing record. Campaign id{' '}
+                  <code className="rounded bg-[var(--ds-surface-sunken)] px-1 py-0.5 font-mono">
+                    {result.campaignId}
+                  </code>
+                  .
+                </>
+              ) : (
+                <>
+                  {materializedSync
+                    ? `Audience snapshot materialized: ${result.membershipSnapshotCountSync.toLocaleString(
+                        'en-US',
+                      )} of ${result.audienceCount.toLocaleString('en-US')} contacts.`
+                    : `Audience snapshot queued for ${result.audienceCount.toLocaleString(
+                        'en-US',
+                      )} contacts — materializing in the background.`}{' '}
+                  Activate below to hand the membership to the autonomous engine
+                  (each member queues for human review under your current
+                  auto-approve setting).
+                </>
+              )}
+            </div>
+            <div className="mt-3 flex items-center gap-3">
+              <Link
+                href={`/pipelines/${result.pipelineId}`}
+                className="text-caption font-medium text-[var(--ds-violet-500)] hover:underline"
+              >
+                View pipeline board →
+              </Link>
+              <span className="text-caption text-muted-foreground">·</span>
+              <span className="text-caption text-muted-foreground">
+                Campaign id <code className="font-mono">{result.campaignId}</code>
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* KAN-1010 — Activate / Pause affordance card */}
+      {isPaused ? (
+        <div className="rounded-[var(--ds-radius-card)] border border-border bg-card p-5">
+          <div className="flex items-start gap-3">
+            <Pause className="mt-0.5 h-5 w-5 flex-shrink-0 text-muted-foreground" />
+            <div className="flex-1">
+              <div className="text-label text-foreground">Campaign paused</div>
+              <div className="mt-1 text-caption text-muted-foreground">
+                Stack entries flipped to paused; the autonomous consumer will no-op
+                on any in-flight or redelivered evaluations for this campaign. No
+                further actions can fire. {pauseResult.stackEntriesPaused.toLocaleString('en-US')} stack entries paused.
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : isActivated ? (
+        <ActivatedCard
+          activateResult={activateResult!}
+          onPause={onPause}
+          pausePending={pausePending}
+          pauseError={pauseError}
+        />
+      ) : (
+        <div className="rounded-[var(--ds-radius-card)] border border-border bg-card p-5">
+          <div className="flex items-start gap-3">
+            <Zap className="mt-0.5 h-4 w-4 flex-shrink-0 text-[var(--ds-violet-500)]" />
+            <div className="flex-1 text-caption text-foreground">
+              <strong>Activate hands the campaign to the autonomous engine.</strong>{' '}
+              Under your current settings (auto-approve OFF), every contact
+              evaluation lands as an item in{' '}
+              <Link href="/escalations" className="font-medium text-[var(--ds-violet-500)] hover:underline">
+                Escalations
+              </Link>{' '}
+              for review — no messages are sent. Pause anytime; the engine halts
+              immediately. A daily LLM cost cap stands guard against runaway spend.
+            </div>
+          </div>
+          <div className="mt-4 flex items-center justify-end gap-3">
+            {activateError ? (
+              <div className="flex items-start gap-2 text-caption text-[var(--ds-danger-text)]">
+                <AlertOctagon className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
+                <span>{activateError.message}</span>
+              </div>
+            ) : null}
+            {activateResult?.kind === 'rejected' ? (
+              <div className="flex items-start gap-2 text-caption text-[var(--ds-warning-text)]">
+                <AlertOctagon className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
+                <span>
+                  Refused: {humanizeActivateRejection(activateResult.reason, activateResult.currentStatus)}
+                </span>
+              </div>
+            ) : null}
+            <Button
+              variant="gradient"
+              size="sm"
+              disabled={activatePending || audienceNotEvaluated}
+              onClick={onActivate}
+            >
+              {activatePending ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:hidden" />
+                  Activating…
+                </>
+              ) : (
+                <>
+                  <Zap className="h-3.5 w-3.5" />
+                  Activate campaign
+                </>
+              )}
+            </Button>
+          </div>
+          {audienceNotEvaluated ? (
+            <div className="mt-2 text-right text-caption text-muted-foreground">
+              Audience snapshot still materializing — activate becomes available
+              when the snapshot finishes.
+            </div>
+          ) : null}
+        </div>
+      )}
+    </>
+  );
+}
+
+function ActivatedCard({
+  activateResult,
+  onPause,
+  pausePending,
+  pauseError,
+}: {
+  activateResult: CampaignActivateResult;
+  onPause: () => void;
+  pausePending: boolean;
+  pauseError: Error | null;
+}) {
+  // Narrow to the two states that mean "active" right now
+  const data =
+    activateResult.kind === 'activated'
+      ? activateResult
+      : activateResult.kind === 'already_active'
+        ? activateResult
+        : null;
+  if (!data) return null;
+  const isFresh = activateResult.kind === 'activated';
+  return (
+    <div className="rounded-[var(--ds-radius-card)] border border-[var(--ds-violet-100)] bg-[var(--ds-violet-100)]/40 p-5">
       <div className="flex items-start gap-3">
-        <CheckCircle2 className="mt-0.5 h-5 w-5 flex-shrink-0 text-[var(--ds-emerald-700)]" />
+        <Zap className="mt-0.5 h-5 w-5 flex-shrink-0 text-[var(--ds-violet-500)]" />
         <div className="flex-1">
           <div className="text-label text-foreground">
-            {result.alreadyExisted ? 'Campaign already committed' : 'Campaign committed'}
+            {isFresh ? 'Campaign activated' : 'Campaign already active'}
           </div>
           <div className="mt-1 text-caption text-muted-foreground">
-            {result.alreadyExisted ? (
+            {isFresh && activateResult.kind === 'activated' ? (
               <>
-                A campaign with this name was committed within the last 5 minutes —
-                returning the existing record. Campaign id{' '}
-                <code className="rounded bg-[var(--ds-surface-sunken)] px-1 py-0.5 font-mono">
-                  {result.campaignId}
-                </code>
+                {activateResult.memberCount.toLocaleString('en-US')} members queued for engine
+                evaluation, drip-publishing at {activateResult.dripPublishesPerSecond}/sec.
+                {activateResult.stackEntriesCreated > 0
+                  ? ` ${activateResult.stackEntriesCreated.toLocaleString('en-US')} new stack entries created`
+                  : ''}
+                {activateResult.stackEntriesReactivated > 0
+                  ? `, ${activateResult.stackEntriesReactivated.toLocaleString('en-US')} reactivated`
+                  : ''}
+                . Under auto-approve OFF, every evaluation lands as an item in{' '}
+                <Link href="/escalations" className="font-medium text-[var(--ds-violet-500)] hover:underline">
+                  Escalations
+                </Link>
                 .
               </>
             ) : (
               <>
-                {materializedSync
-                  ? `Audience snapshot materialized: ${result.membershipSnapshotCountSync.toLocaleString(
-                      'en-US',
-                    )} of ${result.audienceCount.toLocaleString('en-US')} contacts.`
-                  : `Audience snapshot queued for ${result.audienceCount.toLocaleString(
-                      'en-US',
-                    )} contacts — materializing in the background.`}{' '}
-                INERT: no contacts have been prioritized into the autonomous loop
-                yet. Slice 3b adds the engine handoff.
+                {data.memberCount.toLocaleString('en-US')} members in flight. Re-activate
+                is a no-op (no re-publish).
               </>
             )}
           </div>
-          <div className="mt-3 flex items-center gap-3">
-            <Link
-              href={`/pipelines/${result.pipelineId}`}
-              className="text-caption font-medium text-[var(--ds-violet-500)] hover:underline"
-            >
-              View pipeline board →
-            </Link>
-            <span className="text-caption text-muted-foreground">·</span>
-            <span className="text-caption text-muted-foreground">
-              Campaign id <code className="font-mono">{result.campaignId}</code>
-            </span>
+          <div className="mt-4 flex items-center justify-end gap-3">
+            {pauseError ? (
+              <div className="flex items-start gap-2 text-caption text-[var(--ds-danger-text)]">
+                <AlertOctagon className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
+                <span>{pauseError.message}</span>
+              </div>
+            ) : null}
+            <Button variant="outline" size="sm" disabled={pausePending} onClick={onPause}>
+              {pausePending ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:hidden" />
+                  Pausing…
+                </>
+              ) : (
+                <>
+                  <Pause className="h-3.5 w-3.5" />
+                  Pause campaign
+                </>
+              )}
+            </Button>
           </div>
         </div>
       </div>
     </div>
   );
+}
+
+function humanizeActivateRejection(reason: string, currentStatus?: string): string {
+  switch (reason) {
+    case 'campaign_not_found':
+      return 'campaign not found in this tenant';
+    case 'audience_not_evaluated':
+      return 'audience snapshot is still materializing — try again in a moment';
+    case 'status_draft':
+      return 'campaign is still a draft — commit it first';
+    case 'status_paused':
+      return 'campaign is paused — pause→active resume is not available in M1';
+    case 'status_completed':
+      return 'campaign has already completed';
+    case 'status_archived':
+      return 'campaign is archived';
+    default:
+      return currentStatus ? `unexpected status: ${currentStatus}` : 'unexpected refusal';
+  }
 }
