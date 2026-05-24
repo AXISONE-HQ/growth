@@ -428,13 +428,16 @@ describe('KAN-997 — ambiguous NL → clarifying question (never guess)', () =>
 
 describe('KAN-997 — thin / zero match → honest message (never silent)', () => {
   it('count = 0 → kind=thin with "No contacts match"', async () => {
+    // KAN-1000 fix-forward — switched from 'churned' to 'lost' (real
+    // Prisma LifecycleStage value). The legacy test mocked 'churned'
+    // which exposed the Zod-enum-drift class repaired by KAN-1000.
     const llmMock: LLMCompleteFn = vi.fn().mockResolvedValue({
       text: JSON.stringify({
         kind: 'segment',
         conditions: {
           field: 'lifecycleStage',
           op: 'in',
-          values: ['churned'],
+          values: ['lost'],
         },
       }),
       model: 'claude-sonnet-4-6',
@@ -447,7 +450,7 @@ describe('KAN-997 — thin / zero match → honest message (never silent)', () =
     const result = await textToSegment(
       prisma,
       TENANT_A,
-      { nl: 'churned contacts', todayUtc: new Date('2026-05-23T14:00:00Z') },
+      { nl: 'lost leads', todayUtc: new Date('2026-05-23T14:00:00Z') },
       llmMock,
     );
 
@@ -719,9 +722,12 @@ describe('KAN-1000 — proposeCampaign (Slice 2 full proposal)', () => {
     const today = new Date('2026-05-23T14:00:00Z');
     const llmMock = chainLlm(
       // textToSegment output
+      // KAN-1000 fix-forward — 'lost' is the real Prisma LifecycleStage
+      // value for sales-lost contacts. Demonstrates the win-back
+      // canonical case end-to-end with the corrected enum.
       {
         kind: 'segment',
-        conditions: { field: 'lifecycleStage', op: 'in', values: ['churned'] },
+        conditions: { field: 'lifecycleStage', op: 'in', values: ['lost'] },
       },
       // propose output — LLM picked obj_reactivate by id, re_engage strategy
       {
@@ -751,11 +757,15 @@ describe('KAN-1000 — proposeCampaign (Slice 2 full proposal)', () => {
     );
 
     const prisma = makeFakePrisma(
-      // 10 churned tenant-A contacts with $20K total historical USD value
+      // 10 'lost' tenant-A contacts with $20K total historical USD value.
+      // 'lost' is the closest Prisma LifecycleStage to "churned" in the
+      // bug-report narrative; "churned" itself doesn't exist (per the
+      // KAN-1000 fix-forward — see system prompt's dormancy guidance
+      // recommending orders.placedAt recency for true churn semantics).
       Array.from({ length: 10 }, () =>
         contact({
           tenantId: TENANT_A,
-          lifecycleStage: 'churned',
+          lifecycleStage: 'lost',
           orders: [
             { placedAt: new Date('2024-06-01T00:00:00Z'), grandTotal: 2000, currency: 'USD' },
           ],
@@ -963,5 +973,181 @@ describe('KAN-1000 — proposeCampaign (Slice 2 full proposal)', () => {
     // not campaign strategies.
     expect(prompt).not.toMatch(/'escalate'/);
     expect(prompt).not.toMatch(/'wait'/);
+  });
+});
+
+// ═════════════════════════════════════════════
+// KAN-1000 Slice 2 fix-forward — enum-validation regression guard
+// ═════════════════════════════════════════════
+//
+// PROD bug repro: text-to-segment emitted `lifecycleStage: ['churned']`
+// (Zod-valid against the drift'd local enum, NOT a real Prisma value).
+// Prisma threw + the raw query string was rendered to the user.
+//
+// Fix has two layers — pin both:
+//   1. Zod schema NOW uses the canonical LifecycleStageEnum from
+//      enums.ts (PAIRS-tested against Prisma). Invalid values are
+//      rejected at parse time — countAudience throws before any
+//      Prisma call.
+//   2. countAudience wraps Prisma calls in try/catch as defense-in-depth
+//      so future schema drift can't leak raw query strings.
+
+describe('KAN-1000 fix-forward — invalid LLM enum is rejected at validation (no Prisma call)', () => {
+  it("text-to-segment with 'churned' lifecycleStage (legacy drift'd value) is rejected by Zod, count NEVER called", async () => {
+    let prismaCalled = false;
+    const prismaSpy: AudiencePrisma = {
+      contact: {
+        count: async () => {
+          prismaCalled = true;
+          throw new Error('SHOULD NEVER REACH PRISMA');
+        },
+      },
+      order: {
+        aggregate: async () => {
+          prismaCalled = true;
+          throw new Error('SHOULD NEVER REACH PRISMA');
+        },
+      },
+      objective: {
+        findMany: async () => [],
+      },
+    };
+
+    const llmMock: LLMCompleteFn = vi.fn().mockResolvedValue({
+      text: JSON.stringify({
+        kind: 'segment',
+        conditions: {
+          field: 'lifecycleStage',
+          op: 'in',
+          // 'churned' is the canonical drift example — not in Prisma's
+          // LifecycleStage enum. With the PAIRS-tested mirror, Zod
+          // rejects this at parseLLMOutput time.
+          values: ['churned'],
+        },
+      }),
+      model: 'claude-sonnet-4-6',
+      inputTokens: 400,
+      outputTokens: 60,
+      latencyMs: 800,
+    });
+
+    await expect(
+      textToSegment(
+        prismaSpy,
+        TENANT_A,
+        { nl: 'win back churned customers', todayUtc: new Date('2026-05-23T14:00:00Z') },
+        llmMock,
+      ),
+    ).rejects.toThrow();
+
+    // The crucial assertion: Prisma was never touched. Zod caught the
+    // invalid enum value at parse time.
+    expect(prismaCalled).toBe(false);
+  });
+
+  it("ContactSource invalid value (e.g., 'form_submission' — drift'd) is also rejected at Zod", async () => {
+    let prismaCalled = false;
+    const prismaSpy: AudiencePrisma = {
+      contact: {
+        count: async () => {
+          prismaCalled = true;
+          return 0;
+        },
+      },
+      order: { aggregate: async () => ({ _sum: { grandTotal: 0 } }) },
+      objective: { findMany: async () => [] },
+    };
+
+    const llmMock: LLMCompleteFn = vi.fn().mockResolvedValue({
+      text: JSON.stringify({
+        kind: 'segment',
+        conditions: {
+          field: 'source',
+          op: 'in',
+          // 'form_submission' was the legacy drift'd value; Prisma's
+          // ContactSource uses 'web_form'. PAIRS catches this in CI;
+          // this test pins the runtime rejection.
+          values: ['form_submission'],
+        },
+      }),
+      model: 'claude-sonnet-4-6',
+      inputTokens: 400,
+      outputTokens: 60,
+      latencyMs: 800,
+    });
+
+    await expect(
+      textToSegment(
+        prismaSpy,
+        TENANT_A,
+        { nl: 'leads from web form', todayUtc: new Date('2026-05-23T14:00:00Z') },
+        llmMock,
+      ),
+    ).rejects.toThrow();
+    expect(prismaCalled).toBe(false);
+  });
+
+  it('valid canonical LifecycleStage values from the corrected enum pass through', async () => {
+    // Sanity check the corrected enum still accepts all 5 valid Prisma
+    // values: lead / mql / sql / customer / lost.
+    const validValues = ['lead', 'mql', 'sql', 'customer', 'lost'];
+    for (const v of validValues) {
+      const llmMock: LLMCompleteFn = vi.fn().mockResolvedValue({
+        text: JSON.stringify({
+          kind: 'segment',
+          conditions: { field: 'lifecycleStage', op: 'in', values: [v] },
+        }),
+        model: 'claude-sonnet-4-6',
+        inputTokens: 400,
+        outputTokens: 60,
+        latencyMs: 800,
+      });
+      const result = await textToSegment(
+        makeFakePrisma([]),
+        TENANT_A,
+        { nl: `${v} contacts`, todayUtc: new Date('2026-05-23T14:00:00Z') },
+        llmMock,
+      );
+      // 0 matches → kind='thin' (the empty-prisma case). The crucial bit
+      // is that Zod accepted the value + flow completed without throw.
+      expect(result.kind).toBe('thin');
+    }
+  });
+
+  it('countAudience wraps Prisma errors in a user-friendly message (defense-in-depth)', async () => {
+    const prismaThatThrows: AudiencePrisma = {
+      contact: {
+        count: async () => {
+          throw new Error('Some scary Prisma error with query JSON dumped');
+        },
+      },
+      order: { aggregate: async () => ({ _sum: { grandTotal: 0 } }) },
+      objective: { findMany: async () => [] },
+    };
+
+    await expect(
+      countAudience(prismaThatThrows, TENANT_A, {
+        conditions: { field: 'lifecycleStage', op: 'in', values: ['lead'] },
+      }),
+    ).rejects.toThrow(/Couldn't map part of that description to your data/);
+  });
+
+  it("system prompt enumerates ONLY the 5 valid LifecycleStage + 10 valid ContactSource values + flags 'churned' guidance", () => {
+    const prompt = buildSystemPrompt(new Date('2026-05-23T14:00:00Z'));
+    // Valid lifecycle stages present
+    expect(prompt).toContain("'lead'");
+    expect(prompt).toContain("'mql'");
+    expect(prompt).toContain("'sql'");
+    expect(prompt).toContain("'customer'");
+    expect(prompt).toContain("'lost'");
+    // Drift'd values explicitly NOT in the prompt
+    expect(prompt).not.toMatch(/'opportunity'\|/);
+    expect(prompt).not.toMatch(/'churned'\|/);
+    // Valid sources present (sample)
+    expect(prompt).toContain("'web_form'");
+    expect(prompt).toContain("'meta_ad'");
+    // Dormancy guidance present (steer LLM away from inventing 'churned')
+    expect(prompt).toMatch(/churned.+do NOT map to a lifecycleStage/i);
+    expect(prompt).toMatch(/orders\.placedAt|orders\.exists/);
   });
 });
