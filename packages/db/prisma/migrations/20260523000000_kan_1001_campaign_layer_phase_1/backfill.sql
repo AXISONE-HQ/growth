@@ -39,9 +39,15 @@
 --   NULL                            → {"_stub":true,"_source":"pipeline.segment=NULL"}
 --
 -- AUDIENCE_MODE DERIVATION
---   All backfilled campaigns get audience_mode='dynamic' since the
---   legacy pipelines accept new contacts continuously (Tier 1.5 routes
---   inbound leads in real time).
+--   All backfilled campaigns get audience_mode='STATIC' (inert). Even
+--   though the legacy pipelines accept inbound leads continuously via
+--   Tier 1.5 routing on Pipeline.segment, the backfilled
+--   audience_conditions = {_stub:true, ...} is NOT an evaluable query.
+--   Marking these 'dynamic' would arm Slice 5's dynamic-eval cron to
+--   try re-evaluating {_stub:true} on a schedule — latent footgun.
+--   'static' = inert + honest. Phase 2 (when commit flow re-derives
+--   real conditions) sets the proper mode then. Slice 5 cron must
+--   ALSO defensively skip rows where audience_conditions ? '_stub'.
 --
 -- PRE-FLIGHT (PO runs these BEFORE this script — see pre-flight-checklist.md):
 --   1. Cloud SQL backups + PITR both `True`
@@ -97,7 +103,11 @@ WITH new_campaigns AS (
       '_stub',  true,
       '_source', concat('pipeline.segment=', COALESCE(p.segment::text, 'NULL'))
     )                                                              AS audience_conditions,
-    'dynamic'::campaign_audience_mode                              AS audience_mode,
+    -- KAN-1001 — 'static' (inert), not 'dynamic'. Stub conditions
+    -- aren't evaluable; arming Slice 5's dynamic cron on them would
+    -- be a latent footgun. Mode flips to 'dynamic' (or stays static
+    -- per intent) when commit flow re-derives real conditions in Phase 2.
+    'static'::campaign_audience_mode                               AS audience_mode,
     'active'::campaign_status                                      AS status,
     100                                                            AS priority,
     p.created_at                                                   AS activated_at,

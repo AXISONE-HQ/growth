@@ -80,7 +80,7 @@ SELECT
     '_stub',  true,
     '_source', concat('pipeline.segment=', COALESCE(segment::text, 'NULL'))
   )                                   AS audience_conditions,
-  'dynamic'::text                     AS audience_mode,
+  'static'::text                      AS audience_mode,
   'active'::text                      AS status,
   100                                 AS priority,
   created_at                          AS activated_at,
@@ -93,7 +93,7 @@ Eyeball:
 - `audience_conditions` reads `{"_stub":true,"_source":"pipeline.segment=<value>"}` — looks right?
 - `nl_intent` has the backfill marker (no leaked PII)
 - `tenant_id` + `objective_id` match the source Pipeline
-- `audience_mode = 'dynamic'` (existing pipelines accept new contacts continuously)
+- `audience_mode = 'static'` (inert — stub conditions aren't an evaluable query; static avoids arming Slice 5's dynamic-eval cron on `{_stub:true}`. Mode flips when Phase 2 re-derives real conditions.)
 - `status = 'active'` (existing pipelines are live)
 
 ## 3. Migration diff (eyeball additive SQL before apply)
