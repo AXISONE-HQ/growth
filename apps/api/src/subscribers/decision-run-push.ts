@@ -58,6 +58,13 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { prisma } from '../prisma.js';
 import { verifyPubsubOidc } from '../lib/oidc-pubsub-verify.js';
+import {
+  // KAN-1009 SAE PR4 — Redis-backed daily counter (cost cap) +
+  // USD-typed convenience wrappers around it.
+  getTodayCostUsd,
+  incrementTodayCostUsd,
+} from '../lib/per-tenant-daily-counter.js';
+import { getRedisClient } from '../services/redis-client.js';
 
 // ─────────────────────────────────────────────
 // Variable-specifier dynamic import for the cross-rootDir Decision Engine
@@ -102,8 +109,16 @@ const DecisionRunEventSchema = z.object({
 });
 
 type DecisionRunGuardOutcome =
-  | { ok: true }
-  | { ok: false; reason: 'campaign_not_active' | 'audience_not_evaluated' | 'stack_not_active' | 'campaign_not_found' | 'stack_not_found' };
+  | { ok: true; stack: { id: string; status: string; lastEvaluatedAt: Date } }
+  | {
+      ok: false;
+      reason:
+        | 'campaign_not_active'
+        | 'audience_not_evaluated'
+        | 'stack_not_active'
+        | 'campaign_not_found'
+        | 'stack_not_found';
+    };
 
 // ─────────────────────────────────────────────
 // Guard evaluation (extracted for testability + grep-clarity)
@@ -111,6 +126,11 @@ type DecisionRunGuardOutcome =
 // The 3-condition test in the brief is mechanical here. Each predicate has
 // a dedicated reason code so guard-rejection logs are filterable in Cloud
 // Logging without grepping free-text messages.
+//
+// KAN-1009 SAE PR4 — on success, returns the loaded stack record
+// (id + status + lastEvaluatedAt) so the downstream dedup gate doesn't
+// need a second findFirst roundtrip. The cost-cap + dedup gates run
+// AFTER this function returns ok:true.
 // ─────────────────────────────────────────────
 
 interface DecisionRunGuardPrisma {
@@ -131,8 +151,12 @@ interface DecisionRunGuardPrisma {
         contactId: string;
         campaignId: string;
       };
-      select: { id: true; status: true };
-    }) => Promise<{ id: string; status: string } | null>;
+      select: { id: true; status: true; lastEvaluatedAt: true };
+    }) => Promise<{
+      id: string;
+      status: string;
+      lastEvaluatedAt: Date;
+    } | null>;
   };
 }
 
@@ -162,7 +186,8 @@ export async function evaluateDecisionRunGuards(
       contactId: event.contactId,
       campaignId: event.campaignId,
     },
-    select: { id: true, status: true },
+    // KAN-1009 — also fetch lastEvaluatedAt for downstream dedup gate
+    select: { id: true, status: true, lastEvaluatedAt: true },
   });
   if (!stack) {
     return { ok: false, reason: 'stack_not_found' };
@@ -170,7 +195,164 @@ export async function evaluateDecisionRunGuards(
   if (stack.status !== 'active') {
     return { ok: false, reason: 'stack_not_active' };
   }
-  return { ok: true };
+  return { ok: true, stack };
+}
+
+// ─────────────────────────────────────────────
+// KAN-1009 SAE PR4 — cost-cap + de-dup gates
+//
+// Run AFTER the 3 hard guards pass, BEFORE runDecisionForContact.
+// Both gates resolve to a single reason code ('cost_cap_exceeded' or
+// 'dedup_recent_eval') so the structured log is filterable downstream.
+// ─────────────────────────────────────────────
+
+/**
+ * Conservative default daily cost cap when Tenant.dailyLlmCostCapUsd is
+ * NULL and the env-override (DECISION_RUN_DAILY_COST_CAP_USD_DEFAULT) is
+ * unset. At ~$0.10/eval estimated cost, $10/day → ~100 evals/day per
+ * tenant — bounded enough that an accidental large activation can't run
+ * away before someone notices.
+ */
+export const DEFAULT_DAILY_COST_CAP_USD = 10.0;
+
+/**
+ * Fixed cost estimate per eval, used to increment the Redis counter
+ * post-success. Brief estimate: $0.05–0.20/eval (2-5 LLM calls at
+ * Sonnet reasoning-tier pricing). Midpoint $0.10. Documented as an
+ * approximation — truth lives in KAN-745 LlmCostRollup; this is the
+ * safety-cap signal, not a billing instrument.
+ */
+export const ESTIMATED_COST_PER_EVAL_USD = 0.1;
+
+/** Dedup window covers Pub/Sub redelivery (~50 min max with retry policy
+ *  10s-600s × 5 attempts). 30 min is enough for redelivery defense in
+ *  PR4; the M2 recurring-cron will want a longer window (24h) — tune
+ *  then.
+ */
+export const DEDUP_WINDOW_MINUTES = 30;
+
+/** Redis counter scope. Keys: cost_cap_usd:tenant:<tenantId>:<UTCYYYYMMDD>. */
+export const COST_CAP_COUNTER_SCOPE = 'cost_cap_usd';
+
+export type CostCapDedupOutcome =
+  | { ok: true; resolvedCapUsd: number; spendTodayUsd: number }
+  | {
+      ok: false;
+      reason: 'cost_cap_exceeded' | 'dedup_recent_eval' | 'cost_signal_unavailable';
+      // Diagnostic fields per reason (best-effort; not always populated):
+      resolvedCapUsd?: number;
+      spendTodayUsd?: number;
+      lastEvaluatedAt?: Date;
+      windowMinutes?: number;
+      counterError?: string;
+    };
+
+/**
+ * Resolve the effective cap for a tenant:
+ *   1. Tenant.dailyLlmCostCapUsd (per-tenant override)
+ *   2. DECISION_RUN_DAILY_COST_CAP_USD_DEFAULT env var (deploy-time override)
+ *   3. DEFAULT_DAILY_COST_CAP_USD constant ($10)
+ *
+ * Returns the float USD value used in the gate comparison.
+ */
+export function resolveDailyCostCapUsd(
+  tenantOverride: number | null | undefined,
+): number {
+  if (tenantOverride != null) return tenantOverride;
+  const envOverride = parseFloat(
+    process.env.DECISION_RUN_DAILY_COST_CAP_USD_DEFAULT ?? '',
+  );
+  if (Number.isFinite(envOverride) && envOverride > 0) return envOverride;
+  return DEFAULT_DAILY_COST_CAP_USD;
+}
+
+interface CostCapDedupPrisma {
+  tenant: {
+    findUnique: (args: {
+      where: { id: string };
+      select: { dailyLlmCostCapUsd: true };
+    }) => Promise<{ dailyLlmCostCapUsd: { toString(): string } | null } | null>;
+  };
+}
+
+interface RedisLike {
+  get: (key: string) => Promise<string | null>;
+}
+
+/**
+ * Evaluate the cost-cap + dedup gates for a (tenantId, contactId, stack)
+ * triple. Read-only — never mutates Redis or the DB. The
+ * `incrementCostCounter` + `updateLastEvaluatedAt` calls happen in the
+ * post-success path of the handler.
+ *
+ * **Fail-safe posture:** if the Redis counter read throws (network /
+ * timeout / Redis down), this function returns `cost_signal_unavailable`.
+ * The handler MUST fail closed (skip the eval) rather than run unbounded.
+ * Bias toward inaction when the cost signal is unreliable.
+ */
+export async function evaluateCostCapAndDedupGates(
+  prismaClient: CostCapDedupPrisma,
+  redis: RedisLike,
+  args: {
+    tenantId: string;
+    stack: { id: string; lastEvaluatedAt: Date };
+    now?: Date;
+  },
+): Promise<CostCapDedupOutcome> {
+  const now = args.now ?? new Date();
+
+  // ── DEDUP GATE ──────────────────────────────────────────────
+  const minutesSinceLastEval =
+    (now.getTime() - args.stack.lastEvaluatedAt.getTime()) / 60_000;
+  if (minutesSinceLastEval < DEDUP_WINDOW_MINUTES) {
+    return {
+      ok: false,
+      reason: 'dedup_recent_eval',
+      lastEvaluatedAt: args.stack.lastEvaluatedAt,
+      windowMinutes: DEDUP_WINDOW_MINUTES,
+    };
+  }
+
+  // ── COST CAP GATE ───────────────────────────────────────────
+  const tenant = await prismaClient.tenant.findUnique({
+    where: { id: args.tenantId },
+    select: { dailyLlmCostCapUsd: true },
+  });
+  const tenantOverride = tenant?.dailyLlmCostCapUsd
+    ? Number(tenant.dailyLlmCostCapUsd.toString())
+    : null;
+  const resolvedCapUsd = resolveDailyCostCapUsd(tenantOverride);
+
+  let spendTodayUsd: number;
+  try {
+    spendTodayUsd = await getTodayCostUsd(
+      redis,
+      COST_CAP_COUNTER_SCOPE,
+      args.tenantId,
+      now,
+    );
+  } catch (err) {
+    // FAIL-SAFE: cost signal unavailable → SKIP the eval (caller-decided
+    // posture; the handler returns 200 ack to avoid Pub/Sub retry storm
+    // against a Redis outage, then ops investigates).
+    return {
+      ok: false,
+      reason: 'cost_signal_unavailable',
+      resolvedCapUsd,
+      counterError: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  if (spendTodayUsd >= resolvedCapUsd) {
+    return {
+      ok: false,
+      reason: 'cost_cap_exceeded',
+      resolvedCapUsd,
+      spendTodayUsd,
+    };
+  }
+
+  return { ok: true, resolvedCapUsd, spendTodayUsd };
 }
 
 // ─────────────────────────────────────────────
@@ -205,7 +387,7 @@ decisionRunPushApp.post('/decision-run', async (c) => {
     return c.text('ok', 200);
   }
 
-  // ─── 3 HARD GUARDS ──────────────────────────────────────────
+  // ─── 3 HARD GUARDS (PR3) ────────────────────────────────────
   const guardResult = await evaluateDecisionRunGuards(prisma, event);
 
   if (!guardResult.ok) {
@@ -224,7 +406,42 @@ decisionRunPushApp.post('/decision-run', async (c) => {
     return c.text('ok', 200);
   }
 
-  // ─── ALL GUARDS PASSED — call Decision Engine unmodified ────
+  // ─── KAN-1009 SAE PR4: COST-CAP + DE-DUP GATES ──────────────
+  // Run AFTER the PR3 guards (which proved the path is INTENDED to run)
+  // and BEFORE the Decision Engine call (which is the expensive part).
+  // Fail-safe posture: a Redis outage routes to cost_signal_unavailable
+  // → skip + ack. Bias toward inaction when the cost signal is
+  // unreliable.
+  const gateResult = await evaluateCostCapAndDedupGates(prisma, getRedisClient(), {
+    tenantId: event.tenantId,
+    stack: guardResult.stack,
+  });
+
+  if (!gateResult.ok) {
+    console.log(
+      JSON.stringify({
+        type: 'decision_run_gate_rejected',
+        reason: gateResult.reason,
+        tenantId: event.tenantId,
+        contactId: event.contactId,
+        campaignId: event.campaignId,
+        source: event.source ?? 'unspecified',
+        messageId: envelope.message.messageId,
+        // Diagnostic fields per reason
+        resolvedCapUsd: gateResult.resolvedCapUsd,
+        spendTodayUsd: gateResult.spendTodayUsd,
+        lastEvaluatedAt: gateResult.lastEvaluatedAt?.toISOString(),
+        windowMinutes: gateResult.windowMinutes,
+        counterError: gateResult.counterError,
+      }),
+    );
+    // Ack — same posture as PR3 guard rejections. The cap/dedup state
+    // is stateful (will keep rejecting until the day resets or the
+    // dedup window expires); redelivery would only re-fire the rejection.
+    return c.text('ok', 200);
+  }
+
+  // ─── ALL GUARDS + GATES PASSED — call Decision Engine unmodified ──
   // Governance pass-through: runDecisionForContact carries the full chain
   // (threshold gate, auto-approve matrix, escalation rules, kill-switch).
   // Under autoApproveEnabled=false the kill-switch routes to ESCALATED
@@ -237,6 +454,57 @@ decisionRunPushApp.post('/decision-run', async (c) => {
       contactId: event.contactId,
       actor: { type: 'SYSTEM', id: 'decision-run-push' },
     });
+
+    // KAN-1009 — post-success: bump the cost counter + update the
+    // stack's lastEvaluatedAt. Both are best-effort; failures here
+    // structured-log but don't fail the response (the eval already
+    // happened; the consumer-side accounting can lag).
+    void (async () => {
+      try {
+        const newTotalUsd = await incrementTodayCostUsd(
+          getRedisClient(),
+          COST_CAP_COUNTER_SCOPE,
+          event.tenantId,
+          ESTIMATED_COST_PER_EVAL_USD,
+        );
+        console.log(
+          JSON.stringify({
+            type: 'decision_run_cost_counter_incremented',
+            tenantId: event.tenantId,
+            estimateDeltaUsd: ESTIMATED_COST_PER_EVAL_USD,
+            newDailyTotalUsd: newTotalUsd,
+            resolvedCapUsd: gateResult.resolvedCapUsd,
+          }),
+        );
+      } catch (counterErr) {
+        console.error(
+          JSON.stringify({
+            type: 'decision_run_cost_counter_failed',
+            tenantId: event.tenantId,
+            error: counterErr instanceof Error ? counterErr.message : String(counterErr),
+          }),
+        );
+      }
+    })();
+
+    void (async () => {
+      try {
+        await prisma.contactObjectiveStack.update({
+          where: { id: guardResult.stack.id },
+          data: { lastEvaluatedAt: new Date() },
+        });
+      } catch (updateErr) {
+        console.error(
+          JSON.stringify({
+            type: 'decision_run_last_evaluated_at_update_failed',
+            tenantId: event.tenantId,
+            stackId: guardResult.stack.id,
+            error: updateErr instanceof Error ? updateErr.message : String(updateErr),
+          }),
+        );
+      }
+    })();
+
     console.log(
       JSON.stringify({
         type: 'decision_run_dispatched',

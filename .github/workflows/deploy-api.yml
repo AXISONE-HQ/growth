@@ -282,6 +282,20 @@ jobs:
             --cpu=1
             --concurrency=80
             --min-instances=1
+          # KAN-1009 SAE PR4 — wire REDIS_URL (existing secret already used
+          # by the connectors service per infra/cloudbuild-connectors.yaml)
+          # for the cost-cap counter in decision-run-push. Also wires the
+          # api-rate-limit + api-idempotency code paths that previously
+          # defaulted to localhost:6379 in PROD (silent fail; out of scope
+          # to fix here but no longer broken once REDIS_URL injects).
+          secrets: |
+            REDIS_URL=growth-redis-url:latest
+          # KAN-1009 — env-default for the daily LLM cost cap when
+          # Tenant.dailyLlmCostCapUsd is NULL. Conservative $10/day at
+          # PR4 ship; tunable via Cloud Run revision update (or per-
+          # tenant override via the new Tenant.dailyLlmCostCapUsd column).
+          env_vars: |
+            DECISION_RUN_DAILY_COST_CAP_USD_DEFAULT=10.0
 
       # KAN-920 — post-deploy config drift guard. Hard-fails the workflow
       # if the just-deployed revision's serving config doesn't match the
