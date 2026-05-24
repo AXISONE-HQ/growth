@@ -516,7 +516,16 @@ enum CampaignAudienceMode {
 
 enum CampaignStatus {
   draft // proposed but not committed; not routed to
-  active // accepting members + executing
+  // KAN-1004 SAE PR1 — INERT post-commit state. Membership snapshot exists,
+  // Pipeline + Stages exist, but NO autonomous consumer evaluates members
+  // (no decision.run publish, no stack push). Slice 3a's actual semantics;
+  // until this enum value existed, 3a wrote `active` which was a misnomer.
+  committed
+  active // engine-active: Slice 3b activation pushed stack entries; consumer evaluates members
+  // KAN-1004 SAE PR1 — engine halted. Stack entries also flipped to
+  // ContactObjectiveStackStatus='paused' so the consumer skips them.
+  // The "stop lever" the brief requires; unused until Slice 3b ships.
+  paused
   completed // window_end reached; in-flight finishes, no new admits
   archived // hidden from UI; preserved for outcome learning
 

@@ -454,7 +454,7 @@ function ProposalPreview({
       {/* First actions */}
       <SectionCard title="First actions" count={p.firstActions.length}>
         <p className="mb-3 text-caption text-muted-foreground">
-          Described, not dispatched. Slice 3 will land commit + execution through the existing decision engine.
+          Described, not dispatched. Commit persists these as a plan; the autonomous engine handoff (real execution) is a separate gated step.
         </p>
         <ol className="space-y-2">
           {p.firstActions.map((action, i) => {
@@ -483,21 +483,23 @@ function ProposalPreview({
         </ol>
       </SectionCard>
 
-      {/* KAN-1001 Slice 3a — Activate card. Commits Campaign + Pipeline +
+      {/* KAN-1001 Slice 3a — Commit card. Persists Campaign + Pipeline +
           Stages + initial membership snapshot. INERT: no Decision Engine
-          handoff, no sends. Activation (engine handoff) lands in 3b. */}
+          handoff, no sends. Real activation (engine handoff) lands in a
+          separate gated PR (SAE PR3). KAN-1004 SAE PR1 corrected the
+          button copy from "Activate" → "Commit" to match semantics. */}
       {commitResult ? (
-        <ActivateSuccessCard result={commitResult} />
+        <CommitSuccessCard result={commitResult} />
       ) : (
         <div className="rounded-[var(--ds-radius-card)] border border-border bg-card p-5">
           <div className="flex items-start gap-3">
             <Workflow className="mt-0.5 h-4 w-4 flex-shrink-0 text-[var(--ds-violet-500)]" />
             <div className="flex-1 text-caption text-foreground">
-              <strong>Activate creates the campaign + its pipeline, but doesn&apos;t start sending.</strong>{' '}
-              Slice 3a is the persistence layer: a committed campaign is observable
-              (rows exist, pipeline appears on the board, audit log records the commit)
-              but no contacts get prioritized into the autonomous loop. The
-              engine-handoff lands in a separate gated PR (Slice 3b).
+              <strong>Committing creates the campaign + its pipeline, but doesn&apos;t start sending.</strong>{' '}
+              The campaign becomes observable (rows exist, pipeline appears on the
+              board, audit log records the commit) but no contacts get prioritized
+              into the autonomous loop. The engine-handoff (real activation) lands
+              in a separate gated PR.
             </div>
           </div>
           <div className="mt-4 flex items-center justify-end gap-3">
@@ -516,12 +518,12 @@ function ProposalPreview({
               {commitPending ? (
                 <>
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  Activating…
+                  Committing…
                 </>
               ) : (
                 <>
                   <Rocket className="h-3.5 w-3.5" />
-                  Activate campaign
+                  Commit campaign
                 </>
               )}
             </Button>
@@ -532,7 +534,7 @@ function ProposalPreview({
   );
 }
 
-function ActivateSuccessCard({ result }: { result: CampaignCommitResult }) {
+function CommitSuccessCard({ result }: { result: CampaignCommitResult }) {
   const materializedSync = result.membershipStatus === 'materialized_sync';
   return (
     <div className="rounded-[var(--ds-radius-card)] border border-[var(--ds-emerald-100)] bg-[var(--ds-emerald-100)]/40 p-5">
@@ -540,7 +542,7 @@ function ActivateSuccessCard({ result }: { result: CampaignCommitResult }) {
         <CheckCircle2 className="mt-0.5 h-5 w-5 flex-shrink-0 text-[var(--ds-emerald-700)]" />
         <div className="flex-1">
           <div className="text-label text-foreground">
-            {result.alreadyExisted ? 'Campaign already active' : 'Campaign committed'}
+            {result.alreadyExisted ? 'Campaign already committed' : 'Campaign committed'}
           </div>
           <div className="mt-1 text-caption text-muted-foreground">
             {result.alreadyExisted ? (

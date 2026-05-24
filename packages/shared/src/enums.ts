@@ -101,9 +101,14 @@ export type ContactSource = z.infer<typeof ContactSourceEnum>;
 // LifecycleStage/ContactSource drift gets applied PROACTIVELY here).
 export const CampaignAudienceModeEnum = z.enum(["static", "dynamic"]);
 
+// KAN-1004 SAE PR1 — added `committed` + `paused` to mirror the Prisma
+// enum migration. `committed` is the post-3a inert landing state;
+// `paused` is the PR3 stop lever. PAIRS-tested in enum-drift.test.ts.
 export const CampaignStatusEnum = z.enum([
   "draft",
+  "committed",
   "active",
+  "paused",
   "completed",
   "archived",
 ]);

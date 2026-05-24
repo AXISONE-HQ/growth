@@ -1,5 +1,9 @@
 /**
  * KAN-1001 Campaign Layer Slice 3a — commit & materialize (INERT).
+ * KAN-1004 SAE PR1 — status='committed' (was 'active'; the earlier name
+ * was a misnomer — committed campaigns are observable but no autonomous
+ * consumer evaluates members. 'active' is now reserved for PR3's
+ * engine-active state).
  *
  * Pure service module called by the apps/api/src/router.ts tRPC layer.
  * Loaded via variable-specifier dynamic import (per
@@ -8,11 +12,12 @@
  * # What this does
  *
  *   1. Idempotency check — soft 5-minute window on (tenantId, name,
- *      status='active'). If a duplicate is in flight (e.g., user
- *      double-clicked Activate), return the existing IDs without writing.
+ *      status IN ('committed','active')). If a duplicate is in flight
+ *      (e.g., user double-clicked Commit), return the existing IDs
+ *      without writing.
  *
  *   2. In a single $transaction:
- *      a. INSERT Campaign row (status='active', activatedAt=now)
+ *      a. INSERT Campaign row (status='committed', activatedAt=now)
  *      b. INSERT Pipeline row + nested Stages (campaignId back-link)
  *      c. If audienceCount ≤ MEMBERSHIP_SYNC_LIMIT (500): INSERT
  *         CampaignMembership rows in batch (source='snapshot')
@@ -344,7 +349,10 @@ export async function commitCampaign(
     where: {
       tenantId,
       name: effectiveName,
-      status: 'active',
+      // KAN-1004 SAE PR1 — fresh commits land 'committed'. PR3-activated
+      // ones may be 'active'; both are valid "this proposal already
+      // produced a real campaign" hits within the soft window.
+      status: { in: ['committed', 'active'] },
       createdAt: { gte: windowCutoff },
     },
     select: { id: true, pipelines: true },
@@ -396,8 +404,20 @@ export async function commitCampaign(
         historicalValueUsdAtActivation: proposal.audience.historicalValueUsd,
         windowStart: effectiveWindowStart ? new Date(effectiveWindowStart) : null,
         windowEnd: effectiveWindowEnd ? new Date(effectiveWindowEnd) : null,
-        status: 'active',
+        // KAN-1004 SAE PR1 — commits land at status='committed' (INERT).
+        // Slice 3a's earlier 'active' was a misnomer: a committed campaign
+        // is observable but no autonomous consumer evaluates its members.
+        // 'active' is now RESERVED for PR3's engine-active state (after
+        // publish-on-activate fires). PR1 also backfills the 2 existing
+        // PROD rows from active→committed so the consumer's status filter
+        // (PR3) is meaningful from day one.
+        status: 'committed',
         priority: 100,
+        // activatedAt remains set on commit — it captures the moment the
+        // membership snapshot is taken. PR3 will introduce a separate
+        // engineActivatedAt-equivalent (or reuse this column) for the
+        // distinct "engine handoff fired" moment. Until then, treat
+        // activatedAt as "membership snapshotted at" for committed rows.
         activatedAt: nowIso,
         createdByUserId: input.userId ?? null,
       },
