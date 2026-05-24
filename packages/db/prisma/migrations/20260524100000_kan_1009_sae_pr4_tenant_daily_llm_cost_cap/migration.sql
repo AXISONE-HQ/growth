@@ -1,0 +1,36 @@
+-- KAN-1009 — SAE PR4: Tenant.dailyLlmCostCapUsd (additive nullable column)
+--
+-- Adds 1 column to the `tenants` table:
+--   - daily_llm_cost_cap_usd  DECIMAL(10, 2)  NULL
+--
+-- Semantics:
+--   NULL → application falls back to env-default
+--          (DECISION_RUN_DAILY_COST_CAP_USD_DEFAULT, conservative $10/day
+--           at PR4 ship time).
+--   N    → application uses N as the hard daily cap for this tenant.
+--
+-- No backfill needed: existing tenants stay NULL (= env-default applies).
+--
+-- Consumer: apps/api/src/subscribers/decision-run-push.ts (KAN-1009 PR4
+-- cost-cap gate). Reads this column in the per-message gate path; if
+-- today's accumulated tenant LLM cost (Redis counter; daily UTC reset
+-- via TTL) exceeds the resolved cap → skip + ack-200 + structured-log
+-- (decision_run_gate_rejected, reason=cost_cap_exceeded). The eval
+-- never reaches runDecisionForContact.
+--
+-- Migration shape: purely additive (1 nullable column add). Zero column
+-- changes on other rows, zero data mutation, zero index changes.
+-- Idempotent: PG raises "column already exists" if re-applied, which
+-- Prisma's migration ledger prevents in normal flow.
+--
+-- Drift artifacts stripped from `prisma migrate diff --script` output:
+--   - DROP INDEX knowledge_chunk_embedding_hnsw_idx
+--     (per feedback_prisma_vector_index_silent_drop_drift memory —
+--     known spurious; would destroy the vector index)
+--   - RENAME INDEX tenant_objective_selection_tenant_id_objective_id_…
+--     (Prisma identifier-truncation drift; not in PR4 scope)
+-- Committed migration.sql contains ONLY the intended ADD COLUMN.
+--
+-- ─────────────────────────────────────────────────────────────────────
+
+ALTER TABLE "tenants" ADD COLUMN "daily_llm_cost_cap_usd" DECIMAL(10,2);

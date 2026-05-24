@@ -33,6 +33,16 @@ const materializeAudienceSnapshotMock = vi.fn();
 
 const campaignFindFirstMock = vi.fn();
 const stackFindFirstMock = vi.fn();
+// KAN-1009 SAE PR4 — PR3's "ALL GUARDS PASS" test path now ALSO traverses
+// PR4's cost-cap + dedup gates. Mocks here keep PR3 behavior intact: the
+// PR4 gates pass through (no tenant cap, zero spend, very old
+// lastEvaluatedAt) so the downstream runDecisionForContact assertions
+// remain the load-bearing PR3 check.
+const stackUpdateMock = vi.fn();
+const tenantFindUniqueMock = vi.fn().mockResolvedValue({ dailyLlmCostCapUsd: null });
+const redisGetMock = vi.fn().mockResolvedValue('0');
+const redisIncrbyMock = vi.fn().mockResolvedValue(10_000);
+const redisExpireMock = vi.fn().mockResolvedValue(1);
 
 vi.mock('../lib/oidc-pubsub-verify.js', () => ({
   verifyPubsubOidc: verifyPubsubOidcMock,
@@ -41,8 +51,20 @@ vi.mock('../lib/oidc-pubsub-verify.js', () => ({
 vi.mock('../prisma.js', () => ({
   prisma: {
     campaign: { findFirst: campaignFindFirstMock },
-    contactObjectiveStack: { findFirst: stackFindFirstMock },
+    contactObjectiveStack: {
+      findFirst: stackFindFirstMock,
+      update: stackUpdateMock,
+    },
+    tenant: { findUnique: tenantFindUniqueMock },
   },
+}));
+
+vi.mock('../services/redis-client.js', () => ({
+  getRedisClient: () => ({
+    get: redisGetMock,
+    incrby: redisIncrbyMock,
+    expire: redisExpireMock,
+  }),
 }));
 
 vi.mock('../../../../packages/api/src/services/run-decision-for-contact.js', () => ({
@@ -358,6 +380,10 @@ describe('decision-run-push — 3 HARD GUARDS (safety surface)', () => {
     stackFindFirstMock.mockResolvedValue({
       id: STACK_A,
       status: 'active',
+      // KAN-1009 PR4 — stack now includes lastEvaluatedAt for the dedup
+      // gate downstream. Very old date → dedup passes; let PR3's assertion
+      // on runDecisionForContact still be the load-bearing check.
+      lastEvaluatedAt: new Date('2026-01-01T00:00:00Z'),
     });
     runDecisionForContactMock.mockResolvedValue({
       decisionId: 'dec_test',
@@ -386,6 +412,7 @@ describe('decision-run-push — 3 HARD GUARDS (safety surface)', () => {
     stackFindFirstMock.mockResolvedValue({
       id: STACK_A,
       status: 'active',
+      lastEvaluatedAt: new Date('2026-01-01T00:00:00Z'), // PR4 dedup passes
     });
     runDecisionForContactMock.mockRejectedValue(new Error('LLM timeout'));
     const res = await postDecisionRun(buildDecisionRunEnvelope());
@@ -450,13 +477,21 @@ describe('evaluateDecisionRunGuards (extracted)', () => {
     expect(result).toEqual({ ok: false, reason: 'campaign_not_found' });
   });
 
-  it('returns ok:true when all 3 guards pass', async () => {
+  it('returns ok:true + the loaded stack when all 3 guards pass', async () => {
+    const stackLastEval = new Date('2026-01-01T00:00:00Z');
     campaignFindFirstMock.mockResolvedValue({
       id: CAMPAIGN_A,
       status: 'active',
       audienceEvaluatedAt: new Date(),
     });
-    stackFindFirstMock.mockResolvedValue({ id: STACK_A, status: 'active' });
+    // KAN-1009 PR4 — guard now returns the loaded stack (id+status+
+    // lastEvaluatedAt) so the downstream dedup gate doesn't need a
+    // second findFirst roundtrip.
+    stackFindFirstMock.mockResolvedValue({
+      id: STACK_A,
+      status: 'active',
+      lastEvaluatedAt: stackLastEval,
+    });
     const result = await evaluateDecisionRunGuards(
       {
         campaign: { findFirst: campaignFindFirstMock },
@@ -464,6 +499,9 @@ describe('evaluateDecisionRunGuards (extracted)', () => {
       },
       { tenantId: TENANT_A, contactId: CONTACT_A, campaignId: CAMPAIGN_A },
     );
-    expect(result).toEqual({ ok: true });
+    expect(result).toEqual({
+      ok: true,
+      stack: { id: STACK_A, status: 'active', lastEvaluatedAt: stackLastEval },
+    });
   });
 });

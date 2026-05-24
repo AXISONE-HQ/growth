@@ -31,6 +31,16 @@ model Tenant {
   // confidenceThreshold + aiPermissions stay as-is (Decision Engine consumers).
   autoApproveEnabled              Boolean               @default(false) @map("auto_approve_enabled")
   dailyActionLimit                Int                   @default(100) @map("daily_action_limit")
+  // KAN-1009 SAE PR4 — per-tenant daily LLM cost cap (USD). NULL = use
+  // the env-default (DECISION_RUN_DAILY_COST_CAP_USD_DEFAULT, conservative
+  // $10/day at ship time). The decision-run-push subscriber reads this
+  // before runDecisionForContact; if today's accumulated tenant spend
+  // exceeds the resolved cap → skip + structured-log + ack. Counter is
+  // Redis-backed (KAN-742 redis-client; daily reset via TTL on UTC date
+  // boundary). Per-tenant configurability shipped now so M2 multi-tenant
+  // can set per-tenant overrides without a migration; UI surface
+  // (settings.ai.update extension) deferred to KAN-1010 follow-up.
+  dailyLlmCostCapUsd              Decimal?              @map("daily_llm_cost_cap_usd") @db.Decimal(10, 2)
   // KAN-705: posture for the AI lead-assignment fallback when confidence is
   // below threshold AND no tenant rule fires. Default conservative.
   belowThresholdPosture           LeadAssignmentPosture @default(stay_unassigned) @map("below_threshold_posture")
@@ -513,6 +523,9 @@ enum CampaignAudienceMode {
 
   @@map("campaign_audience_mode")
 }
+
+// NOTE: Tenant.dailyLlmCostCapUsd added by KAN-1009 SAE PR4 — see the
+// Tenant model section above for the column definition.
 
 enum CampaignStatus {
   draft // proposed but not committed; not routed to
