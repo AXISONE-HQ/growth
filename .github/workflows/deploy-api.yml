@@ -282,14 +282,19 @@ jobs:
             --cpu=1
             --concurrency=80
             --min-instances=1
-          # KAN-1009 SAE PR4 — wire REDIS_URL (existing secret already used
-          # by the connectors service per infra/cloudbuild-connectors.yaml)
-          # for the cost-cap counter in decision-run-push. Also wires the
-          # api-rate-limit + api-idempotency code paths that previously
-          # defaulted to localhost:6379 in PROD (silent fail; out of scope
-          # to fix here but no longer broken once REDIS_URL injects).
+          # KAN-1009 SAE PR4 — wire REDIS_URL for the cost-cap counter in
+          # decision-run-push. Secret name matches the canonical production
+          # secret used by the live connectors service (verified via
+          # `gcloud run services describe growth-connectors`); the
+          # `-production` suffix mirrors growth-db-url-production. The stale
+          # cloudbuild-connectors.yaml string `growth-redis-url:latest` is
+          # an unused artifact (the file doesn't drive any active CI flow);
+          # do not copy from there. Also wires the api-rate-limit +
+          # api-idempotency code paths that previously defaulted to
+          # localhost:6379 in PROD (silent fail; out of scope to fix here
+          # but no longer broken once REDIS_URL injects).
           secrets: |
-            REDIS_URL=growth-redis-url:latest
+            REDIS_URL=growth-redis-url-production:latest
           # KAN-1009 — env-default for the daily LLM cost cap when
           # Tenant.dailyLlmCostCapUsd is NULL. Conservative $10/day at
           # PR4 ship; tunable via Cloud Run revision update (or per-
