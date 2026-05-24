@@ -62,55 +62,58 @@ model Tenant {
   updatedAt                       DateTime              @updatedAt @map("updated_at")
 
   // Relations
-  blueprint              Blueprint?              @relation(fields: [blueprintId], references: [id])
-  users                  User[]
-  contacts               Contact[]
-  brainSnapshots         BrainSnapshot[]
-  objectives             Objective[]
-  decisions              Decision[]
-  actions                Action[]
-  outcomes               Outcome[]
-  auditLogs              AuditLog[]
-  strategyWeights        StrategyWeight[]
-  pipelines              Pipeline[]
-  microObjectives        MicroObjective[]
-  guardrails             Guardrail[]
-  assignmentRules        AssignmentRule[]
-  customers              Customer[]
-  conversations          Conversation[]
-  escalations            Escalation[]
-  knowledgeBase          KnowledgeBase[]
-  knowledgeSources       KnowledgeSource[]
-  faqEntries             FaqEntry[]
-  services               Service[]
-  knowledgeGapSummaries  KnowledgeGapSummary[]
-  aiAgentConfigs         AiAgentConfig[]
-  contactObjectiveStack  ContactObjectiveStack[]
+  blueprint               Blueprint?                 @relation(fields: [blueprintId], references: [id])
+  users                   User[]
+  contacts                Contact[]
+  brainSnapshots          BrainSnapshot[]
+  objectives              Objective[]
+  decisions               Decision[]
+  actions                 Action[]
+  outcomes                Outcome[]
+  auditLogs               AuditLog[]
+  strategyWeights         StrategyWeight[]
+  pipelines               Pipeline[]
+  microObjectives         MicroObjective[]
+  guardrails              Guardrail[]
+  assignmentRules         AssignmentRule[]
+  customers               Customer[]
+  conversations           Conversation[]
+  escalations             Escalation[]
+  knowledgeBase           KnowledgeBase[]
+  knowledgeSources        KnowledgeSource[]
+  faqEntries              FaqEntry[]
+  services                Service[]
+  knowledgeGapSummaries   KnowledgeGapSummary[]
+  aiAgentConfigs          AiAgentConfig[]
+  contactObjectiveStack   ContactObjectiveStack[]
   // KAN-962 (slice 2a) — tenant-level objective declarations
-  objectiveSelections    TenantObjectiveSelection[]
+  objectiveSelections     TenantObjectiveSelection[]
   // KAN-962 (slice 2a) — customer-lifecycle append-only audit
   customerLifecycleEvents CustomerLifecycleEvent[]
-  agenticShadowDecisions AgenticShadowDecision[]
-  leadInboxEvents        LeadInboxEvent[]
-  apiKeys                TenantApiKey[]
-  llmCostRollups         LlmCostRollup[]
-  deals                  Deal[]
-  engagements            Engagement[]
-  deferredSends          DeferredSend[]
+  agenticShadowDecisions  AgenticShadowDecision[]
+  leadInboxEvents         LeadInboxEvent[]
+  apiKeys                 TenantApiKey[]
+  llmCostRollups          LlmCostRollup[]
+  deals                   Deal[]
+  engagements             Engagement[]
+  deferredSends           DeferredSend[]
   // KAN-852 — Account Page Cohort 1. 1:1 by AccountProfile.tenantId @unique.
-  accountProfile         AccountProfile?
+  accountProfile          AccountProfile?
   // KAN-879 — CRM Core Schema
-  companies              Company[]
-  orders                 Order[]
+  companies               Company[]
+  orders                  Order[]
   // KAN-896 — Ingestion Cohort 2.1a (upload backend)
-  imports                ImportJob[]
+  imports                 ImportJob[]
   // KAN-903 — Ingestion Cohort 2.5 (staging tables). Tenant-scoped so
   // staging-status dashboards + cross-table aggregate queries can join
   // by tenant without going through ImportJob.
-  stagingContacts        ImportStagingContact[]
-  stagingCompanies       ImportStagingCompany[]
-  stagingDeals           ImportStagingDeal[]
-  stagingOrders          ImportStagingOrder[]
+  stagingContacts         ImportStagingContact[]
+  stagingCompanies        ImportStagingCompany[]
+  stagingDeals            ImportStagingDeal[]
+  stagingOrders           ImportStagingOrder[]
+  // KAN-1001 Campaign Slice 0 — Campaign Layer back-relations.
+  campaigns               Campaign[]
+  campaignMemberships     CampaignMembership[]
 
   //   tenantSettings  TenantSettings[]  // commented out for smoke build (model missing on main)
   channelConnections ChannelConnection[]
@@ -238,20 +241,22 @@ model Contact {
   tenant                Tenant                  @relation(fields: [tenantId], references: [id])
   contactObjectiveStack ContactObjectiveStack[]
   decisions             Decision[]
-  outcomes        Outcome[]
-  customer        Customer?
-  conversations   Conversation[]
-  escalations     Escalation[]
-  actions         Action[]
-  currentPipeline Pipeline?      @relation("ContactCurrentPipeline", fields: [currentPipelineId], references: [id], onDelete: SetNull)
-  currentStage    Stage?         @relation("ContactCurrentStage", fields: [currentStageId], references: [id], onDelete: SetNull)
+  outcomes              Outcome[]
+  customer              Customer?
+  conversations         Conversation[]
+  escalations           Escalation[]
+  actions               Action[]
+  currentPipeline       Pipeline?               @relation("ContactCurrentPipeline", fields: [currentPipelineId], references: [id], onDelete: SetNull)
+  currentStage          Stage?                  @relation("ContactCurrentStage", fields: [currentStageId], references: [id], onDelete: SetNull)
   // KAN-791 — LeadStageHistory dropped (replaced by DealStageHistory which is deal-scoped)
-  deals           Deal[]
-  engagements     Engagement[]
-  deferredSends   DeferredSend[]
+  deals                 Deal[]
+  engagements           Engagement[]
+  deferredSends         DeferredSend[]
   // KAN-879
-  company         Company?       @relation(fields: [companyId], references: [id])
-  orders          Order[]
+  company               Company?                @relation(fields: [companyId], references: [id])
+  orders                Order[]
+  // KAN-1001 Campaign Slice 0 — Contact ↔ CampaignMembership back-relation.
+  campaignMemberships   CampaignMembership[]
 
   @@index([tenantId])
   @@index([tenantId, email])
@@ -275,33 +280,44 @@ model Contact {
 // objective-stack-repo at packages/api/src/services/objective-stack-repo.ts
 // keeps cross-entity ops (priority, fallback, gap roll-up) in one place.
 model ContactObjectiveStack {
-  id              String                       @id @default(uuid())
-  tenantId        String                       @map("tenant_id")
-  contactId       String                       @map("contact_id")
-  objectiveId     String                       @map("objective_id")
+  id              String                      @id @default(uuid())
+  tenantId        String                      @map("tenant_id")
+  contactId       String                      @map("contact_id")
+  objectiveId     String                      @map("objective_id")
+  // KAN-1001 Campaign Slice 0 — provenance for new stack entries created
+  // from a Campaign activation (Slice 3 commit flow). Nullable so the
+  // backfill doesn't touch existing rows (they predate Campaign and
+  // continue working via the un-namespaced priority logic). Slice 3's
+  // Campaign commit populates this for new entries.
+  campaignId      String?                     @map("campaign_id")
   // Lower priority = higher rank. 1 = primary, 2 = secondary, …
   priority        Int
-  status          ContactObjectiveStackStatus  @default(active)
+  status          ContactObjectiveStackStatus @default(active)
   // Per-entity sub-objective progress map. Same shape as legacy
   // ContactState.subObjectives Json (carried forward unchanged).
-  subObjectives   Json                         @default("[]") @map("sub_objectives")
-  strategyCurrent String?                      @map("strategy_current")
-  confidenceScore Float?                       @map("confidence_score")
-  achievedAt      DateTime?                    @map("achieved_at")
-  blockedReason   String?                      @map("blocked_reason")
-  blockedSinceAt  DateTime?                    @map("blocked_since_at")
-  activatedAt     DateTime                     @default(now()) @map("activated_at")
-  lastEvaluatedAt DateTime                     @default(now()) @map("last_evaluated_at")
-  createdAt       DateTime                     @default(now()) @map("created_at")
-  updatedAt       DateTime                     @updatedAt @map("updated_at")
+  subObjectives   Json                        @default("[]") @map("sub_objectives")
+  strategyCurrent String?                     @map("strategy_current")
+  confidenceScore Float?                      @map("confidence_score")
+  achievedAt      DateTime?                   @map("achieved_at")
+  blockedReason   String?                     @map("blocked_reason")
+  blockedSinceAt  DateTime?                   @map("blocked_since_at")
+  activatedAt     DateTime                    @default(now()) @map("activated_at")
+  lastEvaluatedAt DateTime                    @default(now()) @map("last_evaluated_at")
+  createdAt       DateTime                    @default(now()) @map("created_at")
+  updatedAt       DateTime                    @updatedAt @map("updated_at")
 
   tenant    Tenant    @relation(fields: [tenantId], references: [id])
   contact   Contact   @relation(fields: [contactId], references: [id], onDelete: Cascade)
   objective Objective @relation(fields: [objectiveId], references: [id])
+  // KAN-1001 — Campaign back-link (Phase 2 readers will join through this
+  // when Slice 3 starts populating campaign_id for new entries).
+  campaign  Campaign? @relation(fields: [campaignId], references: [id], onDelete: SetNull)
 
   @@unique([contactId, objectiveId])
   @@index([tenantId, contactId, priority])
   @@index([tenantId, status])
+  // KAN-1001 — Phase 2 routing reads through this index.
+  @@index([tenantId, campaignId, priority])
   @@map("contact_objective_stack")
 }
 
@@ -321,8 +337,8 @@ enum ContactObjectiveStackStatus {
 // ─────────────────────────────────────────────
 
 model Objective {
-  id               String                 @id @default(uuid())
-  tenantId         String                 @map("tenant_id")
+  id               String                @id @default(uuid())
+  tenantId         String                @map("tenant_id")
   name             String
   // Free-form string (NOT the ObjectiveType enum — see schema-claims discipline
   // note in KAN-959). The Pipeline.objectiveType enum is parallel + scoped to
@@ -331,38 +347,187 @@ model Objective {
   // reactivate, retain_customer, upsell, recover_failed_payment). Taxonomy
   // consolidation deferred to a later slice.
   type             String
-  successCondition Json                   @map("success_condition")
-  subObjectives    Json                   @default("[]") @map("sub_objectives")
-  blueprintId      String?                @map("blueprint_id")
+  successCondition Json                  @map("success_condition")
+  subObjectives    Json                  @default("[]") @map("sub_objectives")
+  blueprintId      String?               @map("blueprint_id")
   // KAN-959 — entity scope (which entity type pursues this objective).
   // Slice 1 writes `contact` only; the column carries all 4 values so slice 5
   // (Order/Company stacks) can adopt without a migration.
-  entityScope      ObjectiveEntityScope?  @map("entity_scope")
+  entityScope      ObjectiveEntityScope? @map("entity_scope")
   // KAN-959 — provenance of the row. blueprint_generic for the catalog seed;
   // future slices add the other values when the AI proposer + human-authored
   // paths land.
   source           ObjectiveSource?
-  isActive         Boolean                @default(true) @map("is_active")
-  createdAt        DateTime               @default(now()) @map("created_at")
-  updatedAt        DateTime               @updatedAt @map("updated_at")
+  isActive         Boolean               @default(true) @map("is_active")
+  createdAt        DateTime              @default(now()) @map("created_at")
+  updatedAt        DateTime              @updatedAt @map("updated_at")
 
-  tenant                 Tenant                    @relation(fields: [tenantId], references: [id])
-  blueprint              Blueprint?                @relation(fields: [blueprintId], references: [id])
-  contactObjectiveStack  ContactObjectiveStack[]
-  outcomes               Outcome[]
+  tenant                Tenant                     @relation(fields: [tenantId], references: [id])
+  blueprint             Blueprint?                 @relation(fields: [blueprintId], references: [id])
+  contactObjectiveStack ContactObjectiveStack[]
+  outcomes              Outcome[]
   // KAN-959 — Pipeline.objectiveId binding (Pipeline → Objective; Pipeline =
   // the structured path to its bound Objective).
-  pipelines              Pipeline[]
+  pipelines             Pipeline[]
   // KAN-959 — MicroObjective reverse-relation. MicroObjective remains a
   // reusable gate definition; per-entity progress lives on the stack row.
-  microObjectives        MicroObjective[]
+  microObjectives       MicroObjective[]
   // KAN-962 (slice 2a) — tenant-level prioritized selection back-relation
-  tenantSelections       TenantObjectiveSelection[]
+  tenantSelections      TenantObjectiveSelection[]
+  // KAN-1001 Campaign Slice 0 — Campaign.objectiveId binding (Campaign =
+  // intent layer ABOVE Pipeline; one Objective → many Campaigns). Restrict
+  // delete posture mirrors TenantObjectiveSelection — you don't drop an
+  // Objective with live Campaigns hanging off it.
+  campaigns             Campaign[]
 
   @@index([tenantId])
   @@index([tenantId, type])
   @@index([tenantId, entityScope])
   @@map("objectives")
+}
+
+// ─────────────────────────────────────────────
+// CAMPAIGN LAYER (KAN-1001 Slice 0 Phase 1 — additive, dual-read)
+//
+// Architect/PO greenlit per the Campaign Layer epic (KAN-996). Campaign
+// owns intent (audience + objective + window + status + priority);
+// Pipeline keeps stage structure + gains a nullable campaign_id
+// back-link. Phase 1 is purely additive — readers (lead-assignment
+// Tier 1.5) untouched, still reading Pipeline.objectiveId + segment.
+// Phase 2 (separate ticket) cuts routing to Campaign + drops the
+// Pipeline columns.
+//
+// Reuse insight: audience_conditions jsonb shape = the
+// AudienceConditionsSchema that Slice 1 (KAN-997) shipped in
+// @growth/shared. Text-to-segment / propose write the same jsonb a
+// future manual condition-builder would. Single storage format.
+// ─────────────────────────────────────────────
+
+model Campaign {
+  id       String @id @default(uuid())
+  tenantId String @map("tenant_id")
+
+  // Intent
+  name        String
+  // KAN-1001 — original NL goal for durable re-runnability + accuracy
+  // review on COMMITTED campaigns. Complementary to the Slice 1 Cloud
+  // Logging line (jsonPayload.type='text_to_segment' / 'campaign_propose')
+  // which captures TRANSIENT proposals the user previewed-but-didn't-
+  // commit. Both surfaces matter for text-to-segment quality review.
+  nlIntent    String?           @map("nl_intent")
+  objectiveId String            @map("objective_id")
+  // 4 user-facing strategies (the 6-value StrategyType enum's escalate +
+  // wait are decision-engine control-flow primitives, not campaign
+  // strategies). Nullable — committed without explicit strategy = default
+  // behavior at execution time.
+  strategy    CampaignStrategy?
+
+  // Audience
+  // jsonb shape = AudienceConditionsSchema in @growth/shared
+  // (PAIRS-tested enums after KAN-1000 fix-forward; recursive
+  // discriminated union of allOf/anyOf over typed leaf conditions).
+  audienceConditions             Json                 @map("audience_conditions")
+  audienceMode                   CampaignAudienceMode @default(static) @map("audience_mode")
+  // Slice 5 dynamic-mode cron sets this on each re-eval cycle. Column
+  // shipped in Slice 0 so the cron landing in Slice 5 doesn't require
+  // another migration.
+  audienceEvaluatedAt            DateTime?            @map("audience_evaluated_at")
+  audienceSnapshotCount          Int?                 @map("audience_snapshot_count")
+  // SUM(Order.grandTotal WHERE contact matches AND currency='USD') at
+  // activation. Snapshot — orders aging out of the window after
+  // activation don't shift this value. NOT a forecast.
+  historicalValueUsdAtActivation Decimal?             @map("historical_value_usd_at_activation") @db.Decimal(14, 2)
+
+  // Window
+  windowStart DateTime? @map("window_start")
+  windowEnd   DateTime? @map("window_end")
+
+  // Lifecycle
+  status      CampaignStatus @default(draft)
+  // Lower = higher rank. Default 100 leaves room for human + AI to
+  // inject hi/lo priority campaigns without renumbering existing ones.
+  priority    Int            @default(100)
+  activatedAt DateTime?      @map("activated_at")
+  completedAt DateTime?      @map("completed_at")
+  archivedAt  DateTime?      @map("archived_at")
+
+  createdByUserId String?  @map("created_by_user_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  tenant       Tenant                  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  // Restrict — you can't drop an Objective with live Campaigns hanging off it.
+  // Mirrors TenantObjectiveSelection.objective relation posture.
+  objective    Objective               @relation(fields: [objectiveId], references: [id], onDelete: Restrict)
+  pipelines    Pipeline[]
+  memberships  CampaignMembership[]
+  stackEntries ContactObjectiveStack[]
+
+  @@index([tenantId, status])
+  @@index([tenantId, objectiveId])
+  // Slice 5 dynamic-cron filter: pick active+dynamic campaigns due for re-eval.
+  @@index([tenantId, status, audienceMode])
+  @@map("campaigns")
+}
+
+model CampaignMembership {
+  id         String               @id @default(uuid())
+  tenantId   String               @map("tenant_id")
+  campaignId String               @map("campaign_id")
+  contactId  String               @map("contact_id")
+  source     CampaignMemberSource
+  joinedAt   DateTime             @default(now()) @map("joined_at")
+  exitedAt   DateTime?            @map("exited_at")
+  // Free-form reason — typically "window_ended", "audience_no_longer_matches",
+  // "manual_remove", or NULL while still active.
+  exitReason String?              @map("exit_reason")
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  contact  Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  // One row per (campaign, contact) — re-admit after exit reuses + updates
+  // exitedAt/exitReason rather than creating a duplicate.
+  @@unique([campaignId, contactId])
+  @@index([tenantId, campaignId])
+  @@index([tenantId, contactId])
+  @@map("campaign_membership")
+}
+
+enum CampaignStrategy {
+  direct
+  re_engage
+  trust_build
+  guided
+
+  @@map("campaign_strategy")
+}
+
+enum CampaignAudienceMode {
+  // Materialize matching contacts once at activation. Historical sets
+  // ("spring 2024 buyers") never grow.
+  static
+  // Re-evaluate audience_conditions on schedule (Slice 5 cron). New
+  // qualifiers admitted via CampaignMembership.source='dynamic_admit'.
+  dynamic
+
+  @@map("campaign_audience_mode")
+}
+
+enum CampaignStatus {
+  draft // proposed but not committed; not routed to
+  active // accepting members + executing
+  completed // window_end reached; in-flight finishes, no new admits
+  archived // hidden from UI; preserved for outcome learning
+
+  @@map("campaign_status")
+}
+
+enum CampaignMemberSource {
+  snapshot // populated at static activation
+  dynamic_admit // appended by Slice 5 cron evaluator
+
+  @@map("campaign_member_source")
 }
 
 enum ObjectiveEntityScope {
@@ -405,15 +570,15 @@ enum ObjectiveSource {
 /// future Brain objective-awareness). `'pending_review'` reserved for
 /// AI-proposed-but-not-yet-adopted cases.
 model TenantObjectiveSelection {
-  id          String                @id @default(uuid())
-  tenantId    String                @map("tenant_id")
-  objectiveId String                @map("objective_id")
-  entityScope ObjectiveEntityScope  @map("entity_scope")
+  id          String               @id @default(uuid())
+  tenantId    String               @map("tenant_id")
+  objectiveId String               @map("objective_id")
+  entityScope ObjectiveEntityScope @map("entity_scope")
   priority    Int
-  status      String                @default("selected")
-  adoptedAt   DateTime              @default(now()) @map("adopted_at")
-  createdAt   DateTime              @default(now()) @map("created_at")
-  updatedAt   DateTime              @updatedAt @map("updated_at")
+  status      String               @default("selected")
+  adoptedAt   DateTime             @default(now()) @map("adopted_at")
+  createdAt   DateTime             @default(now()) @map("created_at")
+  updatedAt   DateTime             @updatedAt @map("updated_at")
 
   tenant    Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   objective Objective @relation(fields: [objectiveId], references: [id], onDelete: Restrict)
@@ -719,20 +884,20 @@ enum KnowledgeCategory {
 }
 
 model Pipeline {
-  id                       String        @id @default(uuid())
-  tenantId                 String        @map("tenant_id")
+  id                       String           @id @default(uuid())
+  tenantId                 String           @map("tenant_id")
   name                     String
   description              String?
-  isActive                 Boolean       @default(true) @map("is_active")
-  order                    Int           @default(0)
-  objectiveType            ObjectiveType @map("objective_type")
-  objectiveDescription     String?       @map("objective_description")
+  isActive                 Boolean          @default(true) @map("is_active")
+  order                    Int              @default(0)
+  objectiveType            ObjectiveType    @map("objective_type")
+  objectiveDescription     String?          @map("objective_description")
   // KAN-959 — Pipeline binds to an Objective row (Pipeline = the path to the
   // Objective). Nullable during slice 1: the fixture pipeline (KAN-702 Verify
   // Pipeline) stays NULL per Phase 1 strict-fixture decision. The legacy
   // `objectiveType` enum + `objectiveDescription` columns remain parallel
   // this slice; consolidation deferred.
-  objectiveId              String?       @map("objective_id")
+  objectiveId              String?          @map("objective_id")
   // KAN-962 (slice 2a) — segment marker. Distinguishes pipelines that serve
   // different audiences of the SAME objective (a tenant pursuing
   // book_appointment may have a `new_leads` pipeline AND a `closed_lost_recovery`
@@ -745,9 +910,16 @@ model Pipeline {
   // Stage.autoApproveMatrix → this column → Tenant.autoApproveEnabled
   // (kill-switch) → platform default (auto-approve-defaults.ts). NULL means
   // "skip this tier" (same posture as Stage.autoApproveMatrix when empty).
-  defaultAutoApproveMatrix Json?         @map("default_auto_approve_matrix")
-  createdAt                DateTime      @default(now()) @map("created_at")
-  updatedAt                DateTime      @updatedAt @map("updated_at")
+  defaultAutoApproveMatrix Json?            @map("default_auto_approve_matrix")
+  // KAN-1001 Campaign Slice 0 — back-link to the owning Campaign. NULLABLE
+  // in Phase 1 because (a) the backfill migration populates this for every
+  // objective-bound Pipeline; (b) the legacy fixture Pipeline (KAN-702
+  // Verify Pipeline) has objectiveId=NULL so its backfill skips → stays
+  // NULL until/unless reassigned. Phase 2 cuts lead-assignment routing
+  // over to read Campaign instead of Pipeline.objectiveId+segment.
+  campaignId               String?          @map("campaign_id")
+  createdAt                DateTime         @default(now()) @map("created_at")
+  updatedAt                DateTime         @updatedAt @map("updated_at")
 
   tenant           Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   stages           Stage[]
@@ -759,8 +931,11 @@ model Pipeline {
   contacts         Contact[]                @relation("ContactCurrentPipeline")
   // KAN-791 — Deal lifecycle relation
   deals            Deal[]
-  // KAN-959 — Objective binding
+  // KAN-959 — Objective binding (retire in Phase 2 — Campaign owns this)
   objective        Objective?               @relation(fields: [objectiveId], references: [id], onDelete: SetNull)
+  // KAN-1001 Campaign Slice 0 — Campaign binding (Phase 2 promotes this
+  // to the primary objective-resolution path; Phase 1 dual-reads).
+  campaign         Campaign?                @relation(fields: [campaignId], references: [id], onDelete: SetNull)
 
   @@index([tenantId])
   @@index([tenantId, isActive])
@@ -769,6 +944,9 @@ model Pipeline {
   // KAN-962 — tier 1.5 routing in lead-assignment hits this index every
   // inbound lead: (tenant, objective_id, segment) is the lookup shape.
   @@index([tenantId, objectiveId, segment])
+  // KAN-1001 — Phase 2 readers will hit this index when joining Pipeline
+  // → Campaign for routing. Cheap to ship now (additive index).
+  @@index([campaignId])
   @@map("pipelines")
 }
 
@@ -825,21 +1003,21 @@ model Stage {
 }
 
 model MicroObjective {
-  id                 String     @id @default(uuid())
+  id                 String   @id @default(uuid())
   // Nullable for platform defaults (KAN-701 seeds 5 platform-default MOs).
-  tenantId           String?    @map("tenant_id")
+  tenantId           String?  @map("tenant_id")
   name               String
   description        String?
-  completionCriteria Json       @default("{}") @map("completion_criteria")
-  isDefault          Boolean    @default(false) @map("is_default")
-  order              Int        @default(0)
+  completionCriteria Json     @default("{}") @map("completion_criteria")
+  isDefault          Boolean  @default(false) @map("is_default")
+  order              Int      @default(0)
   // KAN-959 — reverse-relation to an Objective row. MicroObjective remains
   // a reusable gate definition shared across objectives; per-entity progress
   // lives on ContactObjectiveStack.subObjectives. The PipelineMicroObjective
   // join below stays for backward compatibility with the wizard UX.
-  objectiveId        String?    @map("objective_id")
-  createdAt          DateTime   @default(now()) @map("created_at")
-  updatedAt          DateTime   @updatedAt @map("updated_at")
+  objectiveId        String?  @map("objective_id")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
 
   tenant    Tenant?                  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   objective Objective?               @relation(fields: [objectiveId], references: [id], onDelete: SetNull)
@@ -975,8 +1153,8 @@ model Customer {
   since       DateTime @default(now())
   updatedAt   DateTime @updatedAt @map("updated_at")
 
-  tenant  Tenant  @relation(fields: [tenantId], references: [id])
-  contact Contact @relation(fields: [contactId], references: [id])
+  tenant          Tenant                   @relation(fields: [tenantId], references: [id])
+  contact         Contact                  @relation(fields: [contactId], references: [id])
   // KAN-962 (slice 2a) — append-only lifecycle audit
   lifecycleEvents CustomerLifecycleEvent[]
 
@@ -2135,9 +2313,9 @@ model Order {
   customFields Json @default("{}") @map("custom_fields")
   aiContext    Json @default("{}") @map("ai_context")
 
-  correlationId String?  @unique @map("correlation_id")
-  createdAt     DateTime @default(now()) @map("created_at")
-  updatedAt     DateTime @updatedAt @map("updated_at")
+  correlationId String?   @unique @map("correlation_id")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
   // KAN-946 — soft-delete column. Nullable; rows with deletedAt IS NOT NULL
   // are excluded from listOrders by default. Mirrors Company's pattern.
   deletedAt     DateTime? @map("deleted_at")
@@ -2420,16 +2598,16 @@ model ImportJob {
   //     },
   //     ...
   //   ]
-  commitStatus       ImportCommitStatus @default(pending) @map("commit_status")
-  commitStartedAt    DateTime?          @map("commit_started_at")
+  commitStatus      ImportCommitStatus @default(pending) @map("commit_status")
+  commitStartedAt   DateTime?          @map("commit_started_at")
   /// Set on terminal commitStatus (succeeded | partial | failed).
-  commitCompletedAt  DateTime?          @map("commit_completed_at")
+  commitCompletedAt DateTime?          @map("commit_completed_at")
   /// Incremented in lockstep with each per-row $transaction success.
-  committedRowCount  Int                @default(0) @map("committed_row_count")
+  committedRowCount Int                @default(0) @map("committed_row_count")
   /// Incremented per row that lands in commitErrors.
-  failedRowCount     Int                @default(0) @map("failed_row_count")
+  failedRowCount    Int                @default(0) @map("failed_row_count")
   /// JSON array of per-row error records (see comment above).
-  commitErrors       Json               @default("[]") @map("commit_errors")
+  commitErrors      Json               @default("[]") @map("commit_errors")
 
   // KAN-922 — Ingestion Cohort 2.5 (configurable field matching).
   // Per-import dedup + FK link configuration. NULL falls back to the
@@ -2440,18 +2618,18 @@ model ImportJob {
   //   Order:   'orderNumber' | 'providerOrderId' | 'external_id'
   // dedupMatchField and customerLinkField are independent (separate
   // ImportJob columns; locked decision G1).
-  dedupMatchField     String? @map("dedup_match_field")
+  dedupMatchField   String? @map("dedup_match_field")
   /// Free-text source tag for externalIds JSON map. Suggested values:
   /// stripe | hubspot | salesforce | shopify | pipedrive | manual.
   /// Required when any *Field column above is set to 'external_id' —
   /// validated at saveFieldMappings.
-  externalSourceTag   String? @map("external_source_tag")
+  externalSourceTag String? @map("external_source_tag")
   /// Deal/Order imports only — which Contact canonical field the FK
   /// resolves against. Same value-space as dedupMatchField for Contact.
-  customerLinkField   String? @map("customer_link_field")
+  customerLinkField String? @map("customer_link_field")
   /// Order imports only — which Deal canonical field the FK resolves
   /// against. NULL leaves Order.dealId NULL (today's default behavior).
-  dealLinkField       String? @map("deal_link_field")
+  dealLinkField     String? @map("deal_link_field")
 
   // Error tracking.
   errorMessage String?   @map("error_message")
@@ -2567,13 +2745,6 @@ model ImportStagingContact {
 
   importJob ImportJob @relation(fields: [importJobId], references: [id], onDelete: Cascade)
   tenant    Tenant    @relation(fields: [tenantId], references: [id])
-
-  @@unique([importJobId, sourceRowIndex])
-  @@index([importJobId, stagingStatus])
-  @@index([tenantId, email])
-  @@index([tenantId, phone])
-  @@index([targetContactId])
-  @@map("import_staging_contacts")
   // ─────────────────────────────────────────────
   // KAN-915 — Mirror columns are a LAZY CACHE of source_row_data +
   // field_mappings projection. Populated by runDuplicateDetection
@@ -2582,6 +2753,13 @@ model ImportStagingContact {
   // commit handlers re-project at write time.
   // DO NOT read these fields anywhere upstream of runDuplicateDetection.
   // ─────────────────────────────────────────────
+
+  @@unique([importJobId, sourceRowIndex])
+  @@index([importJobId, stagingStatus])
+  @@index([tenantId, email])
+  @@index([tenantId, phone])
+  @@index([targetContactId])
+  @@map("import_staging_contacts")
 }
 
 model ImportStagingCompany {
@@ -2609,6 +2787,9 @@ model ImportStagingCompany {
 
   importJob ImportJob @relation(fields: [importJobId], references: [id], onDelete: Cascade)
   tenant    Tenant    @relation(fields: [tenantId], references: [id])
+  // KAN-915 — LAZY CACHE of source_row_data + field_mappings projection.
+  // Populated by runDuplicateDetection at dedup-pass start.
+  // DO NOT read these fields anywhere upstream of runDuplicateDetection.
 
   @@unique([importJobId, sourceRowIndex])
   @@index([importJobId, stagingStatus])
@@ -2616,9 +2797,6 @@ model ImportStagingCompany {
   @@index([tenantId, name])
   @@index([targetCompanyId])
   @@map("import_staging_companies")
-  // KAN-915 — LAZY CACHE of source_row_data + field_mappings projection.
-  // Populated by runDuplicateDetection at dedup-pass start.
-  // DO NOT read these fields anywhere upstream of runDuplicateDetection.
 }
 
 model ImportStagingDeal {
@@ -2654,6 +2832,9 @@ model ImportStagingDeal {
 
   importJob ImportJob @relation(fields: [importJobId], references: [id], onDelete: Cascade)
   tenant    Tenant    @relation(fields: [tenantId], references: [id])
+  // KAN-915 — LAZY CACHE of source_row_data + field_mappings projection.
+  // Populated by runDuplicateDetection at dedup-pass start.
+  // DO NOT read these fields anywhere upstream of runDuplicateDetection.
 
   @@unique([importJobId, sourceRowIndex])
   @@index([importJobId, stagingStatus])
@@ -2661,9 +2842,6 @@ model ImportStagingDeal {
   @@index([tenantId, name])
   @@index([targetDealId])
   @@map("import_staging_deals")
-  // KAN-915 — LAZY CACHE of source_row_data + field_mappings projection.
-  // Populated by runDuplicateDetection at dedup-pass start.
-  // DO NOT read these fields anywhere upstream of runDuplicateDetection.
 }
 
 model ImportStagingOrder {
@@ -2696,6 +2874,9 @@ model ImportStagingOrder {
 
   importJob ImportJob @relation(fields: [importJobId], references: [id], onDelete: Cascade)
   tenant    Tenant    @relation(fields: [tenantId], references: [id])
+  // KAN-915 — LAZY CACHE of source_row_data + field_mappings projection.
+  // Populated by runDuplicateDetection at dedup-pass start.
+  // DO NOT read these fields anywhere upstream of runDuplicateDetection.
 
   @@unique([importJobId, sourceRowIndex])
   @@index([importJobId, stagingStatus])
@@ -2703,7 +2884,4 @@ model ImportStagingOrder {
   @@index([tenantId, providerOrderId])
   @@index([targetOrderId])
   @@map("import_staging_orders")
-  // KAN-915 — LAZY CACHE of source_row_data + field_mappings projection.
-  // Populated by runDuplicateDetection at dedup-pass start.
-  // DO NOT read these fields anywhere upstream of runDuplicateDetection.
 }
