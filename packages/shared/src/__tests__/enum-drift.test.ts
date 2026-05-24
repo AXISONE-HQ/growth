@@ -38,6 +38,12 @@ import {
   // values → leaked raw Prisma error to UI).
   LifecycleStage,
   ContactSource,
+  // KAN-1001 Campaign Slice 0 — proactive PAIRS coverage for the 4 new
+  // Campaign-layer Prisma enums shipped by Phase 1 migration.
+  CampaignStrategy,
+  CampaignAudienceMode,
+  CampaignStatus,
+  CampaignMemberSource,
 } from "@prisma/client";
 import {
   ObjectiveTypeEnum,
@@ -49,7 +55,11 @@ import {
   StageOutcomeTypeEnum,
   LifecycleStageEnum,
   ContactSourceEnum,
+  CampaignAudienceModeEnum,
+  CampaignStatusEnum,
+  CampaignMemberSourceEnum,
 } from "../enums.js";
+import { CampaignStrategyEnum } from "../campaign-proposal.js";
 // KAN-826 — KnowledgeSourceType + KnowledgeSourceStatus PAIRS removed.
 // Sprint 11a Architect Spec replaced KAN-706 enum models with string columns
 // on the new KnowledgeSource model (sourceType + status are unconstrained
@@ -108,6 +118,29 @@ const PAIRS: EnumPair[] = [
     name: "ContactSource",
     prismaValues: Object.values(ContactSource),
     zodValues: ContactSourceEnum.options,
+  },
+  // KAN-1001 Campaign Slice 0 — proactive PAIRS for the 4 new
+  // Campaign-layer enums. Filed in the same PR as the migration that
+  // creates them, so the discipline can't slip.
+  {
+    name: "CampaignStrategy",
+    prismaValues: Object.values(CampaignStrategy),
+    zodValues: CampaignStrategyEnum.options,
+  },
+  {
+    name: "CampaignAudienceMode",
+    prismaValues: Object.values(CampaignAudienceMode),
+    zodValues: CampaignAudienceModeEnum.options,
+  },
+  {
+    name: "CampaignStatus",
+    prismaValues: Object.values(CampaignStatus),
+    zodValues: CampaignStatusEnum.options,
+  },
+  {
+    name: "CampaignMemberSource",
+    prismaValues: Object.values(CampaignMemberSource),
+    zodValues: CampaignMemberSourceEnum.options,
   },
 ];
 

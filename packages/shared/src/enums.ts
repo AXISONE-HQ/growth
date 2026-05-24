@@ -90,3 +90,22 @@ export const ContactSourceEnum = z.enum([
   "other",
 ]);
 export type ContactSource = z.infer<typeof ContactSourceEnum>;
+
+// KAN-1001 Campaign Layer Slice 0 — Zod mirrors for the 3 NEW Campaign-
+// layer Prisma enums. The 4th (CampaignStrategy) already has a Zod mirror
+// in campaign-proposal.ts (shipped by KAN-1000 Slice 2 — same 4 values:
+// direct/re_engage/trust_build/guided). PAIRS reuses that one.
+//
+// PAIRS-tested in enum-drift.test.ts so any future drift hits CI
+// immediately (the discipline that retroactively caught KAN-1000's
+// LifecycleStage/ContactSource drift gets applied PROACTIVELY here).
+export const CampaignAudienceModeEnum = z.enum(["static", "dynamic"]);
+
+export const CampaignStatusEnum = z.enum([
+  "draft",
+  "active",
+  "completed",
+  "archived",
+]);
+
+export const CampaignMemberSourceEnum = z.enum(["snapshot", "dynamic_admit"]);
