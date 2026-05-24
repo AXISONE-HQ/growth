@@ -19,6 +19,7 @@
  */
 
 import { useState } from 'react';
+import Link from 'next/link';
 import { useMutation } from '@tanstack/react-query';
 import {
   Loader2,
@@ -33,10 +34,13 @@ import {
   Phone,
   Megaphone,
   DollarSign,
+  CheckCircle2,
+  Rocket,
 } from 'lucide-react';
 import {
   audienceApi,
   type AudienceProposeResult,
+  type CampaignCommitResult,
   type CampaignFirstAction,
   type CampaignProposalShape,
 } from '@/lib/api';
@@ -79,6 +83,20 @@ function isoToDateInput(iso: string | null): string {
   return iso.slice(0, 10); // 'YYYY-MM-DD'
 }
 
+/** Stable per-proposal UUID — generated client-side once when a proposal
+ *  lands. Sent to audience.commit as `idempotencyKey` so a double-click
+ *  on Activate returns the existing IDs (same key + same name within the
+ *  server's 5-minute window = recognized as a retry). Re-generated on
+ *  each new proposal so subsequent commits are distinct. */
+function newIdempotencyKey(): string {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+    return crypto.randomUUID();
+  }
+  // Defensive fallback for environments without WebCrypto (extremely
+  // unlikely in browsers we ship for; here for SSR-safety only).
+  return `ik-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
 export default function CampaignsPage() {
   const [nl, setNl] = useState('');
   // Editable copies of the proposal's name + window. Initialize on
@@ -86,6 +104,11 @@ export default function CampaignsPage() {
   const [editName, setEditName] = useState('');
   const [editWindowStart, setEditWindowStart] = useState('');
   const [editWindowEnd, setEditWindowEnd] = useState('');
+  // KAN-1001 Slice 3a — per-proposal idempotency key. Reset on each new
+  // proposal so the next proposal generates a fresh key.
+  const [idempotencyKey, setIdempotencyKey] = useState<string>(() =>
+    newIdempotencyKey(),
+  );
 
   const mutation = useMutation<AudienceProposeResult, Error, string>({
     mutationFn: (input) => audienceApi.propose(input),
@@ -94,8 +117,31 @@ export default function CampaignsPage() {
         setEditName(result.proposal.name);
         setEditWindowStart(isoToDateInput(result.proposal.windowStartUtc));
         setEditWindowEnd(isoToDateInput(result.proposal.windowEndUtc));
+        // Fresh idempotency key per new proposal — the previous key is
+        // bound to the previous proposal's name window.
+        setIdempotencyKey(newIdempotencyKey());
       }
     },
+  });
+
+  // KAN-1001 Slice 3a — commit mutation. Returns the persisted Campaign
+  // + Pipeline IDs + a materialization status flag so the UI can show
+  // honest text ("snapshot materialized: N contacts" vs "snapshot
+  // queued — large audience materializing in the background").
+  const commitMutation = useMutation<
+    CampaignCommitResult,
+    Error,
+    {
+      proposal: CampaignProposalShape;
+      edits?: {
+        name?: string;
+        windowStartUtc?: string | null;
+        windowEndUtc?: string | null;
+      };
+      idempotencyKey: string;
+    }
+  >({
+    mutationFn: (input) => audienceApi.commit(input),
   });
 
   if (!FLAG_ON) {
@@ -214,6 +260,23 @@ export default function CampaignsPage() {
           onNameChange={setEditName}
           onWindowStartChange={setEditWindowStart}
           onWindowEndChange={setEditWindowEnd}
+          commitResult={commitMutation.data}
+          commitError={commitMutation.error}
+          commitPending={commitMutation.isPending}
+          onCommit={() => {
+            if (!result || (result.kind !== 'proposal' && result.kind !== 'thin')) return;
+            const dateToIso = (d: string): string | null =>
+              d ? new Date(`${d}T00:00:00.000Z`).toISOString() : null;
+            commitMutation.mutate({
+              proposal: result.proposal,
+              edits: {
+                name: editName.trim() || undefined,
+                windowStartUtc: dateToIso(editWindowStart),
+                windowEndUtc: dateToIso(editWindowEnd),
+              },
+              idempotencyKey,
+            });
+          }}
         />
       ) : null}
 
@@ -243,6 +306,10 @@ function ProposalPreview({
   onNameChange,
   onWindowStartChange,
   onWindowEndChange,
+  commitResult,
+  commitError,
+  commitPending,
+  onCommit,
 }: {
   result: AudienceProposeResult;
   editName: string;
@@ -251,6 +318,10 @@ function ProposalPreview({
   onNameChange: (v: string) => void;
   onWindowStartChange: (v: string) => void;
   onWindowEndChange: (v: string) => void;
+  commitResult: CampaignCommitResult | undefined;
+  commitError: Error | null;
+  commitPending: boolean;
+  onCommit: () => void;
 }) {
   if (result.kind === 'ambiguous') return null;
   const isThin = result.kind === 'thin';
@@ -412,12 +483,100 @@ function ProposalPreview({
         </ol>
       </SectionCard>
 
-      {/* Read-only disclaimer */}
-      <div className="rounded-[var(--ds-radius-input)] border border-[var(--ds-violet-100)] bg-[var(--ds-violet-100)]/40 p-4">
-        <div className="flex items-start gap-3">
-          <Workflow className="mt-0.5 h-4 w-4 flex-shrink-0 text-[var(--ds-violet-500)]" />
-          <div className="text-caption text-foreground">
-            <strong>Read-only preview.</strong> This proposal is not saved or executed. Slice 3 ships the commit + activation flow (gated on Slice 0 schema).
+      {/* KAN-1001 Slice 3a — Activate card. Commits Campaign + Pipeline +
+          Stages + initial membership snapshot. INERT: no Decision Engine
+          handoff, no sends. Activation (engine handoff) lands in 3b. */}
+      {commitResult ? (
+        <ActivateSuccessCard result={commitResult} />
+      ) : (
+        <div className="rounded-[var(--ds-radius-card)] border border-border bg-card p-5">
+          <div className="flex items-start gap-3">
+            <Workflow className="mt-0.5 h-4 w-4 flex-shrink-0 text-[var(--ds-violet-500)]" />
+            <div className="flex-1 text-caption text-foreground">
+              <strong>Activate creates the campaign + its pipeline, but doesn&apos;t start sending.</strong>{' '}
+              Slice 3a is the persistence layer: a committed campaign is observable
+              (rows exist, pipeline appears on the board, audit log records the commit)
+              but no contacts get prioritized into the autonomous loop. The
+              engine-handoff lands in a separate gated PR (Slice 3b).
+            </div>
+          </div>
+          <div className="mt-4 flex items-center justify-end gap-3">
+            {commitError ? (
+              <div className="flex items-start gap-2 text-caption text-[var(--ds-danger-text)]">
+                <AlertCircle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
+                <span>{commitError.message}</span>
+              </div>
+            ) : null}
+            <Button
+              variant="gradient"
+              size="sm"
+              disabled={commitPending || editName.trim().length === 0}
+              onClick={onCommit}
+            >
+              {commitPending ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  Activating…
+                </>
+              ) : (
+                <>
+                  <Rocket className="h-3.5 w-3.5" />
+                  Activate campaign
+                </>
+              )}
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ActivateSuccessCard({ result }: { result: CampaignCommitResult }) {
+  const materializedSync = result.membershipStatus === 'materialized_sync';
+  return (
+    <div className="rounded-[var(--ds-radius-card)] border border-[var(--ds-emerald-100)] bg-[var(--ds-emerald-100)]/40 p-5">
+      <div className="flex items-start gap-3">
+        <CheckCircle2 className="mt-0.5 h-5 w-5 flex-shrink-0 text-[var(--ds-emerald-700)]" />
+        <div className="flex-1">
+          <div className="text-label text-foreground">
+            {result.alreadyExisted ? 'Campaign already active' : 'Campaign committed'}
+          </div>
+          <div className="mt-1 text-caption text-muted-foreground">
+            {result.alreadyExisted ? (
+              <>
+                A campaign with this name was committed within the last 5 minutes —
+                returning the existing record. Campaign id{' '}
+                <code className="rounded bg-[var(--ds-surface-sunken)] px-1 py-0.5 font-mono">
+                  {result.campaignId}
+                </code>
+                .
+              </>
+            ) : (
+              <>
+                {materializedSync
+                  ? `Audience snapshot materialized: ${result.membershipSnapshotCountSync.toLocaleString(
+                      'en-US',
+                    )} of ${result.audienceCount.toLocaleString('en-US')} contacts.`
+                  : `Audience snapshot queued for ${result.audienceCount.toLocaleString(
+                      'en-US',
+                    )} contacts — materializing in the background.`}{' '}
+                INERT: no contacts have been prioritized into the autonomous loop
+                yet. Slice 3b adds the engine handoff.
+              </>
+            )}
+          </div>
+          <div className="mt-3 flex items-center gap-3">
+            <Link
+              href={`/pipelines/${result.pipelineId}`}
+              className="text-caption font-medium text-[var(--ds-violet-500)] hover:underline"
+            >
+              View pipeline board →
+            </Link>
+            <span className="text-caption text-muted-foreground">·</span>
+            <span className="text-caption text-muted-foreground">
+              Campaign id <code className="font-mono">{result.campaignId}</code>
+            </span>
           </div>
         </div>
       </div>

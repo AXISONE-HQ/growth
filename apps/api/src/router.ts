@@ -5824,6 +5824,55 @@ interface AudienceRouterModule {
     llm: unknown,
   ) => Promise<unknown>;
 }
+
+// KAN-1001 Campaign Layer Slice 3a — commit & materialize (INERT).
+// Lives in packages/api/src/services/campaign-commit.ts; loaded via
+// variable-specifier dynamic import (same pattern as the rest of the
+// cross-rootDir services).
+interface CampaignCommitModule {
+  commitCampaign: (
+    prisma: unknown,
+    tenantId: string,
+    input: {
+      proposal: unknown;
+      edits?: { name?: string; windowStartUtc?: string | null; windowEndUtc?: string | null };
+      idempotencyKey: string;
+      userId?: string;
+    },
+    hooks: unknown,
+  ) => Promise<{
+    alreadyExisted: boolean;
+    campaignId: string;
+    pipelineId: string;
+    stageIds: string[];
+    audienceCount: number;
+    membershipStatus: 'materialized_sync' | 'deferred_async';
+    membershipSnapshotCountSync: number;
+  }>;
+  archiveCampaign: (
+    prisma: unknown,
+    tenantId: string,
+    input: { campaignId: string; userId?: string },
+    hooks: unknown,
+  ) => Promise<{ campaignId: string; status: 'archived'; archivedAt: Date }>;
+  materializeAudienceSnapshot: (
+    prisma: unknown,
+    args: { tenantId: string; campaignId: string; conditions: unknown },
+  ) => Promise<{
+    campaignId: string;
+    totalContactsScanned: number;
+    totalMembershipInserted: number;
+    batchCount: number;
+  }>;
+}
+let _campaignCommitModule: CampaignCommitModule | null = null;
+async function loadCampaignCommitModule(): Promise<CampaignCommitModule> {
+  if (_campaignCommitModule) return _campaignCommitModule;
+  const spec = "../../../packages/api/src/services/campaign-commit.js";
+  _campaignCommitModule = (await import(spec)) as CampaignCommitModule;
+  return _campaignCommitModule;
+}
+
 let _audienceModule: AudienceRouterModule | null = null;
 async function loadAudienceModule(): Promise<AudienceRouterModule> {
   if (_audienceModule) return _audienceModule;
@@ -5920,6 +5969,161 @@ const audienceRouter = router({
         ctx.tenantId,
         { nl: input.nl },
         llmModule.complete,
+      );
+    }),
+
+  // KAN-1001 Campaign Layer Slice 3a — commit & materialize (INERT).
+  //
+  // Persists Campaign + campaign-owned Pipeline + Stages + initial
+  // CampaignMembership snapshot. INERT: no ContactObjectiveStack writes,
+  // no Decision Engine handoff, no action publishes possible. Slice 3b
+  // adds the engine-handoff layer.
+  //
+  // For audiences > MEMBERSHIP_SYNC_LIMIT (500), the membership snapshot
+  // is materialized out-of-band by an in-process fire-and-forget worker
+  // (see materializeAsync hook below). This is a documented deviation
+  // from a full Pub/Sub subscriber chain; tracked as a 3a follow-up.
+  commit: protectedProcedure
+    .input(
+      z.object({
+        // The proposal payload is large + nested; treat as z.unknown()
+        // here and re-parse via CampaignProposalSchema inside the
+        // service (same pattern as audience.count's conditions input).
+        proposal: z.unknown(),
+        edits: z
+          .object({
+            name: z.string().min(1).max(200).optional(),
+            windowStartUtc: z.string().datetime().nullable().optional(),
+            windowEndUtc: z.string().datetime().nullable().optional(),
+          })
+          .optional(),
+        idempotencyKey: z.string().uuid(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const { commitCampaign, materializeAudienceSnapshot } =
+        await loadCampaignCommitModule();
+      // Hooks:
+      //   auditLog.writeInTx → tx.auditLog.create (in-tx, atomic rollback)
+      //   materializeAsync.kickOff → in-process Promise (fire-and-forget,
+      //     never throws to caller; errors land in structured logs)
+      const hooks = {
+        auditLog: {
+          writeInTx: async (
+            tx: { auditLog: { create: (args: unknown) => Promise<{ id: string }> } },
+            payload: {
+              tenantId: string;
+              actor: string;
+              actionType: string;
+              payload: Record<string, unknown>;
+              reasoning: string;
+            },
+          ): Promise<{ id: string }> =>
+            tx.auditLog.create({
+              data: {
+                tenantId: payload.tenantId,
+                actor: payload.actor,
+                actionType: payload.actionType,
+                payload: payload.payload,
+                reasoning: payload.reasoning,
+              },
+            }),
+        },
+        materializeAsync: {
+          kickOff: (a: {
+            tenantId: string;
+            campaignId: string;
+            conditions: unknown;
+          }): void => {
+            // Fire-and-forget — must NOT block the request. Structured
+            // log emits regardless of success/fail so ops can correlate
+            // a commit response with its later materialization.
+            void materializeAudienceSnapshot(ctx.prisma, a)
+              .then((res) => {
+                // eslint-disable-next-line no-console
+                console.log(
+                  JSON.stringify({
+                    type: 'campaign_materialize_async',
+                    status: 'success',
+                    tenantId: a.tenantId,
+                    campaignId: a.campaignId,
+                    totalContactsScanned: res.totalContactsScanned,
+                    totalMembershipInserted: res.totalMembershipInserted,
+                    batchCount: res.batchCount,
+                  }),
+                );
+              })
+              .catch((err: unknown) => {
+                // eslint-disable-next-line no-console
+                console.log(
+                  JSON.stringify({
+                    type: 'campaign_materialize_async',
+                    status: 'failed',
+                    tenantId: a.tenantId,
+                    campaignId: a.campaignId,
+                    error:
+                      err instanceof Error ? err.message : String(err),
+                  }),
+                );
+              });
+          },
+        },
+      };
+      return commitCampaign(
+        ctx.prisma,
+        ctx.tenantId,
+        {
+          proposal: input.proposal,
+          edits: input.edits,
+          idempotencyKey: input.idempotencyKey,
+          userId: ctx.firebaseUser?.uid ?? undefined,
+        },
+        hooks,
+      );
+    }),
+
+  // KAN-1001 Slice 3a — archive lifecycle transition. Sets status=
+  // 'archived' + archivedAt=now. Audit-logged.
+  //
+  // NOTE: 'paused' is not in the CampaignStatus enum (draft|active|
+  // completed|archived). If 3b needs pause/resume, add 'paused' via an
+  // additive enum migration; for 3a, archive is the "can be stopped"
+  // lever.
+  archive: protectedProcedure
+    .input(z.object({ campaignId: z.string().uuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const { archiveCampaign } = await loadCampaignCommitModule();
+      const hooks = {
+        auditLog: {
+          writeInTx: async (
+            tx: { auditLog: { create: (args: unknown) => Promise<{ id: string }> } },
+            payload: {
+              tenantId: string;
+              actor: string;
+              actionType: string;
+              payload: Record<string, unknown>;
+              reasoning: string;
+            },
+          ): Promise<{ id: string }> =>
+            tx.auditLog.create({
+              data: {
+                tenantId: payload.tenantId,
+                actor: payload.actor,
+                actionType: payload.actionType,
+                payload: payload.payload,
+                reasoning: payload.reasoning,
+              },
+            }),
+        },
+      };
+      return archiveCampaign(
+        ctx.prisma,
+        ctx.tenantId,
+        {
+          campaignId: input.campaignId,
+          userId: ctx.firebaseUser?.uid ?? undefined,
+        },
+        hooks,
       );
     }),
 });
