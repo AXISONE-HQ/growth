@@ -216,14 +216,23 @@ function makeFakePrismaForCommit(store: FakeStore): CommitPrisma {
         const w = where as {
           tenantId?: string;
           name?: string;
-          status?: string;
+          // KAN-1004 SAE PR1 — idempotency check now uses `{ in: [...] }`
+          // for status (covers both 'committed' new commits + 'active'
+          // PR3-activated rows). Fake supports both equality + `in`.
+          status?: string | { in: readonly string[] };
           createdAt?: { gte?: Date };
           id?: string;
         };
         const matches = store.campaigns.filter((c) => {
           if (w.tenantId !== undefined && c.tenantId !== w.tenantId) return false;
           if (w.name !== undefined && c.name !== w.name) return false;
-          if (w.status !== undefined && c.status !== w.status) return false;
+          if (w.status !== undefined) {
+            if (typeof w.status === 'string') {
+              if (c.status !== w.status) return false;
+            } else if ('in' in w.status && Array.isArray(w.status.in)) {
+              if (!w.status.in.includes(c.status)) return false;
+            }
+          }
           if (w.id !== undefined && c.id !== w.id) return false;
           if (w.createdAt?.gte && c.createdAt < w.createdAt.gte) return false;
           return true;
@@ -511,7 +520,9 @@ describe('campaign-commit — happy path', () => {
     // Persistence — exactly one campaign, exactly one pipeline (linked)
     expect(store.campaigns).toHaveLength(1);
     expect(store.campaigns[0]!.tenantId).toBe(TENANT_A);
-    expect(store.campaigns[0]!.status).toBe('active');
+    // KAN-1004 SAE PR1 — committed (was 'active'). 'active' is now reserved
+    // for PR3's engine-active state (publish-on-activate fired).
+    expect(store.campaigns[0]!.status).toBe('committed');
     expect(store.campaigns[0]!.audienceMode).toBe('static');
     expect(store.campaigns[0]!.activatedAt).not.toBeNull();
     expect(store.campaigns[0]!.audienceEvaluatedAt).not.toBeNull();
@@ -817,8 +828,10 @@ describe('campaign-commit — archive', () => {
       ),
     ).rejects.toThrow(/not found in tenant scope/);
 
-    // Campaign status unchanged
-    expect(store.campaigns[0]!.status).toBe('active');
+    // Campaign status unchanged (still the committed state from the
+    // happy-path commit above; KAN-1004 SAE PR1 flipped default from
+    // 'active' to 'committed').
+    expect(store.campaigns[0]!.status).toBe('committed');
     expect(store.campaigns[0]!.archivedAt).toBeNull();
   });
 });
@@ -861,7 +874,10 @@ describe('materializeAudienceSnapshot — paginated worker', () => {
           historicalValueUsdAtActivation: null,
           windowStart: null,
           windowEnd: null,
-          status: 'active',
+          // Worker fixture — campaign exists post-3a-style commit, so
+          // status reflects the PR1 default ('committed'). Worker
+          // doesn't check status; this is for model accuracy only.
+          status: 'committed',
           priority: 100,
           activatedAt: new Date(),
           completedAt: null,

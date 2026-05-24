@@ -1,0 +1,41 @@
+-- KAN-1004 — Safe Autonomous Execution PR1: Campaign state-model migration (additive)
+--
+-- PR1 of the Safe Autonomous Execution epic. Establishes the state vocabulary
+-- the autonomous consumer (PR3) keys off.
+--
+-- Adds 2 enum values to "campaign_status":
+--   - 'committed' — Slice 3a INERT state. Membership snapshot exists,
+--                   Pipeline + Stages exist, but NO autonomous consumer
+--                   evaluates members (no decision.run publish, no stack
+--                   push). 3a's actual semantics — until this enum value
+--                   existed, 3a wrote 'active' which was a misnomer.
+--   - 'paused'    — Engine halted. Used by PR3's pause lever; stack
+--                   entries also flipped to ContactObjectiveStackStatus
+--                   ='paused' so the consumer skips them.
+--
+-- Within this PR (separate, hand-run backfill.sql), every existing
+-- campaign currently labeled 'active' is relabeled to 'committed' to
+-- correct the 3a-era misnomer BEFORE any consumer ships. The consumer
+-- (PR3) keys off status='active' only, so unrelabeled 'active' rows
+-- would auto-wake. This sequencing is non-negotiable.
+--
+-- After PR1 lands + backfill applies, the invariant is:
+--   - 'active' is RESERVED (no rows have it until PR3 activates something)
+--   - 'committed' is the post-commit landing state
+--   - 'paused' is the stop lever (unused until PR3)
+--
+-- Migration shape: purely additive enum values. No column changes,
+-- no FK adds, no index changes. Idempotent: PG raises
+-- "duplicate_object" if re-applied, which `prisma migrate deploy`
+-- handles gracefully via its ledger (migration only runs once).
+--
+-- Postgres constraint: ALTER TYPE ... ADD VALUE cannot run inside an
+-- explicit transaction block. `prisma migrate deploy` runs each
+-- statement as its own auto-commit, which satisfies this. Do NOT
+-- wrap these in BEGIN/COMMIT.
+--
+-- ─────────────────────────────────────────────────────────────────────
+
+ALTER TYPE "campaign_status" ADD VALUE 'committed';
+
+ALTER TYPE "campaign_status" ADD VALUE 'paused';
