@@ -61,3 +61,32 @@ export const StageOutcomeTypeEnum = z.enum([
   "terminal_lost",
 ]);
 export type StageOutcomeType = z.infer<typeof StageOutcomeTypeEnum>;
+
+// KAN-1000 Slice 2 fix-forward — Contact LifecycleStage + ContactSource
+// Zod mirrors. Added after a PROD bug where audience-conditions.ts had
+// drift'd Zod enums (added 'opportunity'/'churned' that don't exist in
+// Prisma, missing 'lost'). The drift hit Prisma at count time + leaked
+// the raw query string to the UI. Added to PAIRS in enum-drift.test.ts
+// so the class can't return for these two enums.
+export const LifecycleStageEnum = z.enum([
+  "lead",
+  "mql",
+  "sql",
+  "customer",
+  "lost",
+]);
+export type LifecycleStage = z.infer<typeof LifecycleStageEnum>;
+
+export const ContactSourceEnum = z.enum([
+  "email_inbox",
+  "web_form",
+  "meta_ad",
+  "manual",
+  "csv_import",
+  "api",
+  "hubspot",
+  "stripe",
+  "shopify",
+  "other",
+]);
+export type ContactSource = z.infer<typeof ContactSourceEnum>;

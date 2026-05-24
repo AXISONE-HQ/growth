@@ -32,6 +32,12 @@ import {
   LeadAssignmentPosture,
   SignalClass,
   StageOutcomeType,
+  // KAN-1000 Slice 2 fix-forward — adding these to PAIRS prevents the
+  // class of drift that hit /campaigns in PROD (Zod enum diverged from
+  // Prisma → LLM emitted valid-against-Zod but invalid-against-Prisma
+  // values → leaked raw Prisma error to UI).
+  LifecycleStage,
+  ContactSource,
 } from "@prisma/client";
 import {
   ObjectiveTypeEnum,
@@ -41,6 +47,8 @@ import {
   LeadAssignmentPostureEnum,
   SignalClassEnum,
   StageOutcomeTypeEnum,
+  LifecycleStageEnum,
+  ContactSourceEnum,
 } from "../enums.js";
 // KAN-826 — KnowledgeSourceType + KnowledgeSourceStatus PAIRS removed.
 // Sprint 11a Architect Spec replaced KAN-706 enum models with string columns
@@ -89,6 +97,17 @@ const PAIRS: EnumPair[] = [
     name: "StageOutcomeType",
     prismaValues: Object.values(StageOutcomeType),
     zodValues: StageOutcomeTypeEnum.options,
+  },
+  // KAN-1000 Slice 2 fix-forward — newly added PAIRS entries.
+  {
+    name: "LifecycleStage",
+    prismaValues: Object.values(LifecycleStage),
+    zodValues: LifecycleStageEnum.options,
+  },
+  {
+    name: "ContactSource",
+    prismaValues: Object.values(ContactSource),
+    zodValues: ContactSourceEnum.options,
   },
 ];
 

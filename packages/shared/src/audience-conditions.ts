@@ -37,29 +37,13 @@
  *   }
  */
 import { z } from 'zod';
-
-// ─────────────────────────────────────────────
-// Leaf condition schemas
-// ─────────────────────────────────────────────
-
-const LifecycleStageEnum = z.enum([
-  'lead',
-  'mql',
-  'sql',
-  'opportunity',
-  'customer',
-  'churned',
-]);
-
-const ContactSourceEnum = z.enum([
-  'form_submission',
-  'email_inbox',
-  'csv_upload',
-  'manual_entry',
-  'api',
-  'integration',
-  'other',
-]);
+// KAN-1000 Slice 2 fix-forward — consume the CANONICAL enums from
+// enums.ts (PAIRS-tested against Prisma). Prior to this fix the local
+// enums here drift'd from Prisma (added 'opportunity'/'churned',
+// missing 'lost'; ContactSource had 7 made-up values vs Prisma's 10).
+// LLM emitted Zod-valid values that exploded at Prisma + leaked the
+// raw query string to the UI.
+import { ContactSourceEnum, LifecycleStageEnum } from './enums.js';
 
 const lifecycleStageLeaf = z.object({
   field: z.literal('lifecycleStage'),

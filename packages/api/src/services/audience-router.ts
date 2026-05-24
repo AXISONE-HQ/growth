@@ -221,10 +221,26 @@ export async function countAudience(
     ],
   };
 
-  const [count, sumResult] = await Promise.all([
-    prisma.contact.count({ where }),
-    prisma.order.aggregate({ where: orderWhere, _sum: { grandTotal: true } }),
-  ]);
+  // KAN-1000 Slice 2 fix-forward — wrap Prisma calls in a friendly
+  // error boundary. If the LLM (or a future programmatic caller) slips
+  // an invalid value past Zod (defense-in-depth: shouldn't happen with
+  // the PAIRS-tested enums, but the Slice 2 PROD bug taught us not to
+  // leak raw Prisma invocation strings to the surface). Wraps as a
+  // single Error with a stable user-facing message; the surface
+  // renders this in the existing error block.
+  let count: number;
+  let sumResult: { _sum: { grandTotal: unknown } };
+  try {
+    [count, sumResult] = await Promise.all([
+      prisma.contact.count({ where }),
+      prisma.order.aggregate({ where: orderWhere, _sum: { grandTotal: true } }),
+    ]);
+  } catch (err) {
+    throw new Error(
+      "Couldn't map part of that description to your data. Try rephrasing — for example, describe dormancy as 'no order in the last 90 days' instead of using a status word like 'churned'.",
+      { cause: err },
+    );
+  }
 
   // Decimal columns arrive as Prisma's Decimal or as strings depending
   // on serialization. Coerce via Number() with NaN→0 fallback so a
@@ -296,9 +312,9 @@ type AudienceConditions =
   | LeafCondition;
 
 type LeafCondition =
-  | { field: 'lifecycleStage'; op: 'in'; values: ('lead'|'mql'|'sql'|'opportunity'|'customer'|'churned')[] }
+  | { field: 'lifecycleStage'; op: 'in'; values: ('lead'|'mql'|'sql'|'customer'|'lost')[] }
   | { field: 'segment'; op: 'in'; values: string[] }
-  | { field: 'source'; op: 'in'; values: ('form_submission'|'email_inbox'|'csv_upload'|'manual_entry'|'api'|'integration'|'other')[] }
+  | { field: 'source'; op: 'in'; values: ('email_inbox'|'web_form'|'meta_ad'|'manual'|'csv_import'|'api'|'hubspot'|'stripe'|'shopify'|'other')[] }
   | { field: 'country'; op: 'in'; values: string[] }  // ISO-3166-1 alpha-2, uppercase
   | { field: 'createdAt'; op: 'between'; fromUtc: string; toUtcExclusive: string }  // ISO 8601 UTC
   | { field: 'orders.placedAt'; op: 'between'; fromUtc: string; toUtcExclusive: string }
@@ -311,6 +327,8 @@ type LeafCondition =
 - Relative dates anchor to TODAY = \`${todayIso}\` (UTC). "last year" → calendar year ${todayUtc.getUTCFullYear() - 1}.
 - "bought" → \`orders.placedAt\` range OR \`orders.exists: true\`. "sent a lead" → \`createdAt\` range (added as a Contact). The two are usually \`anyOf\` (OR), unless the phrasing says "and".
 - All countries use ISO-3166-1 alpha-2 uppercase ('US', 'CA', 'GB').
+- **Strict enum discipline (KAN-1000 fix-forward)**: \`lifecycleStage\` MUST be one of exactly \`'lead'|'mql'|'sql'|'customer'|'lost'\`. \`source\` MUST be one of exactly \`'email_inbox'|'web_form'|'meta_ad'|'manual'|'csv_import'|'api'|'hubspot'|'stripe'|'shopify'|'other'\`. **Never invent values like 'churned', 'dormant', 'inactive', 'opportunity'** — they don't exist in the schema.
+- **Dormancy / churn semantics**: phrases like "churned", "dormant", "inactive", "win back" do NOT map to a lifecycleStage value. Map them to ORDERS RECENCY instead: \`{ field: 'orders.placedAt', op: 'between', fromUtc: '<old date>', toUtcExclusive: '<recent cutoff>' }\` for "ordered before but not recently", OR \`{ field: 'orders.exists', op: 'eq', value: false }\` for "never bought". If neither maps cleanly, return ambiguous and ask the user to define dormancy (e.g., "no order in 90 days?").
 - NEVER guess on ambiguous phrasing. If the description could plausibly mean two different segments, return \`{ kind: 'ambiguous', clarifyingQuestion: '...' }\` instead of fabricating one.
 
 # Output
