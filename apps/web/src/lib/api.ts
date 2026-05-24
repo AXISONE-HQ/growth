@@ -1935,6 +1935,35 @@ export type AudienceTextToSegmentResult =
       clarifyingQuestion: string;
     };
 
+// KAN-1000 Slice 2 — full campaign proposal (read-only).
+
+export type CampaignFirstAction = {
+  day: number;
+  channel: 'email' | 'sms' | 'whatsapp';
+  intent: string;
+  description: string;
+};
+
+export type CampaignProposalShape = {
+  name: string;
+  windowStartUtc: string | null;
+  windowEndUtc: string | null;
+  audience: {
+    conditions: unknown;
+    count: number;
+    historicalValueUsd: number;
+  };
+  objective: { id: string; name: string; type: string };
+  strategy: 'direct' | 're_engage' | 'trust_build' | 'guided';
+  proposedStages: Array<{ name: string; order: number; description: string }>;
+  firstActions: CampaignFirstAction[];
+};
+
+export type AudienceProposeResult =
+  | { kind: 'proposal'; proposal: CampaignProposalShape; message: string }
+  | { kind: 'thin'; proposal: CampaignProposalShape; message: string }
+  | { kind: 'ambiguous'; clarifyingQuestion: string };
+
 export const audienceApi = {
   /**
    * NL → audience_conditions + count, single round-trip. LLM is
@@ -1947,9 +1976,23 @@ export const audienceApi = {
 
   /**
    * Direct count for a pre-built AudienceConditions tree. Slice 1 UI
-   * doesn't call this; reserved for Slice 2 manual filter builder.
+   * doesn't call this; reserved for Slice 2 manual filter builder + the
+   * /campaigns preview edits (when the user changes the date window,
+   * the preview re-counts via this directly without re-running the LLM).
    */
   count: (conditions: unknown) =>
-    trpcQuery<{ count: number; isThin: boolean }>('audience.count', { conditions }),
+    trpcQuery<{ count: number; isThin: boolean; historicalValueUsd: number }>(
+      'audience.count',
+      { conditions },
+    ),
+
+  /**
+   * KAN-1000 Slice 2 — NL → full campaign proposal. Two LLM calls
+   * server-side (text-to-segment + propose), single round-trip from
+   * the client's view. Read-only — no Campaign entity is persisted.
+   * Cost callerTag = 'campaign:propose' (rolls up on observability).
+   */
+  propose: (nl: string) =>
+    trpcMutation<AudienceProposeResult>('audience.propose', { nl }),
 };
 

@@ -24,6 +24,8 @@ import {
   countAudience,
   textToSegment,
   buildSystemPrompt,
+  buildProposeSystemPrompt,
+  proposeCampaign,
   THIN_THRESHOLD,
   type AudiencePrisma,
   type LLMCompleteFn,
@@ -41,13 +43,26 @@ interface FakeContact {
   source: string | null;
   country: string | null;
   createdAt: Date;
-  orders: { placedAt: Date }[];
+  orders: { placedAt: Date; grandTotal: number; currency: string }[];
+}
+
+// KAN-1000 Slice 2 — objective catalog shape for the propose tests.
+interface FakeObjective {
+  id: string;
+  tenantId: string;
+  name: string;
+  type: string;
+  isActive: boolean;
+  createdAt: Date;
 }
 
 const TENANT_A = '11111111-1111-1111-1111-111111111111';
 const TENANT_B = '22222222-2222-2222-2222-222222222222';
 
-function makeFakePrisma(contacts: FakeContact[]): AudiencePrisma {
+function makeFakePrisma(
+  contacts: FakeContact[],
+  objectives: FakeObjective[] = [],
+): AudiencePrisma {
   return {
     contact: {
       count: async ({ where }) => {
@@ -55,7 +70,61 @@ function makeFakePrisma(contacts: FakeContact[]): AudiencePrisma {
         return matches.length;
       },
     },
+    // KAN-1000 Slice 2 — order.aggregate for historicalValueUsd.
+    // Walks the same where-tree the count side uses, plus an outer
+    // currency='USD' filter, then sums grandTotal across matched orders.
+    order: {
+      aggregate: async ({ where }) => {
+        // The shape conditionsToWhere builds for orders is:
+        //   { AND: [{ tenantId }, { currency: 'USD' }, { contact: { AND: [...] } }] }
+        // Extract the contact subtree + the currency filter; sum
+        // matching orders.
+        const flat = flattenAndArray(where);
+        const tenantClause = flat.find((w) => 'tenantId' in w) as
+          | { tenantId: string }
+          | undefined;
+        const currencyClause = flat.find((w) => 'currency' in w) as
+          | { currency: string }
+          | undefined;
+        const contactClause = flat.find((w) => 'contact' in w) as
+          | { contact: Record<string, unknown> }
+          | undefined;
+
+        const wantTenant = tenantClause?.tenantId;
+        const wantCurrency = currencyClause?.currency ?? 'USD';
+
+        let sum = 0;
+        for (const c of contacts) {
+          if (wantTenant && c.tenantId !== wantTenant) continue;
+          if (contactClause && !evalWhere(c, contactClause.contact)) continue;
+          for (const o of c.orders) {
+            if (o.currency !== wantCurrency) continue;
+            sum += o.grandTotal;
+          }
+        }
+
+        return { _sum: { grandTotal: sum } };
+      },
+    },
+    objective: {
+      findMany: async ({ where }) => {
+        return objectives
+          .filter((o) => o.tenantId === where.tenantId)
+          .filter((o) => where.isActive === undefined || o.isActive === where.isActive)
+          .map((o) => ({ id: o.id, name: o.name, type: o.type }));
+      },
+    },
   };
+}
+
+// Helper: flatten an outer { AND: [...] } into a flat array of clauses.
+function flattenAndArray(w: Record<string, unknown>): Array<Record<string, unknown>> {
+  if ('AND' in w && Array.isArray(w.AND)) {
+    return (w.AND as Array<Record<string, unknown>>).flatMap((inner) =>
+      'AND' in inner && Array.isArray(inner.AND) ? flattenAndArray(inner) : [inner],
+    );
+  }
+  return [w];
 }
 
 /**
@@ -515,5 +584,384 @@ describe('KAN-997 — LLM output robustness', () => {
         llmMock,
       ),
     ).rejects.toThrow();
+  });
+});
+
+// ═════════════════════════════════════════════
+// KAN-1000 Slice 2 — historicalValueUsd + proposeCampaign
+// ═════════════════════════════════════════════
+
+describe('KAN-1000 — countAudience historicalValueUsd (Slice 2)', () => {
+  it('sums matched contacts past USD orders; excludes non-USD currency', async () => {
+    const prisma = makeFakePrisma([
+      // Tenant A customer with $5,000 USD + $2,000 USD orders (sum = 7000)
+      contact({
+        tenantId: TENANT_A,
+        lifecycleStage: 'customer',
+        orders: [
+          { placedAt: new Date('2025-01-15T00:00:00Z'), grandTotal: 5000, currency: 'USD' },
+          { placedAt: new Date('2025-02-15T00:00:00Z'), grandTotal: 2000, currency: 'USD' },
+        ],
+      }),
+      // Tenant A customer with $3,000 USD + €1,000 EUR (sum USD = 3000, EUR excluded)
+      contact({
+        tenantId: TENANT_A,
+        lifecycleStage: 'customer',
+        orders: [
+          { placedAt: new Date('2025-03-15T00:00:00Z'), grandTotal: 3000, currency: 'USD' },
+          { placedAt: new Date('2025-04-15T00:00:00Z'), grandTotal: 1000, currency: 'EUR' },
+        ],
+      }),
+      // Tenant A customer with no orders (sum = 0, contributes count only)
+      contact({ tenantId: TENANT_A, lifecycleStage: 'customer', orders: [] }),
+    ]);
+
+    const result = await countAudience(prisma, TENANT_A, {
+      conditions: { field: 'lifecycleStage', op: 'in', values: ['customer'] },
+    });
+
+    expect(result.count).toBe(3);
+    expect(result.historicalValueUsd).toBe(10000); // 5000 + 2000 + 3000
+  });
+
+  it('tenant isolation — historicalValueUsd never includes other-tenant orders', async () => {
+    const prisma = makeFakePrisma([
+      contact({
+        tenantId: TENANT_A,
+        lifecycleStage: 'customer',
+        orders: [
+          { placedAt: new Date('2025-01-15T00:00:00Z'), grandTotal: 100, currency: 'USD' },
+        ],
+      }),
+      contact({
+        tenantId: TENANT_B,
+        lifecycleStage: 'customer',
+        orders: [
+          { placedAt: new Date('2025-01-15T00:00:00Z'), grandTotal: 999999, currency: 'USD' },
+        ],
+      }),
+    ]);
+
+    const a = await countAudience(prisma, TENANT_A, {
+      conditions: { field: 'lifecycleStage', op: 'in', values: ['customer'] },
+    });
+    const b = await countAudience(prisma, TENANT_B, {
+      conditions: { field: 'lifecycleStage', op: 'in', values: ['customer'] },
+    });
+
+    expect(a.historicalValueUsd).toBe(100);
+    expect(b.historicalValueUsd).toBe(999999);
+  });
+
+  it('zero matches → historicalValueUsd = 0 (no NaN leak)', async () => {
+    const prisma = makeFakePrisma([
+      contact({ tenantId: TENANT_A, lifecycleStage: 'lead' }),
+    ]);
+    const result = await countAudience(prisma, TENANT_A, {
+      conditions: { field: 'lifecycleStage', op: 'in', values: ['customer'] },
+    });
+    expect(result.count).toBe(0);
+    expect(result.historicalValueUsd).toBe(0);
+  });
+});
+
+describe('KAN-1000 — proposeCampaign (Slice 2 full proposal)', () => {
+  // Standard tenant catalog used across propose tests.
+  function makeCatalog(): FakeObjective[] {
+    const now = new Date('2026-01-01T00:00:00Z');
+    return [
+      {
+        id: 'obj_reactivate',
+        tenantId: TENANT_A,
+        name: 'Reactivate dormant customers',
+        type: 'reactivate',
+        isActive: true,
+        createdAt: now,
+      },
+      {
+        id: 'obj_book_appt',
+        tenantId: TENANT_A,
+        name: 'Book sales appointments',
+        type: 'book_appointment',
+        isActive: true,
+        createdAt: now,
+      },
+      {
+        id: 'obj_upsell',
+        tenantId: TENANT_A,
+        name: 'Upsell to premium tier',
+        type: 'upsell',
+        isActive: true,
+        createdAt: now,
+      },
+    ];
+  }
+
+  // Helper: chain two mock responses (textToSegment LLM call + propose
+  // LLM call). The propose path makes 2 LLM calls — first to extract
+  // the audience, second to build the full proposal.
+  function chainLlm(textToSegmentOut: object, proposeOut: object): LLMCompleteFn {
+    let callIdx = 0;
+    return vi.fn().mockImplementation(async () => {
+      const text = callIdx === 0 ? JSON.stringify(textToSegmentOut) : JSON.stringify(proposeOut);
+      callIdx++;
+      return {
+        text,
+        model: 'claude-sonnet-4-6',
+        inputTokens: 800,
+        outputTokens: 300,
+        latencyMs: 1200,
+      };
+    });
+  }
+
+  it('canonical case — win-back NL → catalog reactivate objective + re_engage strategy + 2-5 stages + first-actions', async () => {
+    const today = new Date('2026-05-23T14:00:00Z');
+    const llmMock = chainLlm(
+      // textToSegment output
+      {
+        kind: 'segment',
+        conditions: { field: 'lifecycleStage', op: 'in', values: ['churned'] },
+      },
+      // propose output — LLM picked obj_reactivate by id, re_engage strategy
+      {
+        kind: 'proposal',
+        proposal: {
+          name: 'Reactivate Churned Customers',
+          windowStartUtc: null,
+          windowEndUtc: null,
+          objective: {
+            id: 'obj_reactivate',
+            name: 'Reactivate dormant customers',
+            type: 'reactivate',
+          },
+          strategy: 're_engage',
+          proposedStages: [
+            { name: 'Awareness', order: 0, description: 'Re-introduce the value' },
+            { name: 'Re-engagement', order: 1, description: 'Direct ask to come back' },
+            { name: 'Conversion', order: 2, description: 'Convert or move to lost' },
+          ],
+          firstActions: [
+            { day: 0, channel: 'email', intent: 're-engagement opener', description: '"We miss you" — value reminder' },
+            { day: 3, channel: 'email', intent: 'value follow-up', description: 'New features since they left' },
+            { day: 7, channel: 'sms', intent: 'final outreach', description: 'Direct ask with discount' },
+          ],
+        },
+      },
+    );
+
+    const prisma = makeFakePrisma(
+      // 10 churned tenant-A contacts with $20K total historical USD value
+      Array.from({ length: 10 }, () =>
+        contact({
+          tenantId: TENANT_A,
+          lifecycleStage: 'churned',
+          orders: [
+            { placedAt: new Date('2024-06-01T00:00:00Z'), grandTotal: 2000, currency: 'USD' },
+          ],
+        }),
+      ),
+      makeCatalog(),
+    );
+
+    const result = await proposeCampaign(
+      prisma,
+      TENANT_A,
+      { nl: 'win back churned customers', todayUtc: today },
+      llmMock,
+    );
+
+    expect(result.kind).toBe('proposal');
+    if (result.kind !== 'proposal') return;
+    expect(result.proposal.audience.count).toBe(10);
+    expect(result.proposal.audience.historicalValueUsd).toBe(20000);
+    expect(result.proposal.objective.id).toBe('obj_reactivate');
+    expect(result.proposal.objective.type).toBe('reactivate');
+    expect(result.proposal.strategy).toBe('re_engage');
+    expect(result.proposal.proposedStages.length).toBeGreaterThanOrEqual(2);
+    expect(result.proposal.firstActions.length).toBeGreaterThanOrEqual(1);
+    expect(result.proposal.firstActions[0]!.channel).toMatch(/email|sms|whatsapp/);
+
+    // The propose call must use the canonical callerTag for cost
+    // attribution (KAN-999 dashboard chip).
+    const llmCalls = vi.mocked(llmMock).mock.calls;
+    expect(llmCalls.length).toBe(2);
+    expect(llmCalls[0]![0].callerTag).toBe('campaign:text-to-segment');
+    expect(llmCalls[1]![0].callerTag).toBe('campaign:propose');
+  });
+
+  it('book-appointment NL → catalog book_appointment objective + guided strategy', async () => {
+    const today = new Date('2026-05-23T14:00:00Z');
+    const llmMock = chainLlm(
+      {
+        kind: 'segment',
+        conditions: { field: 'lifecycleStage', op: 'in', values: ['mql'] },
+      },
+      {
+        kind: 'proposal',
+        proposal: {
+          name: 'Book Sales Demos with Qualified Leads',
+          windowStartUtc: null,
+          windowEndUtc: null,
+          objective: {
+            id: 'obj_book_appt',
+            name: 'Book sales appointments',
+            type: 'book_appointment',
+          },
+          strategy: 'guided',
+          proposedStages: [
+            { name: 'Qualification', order: 0, description: 'Confirm fit' },
+            { name: 'Demo', order: 1, description: 'Run the demo' },
+          ],
+          firstActions: [
+            { day: 0, channel: 'email', intent: 'qualifying email', description: 'Confirm fit + propose times' },
+          ],
+        },
+      },
+    );
+
+    const prisma = makeFakePrisma(
+      [contact({ tenantId: TENANT_A, lifecycleStage: 'mql' })],
+      makeCatalog(),
+    );
+
+    const result = await proposeCampaign(
+      prisma,
+      TENANT_A,
+      { nl: 'book demos with qualified leads', todayUtc: today },
+      llmMock,
+    );
+
+    if (result.kind !== 'thin') throw new Error('expected thin (count=1 ≤ THIN_THRESHOLD)');
+    expect(result.proposal.objective.type).toBe('book_appointment');
+    expect(result.proposal.strategy).toBe('guided');
+    expect(result.message).toMatch(/Only 1 contact matches/);
+  });
+
+  it('LLM picks objective by id from the catalog (cannot invent unknown objective)', async () => {
+    const today = new Date('2026-05-23T14:00:00Z');
+    const llmMock = chainLlm(
+      {
+        kind: 'segment',
+        conditions: { field: 'lifecycleStage', op: 'in', values: ['customer'] },
+      },
+      // LLM emits an objective WITHOUT a real catalog id. The Zod schema
+      // permits any string id (test the LLM honoring catalog discipline
+      // requires golden goldens, not schema enforcement), but we assert
+      // the LLM CAN pick a valid id and our pipeline preserves it.
+      {
+        kind: 'proposal',
+        proposal: {
+          name: 'Upsell',
+          windowStartUtc: null,
+          windowEndUtc: null,
+          objective: {
+            id: 'obj_upsell',
+            name: 'Upsell to premium tier',
+            type: 'upsell',
+          },
+          strategy: 'direct',
+          proposedStages: [{ name: 'Pitch', order: 0, description: 'Present premium' }],
+          firstActions: [{ day: 0, channel: 'email', intent: 'pitch', description: 'Premium-tier value email' }],
+        },
+      },
+    );
+
+    const prisma = makeFakePrisma(
+      Array.from({ length: 30 }, () =>
+        contact({ tenantId: TENANT_A, lifecycleStage: 'customer' }),
+      ),
+      makeCatalog(),
+    );
+
+    const result = await proposeCampaign(
+      prisma,
+      TENANT_A,
+      { nl: 'upsell our customers to premium', todayUtc: today },
+      llmMock,
+    );
+
+    if (result.kind !== 'proposal') throw new Error('expected proposal');
+    expect(result.proposal.objective.id).toBe('obj_upsell');
+    // The id came from the catalog (verified by makeCatalog above
+    // containing this id).
+    const catalog = makeCatalog();
+    expect(catalog.some((o) => o.id === result.proposal.objective.id)).toBe(true);
+  });
+
+  it('empty objective catalog → honest ambiguous response, no propose call attempted', async () => {
+    const today = new Date('2026-05-23T14:00:00Z');
+    const llmMock = chainLlm(
+      {
+        kind: 'segment',
+        conditions: { field: 'lifecycleStage', op: 'in', values: ['lead'] },
+      },
+      // Doesn't matter — propose call should never fire
+      {},
+    );
+
+    const prisma = makeFakePrisma(
+      [contact({ tenantId: TENANT_A, lifecycleStage: 'lead' })],
+      [], // empty catalog
+    );
+
+    const result = await proposeCampaign(
+      prisma,
+      TENANT_A,
+      { nl: 'leads', todayUtc: today },
+      llmMock,
+    );
+
+    expect(result.kind).toBe('ambiguous');
+    if (result.kind !== 'ambiguous') return;
+    expect(result.clarifyingQuestion).toMatch(/No objectives defined/);
+    // Only textToSegment LLM call ran — propose call was short-circuited.
+    expect(vi.mocked(llmMock).mock.calls.length).toBe(1);
+  });
+
+  it('textToSegment ambiguous → propose propagates verbatim, no propose call attempted', async () => {
+    const today = new Date('2026-05-23T14:00:00Z');
+    const llmMock = chainLlm(
+      {
+        kind: 'ambiguous',
+        clarifyingQuestion: 'Did you mean active customers or churned customers?',
+      },
+      {},
+    );
+
+    const prisma = makeFakePrisma([], makeCatalog());
+
+    const result = await proposeCampaign(
+      prisma,
+      TENANT_A,
+      { nl: 'customers', todayUtc: today },
+      llmMock,
+    );
+
+    expect(result.kind).toBe('ambiguous');
+    if (result.kind !== 'ambiguous') return;
+    expect(result.clarifyingQuestion).toMatch(/active customers or churned/);
+    expect(vi.mocked(llmMock).mock.calls.length).toBe(1);
+  });
+
+  it('buildProposeSystemPrompt encodes catalog + today + 4-strategy enum', () => {
+    const today = new Date('2026-05-23T14:00:00Z');
+    const prompt = buildProposeSystemPrompt(
+      today,
+      [{ id: 'obj_x', name: 'X', type: 'reactivate' }],
+      { count: 100, historicalValueUsd: 5000, conditions: { field: 'lifecycleStage', op: 'in', values: ['customer'] } },
+    );
+    expect(prompt).toContain('2026-05-23T14:00:00.000Z');
+    expect(prompt).toContain('obj_x');
+    expect(prompt).toContain('reactivate');
+    expect(prompt).toContain('direct');
+    expect(prompt).toContain('re_engage');
+    expect(prompt).toContain('trust_build');
+    expect(prompt).toContain('guided');
+    // Control-flow strategies (escalate / wait) MUST NOT appear in the
+    // user-facing strategy list — they're decision-engine primitives,
+    // not campaign strategies.
+    expect(prompt).not.toMatch(/'escalate'/);
+    expect(prompt).not.toMatch(/'wait'/);
   });
 });

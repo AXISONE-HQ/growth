@@ -5809,8 +5809,15 @@ interface AudienceRouterModule {
     prisma: unknown,
     tenantId: string,
     input: { conditions: unknown },
-  ) => Promise<{ count: number; isThin: boolean }>;
+  ) => Promise<{ count: number; isThin: boolean; historicalValueUsd: number }>;
   textToSegment: (
+    prisma: unknown,
+    tenantId: string,
+    input: { nl: string; todayUtc?: Date },
+    llm: unknown,
+  ) => Promise<unknown>;
+  // KAN-1000 Slice 2 — full campaign proposal (read-only).
+  proposeCampaign: (
     prisma: unknown,
     tenantId: string,
     input: { nl: string; todayUtc?: Date },
@@ -5886,6 +5893,29 @@ const audienceRouter = router({
         loadLlmModule(),
       ]);
       return textToSegment(
+        ctx.prisma,
+        ctx.tenantId,
+        { nl: input.nl },
+        llmModule.complete,
+      );
+    }),
+
+  // KAN-1000 Slice 2 — NL → full campaign proposal (audience +
+  // inferred objective + strategy + stages + first-actions). Two
+  // sequential LLM calls under the hood (text-to-segment then propose);
+  // read-only — no Campaign entity persisted.
+  propose: protectedProcedure
+    .input(
+      z.object({
+        nl: z.string().min(1).max(2000),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const [{ proposeCampaign }, llmModule] = await Promise.all([
+        loadAudienceModule(),
+        loadLlmModule(),
+      ]);
+      return proposeCampaign(
         ctx.prisma,
         ctx.tenantId,
         { nl: input.nl },
