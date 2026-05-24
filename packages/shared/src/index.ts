@@ -23,3 +23,10 @@ export * from "./import-row-committed.js";
 export * from "./objective-stack.js";
 // KAN-962 — Objective + Pipeline proposer shared types (slice 2a)
 export * from "./objective-proposal.js";
+// KAN-997 — Campaign Layer Slice 1 — audience targeting jsonb shape +
+// UTC-anchored relative-date util. Shared so the LLM extractor in
+// packages/api/services/audience-router.ts + the count-side Prisma
+// where-tree + any future renderer (Slice 2 preview card, etc.) all
+// consume the same contract.
+export * from "./audience-conditions.js";
+export * from "./relative-dates.js";

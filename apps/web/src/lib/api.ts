@@ -1906,3 +1906,50 @@ export const importJobsApi = {
       { importJobId },
     ),
 };
+
+// ─────────────────────────────────────────────
+// KAN-997 — Campaign Layer Slice 1 — text-to-segment (read-only).
+//
+// Slice 1 surface is intentionally minimal: a single mutation
+// (textToSegment) that takes NL and returns a discriminated union of
+// { segment | thin | ambiguous }. The Slice 1 demo page consumes only
+// this. Direct count() exposed for Slice 2 manual filter builder +
+// future API consumers.
+// ─────────────────────────────────────────────
+
+export type AudienceTextToSegmentResult =
+  | {
+      kind: 'segment';
+      conditions: unknown;
+      count: number;
+      message: string;
+    }
+  | {
+      kind: 'thin';
+      conditions: unknown;
+      count: number;
+      message: string;
+    }
+  | {
+      kind: 'ambiguous';
+      clarifyingQuestion: string;
+    };
+
+export const audienceApi = {
+  /**
+   * NL → audience_conditions + count, single round-trip. LLM is
+   * tier='reasoning' (claude-sonnet-4-6) with callerTag
+   * 'campaign:text-to-segment' (cost rolls up on /settings/observability
+   * under the 'campaign' prefix chip).
+   */
+  textToSegment: (nl: string) =>
+    trpcMutation<AudienceTextToSegmentResult>('audience.textToSegment', { nl }),
+
+  /**
+   * Direct count for a pre-built AudienceConditions tree. Slice 1 UI
+   * doesn't call this; reserved for Slice 2 manual filter builder.
+   */
+  count: (conditions: unknown) =>
+    trpcQuery<{ count: number; isThin: boolean }>('audience.count', { conditions }),
+};
+
