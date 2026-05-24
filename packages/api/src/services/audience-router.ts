@@ -28,9 +28,18 @@
  */
 import type {
   AudienceConditions,
+  CampaignProposal,
   LeafCondition,
+  ProposeResult,
 } from '@growth/shared';
-import { AudienceConditionsSchema, isAllOf, isAnyOf, isLeaf } from '@growth/shared';
+import {
+  AudienceConditionsSchema,
+  CampaignProposalSchema,
+  CampaignStrategyEnum,
+  isAllOf,
+  isAnyOf,
+  isLeaf,
+} from '@growth/shared';
 
 /** Below this count, the surface emits an honest "thin" message. */
 export const THIN_THRESHOLD = 5;
@@ -67,6 +76,21 @@ export interface LLMCompleteFn {
 export interface AudiencePrisma {
   contact: {
     count: (args: { where: Record<string, unknown> }) => Promise<number>;
+  };
+  // KAN-1000 Slice 2 — historical value sum + objective catalog read.
+  order: {
+    aggregate: (args: {
+      where: Record<string, unknown>;
+      _sum: { grandTotal: true };
+    }) => Promise<{ _sum: { grandTotal: unknown } }>;
+  };
+  objective: {
+    findMany: (args: {
+      where: { tenantId: string; isActive?: boolean };
+      select: { id: true; name: true; type: true };
+      take?: number;
+      orderBy?: { createdAt: 'desc' | 'asc' };
+    }) => Promise<Array<{ id: string; name: string; type: string }>>;
   };
 }
 
@@ -146,15 +170,24 @@ export interface CountInput {
 export interface CountResult {
   count: number;
   isThin: boolean;
+  /** KAN-1000 Slice 2 — SUM(Order.grandTotal) where Order.contact
+   *  matches the audience tree AND Order.currency='USD'. Labeled
+   *  "Past USD revenue in this audience" on the surface; NOT a
+   *  forecast. Mixed-currency aggregation deferred (USD is the
+   *  default; non-USD orders excluded from this sum). */
+  historicalValueUsd: number;
 }
 
 /**
  * KAN-997 — count contacts matching the audience tree, scoped to the
  * caller's tenant. The tenant_id WHERE is added at the OUTER level so
  * no leaf condition can accidentally escape tenant scope.
+ * KAN-1000 Slice 2 — also returns historicalValueUsd = SUM of past
+ * USD orders from matched contacts. Single round-trip from the
+ * surface's perspective (parallel queries below).
  *
- * Returns `{ count, isThin }`. `isThin` lets the surface render an
- * honest "only N contacts match" message without re-deriving the
+ * Returns `{ count, isThin, historicalValueUsd }`. `isThin` lets the
+ * surface render "only N contacts match" without re-deriving the
  * threshold on the client.
  */
 export async function countAudience(
@@ -177,8 +210,34 @@ export async function countAudience(
     AND: [{ tenantId }, innerWhere],
   };
 
-  const count = await prisma.contact.count({ where });
-  return { count, isThin: count > 0 && count <= THIN_THRESHOLD };
+  // Historical-value query — Order.contact relation filter applies the
+  // same audience tree (no tenant escape: outer tenantId on Order +
+  // contact relation also scoped by the audience tree's outer-AND).
+  const orderWhere: Record<string, unknown> = {
+    AND: [
+      { tenantId },
+      { currency: 'USD' },
+      { contact: { AND: [{ tenantId }, innerWhere] } },
+    ],
+  };
+
+  const [count, sumResult] = await Promise.all([
+    prisma.contact.count({ where }),
+    prisma.order.aggregate({ where: orderWhere, _sum: { grandTotal: true } }),
+  ]);
+
+  // Decimal columns arrive as Prisma's Decimal or as strings depending
+  // on serialization. Coerce via Number() with NaN→0 fallback so a
+  // missing aggregate (zero orders) renders as 0, not undefined.
+  const rawSum = sumResult._sum.grandTotal;
+  const historicalValueUsd =
+    rawSum == null ? 0 : Number((rawSum as { toString(): string }).toString());
+
+  return {
+    count,
+    isThin: count > 0 && count <= THIN_THRESHOLD,
+    historicalValueUsd: Number.isFinite(historicalValueUsd) ? historicalValueUsd : 0,
+  };
 }
 
 // ─────────────────────────────────────────────
@@ -445,6 +504,329 @@ export async function textToSegment(
   }
 
   logTextToSegmentEvent({
+    tenantId,
+    nlInput: input.nl,
+    result,
+    model: llmResponse.model,
+    latencyMs: llmResponse.latencyMs,
+    inputTokens: llmResponse.inputTokens,
+    outputTokens: llmResponse.outputTokens,
+  });
+
+  return result;
+}
+
+// ─────────────────────────────────────────────
+// KAN-1000 Slice 2 — propose & preview (read-only)
+// ─────────────────────────────────────────────
+
+export interface ProposeInput {
+  nl: string;
+  todayUtc?: Date;
+}
+
+/**
+ * KAN-1000 — System prompt for the full-proposal extractor. Receives
+ * the tenant's actual objective catalog so the LLM picks by id (NEVER
+ * invents). Encodes the 4 user-facing strategies (skips
+ * escalate+wait control-flow values).
+ */
+export function buildProposeSystemPrompt(
+  todayUtc: Date,
+  objectiveCatalog: Array<{ id: string; name: string; type: string }>,
+  audience: { count: number; historicalValueUsd: number; conditions: AudienceConditions },
+): string {
+  const todayIso = todayUtc.toISOString();
+  const catalogJson = JSON.stringify(
+    objectiveCatalog.map((o) => ({ id: o.id, name: o.name, type: o.type })),
+    null,
+    2,
+  );
+  return `You produce a complete campaign proposal in JSON, given:
+  - a resolved audience (already counted)
+  - the tenant's objective catalog
+  - today's date
+
+# Today
+TODAY = ${todayIso}
+
+# Resolved audience (from text-to-segment, already counted)
+\`\`\`json
+{
+  "count": ${audience.count},
+  "historicalValueUsd": ${audience.historicalValueUsd},
+  "conditions": ${JSON.stringify(audience.conditions, null, 2)}
+}
+\`\`\`
+
+# Tenant objective catalog (pick ONE by id; do not invent)
+\`\`\`json
+${catalogJson}
+\`\`\`
+
+# Strategy values (pick ONE)
+- "direct"      — Direct Conversion (high-intent, push toward conversion)
+- "re_engage"   — Re-engagement (win-back dormant/churned)
+- "trust_build" — Trust Building (early-stage, at-risk)
+- "guided"      — Guided Assistance (evaluating, educational)
+
+# Output JSON schema
+
+\`\`\`ts
+type Output =
+  | {
+      kind: 'proposal';
+      proposal: {
+        name: string;                   // suggested campaign name (3-120 chars)
+        windowStartUtc: string | null;  // ISO 8601 UTC; null = open-ended
+        windowEndUtc: string | null;    // ISO 8601 UTC; null = open-ended
+        objective: { id: string; name: string; type: string };  // copied from catalog
+        strategy: 'direct' | 're_engage' | 'trust_build' | 'guided';
+        proposedStages: Array<{ name: string; order: number; description: string }>;  // 1-8 stages
+        firstActions: Array<{ day: number; channel: 'email'|'sms'|'whatsapp'; intent: string; description: string }>;  // 1-10 actions
+      };
+    }
+  | { kind: 'ambiguous'; clarifyingQuestion: string };
+\`\`\`
+
+# Rules
+
+- Objective MUST be one of the catalog rows above. Copy its \`id\`, \`name\`, \`type\` verbatim. Match the NL goal to the closest catalog \`type\` (e.g., "win-back dormant" → 'reactivate'; "book demo" → 'book_appointment'; "upsell premium" → 'upsell').
+- Strategy MUST be one of the 4 values. "win-back" / "reactivate" / "dormant" → 're_engage'. "high-intent" / "convert now" → 'direct'. "trust" / "warm-up" → 'trust_build'. "educate" / "evaluate" → 'guided'.
+- Propose 2-5 stages that suit the objective+strategy combo. Each stage: short name + 1-sentence description.
+- Propose 1-5 first-actions (Day 0, Day 3, Day 7 style). Channels: email / sms / whatsapp.
+- Window: extract from NL if specified ("over the next 30 days" → today to today+30); else null.
+- Name: derive from NL — short, descriptive.
+- If the NL is too ambiguous to map to a catalog objective, return \`{ kind: 'ambiguous', clarifyingQuestion: '...' }\` instead.
+
+# Output
+
+Respond with ONE JSON object, no prose, no markdown fences.`;
+}
+
+/**
+ * Parse the LLM's propose response into the discriminated ProposeResult
+ * (without count/historicalValueUsd — those are folded in by caller).
+ */
+function parseProposeOutput(
+  text: string,
+):
+  | { kind: 'proposal'; raw: Omit<CampaignProposal, 'audience'> }
+  | { kind: 'ambiguous'; clarifyingQuestion: string } {
+  let s = text.trim();
+  const fenceMatch = s.match(/^```(?:json)?\s*\n?([\s\S]*?)\n?```$/);
+  if (fenceMatch && fenceMatch[1]) s = fenceMatch[1].trim();
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(s);
+  } catch (e) {
+    throw new Error(
+      `propose: LLM returned non-JSON output: ${(e as Error).message}`,
+    );
+  }
+
+  if (
+    typeof parsed === 'object' &&
+    parsed !== null &&
+    'kind' in parsed &&
+    (parsed as { kind: unknown }).kind === 'ambiguous'
+  ) {
+    const q = (parsed as { clarifyingQuestion?: unknown }).clarifyingQuestion;
+    if (typeof q !== 'string' || q.length === 0) {
+      throw new Error('propose: ambiguous output missing clarifyingQuestion');
+    }
+    return { kind: 'ambiguous', clarifyingQuestion: q };
+  }
+
+  if (
+    typeof parsed === 'object' &&
+    parsed !== null &&
+    'kind' in parsed &&
+    (parsed as { kind: unknown }).kind === 'proposal'
+  ) {
+    const proposalRaw = (parsed as { proposal?: unknown }).proposal;
+    // Schema-validate everything except `audience` (filled in by caller).
+    // We hand-roll the partial parse because CampaignProposalSchema
+    // requires audience — wrap with a VALID leaf-condition stub we'll
+    // immediately overwrite. Using { allOf: [] } would fail Zod's
+    // min(1) on logical arrays.
+    const stubbed: unknown = {
+      ...(proposalRaw as Record<string, unknown>),
+      audience: {
+        conditions: { field: 'lifecycleStage', op: 'in', values: ['lead'] },
+        count: 0,
+        historicalValueUsd: 0,
+      },
+    };
+    // Validate the strategy + structure via the full schema; we'll
+    // strip the stubbed audience before returning.
+    const validated = CampaignProposalSchema.parse(stubbed);
+    // Defense-in-depth: confirm strategy is one of the 4 user-facing
+    // values (CampaignStrategyEnum already enforces, double-check at
+    // runtime in case Zod's discriminated union doesn't catch a
+    // typo'd value the LLM emits).
+    CampaignStrategyEnum.parse(validated.strategy);
+    const { audience: _drop, ...withoutAudience } = validated;
+    return { kind: 'proposal', raw: withoutAudience };
+  }
+
+  throw new Error(
+    `propose: LLM output missing valid kind discriminator: ${s.slice(0, 200)}`,
+  );
+}
+
+/**
+ * Structured Cloud Logging line for the propose call. Mirrors the
+ * text_to_segment log so accuracy review can query both via the
+ * jsonPayload.type filter.
+ */
+function logProposeEvent(payload: {
+  tenantId: string;
+  nlInput: string;
+  result: ProposeResult;
+  model: string;
+  latencyMs: number;
+  inputTokens: number;
+  outputTokens: number;
+}): void {
+  // eslint-disable-next-line no-console
+  console.log(
+    JSON.stringify({
+      type: 'campaign_propose',
+      tenantId: payload.tenantId,
+      nlInput: payload.nlInput,
+      resultKind: payload.result.kind,
+      proposal:
+        payload.result.kind === 'proposal' || payload.result.kind === 'thin'
+          ? payload.result.proposal
+          : null,
+      clarifyingQuestion:
+        payload.result.kind === 'ambiguous' ? payload.result.clarifyingQuestion : null,
+      model: payload.model,
+      latencyMs: payload.latencyMs,
+      inputTokens: payload.inputTokens,
+      outputTokens: payload.outputTokens,
+      callerTag: 'campaign:propose',
+    }),
+  );
+}
+
+/**
+ * KAN-1000 — NL → full campaign proposal (read-only).
+ *
+ * Pipeline:
+ *   1. Call textToSegment internally — resolves NL → conditions +
+ *      count + historicalValueUsd
+ *   2. If ambiguous → propagate honestly (no propose call attempted)
+ *   3. Load tenant's active objective catalog
+ *   4. Call LLM (tier=reasoning, callerTag='campaign:propose') with
+ *      catalog + resolved audience in the system prompt
+ *   5. Schema-validate + return discriminated ProposeResult
+ *   6. Honest thin/zero handling propagates from audience count
+ */
+export async function proposeCampaign(
+  prisma: AudiencePrisma,
+  tenantId: string,
+  input: ProposeInput,
+  llm: LLMCompleteFn,
+): Promise<ProposeResult> {
+  const today = input.todayUtc ?? new Date();
+
+  // Step 1: resolve audience via the Slice 1 pipeline.
+  const segmentResult = await textToSegment(prisma, tenantId, input, llm);
+
+  // Step 2: propagate ambiguous verbatim.
+  if (segmentResult.kind === 'ambiguous') {
+    return { kind: 'ambiguous', clarifyingQuestion: segmentResult.clarifyingQuestion };
+  }
+
+  // Step 3: load tenant's objective catalog (filtered to active).
+  const catalog = await prisma.objective.findMany({
+    where: { tenantId, isActive: true },
+    select: { id: true, name: true, type: true },
+    take: 50,
+    orderBy: { createdAt: 'desc' },
+  });
+
+  if (catalog.length === 0) {
+    // Tenant has no objectives — can't propose anything that maps to
+    // a real catalog row. Honest signal: ask the user to declare an
+    // objective first (Settings → Objectives sub-tab).
+    return {
+      kind: 'ambiguous',
+      clarifyingQuestion:
+        'No objectives defined for this tenant yet. Open Settings → Objectives and declare at least one before proposing a campaign.',
+    };
+  }
+
+  // Step 4: propose call with audience + catalog context.
+  const audience = {
+    conditions: segmentResult.conditions,
+    count: segmentResult.count,
+    historicalValueUsd: 0, // refined below — textToSegment doesn't compute this
+  };
+
+  // Re-run countAudience to get historicalValueUsd (textToSegment only
+  // returns count). Cheap re-query — same tenant-scoped WHERE; both
+  // queries hit indexes.
+  const countWithValue = await countAudience(prisma, tenantId, {
+    conditions: segmentResult.conditions,
+  });
+  audience.historicalValueUsd = countWithValue.historicalValueUsd;
+
+  const systemPrompt = buildProposeSystemPrompt(today, catalog, audience);
+
+  const llmResponse = await llm({
+    tenantId,
+    tier: 'reasoning',
+    systemPrompt,
+    userPrompt: input.nl,
+    callerTag: 'campaign:propose',
+    jsonMode: true,
+    maxTokens: 3000,
+  });
+
+  const parsed = parseProposeOutput(llmResponse.text);
+
+  let result: ProposeResult;
+  if (parsed.kind === 'ambiguous') {
+    result = { kind: 'ambiguous', clarifyingQuestion: parsed.clarifyingQuestion };
+  } else {
+    const fullProposal: CampaignProposal = {
+      ...parsed.raw,
+      audience: {
+        conditions: segmentResult.conditions,
+        count: countWithValue.count,
+        historicalValueUsd: countWithValue.historicalValueUsd,
+      },
+    };
+
+    // Honesty: if the resolved audience is thin/zero, mark the proposal
+    // result as thin — surface uses the same amber treatment as the
+    // textToSegment thin path.
+    if (countWithValue.count === 0) {
+      result = {
+        kind: 'thin',
+        proposal: fullProposal,
+        message: 'No contacts match this segment. The proposal is for reference only.',
+      };
+    } else if (countWithValue.isThin) {
+      result = {
+        kind: 'thin',
+        proposal: fullProposal,
+        message: `Only ${countWithValue.count} ${countWithValue.count === 1 ? 'contact matches' : 'contacts match'}. The proposal will reach a small segment.`,
+      };
+    } else {
+      result = {
+        kind: 'proposal',
+        proposal: fullProposal,
+        message: `${countWithValue.count.toLocaleString('en-US')} contacts match.`,
+      };
+    }
+  }
+
+  logProposeEvent({
     tenantId,
     nlInput: input.nl,
     result,

@@ -51,6 +51,10 @@ describe("KAN-cohort-3.5 — resolveTitle (longest-prefix match)", () => {
     expect(resolveTitle("/conversations")).toBe("Messages");
   });
 
+  it("KAN-1000 Slice 2 — /campaigns resolves to 'Campaigns'", () => {
+    expect(resolveTitle("/campaigns")).toBe("Campaigns");
+  });
+
   it("longest match wins — /settings/account/identity beats /settings", () => {
     expect(resolveTitle("/settings/account/identity")).toBe("Account");
     expect(resolveTitle("/settings")).toBe("Settings");

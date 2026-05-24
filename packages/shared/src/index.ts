@@ -30,3 +30,7 @@ export * from "./objective-proposal.js";
 // consume the same contract.
 export * from "./audience-conditions.js";
 export * from "./relative-dates.js";
+// KAN-1000 — Campaign Layer Slice 2 — full proposal shape (audience +
+// objective + strategy + stages + first-actions). Read-only — no
+// Campaign DB model corresponds. Slice 3 wires persistence.
+export * from "./campaign-proposal.js";
