@@ -2021,7 +2021,70 @@ export const audienceApi = {
       'audience.archive',
       { campaignId },
     ),
+
+  /** KAN-1010 SAE PR5 — activate a committed campaign. Flips status →
+   *  active, upserts ContactObjectiveStack entries, drip-publishes
+   *  decision.run per member. Under autoApproveEnabled=false: every
+   *  evaluation lands as an Escalation in the /escalations queue;
+   *  zero unsupervised sends.
+   *
+   *  Preconditions: campaign.status='committed' AND audienceEvaluatedAt
+   *  IS NOT NULL. Else returns kind='rejected' with a named reason.
+   *  Idempotent on active. */
+  activate: (campaignId: string) =>
+    trpcMutation<CampaignActivateResult>('audience.activate', { campaignId }),
+
+  /** KAN-1010 SAE PR5 — pause an active campaign. The stop lever:
+   *  flips status → paused + stack rows → paused so the PR3 consumer
+   *  guard rejects any in-flight or redelivered decision.run. */
+  pause: (campaignId: string) =>
+    trpcMutation<CampaignPauseResult>('audience.pause', { campaignId }),
 };
+
+export type CampaignActivateResult =
+  | {
+      kind: 'activated';
+      campaignId: string;
+      memberCount: number;
+      stackEntriesCreated: number;
+      stackEntriesReactivated: number;
+      dripPublishesPerSecond: number;
+    }
+  | {
+      kind: 'already_active';
+      campaignId: string;
+      memberCount: number;
+    }
+  | {
+      kind: 'rejected';
+      campaignId: string;
+      reason:
+        | 'campaign_not_found'
+        | 'audience_not_evaluated'
+        | 'status_draft'
+        | 'status_paused'
+        | 'status_completed'
+        | 'status_archived';
+      currentStatus?: string;
+    };
+
+export type CampaignPauseResult =
+  | {
+      kind: 'paused';
+      campaignId: string;
+      stackEntriesPaused: number;
+    }
+  | {
+      kind: 'already_inactive';
+      campaignId: string;
+      currentStatus: string;
+    }
+  | {
+      kind: 'rejected';
+      campaignId: string;
+      reason: 'campaign_not_found' | 'status_draft' | 'status_committed';
+      currentStatus?: string;
+    };
 
 export type CampaignCommitResult = {
   alreadyExisted: boolean;

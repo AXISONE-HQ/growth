@@ -5873,6 +5873,45 @@ async function loadCampaignCommitModule(): Promise<CampaignCommitModule> {
   return _campaignCommitModule;
 }
 
+// KAN-1010 SAE PR5 — campaign-activation service (activate, pause, drip)
+interface CampaignActivationModule {
+  activateCampaign: (
+    prisma: unknown,
+    tenantId: string,
+    input: { campaignId: string; userId?: string },
+    hooks: unknown,
+    opts?: { publishesPerSecond?: number },
+  ) => Promise<{
+    kind: 'activated' | 'already_active' | 'rejected';
+    campaignId: string;
+    memberCount?: number;
+    stackEntriesCreated?: number;
+    stackEntriesReactivated?: number;
+    dripPublishesPerSecond?: number;
+    reason?: string;
+    currentStatus?: string;
+  }>;
+  pauseCampaign: (
+    prisma: unknown,
+    tenantId: string,
+    input: { campaignId: string; userId?: string },
+    hooks: unknown,
+  ) => Promise<{
+    kind: 'paused' | 'already_inactive' | 'rejected';
+    campaignId: string;
+    stackEntriesPaused?: number;
+    currentStatus?: string;
+    reason?: string;
+  }>;
+}
+let _campaignActivationModule: CampaignActivationModule | null = null;
+async function loadCampaignActivationModule(): Promise<CampaignActivationModule> {
+  if (_campaignActivationModule) return _campaignActivationModule;
+  const spec = "../../../packages/api/src/services/campaign-activation.js";
+  _campaignActivationModule = (await import(spec)) as CampaignActivationModule;
+  return _campaignActivationModule;
+}
+
 // KAN-1007 SAE PR3 — pubsub-client loader for the durable materialize
 // publish path. Variable-specifier dynamic import (same cross-rootDir
 // posture as the campaign-commit + audience modules above).
@@ -6167,6 +6206,128 @@ const audienceRouter = router({
         },
       };
       return archiveCampaign(
+        ctx.prisma,
+        ctx.tenantId,
+        {
+          campaignId: input.campaignId,
+          userId: ctx.firebaseUser?.uid ?? undefined,
+        },
+        hooks,
+      );
+    }),
+
+  // KAN-1010 SAE PR5 — audience.activate(): the M1 trigger
+  //
+  // Flips committed campaign to active, upserts ContactObjectiveStack
+  // entries, drip-publishes decision.run per member. Under
+  // autoApproveEnabled=false (M1 posture) every eval lands as an
+  // Escalation row in the PR2 queue — zero unsupervised sends. PR3's
+  // dormant consumer is the canonical gate; PR4's cost cap + dedup
+  // stand guard against runaway spend.
+  //
+  // Preconditions: campaign.status='committed' AND audienceEvaluatedAt
+  // IS NOT NULL. Else rejects with a named reason. Idempotent on active.
+  activate: protectedProcedure
+    .input(z.object({ campaignId: z.string().uuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const { activateCampaign } = await loadCampaignActivationModule();
+      const { getPubSubClient } = await loadPubSubClientModule();
+      const hooks = {
+        auditLog: {
+          writeInTx: async (
+            tx: { auditLog: { create: (args: unknown) => Promise<{ id: string }> } },
+            payload: {
+              tenantId: string;
+              actor: string;
+              actionType: string;
+              payload: Record<string, unknown>;
+              reasoning: string;
+            },
+          ): Promise<{ id: string }> =>
+            tx.auditLog.create({
+              data: {
+                tenantId: payload.tenantId,
+                actor: payload.actor,
+                actionType: payload.actionType,
+                payload: payload.payload,
+                reasoning: payload.reasoning,
+              },
+            }),
+        },
+        pubsub: {
+          publishDecisionRun: async (args: {
+            tenantId: string;
+            contactId: string;
+            campaignId: string;
+          }): Promise<string> => {
+            const data = Buffer.from(
+              JSON.stringify({
+                tenantId: args.tenantId,
+                contactId: args.contactId,
+                campaignId: args.campaignId,
+                source: 'activate',
+              }),
+            );
+            return getPubSubClient().publish('decision.run', data, {
+              tenantId: args.tenantId,
+              campaignId: args.campaignId,
+            });
+          },
+        },
+      };
+      // Env-tunable drip cap; default 10 pubs/sec from service module.
+      const envRate = parseInt(
+        process.env.ACTIVATE_DRIP_PUBLISHES_PER_SECOND ?? '',
+        10,
+      );
+      const publishesPerSecond =
+        Number.isFinite(envRate) && envRate > 0 ? envRate : undefined;
+      return activateCampaign(
+        ctx.prisma,
+        ctx.tenantId,
+        {
+          campaignId: input.campaignId,
+          userId: ctx.firebaseUser?.uid ?? undefined,
+        },
+        hooks,
+        { publishesPerSecond },
+      );
+    }),
+
+  // KAN-1010 SAE PR5 — audience.pause(): the M1 stop lever
+  //
+  // Flips active campaign to paused + updateMany stack entries to
+  // paused. The PR3 consumer guard fails on stack.status='paused' for
+  // every in-flight or redelivered decision.run → no further evals
+  // fire. Pub/Sub backlog NOT purged; guard makes queued events inert.
+  pause: protectedProcedure
+    .input(z.object({ campaignId: z.string().uuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const { pauseCampaign } = await loadCampaignActivationModule();
+      const hooks = {
+        auditLog: {
+          writeInTx: async (
+            tx: { auditLog: { create: (args: unknown) => Promise<{ id: string }> } },
+            payload: {
+              tenantId: string;
+              actor: string;
+              actionType: string;
+              payload: Record<string, unknown>;
+              reasoning: string;
+            },
+          ): Promise<{ id: string }> =>
+            tx.auditLog.create({
+              data: {
+                tenantId: payload.tenantId,
+                actor: payload.actor,
+                actionType: payload.actionType,
+                payload: payload.payload,
+                reasoning: payload.reasoning,
+              },
+            }),
+        },
+      };
+      return pauseCampaign(
         ctx.prisma,
         ctx.tenantId,
         {
