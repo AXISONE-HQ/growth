@@ -292,6 +292,20 @@ export default function CampaignsPage() {
               idempotencyKey,
             });
           }}
+          // KAN-1010 SAE PR5 + fix-forward: pass activate/pause through
+          // ProposalPreview to the inner CommitSuccessCard. Previously the
+          // inner card referenced `activateMutation` directly which is
+          // only in CampaignsPage's scope, not ProposalPreview's → runtime
+          // ReferenceError. Verified via render-test regression
+          // (campaigns-commit-success-render.test.tsx).
+          activateResult={activateMutation.data}
+          activateError={activateMutation.error}
+          activatePending={activateMutation.isPending}
+          onActivate={(campaignId) => activateMutation.mutate(campaignId)}
+          pauseResult={pauseMutation.data}
+          pauseError={pauseMutation.error}
+          pausePending={pauseMutation.isPending}
+          onPause={(campaignId) => pauseMutation.mutate(campaignId)}
         />
       ) : null}
 
@@ -325,6 +339,17 @@ function ProposalPreview({
   commitError,
   commitPending,
   onCommit,
+  // KAN-1010 SAE PR5 fix-forward — receive activate/pause from parent
+  // (CampaignsPage scope) instead of referencing CampaignsPage locals
+  // from inside ProposalPreview (the original bug).
+  activateResult,
+  activateError,
+  activatePending,
+  onActivate,
+  pauseResult,
+  pauseError,
+  pausePending,
+  onPause,
 }: {
   result: AudienceProposeResult;
   editName: string;
@@ -337,6 +362,14 @@ function ProposalPreview({
   commitError: Error | null;
   commitPending: boolean;
   onCommit: () => void;
+  activateResult: CampaignActivateResult | undefined;
+  activateError: Error | null;
+  activatePending: boolean;
+  onActivate: (campaignId: string) => void;
+  pauseResult: CampaignPauseResult | undefined;
+  pauseError: Error | null;
+  pausePending: boolean;
+  onPause: (campaignId: string) => void;
 }) {
   if (result.kind === 'ambiguous') return null;
   const isThin = result.kind === 'thin';
@@ -506,14 +539,14 @@ function ProposalPreview({
       {commitResult ? (
         <CommitSuccessCard
           result={commitResult}
-          activateResult={activateMutation.data}
-          activateError={activateMutation.error}
-          activatePending={activateMutation.isPending}
-          onActivate={() => activateMutation.mutate(commitResult.campaignId)}
-          pauseResult={pauseMutation.data}
-          pauseError={pauseMutation.error}
-          pausePending={pauseMutation.isPending}
-          onPause={() => pauseMutation.mutate(commitResult.campaignId)}
+          activateResult={activateResult}
+          activateError={activateError}
+          activatePending={activatePending}
+          onActivate={() => onActivate(commitResult.campaignId)}
+          pauseResult={pauseResult}
+          pauseError={pauseError}
+          pausePending={pausePending}
+          onPause={() => onPause(commitResult.campaignId)}
         />
       ) : (
         <div className="rounded-[var(--ds-radius-card)] border border-border bg-card p-5">
@@ -821,3 +854,10 @@ function humanizeActivateRejection(reason: string, currentStatus?: string): stri
       return currentStatus ? `unexpected status: ${currentStatus}` : 'unexpected refusal';
   }
 }
+
+// KAN-1010 SAE PR5 fix-forward — testing seam. CommitSuccessCard is
+// module-private (no direct export) so unit tests have nothing to
+// import. Expose under a `__testing__` namespace following the
+// established codebase convention (per redis-client.ts
+// __setRedisClientForTest, etc.). Production code does not consume this.
+export const __testing__ = { CommitSuccessCard };
