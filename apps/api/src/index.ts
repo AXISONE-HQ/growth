@@ -31,6 +31,13 @@ import { knowledgeIngestPushApp } from "./subscribers/knowledge-ingest-push.js";
 import { llmCallPushApp } from "./subscribers/llm-call-push.js";
 import { leadReceivedPushApp } from "./subscribers/lead-received-push.js";
 import { knowledgeSourceIngestedPushApp } from "./subscribers/knowledge-source-ingested-push.js";
+// KAN-1007 SAE PR3 — Pub/Sub bringup. Both subscribers ship dormant in
+// the sense that nothing in app code publishes decision.run today
+// (audience.activate() is SAE PR5). campaign.materialize is published by
+// the audience.commit kickOff hook (durable replacement for the KAN-1002
+// in-process worker; folds KAN-1003).
+import { campaignMaterializePushApp } from "./subscribers/campaign-materialize-push.js";
+import { decisionRunPushApp } from "./subscribers/decision-run-push.js";
 import { leadApiApp } from "./routes/lead-api.js";
 import { knowledgeSourcesApp } from "./routes/knowledge-sources.js";
 import { faqEntriesApp } from "./routes/faq-entries.js";
@@ -101,6 +108,10 @@ app.route("/pubsub", llmCallPushApp);
 // KAN-774 — lead.received → assignLeadToPipeline (closes Lead Inbox consumer gap)
 app.route("/pubsub", leadReceivedPushApp);
 app.route("/pubsub", knowledgeSourceIngestedPushApp);
+// KAN-1007 SAE PR3 — mount the two new push subscribers under /pubsub
+// (matches Terraform push_endpoint paths in infra/terraform/sae-pubsub.tf).
+app.route("/pubsub", campaignMaterializePushApp);
+app.route("/pubsub", decisionRunPushApp);
 
 // KAN-814 — Cloud Scheduler cron HTTP target. Mounted at
 // /internal/cron/deferred-send-evaluator. OIDC-protected (reuses
