@@ -21,13 +21,13 @@ import { PrismaClient } from '@prisma/client';
 // Schemas
 // ─────────────────────────────────────────────
 
-export const SubObjectiveStatus = z.enum([
-  'not_started',
-  'in_progress',
-  'completed',
-  'failed',
-  'skipped',
-]);
+// KAN-1028: SubObjectiveStatus relaxed to z.string() preemptively. The
+// 5-value enum (not_started/in_progress/completed/failed/skipped) was
+// authored as restrictive validation, but no PROD subObjectives exist
+// today and the future catalog vocabulary may differ. Downstream uses
+// status as a string label (no enum-driven branching). Same relaxation
+// pattern as ObjectiveSchema.type below.
+export const SubObjectiveStatus = z.string();
 
 export const SubObjectiveSchema = z.object({
   id: z.string(),
@@ -37,36 +37,41 @@ export const SubObjectiveSchema = z.object({
   weight: z.number().min(0).max(1).default(1),
   completedAt: z.string().datetime().nullable().optional(),
   dependsOn: z.array(z.string()).default([]),
-  category: z.enum([
-    'awareness',
-    'engagement',
-    'qualification',
-    'conversion',
-    'retention',
-    'expansion',
-  ]),
+  // KAN-1028: category relaxed to z.string() — same reasoning. Category
+  // taxonomy is product-evolving; the 6-value enum (awareness/engagement/
+  // qualification/conversion/retention/expansion) was an aspirational
+  // vocabulary that doesn't bind any downstream logic. Free-form string
+  // matches the schema.prisma design intent for the broader Objective
+  // catalog.
+  category: z.string(),
   metadata: z.record(z.unknown()).optional(),
 });
 
 export const ObjectiveSchema = z.object({
   id: z.string(),
   tenantId: z.string(),
-  type: z.enum([
-    'lead_conversion',
-    'customer_retention',
-    'upsell',
-    're_engagement',
-    'onboarding',
-    'renewal',
-    'win_back',
-  ]),
+  // KAN-1028: type relaxed from 7-value enum (lead_conversion, customer_
+  // retention, upsell, re_engagement, onboarding, renewal, win_back) to
+  // z.string(). The schema.prisma:352-358 design intent is explicit:
+  // "Free-form string (NOT the ObjectiveType enum — see schema-claims
+  // discipline note in KAN-959)". The PROD catalog has 8 different values
+  // (book_appointment, sell_online, enrich_lead, warm_up, reactivate,
+  // retain_customer, upsell, recover_failed_payment) — only `upsell`
+  // overlapped the aspirational engine enum, so 7/8 PROD rows used to
+  // crash here (2026-05-25 17:41Z incident). Downstream usage at lines
+  // 510/607/662/663 is string-label only — no enum-driven branching.
+  // Sibling: StrategySelectionInputSchema.objectiveType is already
+  // z.string() (per the existing convention).
+  type: z.string(),
   name: z.string(),
-  successCondition: z.object({
-    metric: z.string(),
-    operator: z.enum(['eq', 'gt', 'gte', 'lt', 'lte']),
-    value: z.number(),
-    timeframeDays: z.number().optional(),
-  }),
+  // KAN-1028: successCondition relaxed from required {metric, operator,
+  // value, timeframeDays?} to a free-form JSON record. ALL 8 PROD
+  // Objective rows have empty `{}` for success_condition (verified
+  // 2026-05-25). The engine NEVER reads inner fields — `objective.
+  // successCondition` is only passthrough at line 664. The required-field
+  // validation was hygiene-only, but it crashed the parse before reaching
+  // the unused-validation point. Defaults to {} so empty rows parse.
+  successCondition: z.record(z.unknown()).optional().default({}),
   subObjectives: z.array(SubObjectiveSchema),
   blueprintId: z.string().optional(),
   createdAt: z.string().datetime(),

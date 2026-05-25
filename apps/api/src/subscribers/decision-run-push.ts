@@ -535,12 +535,29 @@ decisionRunPushApp.post('/decision-run', async (c) => {
         contactId: event.contactId,
         campaignId: event.campaignId,
         error: err instanceof Error ? err.message : String(err),
+        // KAN-1028 — interim: capture a truncated stack for triage so the
+        // 200-ack doesn't lose the diagnostic signal. KAN-1018 full design
+        // will extract this into structured fields.
+        stack: err instanceof Error ? err.stack?.split('\n').slice(0, 5).join(' | ') : undefined,
         messageId: envelope.message.messageId,
       }),
     );
-    // Nack — runDecisionForContact transient errors (DB connection, LLM
-    // timeout) merit Pub/Sub redelivery. Permanent errors burn through to
-    // the DLQ after max_delivery_attempts.
-    return c.text('retry', 500);
+    // KAN-1028 — interim throw-protection (KAN-1018 core pulled forward).
+    // ACK with 200 instead of 500: NO Pub/Sub retry. Bounds future engine
+    // crashes to 1 delivery attempt instead of the 3-8 retries we observed
+    // across the 2026-05-25 incidents (microObjectiveProgress crash:
+    // $0.31/8-retry; calling-convention crash: $0.0955/3-retry; Objective
+    // vocab mismatch: $0.0746/3-retry). The retry-storm has demonstrably
+    // not helped recover from ANY of the 3 throws — they were all
+    // persistent errors that needed code fixes, not transient retries.
+    //
+    // Trade-off: legitimate transient errors (DB connection blip, LLM
+    // timeout) now also get ACKed and lost. KAN-1018 full A4 design adds
+    // error categorization (Prisma codes, TRPCError codes, Anthropic 5xx
+    // vs 4xx) so transient errors retry and persistent errors burn to
+    // DLQ. Until then, the bounded-loss-on-transient is acceptable: the
+    // contact's stack row will be re-evaluated on the next scheduled
+    // pass (PR7 re-eval cron) or the next user-triggered activate.
+    return c.text('persistent_error', 200);
   }
 });
