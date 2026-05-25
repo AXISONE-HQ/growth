@@ -33,22 +33,41 @@ const PIPELINE_B_FOREIGN = "dddddddd-dddd-dddd-dddd-dddddddddddd";
 function makeMockPrisma(overrides: Record<string, unknown> = {}) {
   return {
     contact: {
-      findFirst: vi.fn(async ({ where }: { where: { id: string; tenantId: string } }) => {
+      // KAN-1022: Contact shape post-KAN-791 Deal-as-lifecycle pivot. The
+      // engine reads pipeline/stage/microObjectiveProgress from the most
+      // recent open Deal, not directly from Contact. The mock returns the
+      // nested `deals` shape that matches the production Prisma select in
+      // agentic-tools.ts:90-120.
+      findFirst: vi.fn(async ({ where, select }: { where: { id: string; tenantId: string }; select?: { deals?: { select?: unknown } } }) => {
         if (where.id === CONTACT_A && where.tenantId === TENANT_A) {
-          return {
+          const base = {
             id: CONTACT_A,
             firstName: "Alice",
             lastName: "Example",
             lifecycleStage: "qualified",
             segment: "smb",
             source: "form_fill",
-            currentPipelineId: PIPELINE_A,
-            currentStageId: "stage-1",
-            microObjectiveProgress: { "mo-1": { completed: true, completedAt: "2026-04-20T00:00:00Z" } },
-            enteredStageAt: new Date("2026-04-25T00:00:00Z"),
-            currentPipeline: { id: PIPELINE_A, name: "Inbound", objectiveType: "warm_up_lead" },
-            currentStage: { id: "stage-1", name: "New", order: 0, isInitial: true, isTerminal: false },
           };
+          // Only include `deals` in the returned object when the production
+          // select asks for it (some tests don't ask, e.g. cross-tenant case
+          // — though those return null entirely).
+          if (select?.deals !== undefined) {
+            return {
+              ...base,
+              deals: [
+                {
+                  id: "deal-1",
+                  pipelineId: PIPELINE_A,
+                  currentStageId: "stage-1",
+                  microObjectiveProgress: { "mo-1": { completed: true, completedAt: "2026-04-20T00:00:00Z" } },
+                  enteredStageAt: new Date("2026-04-25T00:00:00Z"),
+                  pipeline: { id: PIPELINE_A, name: "Inbound", objectiveType: "warm_up_lead" },
+                  currentStage: { id: "stage-1", name: "New", order: 0, isInitial: true, isTerminal: false },
+                },
+              ],
+            };
+          }
+          return { ...base, deals: [] };
         }
         return null;
       }),
@@ -210,6 +229,72 @@ describe("getContactContext", () => {
     await getContactContext({ contactId: CONTACT_B_FOREIGN }, makeCtx(prisma));
     expect(prisma.decision.findMany).not.toHaveBeenCalled();
     expect(prisma.outcome.findMany).not.toHaveBeenCalled();
+  });
+
+  // KAN-1022 regression — guards the Deal-side rewire against future drift
+  // on this exact path. The 2026-05-25 PROD incident ($0.31 spent on 8
+  // Pub/Sub retries × 3 LLM calls each) happened because Contact.microObjectiveProgress
+  // was dropped by KAN-791 but the engine still selected it. The fix
+  // rewires reads to Deal.microObjectiveProgress / Deal.pipeline /
+  // Deal.currentStage. These tests pin BOTH (a) the rewire actually sources
+  // from Deal and (b) the no-Deal case degrades gracefully (LLM gets
+  // null/empty, not undefined/crash).
+  describe("KAN-1022 Deal-side rewire", () => {
+    it("sources microObjectiveProgress + pipeline + stage + enteredStageAt from the current open Deal", async () => {
+      const prisma = makeMockPrisma();
+      const result = (await getContactContext({ contactId: CONTACT_A }, makeCtx(prisma))) as {
+        contact: { microObjectiveProgress: Record<string, unknown>; enteredStageAt: Date | null };
+        pipeline: { id: string; name: string; objectiveType: string } | null;
+        stage: { id: string; name: string; order: number; isInitial: boolean; isTerminal: boolean } | null;
+      };
+
+      // Deal-side data reaches the LLM context (the "preserves LLM context" invariant).
+      expect(result.pipeline).toEqual(
+        expect.objectContaining({ id: PIPELINE_A, name: "Inbound", objectiveType: "warm_up_lead" }),
+      );
+      expect(result.stage).toEqual(
+        expect.objectContaining({ id: "stage-1", name: "New", isInitial: true, isTerminal: false }),
+      );
+      expect(result.contact.microObjectiveProgress).toEqual({
+        "mo-1": { completed: true, completedAt: "2026-04-20T00:00:00Z" },
+      });
+      expect(result.contact.enteredStageAt).toEqual(new Date("2026-04-25T00:00:00Z"));
+    });
+
+    it("returns null pipeline/stage + empty microObjectiveProgress when contact has no open Deal", async () => {
+      // Override: contact exists but with NO open deals (M1 reality for the
+      // 5 IS smoke contacts as of 2026-05-25). The rewire must degrade
+      // gracefully rather than throw — LLM operates in "no pipeline" mode.
+      const prisma = makeMockPrisma({
+        contact: {
+          findFirst: vi.fn(async ({ where }: { where: { id: string; tenantId: string } }) => {
+            if (where.id === CONTACT_A && where.tenantId === TENANT_A) {
+              return {
+                id: CONTACT_A,
+                firstName: "Bob",
+                lastName: "NoDealYet",
+                lifecycleStage: "lead",
+                segment: null,
+                source: "manual",
+                deals: [], // ← empty deals (no open Deal for this contact)
+              };
+            }
+            return null;
+          }),
+        },
+      });
+
+      const result = (await getContactContext({ contactId: CONTACT_A }, makeCtx(prisma))) as {
+        contact: { microObjectiveProgress: Record<string, unknown>; enteredStageAt: Date | null };
+        pipeline: unknown | null;
+        stage: unknown | null;
+      };
+
+      expect(result.pipeline).toBeNull();
+      expect(result.stage).toBeNull();
+      expect(result.contact.microObjectiveProgress).toEqual({});
+      expect(result.contact.enteredStageAt).toBeNull();
+    });
   });
 });
 
