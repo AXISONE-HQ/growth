@@ -32,11 +32,19 @@ export const SubObjectiveStatus = z.string();
 export const SubObjectiveSchema = z.object({
   id: z.string(),
   name: z.string(),
-  description: z.string().optional(),
+  // KAN-1029 class-fix: `.nullish()` (= nullable + optional). PROD has no
+  // populated subObjectives today, but Prisma stores the parent column
+  // as Json; a future writer emitting `description: null` would crash
+  // the parse. `.nullish()` accepts both null and undefined.
+  description: z.string().nullish(),
   status: SubObjectiveStatus,
   weight: z.number().min(0).max(1).default(1),
   completedAt: z.string().datetime().nullable().optional(),
-  dependsOn: z.array(z.string()).default([]),
+  // KAN-1029 class-fix: accept null AND undefined; both default to [].
+  // Zod's `.default()` only fires on undefined, so we preprocess null→[]
+  // first. Same dormant-but-cheap reasoning as the other JSON sub-field
+  // relaxations.
+  dependsOn: z.preprocess((v) => (v == null ? [] : v), z.array(z.string())),
   // KAN-1028: category relaxed to z.string() — same reasoning. Category
   // taxonomy is product-evolving; the 6-value enum (awareness/engagement/
   // qualification/conversion/retention/expansion) was an aspirational
@@ -44,7 +52,9 @@ export const SubObjectiveSchema = z.object({
   // matches the schema.prisma design intent for the broader Objective
   // catalog.
   category: z.string(),
-  metadata: z.record(z.unknown()).optional(),
+  // KAN-1029 class-fix: `.nullish()` (= nullable + optional). Same
+  // dormant-JSON-sub-field reasoning.
+  metadata: z.record(z.unknown()).nullish(),
 });
 
 export const ObjectiveSchema = z.object({
@@ -73,7 +83,13 @@ export const ObjectiveSchema = z.object({
   // the unused-validation point. Defaults to {} so empty rows parse.
   successCondition: z.record(z.unknown()).optional().default({}),
   subObjectives: z.array(SubObjectiveSchema),
-  blueprintId: z.string().optional(),
+  // KAN-1029: `.nullish()` not `.optional()`. Prisma column is
+  // `blueprint_id String?` (nullable); all 8 PROD catalog rows are
+  // NULL, so `.optional()` (which accepts undefined but rejects null)
+  // crashed the parse on every objective. The 2026-05-25 smoke-2
+  // ZodError at this field is what surfaced the broader class-fix
+  // sweep (see scripts/prod-schema-audit-engine-parse.ts).
+  blueprintId: z.string().nullish(),
   createdAt: z.string().datetime(),
 });
 
@@ -81,13 +97,37 @@ export const ContactStateSchema = z.object({
   id: z.string(),
   contactId: z.string(),
   objectiveId: z.string(),
-  subObjectives: z.record(z.object({
-    status: SubObjectiveStatus,
-    completedAt: z.string().datetime().nullable().optional(),
-    attempts: z.number().default(0),
-    lastAttemptAt: z.string().datetime().nullable().optional(),
-    notes: z.string().optional(),
-  })),
+  // KAN-1029: preprocess-coerce empty-array → empty-object.
+  //
+  // Prisma column shape:  `sub_objectives Json @default("[]")`
+  // PROD reality:         all 5 stack rows have value `[]` (the default;
+  //                       no writer in the codebase ever populates this
+  //                       field — verified by grep across the entire
+  //                       packages/api + apps/api/* + apps/connectors
+  //                       source tree, 2026-05-25).
+  // Engine expectation:   keyed map `{ [subObjId]: { status, attempts, … } }`,
+  //                       indexed by `subObj.id` at lines 559/583 below.
+  //
+  // The coercion treats `[]` as "no sub-objectives tracked yet" — which
+  // is exactly what the empty default represents. ZERO data loss in the
+  // empty case (the only case that exists in PROD today).
+  //
+  // POPULATED-shape contract is TBD: when a writer eventually lands (the
+  // KAN-763 sub-objective progress tracker territory), it MUST write a
+  // keyed map. A populated array would still fail the inner `z.record(...)`
+  // — that failure is the right signal: "writer is emitting the wrong
+  // shape." The regression test pins this so the next PR adding a writer
+  // explicitly extends the contract here.
+  subObjectives: z.preprocess(
+    (v) => (Array.isArray(v) && v.length === 0 ? {} : v),
+    z.record(z.object({
+      status: SubObjectiveStatus,
+      completedAt: z.string().datetime().nullable().optional(),
+      attempts: z.number().default(0),
+      lastAttemptAt: z.string().datetime().nullable().optional(),
+      notes: z.string().nullish(),
+    })),
+  ),
   strategyCurrent: z.string().nullable(),
   confidenceScore: z.number().min(0).max(100).nullable(),
   updatedAt: z.string().datetime(),
