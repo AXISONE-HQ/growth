@@ -330,21 +330,30 @@ describe('KAN-1025 — runShadow pipeline calling-convention regression', () => 
   // also lock the canonical scale convention (DecisionPayload.confidence in
   // 0..1, gate uses `* 100` at the call boundary).
   describe('KAN-1025 follow-up — real threshold-comparison invariant (kill-switch OFF)', () => {
-    it('high confidence (90 → 0.9) passes gate → EXECUTED when kill-switch off', async () => {
-      // Stub scoreConfidence to return 90 (0..100 scale; will normalize to 0.9)
+    // PO Phase 4 directive: the DEFINITIVE test pair is values STRADDLING
+    // the threshold (70), not far away from it. A high-confidence value
+    // JUST ABOVE the threshold (75) produces EXECUTED only if the entire
+    // unit chain is right — if the *100 boundary multiplication were broken
+    // (or removed), the gate would receive 0.75 instead of 75, compare
+    // `0.75 < 70 = true`, and ESCALATE the contact. An EXECUTED outcome is
+    // unreachable without the correct scale. Pair with 65 (< 70) for the
+    // other branch (escalate-by-threshold) → the pair pins the boundary
+    // location AND the unit chain.
+    it('confidence 75 (≥ threshold 70) passes gate → EXECUTED when kill-switch off — UNREACHABLE without correct scale', async () => {
+      // Stub scoreConfidence to return 75 (0..100 scale; normalizes to 0.75 in runShadow)
       const scoreConfidenceMock = scoreConfidence as unknown as { mockResolvedValueOnce: (v: unknown) => void };
       scoreConfidenceMock.mockResolvedValueOnce({
         contactId: CONTACT_ID,
         tenantId: TENANT_ID,
         objectiveId: OBJECTIVE_ID,
-        overallConfidence: 90, // 0..100 scale per ConfidenceScorerResultSchema
+        overallConfidence: 75, // 0..100 per ConfidenceScorerResultSchema
         factors: [],
         riskFlags: [],
         scoredAt: '2026-05-25T16:00:03Z',
       });
 
       const { prisma, decisionCreate } = buildFakePrisma();
-      // Turn kill-switch OFF on this fixture
+      // Turn kill-switch OFF
       (prisma as unknown as { contact: { findFirst: ReturnType<typeof vi.fn> } }).contact.findFirst.mockResolvedValueOnce({
         id: CONTACT_ID,
         tenantId: TENANT_ID,
@@ -369,20 +378,24 @@ describe('KAN-1025 — runShadow pipeline calling-convention regression', () => 
 
       const result = await runDecisionForContact(prisma, { tenantId: TENANT_ID, contactId: CONTACT_ID });
 
-      // Gate did `overallConfidence (90) < threshold (70)` → false → EXECUTED.
+      // Gate compares: confidence(0.75) * 100 = 75. 75 < 70 → false → EXECUTED.
+      // If the *100 boundary were broken/removed: gate would compare 0.75 < 70
+      // → true → ESCALATED, and this assertion would fail. The unit chain
+      // is the only way to reach EXECUTED here.
       expect((result as { outcome?: string }).outcome).toBe('EXECUTED');
-      // Decision.confidence stored as 0..1
+
+      // Decision.confidence stored as 0..1 (canonical DecisionPayload contract)
       const decisionCall = decisionCreate.mock.calls[0]?.[0] as { data: Record<string, unknown> };
-      expect(decisionCall.data.confidence).toBe(0.9);
+      expect(decisionCall.data.confidence).toBe(0.75);
     });
 
-    it('low confidence (50 → 0.5) fails gate → ESCALATED when kill-switch off (gate-driven, NOT kill-switch-driven)', async () => {
+    it('confidence 65 (< threshold 70) fails gate → ESCALATED via threshold (NOT kill-switch) when kill-switch off', async () => {
       const scoreConfidenceMock = scoreConfidence as unknown as { mockResolvedValueOnce: (v: unknown) => void };
       scoreConfidenceMock.mockResolvedValueOnce({
         contactId: CONTACT_ID,
         tenantId: TENANT_ID,
         objectiveId: OBJECTIVE_ID,
-        overallConfidence: 50,  // 0..100 → normalizes to 0.5
+        overallConfidence: 65,  // 0..100 → normalizes to 0.65
         factors: [],
         riskFlags: [],
         scoredAt: '2026-05-25T16:00:03Z',
@@ -413,15 +426,16 @@ describe('KAN-1025 — runShadow pipeline calling-convention regression', () => 
 
       const result = await runDecisionForContact(prisma, { tenantId: TENANT_ID, contactId: CONTACT_ID });
 
-      // Gate: 50 < 70 → ESCALATED (gate-driven). NOT the kill-switch path.
+      // Gate: 65 < 70 → ESCALATED (gate-driven, NOT kill-switch).
       expect((result as { outcome?: string }).outcome).toBe('ESCALATED');
       const decisionCall = decisionCreate.mock.calls[0]?.[0] as { data: Record<string, unknown> };
-      expect(decisionCall.data.confidence).toBe(0.5);
+      expect(decisionCall.data.confidence).toBe(0.65);
 
-      // Reasoning surface (from threshold-gate.ts line 376): "Confidence X is
-      // below ... threshold Y." — proves the gate (not the kill-switch) is
-      // what produced this outcome. The kill-switch reasoning is "Tenant
-      // auto-approve is disabled" per killswitch-symmetry.test.ts:60.
+      // Reasoning surface (threshold-gate.ts:376): "Confidence X is below
+      // ... threshold Y." Discriminator vs kill-switch reasoning ("Tenant
+      // auto-approve is disabled" per killswitch-symmetry.test.ts:60) —
+      // proves the threshold gate (not the kill-switch) produced this
+      // outcome.
       const escalationCall = escalationCreate.mock.calls[0]?.[0] as { data: Record<string, unknown> };
       expect(escalationCall.data.triggerReason as string).toMatch(/Confidence/i);
       expect(escalationCall.data.triggerReason as string).not.toMatch(/auto-approve is disabled/i);
