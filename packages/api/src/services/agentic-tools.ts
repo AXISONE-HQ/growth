@@ -91,6 +91,14 @@ export async function getContactContext(
   input: GetContactContextInput,
   ctx: RealToolHandlerContext,
 ): Promise<unknown> {
+  // KAN-1022: pipeline/stage/microObjectiveProgress moved to Deal by
+  // KAN-791 lifecycle pivot (2026-05-03). Contact's read-shim FK columns
+  // (currentPipelineId/currentStageId) are mostly NULL in PROD post-pivot
+  // (10/13,589 populated as of 2026-05-25 audit); the Deal-side
+  // source-of-truth join is the only reliable read. We take the most
+  // recent open Deal (M1 reality is one open Deal per contact; the
+  // multi-open-Deal-per-contact case is tracked in KAN-1015's design
+  // for cross-campaign-same-objective).
   const contact = await ctx.prisma.contact.findFirst({
     where: { id: input.contactId, tenantId: ctx.tenantId },
     select: {
@@ -100,15 +108,23 @@ export async function getContactContext(
       lifecycleStage: true,
       segment: true,
       source: true,
-      currentPipelineId: true,
-      currentStageId: true,
-      microObjectiveProgress: true,
-      enteredStageAt: true,
-      currentPipeline: { select: { id: true, name: true, objectiveType: true } },
-      currentStage: { select: { id: true, name: true, order: true, isInitial: true, isTerminal: true } },
+      deals: {
+        where: { status: 'open' },
+        orderBy: { createdAt: 'desc' },
+        take: 1,
+        select: {
+          id: true,
+          microObjectiveProgress: true,
+          enteredStageAt: true,
+          pipeline: { select: { id: true, name: true, objectiveType: true } },
+          currentStage: { select: { id: true, name: true, order: true, isInitial: true, isTerminal: true } },
+        },
+      },
     },
   });
   if (!contact) return forbidden("contact");
+
+  const currentDeal = contact.deals[0] ?? null;
 
   const [recentDecisions, recentOutcomes] = await Promise.all([
     ctx.prisma.decision.findMany({
@@ -145,11 +161,12 @@ export async function getContactContext(
       lifecycleStage: contact.lifecycleStage,
       segment: contact.segment,
       source: contact.source,
-      enteredStageAt: contact.enteredStageAt,
-      microObjectiveProgress: contact.microObjectiveProgress,
+      // KAN-1022: sourced from current open Deal post-KAN-791
+      enteredStageAt: currentDeal?.enteredStageAt ?? null,
+      microObjectiveProgress: currentDeal?.microObjectiveProgress ?? {},
     },
-    pipeline: contact.currentPipeline,
-    stage: contact.currentStage,
+    pipeline: currentDeal?.pipeline ?? null,
+    stage: currentDeal?.currentStage ?? null,
     recentDecisions,
     recentOutcomes,
   });
@@ -362,22 +379,34 @@ export async function getObjectiveProgress(
   input: GetObjectiveProgressInput,
   ctx: RealToolHandlerContext,
 ): Promise<unknown> {
+  // KAN-1022: same Deal-side rewire as getContactContext. Pipeline + MO
+  // progress live on Deal post-KAN-791.
   const contact = await ctx.prisma.contact.findFirst({
     where: { id: input.contactId, tenantId: ctx.tenantId },
-    select: { id: true, microObjectiveProgress: true, currentPipelineId: true },
+    select: {
+      id: true,
+      deals: {
+        where: { status: 'open' },
+        orderBy: { createdAt: 'desc' },
+        take: 1,
+        select: { id: true, pipelineId: true, microObjectiveProgress: true },
+      },
+    },
   });
   if (!contact) return forbidden("contact");
 
+  const currentDeal = contact.deals[0] ?? null;
+
   // Pipeline-attached MO names for context — read all MOs the current
-  // pipeline activates, join with progress JSON on the contact.
-  const pipelineMOs = contact.currentPipelineId
+  // pipeline activates, join with progress JSON on the deal.
+  const pipelineMOs = currentDeal?.pipelineId
     ? await ctx.prisma.pipelineMicroObjective.findMany({
-        where: { pipelineId: contact.currentPipelineId, isActive: true },
+        where: { pipelineId: currentDeal.pipelineId, isActive: true },
         select: { microObjective: { select: { id: true, name: true, isDefault: true } } },
       })
     : [];
 
-  const progress = (contact.microObjectiveProgress ?? {}) as Record<
+  const progress = (currentDeal?.microObjectiveProgress ?? {}) as Record<
     string,
     { completed?: boolean; completedAt?: string }
   >;

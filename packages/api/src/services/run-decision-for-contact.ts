@@ -152,6 +152,28 @@ function buildContextDatabase(prisma: PrismaClient): ContextDatabase {
       const c = await prisma.contact.findFirst({ where: { id: contactId, tenantId } });
       return c as Record<string, unknown> | null;
     },
+    // KAN-1022 — load the contact's most recent open Deal so the assembler
+    // can read pipeline/stage/microObjectiveProgress from the post-KAN-791
+    // source-of-truth (Contact's read-shim columns are mostly NULL in PROD).
+    async getCurrentDeal(contactId, tenantId) {
+      const d = await prisma.deal.findFirst({
+        where: { contactId, tenantId, status: 'open' },
+        orderBy: { createdAt: 'desc' },
+        select: {
+          id: true,
+          pipelineId: true,
+          currentStageId: true,
+          microObjectiveProgress: true,
+        },
+      });
+      if (!d) return null;
+      return {
+        id: d.id,
+        pipelineId: d.pipelineId,
+        currentStageId: d.currentStageId,
+        microObjectiveProgress: (d.microObjectiveProgress ?? {}) as Record<string, unknown>,
+      };
+    },
     async getContactState(contactId, objectiveId) {
       // KAN-959 — repointed from contactState to contactObjectiveStack.
       // The hook signature (interface) keeps the legacy name for the

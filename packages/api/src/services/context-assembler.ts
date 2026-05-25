@@ -186,6 +186,24 @@ export interface ContextDatabase {
     pipelineId: string,
     stageId: string | null,
   ): Promise<PipelineStateBundle | null>;
+  /**
+   * KAN-1022: load the contact's most recent open Deal. Post-KAN-791
+   * Deal-as-lifecycle pivot, pipeline/stage/microObjectiveProgress live on
+   * Deal not Contact. Optional for back-compat with any ContextDatabase
+   * implementation that hasn't been updated; when missing OR returns null,
+   * assembler falls back to Contact's read-shim columns (which are mostly
+   * NULL in PROD post-pivot — silent degradation is documented and is
+   * exactly the bug KAN-1022 closes).
+   */
+  getCurrentDeal?(
+    contactId: string,
+    tenantId: string,
+  ): Promise<{
+    id: string;
+    pipelineId: string;
+    currentStageId: string;
+    microObjectiveProgress: Record<string, unknown>;
+  } | null>;
 }
 
 /** KAN-703: bundle returned by ContextDatabase.getPipelineState. */
@@ -490,7 +508,7 @@ async function assembleFromDatabase(
   input: ContextAssemblerInput,
   db: ContextDatabase,
 ): Promise<Partial<AssembledContext>> {
-  const [contact, contactState, brain, tenantConfig, recentActions] =
+  const [contact, contactState, brain, tenantConfig, recentActions, currentDeal] =
     await Promise.all([
       db.getContact(input.contactId, input.tenantId),
       input.objectiveId
@@ -499,16 +517,27 @@ async function assembleFromDatabase(
       db.getBrainSnapshot(input.tenantId),
       db.getTenantConfig(input.tenantId),
       db.getRecentActions(input.contactId, 10),
+      // KAN-1022: pull the current Deal alongside; pipeline/stage/MO
+      // progress live there post-KAN-791. Optional method — falls back
+      // to null when implementation doesn't override.
+      db.getCurrentDeal
+        ? db.getCurrentDeal(input.contactId, input.tenantId)
+        : Promise.resolve(null),
     ]);
 
-  // KAN-703: load pipeline state when the contact has currentPipelineId set.
-  // Legacy contacts (no pipeline assigned yet) skip this — pipelineState=null
-  // → no pipeline/stage/microObjective context, knowledge falls through
-  // unfiltered, all back-compat. Best-effort: if the loader throws or isn't
-  // implemented, log + continue with null.
+  // KAN-703 + KAN-1022: load pipeline state when there's a current Deal
+  // (Deal is the post-KAN-791 source-of-truth for pipeline+stage). Falls
+  // back to Contact's read-shim columns ONLY if Deal is absent — those
+  // columns are mostly NULL in PROD post-pivot (10/13,589 populated as of
+  // 2026-05-25 audit), so the fallback is mostly a no-op but kept for
+  // back-compat with any in-flight migration.
   let pipelineState: PipelineStateBundle | null = null;
-  const currentPipelineId = (contact?.current_pipeline_id ?? contact?.currentPipelineId) as string | null | undefined;
-  const currentStageId = (contact?.current_stage_id ?? contact?.currentStageId) as string | null | undefined;
+  const currentPipelineId =
+    currentDeal?.pipelineId ??
+    ((contact?.current_pipeline_id ?? contact?.currentPipelineId) as string | null | undefined);
+  const currentStageId =
+    currentDeal?.currentStageId ??
+    ((contact?.current_stage_id ?? contact?.currentStageId) as string | null | undefined);
   if (currentPipelineId && db.getPipelineState) {
     try {
       pipelineState = await db.getPipelineState(currentPipelineId, currentStageId ?? null);
@@ -531,10 +560,17 @@ async function assembleFromDatabase(
     ? applyKnowledgeFilter(rawKnowledge, pipelineState.knowledgeFilters)
     : rawKnowledge;
 
-  // KAN-703: per-MicroObjective progress lives on Contact.microObjectiveProgress
-  // (JSONB). Pull it through to the BrainContext alongside the active
-  // MicroObjective definitions from pipelineState.
-  const microObjectiveProgress = (contact?.micro_objective_progress ?? contact?.microObjectiveProgress) as
+  // KAN-703 + KAN-1022: per-MicroObjective progress lives on
+  // Deal.microObjectiveProgress (JSONB) post-KAN-791. Pull it through to
+  // BrainContext alongside the active MicroObjective definitions from
+  // pipelineState. Contact-side read-shim is the back-compat fallback for
+  // legacy contacts created pre-pivot (Contact.microObjectiveProgress was
+  // dropped from the schema entirely, so this fallback resolves to
+  // undefined — kept as a typed-null sentinel rather than dropping the
+  // line, in case any test fixture still reads from a Contact-shaped
+  // payload).
+  const microObjectiveProgress = (currentDeal?.microObjectiveProgress ??
+    (contact?.micro_objective_progress as Record<string, unknown> | undefined)) as
     | Record<string, unknown>
     | undefined;
 
