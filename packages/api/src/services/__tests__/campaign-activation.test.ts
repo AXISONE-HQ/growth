@@ -64,6 +64,7 @@ interface FakeStackRow {
   campaignId: string | null;
   priority: number;
   status: string;
+  lastEvaluatedAt: Date;
 }
 
 interface FakeStore {
@@ -121,6 +122,7 @@ function makeFakePrismaForActivate(store: FakeStore): ActivatePrisma {
             campaignId: row.campaignId,
             priority: row.priority,
             status: row.status,
+            lastEvaluatedAt: row.lastEvaluatedAt,
           });
           count += 1;
         }
@@ -331,6 +333,7 @@ describe('activateCampaign — happy path', () => {
       campaignId: CAMPAIGN_A,
       priority: 100,
       status: 'paused',
+      lastEvaluatedAt: new Date('2026-05-23T15:00:00Z'),
     });
     const prisma = makeFakePrismaForActivate(store);
     const hooks = makeActivateHooks();
@@ -348,6 +351,47 @@ describe('activateCampaign — happy path', () => {
 
     expect(store.stack.find((s) => s.contactId === 'contact-1')!.status).toBe('active');
     expect(store.stack.find((s) => s.contactId === 'contact-2')!.status).toBe('active');
+  });
+
+  // F2 regression — KAN-1010 M1 closing smoke discovery (2026-05-24).
+  //
+  // The decision-run-push dedup gate rejects when (now - lastEvaluatedAt)
+  // < DEDUP_WINDOW_MINUTES (=30, defined at
+  // apps/api/src/subscribers/decision-run-push.ts:232). Before F2, the
+  // contact_objective_stack.lastEvaluatedAt column relied on its schema
+  // @default(now()) for freshly-created rows, which made
+  // "never evaluated" indistinguishable from "evaluated 0s ago" — so the
+  // first scheduled eval of every freshly-activated stack tripped
+  // dedup_recent_eval and silently no-op'd the entire activate → drip →
+  // eval flow. PR5's PROD smoke caught it; deploy gates + unit tests
+  // missed it because the cross-PR interaction lived between PR4's gate
+  // and PR5's stack creation. The fix sets epoch on createMany so fresh
+  // stacks dedup-pass on first fire; KAN follow-up A migrates the column
+  // to nullable for proper semantics.
+  it('sets lastEvaluatedAt to a value that passes the 30-min dedup gate on first fire', () => {
+    return (async () => {
+      const store = seedCommittedCampaign({
+        memberContactIds: ['contact-1', 'contact-2'],
+      });
+      const prisma = makeFakePrismaForActivate(store);
+      const hooks = makeActivateHooks();
+
+      await activateCampaign(prisma, TENANT_A, { campaignId: CAMPAIGN_A }, hooks, {
+        publishesPerSecond: 1000,
+      });
+
+      // Mirror of the production gate's arithmetic (apps/api/src/subscribers/
+      // decision-run-push.ts:305-307). Hard-coded constant deliberately —
+      // the test asserts the cross-workspace invariant; if DEDUP_WINDOW_MINUTES
+      // changes there, this test must be updated in lockstep (the lockstep
+      // discipline is the point).
+      const DEDUP_WINDOW_MINUTES_MIRROR = 30;
+      const now = Date.now();
+      for (const s of store.stack) {
+        const minutesSinceLastEval = (now - s.lastEvaluatedAt.getTime()) / 60_000;
+        expect(minutesSinceLastEval).toBeGreaterThanOrEqual(DEDUP_WINDOW_MINUTES_MIRROR);
+      }
+    })();
   });
 });
 
@@ -479,6 +523,7 @@ describe('pauseCampaign — halts', () => {
         campaignId: CAMPAIGN_A,
         priority: 100,
         status: 'active',
+        lastEvaluatedAt: new Date(0),
       },
       {
         id: 's2',
@@ -488,6 +533,7 @@ describe('pauseCampaign — halts', () => {
         campaignId: CAMPAIGN_A,
         priority: 100,
         status: 'active',
+        lastEvaluatedAt: new Date(0),
       },
     );
     const prisma = makeFakePrismaForActivate(store);
@@ -514,6 +560,7 @@ describe('pauseCampaign — halts', () => {
         campaignId: CAMPAIGN_A,
         priority: 100,
         status: 'achieved', // terminal — pause should not touch
+        lastEvaluatedAt: new Date(0),
       },
     );
     const prisma = makeFakePrismaForActivate(store);
@@ -597,6 +644,7 @@ describe('dripPublishDecisionRun — direct unit', () => {
         campaignId: CAMPAIGN_A,
         priority: 100,
         status: 'active',
+        lastEvaluatedAt: new Date(0),
       });
     }
     const prisma = makeFakePrismaForActivate(store);
@@ -636,6 +684,7 @@ describe('dripPublishDecisionRun — direct unit', () => {
         campaignId: CAMPAIGN_A,
         priority: 100,
         status: 'active',
+        lastEvaluatedAt: new Date(0),
       },
       {
         id: 's-2',
@@ -645,6 +694,7 @@ describe('dripPublishDecisionRun — direct unit', () => {
         campaignId: CAMPAIGN_A,
         priority: 100,
         status: 'paused', // mid-flight pause
+        lastEvaluatedAt: new Date(0),
       },
     );
     const prisma = makeFakePrismaForActivate(store);
@@ -674,6 +724,7 @@ describe('dripPublishDecisionRun — direct unit', () => {
         campaignId: CAMPAIGN_A,
         priority: 100,
         status: 'active',
+        lastEvaluatedAt: new Date(0),
       });
     }
     const prisma = makeFakePrismaForActivate(store);
@@ -705,6 +756,7 @@ describe('dripPublishDecisionRun — direct unit', () => {
         campaignId: CAMPAIGN_A,
         priority: 100,
         status: 'active',
+        lastEvaluatedAt: new Date(0),
       });
     }
     const prisma = makeFakePrismaForActivate(store);
