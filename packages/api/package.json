@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "description": "Internal shared API services consumed by apps/api via cross-rootDir relative imports. KAN-829 sub-cohort 7 added this package.json so Node's ESM loader resolves these .ts/.js imports as ESM (was previously inheriting CJS default from the root package.json, which broke named-export resolution under Node 24 + tsx 4.21+).",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
   "dependencies": {
     "@types/papaparse": "^5.5.2",
     "fastest-levenshtein": "^1.0.16",
