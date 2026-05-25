@@ -57,6 +57,17 @@ jobs:
           service: ${{ env.SERVICE_NAME }}
           region: ${{ env.REGION }}
           image: ${{ env.IMAGE }}:${{ github.sha }}
+          # KAN-1030 — send-redirect guardrail (founder mandate 2026-05-25).
+          # Default-ON test-recipient override at the channel-adapter
+          # choke-point: every Resend / Twilio / future-channel send gets
+          # rerouted to the founder's test contacts while ENABLED=true.
+          # `--update-env-vars` MERGES with the service's existing env (set
+          # out-of-band via gcloud) — does NOT wipe DATABASE_URL / GCP_PROJECT_ID /
+          # secrets / etc. Disabling for real production sends is an
+          # explicit env change to `false` — document loudly + alert before
+          # flipping (sibling posture to the autoApproveEnabled kill-switch).
+          # See apps/connectors/src/adapters/_shared/send-redirect.ts.
+          flags: '--update-env-vars=SEND_REDIRECT_ENABLED=true,SEND_REDIRECT_EMAIL=fred@axisone.ca,SEND_REDIRECT_PHONE=+15148359958'
 
       - name: Show deployment URL
         run: |

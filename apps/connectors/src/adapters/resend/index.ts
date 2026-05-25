@@ -31,6 +31,7 @@ import type {
 } from '@growth/connector-contracts';
 import { env } from '../../env.js';
 import { logger } from '../../logger.js';
+import { applyRedirect } from '../_shared/send-redirect.js';
 import { classifyResendStatus } from './errors.js';
 import { isSuppressedDb, suppressDb } from './suppressions.js';
 import {
@@ -82,6 +83,16 @@ export class ResendAdapter implements ChannelAdapter {
 
   // ── send() ────────────────────────────────────────────────
   async send(connection: ChannelConnection, msg: OutboundMessage): Promise<SendResult> {
+    // KAN-1030 — send-redirect guardrail. MUST be the first line: every
+    // provider SDK call below this point sees the (possibly) redirected
+    // recipient. When SEND_REDIRECT_ENABLED=true (default), msg.recipient.email
+    // is swapped to SEND_REDIRECT_EMAIL and subject/body are annotated.
+    // When the target env is missing, applyRedirect THROWS — propagates
+    // up to the action-send-push subscriber which catches + logs + ACKs.
+    // Structural CI gate enforces this is the first line of EVERY adapter
+    // send() — see adapters/_shared/__tests__/send-redirect-no-bypass.test.ts.
+    msg = applyRedirect(msg, 'EMAIL');
+
     if (!msg.recipient.email) {
       return {
         providerMessageId: '',
