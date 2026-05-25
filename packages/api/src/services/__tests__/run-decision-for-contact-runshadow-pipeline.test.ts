@@ -319,6 +319,115 @@ describe('KAN-1025 — runShadow pipeline calling-convention regression', () => 
     expect(confidence).not.toBe(0);
   });
 
+  // KAN-1025 follow-up — Phase 4 review caught that the previous 7 cases
+  // never exercised the gate's real `< confidenceThreshold` branch (every
+  // test had `autoApproveEnabled=false`, which short-circuits to ESCALATED
+  // before the confidence comparison runs). The unit chain could have been
+  // wrong and the tests wouldn't have caught it.
+  //
+  // These two cases pin the threshold-comparison invariant by turning the
+  // kill-switch OFF and varying confidence above/below the threshold. They
+  // also lock the canonical scale convention (DecisionPayload.confidence in
+  // 0..1, gate uses `* 100` at the call boundary).
+  describe('KAN-1025 follow-up — real threshold-comparison invariant (kill-switch OFF)', () => {
+    it('high confidence (90 → 0.9) passes gate → EXECUTED when kill-switch off', async () => {
+      // Stub scoreConfidence to return 90 (0..100 scale; will normalize to 0.9)
+      const scoreConfidenceMock = scoreConfidence as unknown as { mockResolvedValueOnce: (v: unknown) => void };
+      scoreConfidenceMock.mockResolvedValueOnce({
+        contactId: CONTACT_ID,
+        tenantId: TENANT_ID,
+        objectiveId: OBJECTIVE_ID,
+        overallConfidence: 90, // 0..100 scale per ConfidenceScorerResultSchema
+        factors: [],
+        riskFlags: [],
+        scoredAt: '2026-05-25T16:00:03Z',
+      });
+
+      const { prisma, decisionCreate } = buildFakePrisma();
+      // Turn kill-switch OFF on this fixture
+      (prisma as unknown as { contact: { findFirst: ReturnType<typeof vi.fn> } }).contact.findFirst.mockResolvedValueOnce({
+        id: CONTACT_ID,
+        tenantId: TENANT_ID,
+        firstName: 'Test',
+        lastName: 'Contact',
+        lifecycleStage: 'qualified',
+        segment: 'smb',
+        source: 'form_fill',
+        dataQualityScore: 80,
+        currentPipelineId: null,
+        currentStageId: null,
+        tenant: {
+          id: TENANT_ID,
+          confidenceThreshold: 70,         // gate compares against 70 (0..100)
+          autoApproveEnabled: true,         // KILL-SWITCH OFF — real gate path
+          autoEscalateFlags: [],
+          blockedActionTypes: [],
+          requireHumanApproval: false,
+          agenticModeEnabled: false,
+        },
+      });
+
+      const result = await runDecisionForContact(prisma, { tenantId: TENANT_ID, contactId: CONTACT_ID });
+
+      // Gate did `overallConfidence (90) < threshold (70)` → false → EXECUTED.
+      expect((result as { outcome?: string }).outcome).toBe('EXECUTED');
+      // Decision.confidence stored as 0..1
+      const decisionCall = decisionCreate.mock.calls[0]?.[0] as { data: Record<string, unknown> };
+      expect(decisionCall.data.confidence).toBe(0.9);
+    });
+
+    it('low confidence (50 → 0.5) fails gate → ESCALATED when kill-switch off (gate-driven, NOT kill-switch-driven)', async () => {
+      const scoreConfidenceMock = scoreConfidence as unknown as { mockResolvedValueOnce: (v: unknown) => void };
+      scoreConfidenceMock.mockResolvedValueOnce({
+        contactId: CONTACT_ID,
+        tenantId: TENANT_ID,
+        objectiveId: OBJECTIVE_ID,
+        overallConfidence: 50,  // 0..100 → normalizes to 0.5
+        factors: [],
+        riskFlags: [],
+        scoredAt: '2026-05-25T16:00:03Z',
+      });
+
+      const { prisma, decisionCreate, escalationCreate } = buildFakePrisma();
+      (prisma as unknown as { contact: { findFirst: ReturnType<typeof vi.fn> } }).contact.findFirst.mockResolvedValueOnce({
+        id: CONTACT_ID,
+        tenantId: TENANT_ID,
+        firstName: 'Test',
+        lastName: 'Contact',
+        lifecycleStage: 'qualified',
+        segment: 'smb',
+        source: 'form_fill',
+        dataQualityScore: 80,
+        currentPipelineId: null,
+        currentStageId: null,
+        tenant: {
+          id: TENANT_ID,
+          confidenceThreshold: 70,
+          autoApproveEnabled: true,         // kill-switch OFF
+          autoEscalateFlags: [],
+          blockedActionTypes: [],
+          requireHumanApproval: false,
+          agenticModeEnabled: false,
+        },
+      });
+
+      const result = await runDecisionForContact(prisma, { tenantId: TENANT_ID, contactId: CONTACT_ID });
+
+      // Gate: 50 < 70 → ESCALATED (gate-driven). NOT the kill-switch path.
+      expect((result as { outcome?: string }).outcome).toBe('ESCALATED');
+      const decisionCall = decisionCreate.mock.calls[0]?.[0] as { data: Record<string, unknown> };
+      expect(decisionCall.data.confidence).toBe(0.5);
+
+      // Reasoning surface (from threshold-gate.ts line 376): "Confidence X is
+      // below ... threshold Y." — proves the gate (not the kill-switch) is
+      // what produced this outcome. The kill-switch reasoning is "Tenant
+      // auto-approve is disabled" per killswitch-symmetry.test.ts:60.
+      const escalationCall = escalationCreate.mock.calls[0]?.[0] as { data: Record<string, unknown> };
+      expect(escalationCall.data.triggerReason as string).toMatch(/Confidence/i);
+      expect(escalationCall.data.triggerReason as string).not.toMatch(/auto-approve is disabled/i);
+    });
+  });
+
   it('routes to ESCALATED + writes Escalation row when autoApproveEnabled=false', async () => {
     const { prisma, escalationCreate } = buildFakePrisma();
     const result = await runDecisionForContact(prisma, { tenantId: TENANT_ID, contactId: CONTACT_ID });
