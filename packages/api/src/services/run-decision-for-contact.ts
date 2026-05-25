@@ -56,6 +56,28 @@ type AgenticLoopFn = (input: { tenantId: string; contactId: string; prisma?: Pri
 
 let _agenticLoopFn: AgenticLoopFn | null = null;
 async function loadAgenticLoop(): Promise<AgenticLoopFn> {
+  // KAN-1028 — env-var gate for the agentic-shadow path. When
+  // DISABLE_AGENTIC_SHADOW=true, the loader throws → runShadow's
+  // `.catch(() => null)` at line 361 converts to null → the parallel
+  // agentic dispatch at line 364 short-circuits to Promise.reject →
+  // allSettled returns [rules=fulfilled, agentic=rejected] → runShadow
+  // returns the rules result + writes an AgenticShadowDecision row with
+  // agenticError='agentic loop module unavailable'.
+  //
+  // Why this matters for M1: `runFreeform` (the rules-based path) makes
+  // ZERO LLM calls (verified — pipeline modules don't import llm-client).
+  // ALL the LLM spend in the 2026-05-25 incidents came from the parallel
+  // agentic-shadow. With shadow disabled, M1 escalate-only runs at $0
+  // LLM cost. The agentic-shadow generates M2 divergence-log data that
+  // M1 doesn't consume — so disabling it during M1 has no production
+  // impact beyond losing shadow-divergence telemetry for the smoke window.
+  //
+  // Smoke posture: env set in deploy-api.yml for the M1-closing smoke
+  // window. PO removes via separate small PR at M1-close (or as part of
+  // the M1-prod shadow-on/off product decision).
+  if (process.env.DISABLE_AGENTIC_SHADOW === 'true') {
+    throw new Error('agentic-shadow disabled via DISABLE_AGENTIC_SHADOW env var');
+  }
   if (_agenticLoopFn) return _agenticLoopFn;
   const spec = './agentic-decision-runner.js';
   const mod = (await import(spec)) as { runAgenticLoop?: AgenticLoopFn };
