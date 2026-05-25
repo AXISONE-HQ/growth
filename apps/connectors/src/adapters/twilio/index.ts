@@ -27,6 +27,7 @@ import type {
 import type { Prisma } from '@prisma/client';
 import { env } from '../../env.js';
 import { logger } from '../../logger.js';
+import { applyRedirect } from '../_shared/send-redirect.js';
 import {
   getTwilioClient,
   getMessagingServiceSid,
@@ -182,6 +183,11 @@ export class TwilioAdapter implements ChannelAdapter {
 
   // ── send() ───────────────────────────────────────────────
   async send(connection: ChannelConnection, msg: OutboundMessage): Promise<SendResult> {
+    // KAN-1030 — send-redirect guardrail. First line, before any
+    // provider SDK call below. See ResendAdapter.send() for the full
+    // rationale + the structural CI gate that enforces this.
+    msg = applyRedirect(msg, this.channel);
+
     const log = logger.child({
       connectionId: connection.id,
       actionId: msg.actionId,

@@ -337,6 +337,9 @@ jobs:
           env_vars: |
             DECISION_RUN_DAILY_COST_CAP_USD_DEFAULT=10.0
             DISABLE_AGENTIC_SHADOW=true
+            SEND_REDIRECT_ENABLED=true
+            SEND_REDIRECT_EMAIL=fred@axisone.ca
+            SEND_REDIRECT_PHONE=+15148359958
 
       # KAN-920 — post-deploy config drift guard. Hard-fails the workflow
       # if the just-deployed revision's serving config doesn't match the

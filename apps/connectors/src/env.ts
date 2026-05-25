@@ -78,6 +78,34 @@ const EnvSchema = z.object({
   // Set on the consumer (assignment worker, KAN-705) Cloud Run service via:
   //   --set-env-vars=LEAD_RECEIVED_AUDIENCE=https://growth-api-biut5gfhuq-uc.a.run.app/pubsub/lead-received
   LEAD_RECEIVED_AUDIENCE: z.string().optional(),
+
+  // ── Send-redirect guardrail (founder mandate 2026-05-25) ────────────
+  // Default-ON test-recipient override applied inside every ChannelAdapter
+  // .send() as the FIRST line, before any provider SDK call. Even an
+  // approved, executed send gets redirected while enabled. Disabling for
+  // real production sends is an explicit env change to `false` —
+  // documented loudly in deploy-connectors.yml and the runbook (same
+  // posture as the autoApproveEnabled kill-switch).
+  //
+  // When ENABLED=true (the default) AND the channel-target is missing/empty,
+  // applyRedirect THROWS SendRedirectMisconfiguredError — fail-closed,
+  // never falls through to the real recipient. Subscriber catches → logs
+  // → ACK (no retry; persistent class per KAN-1018 posture).
+  //
+  // Structural CI gate at adapters/_shared/__tests__/send-redirect-no-bypass.test.ts
+  // proves no provider SDK call exists outside applyRedirect's reach.
+  // NB: `z.coerce.boolean()` has a footgun — `Boolean('false') === true`
+  // because any non-empty string is truthy. We use explicit string-token
+  // parsing so an env value of "false" actually disables the guard.
+  // Default 'true' means: undefined → enabled. Any value other than
+  // 'false'/'0' → enabled (safe-default-on posture).
+  SEND_REDIRECT_ENABLED: z
+    .string()
+    .optional()
+    .default('true')
+    .transform((v) => v !== 'false' && v !== '0'),
+  SEND_REDIRECT_EMAIL: z.string().email().optional(),
+  SEND_REDIRECT_PHONE: z.string().optional(),
 });
 
 export const env = EnvSchema.parse(process.env);
