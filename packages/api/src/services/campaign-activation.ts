@@ -170,6 +170,7 @@ export interface ActivateTransactionClient {
         campaignId: string;
         priority: number;
         status: 'active';
+        lastEvaluatedAt: Date;
       }>;
       skipDuplicates?: boolean;
     }) => Promise<{ count: number }>;
@@ -352,6 +353,15 @@ export async function activateCampaign(
     // documented in the PR description; affects cross-campaign sharing
     // of the same objective, not in single-tenant M1 reality).
     const created = await tx.contactObjectiveStack.createMany({
+      // lastEvaluatedAt explicitly set to epoch (NOT default-now). The
+      // decision-run-push dedup gate rejects when (now - lastEvaluatedAt)
+      // < DEDUP_WINDOW_MINUTES (30). The schema default of `now()` made
+      // "never evaluated" indistinguishable from "evaluated 0s ago", so
+      // the very first scheduled eval of a freshly-activated stack always
+      // tripped dedup_recent_eval — silently no-op'd the entire activate→
+      // drip→eval flow. KAN-1012 (F1 follow-up) will migrate the column
+      // to nullable + treat null as never-evaluated; F2 here is the
+      // unblocking shim.
       data: members.map((m) => ({
         tenantId,
         contactId: m.contactId,
@@ -359,6 +369,7 @@ export async function activateCampaign(
         campaignId: campaign.id,
         priority: campaign.priority,
         status: 'active' as const,
+        lastEvaluatedAt: new Date(0),
       })),
       skipDuplicates: true,
     });
