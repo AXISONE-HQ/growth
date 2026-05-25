@@ -179,7 +179,11 @@ function buildContextDatabase(prisma: PrismaClient): ContextDatabase {
       // The hook signature (interface) keeps the legacy name for the
       // run-decision-for-contact orchestrator's consumer surface;
       // implementation reads the new table.
-      const s = await (prisma as any).contactObjectiveStack?.findFirst({
+      // KAN-1023 audit: stripped `(prisma as any).contactObjectiveStack?.`
+      // cast. Delegate exists on PrismaClient (verified via generated client);
+      // optional-chain was guarding against a delegate-missing case that
+      // never occurs.
+      const s = await prisma.contactObjectiveStack.findFirst({
         where: { contactId, objectiveId },
       });
       return (s ?? null) as Record<string, unknown> | null;
@@ -193,7 +197,8 @@ function buildContextDatabase(prisma: PrismaClient): ContextDatabase {
       return t as Record<string, unknown> | null;
     },
     async getRecentActions(contactId, limit) {
-      const rows = await (prisma as any).action?.findMany({
+      // KAN-1023 audit: stripped `(prisma as any).action?.` cast.
+      const rows = await prisma.action.findMany({
         where: { contactId },
         orderBy: { createdAt: 'desc' },
         take: limit,
@@ -206,19 +211,24 @@ function buildContextDatabase(prisma: PrismaClient): ContextDatabase {
     // packages/db's generated client and are reachable at runtime; the static
     // `as any` keeps the build-error count flat).
     async getPipelineState(pipelineId, stageId) {
-      const p: any = await (prisma as any).pipeline?.findUnique({
+      // KAN-1023 audit: stripped `(prisma as any).*?.` casts on pipeline,
+      // stage, pipelineMicroObjective, knowledgeFilter delegates. All exist
+      // on the typed PrismaClient (verified). Optional-chain was guarding
+      // delegate-missing cases that don't occur. Inner-row `any` types
+      // preserved for now (separate audit scope: shape-of-returned-row).
+      const p = await prisma.pipeline.findUnique({
         where: { id: pipelineId },
         include: { targets: true },
       });
       if (!p) return null;
-      const s: any = stageId
-        ? await (prisma as any).stage?.findUnique({ where: { id: stageId } })
+      const s = stageId
+        ? await prisma.stage.findUnique({ where: { id: stageId } })
         : null;
-      const pmoRows: any[] = (await (prisma as any).pipelineMicroObjective?.findMany({
+      const pmoRows = (await prisma.pipelineMicroObjective.findMany({
         where: { pipelineId, isActive: true },
         include: { microObjective: true },
       })) ?? [];
-      const filterRows: any[] = (await (prisma as any).knowledgeFilter?.findMany({
+      const filterRows = (await prisma.knowledgeFilter.findMany({
         where: { pipelineId },
       })) ?? [];
       return {
@@ -413,7 +423,8 @@ async function persistShadowRow(
   },
 ): Promise<void> {
   try {
-    await (prisma as unknown as { agenticShadowDecision: { create: (args: unknown) => Promise<unknown> } }).agenticShadowDecision.create({
+    // KAN-1023 audit: stripped structural cast on agenticShadowDecision.
+    await prisma.agenticShadowDecision.create({
       data: {
         tenantId: row.tenantId,
         contactId: row.contactId,
@@ -854,36 +865,156 @@ async function runFreeform(
     buildContextDatabase(prisma),
   );
 
+  // KAN-1025: resolve objectiveId for the engine pipeline. The 4 pipeline
+  // steps (gaps/strategy/action/confidence) all require objectiveId as a
+  // typed input. Load from the active ContactObjectiveStack row — the same
+  // source that decision-run-push.ts guard logic uses. For M1 reality
+  // (1-tenant, single-objective warm_up), this is deterministic; if a future
+  // multi-objective contact needs a specific objective passed in, add
+  // `objectiveId?: string` to RunForContactInput then.
+  const activeStack = await prisma.contactObjectiveStack.findFirst({
+    where: { tenantId, contactId, status: 'active' },
+    orderBy: { priority: 'desc' },
+    select: { objectiveId: true },
+  });
+  if (!activeStack) {
+    throw new TRPCError({
+      code: 'NOT_FOUND',
+      message: `No active ContactObjectiveStack row for contact ${contactId} in tenant ${tenantId}`,
+    });
+  }
+  const objectiveId = activeStack.objectiveId;
+
   // 2. Objective Gap.
-  const gaps: any = await (analyzeGapsForContact as any)({ prisma, tenantId, contactId, context });
+  // KAN-1025: stripped `(analyzeGapsForContact as any)({...})` cast. The cast
+  // hid a signature mismatch (4-positional fn called with 1 object arg) that
+  // caused the 2026-05-25 15:35Z PROD incident ($0.0955, 3 retries). Now
+  // passes positional args correctly.
+  const gaps = await analyzeGapsForContact(prisma, tenantId, contactId, objectiveId);
 
   // 3. Strategy Selector.
-  const strategyRaw: any = await (selectStrategy as any)({ prisma, tenantId, contactId, gaps, context });
-  const strategy: any = strategyRaw?.strategy ?? strategyRaw;
+  // KAN-1025: stripped `(selectStrategy as any)({...})` cast. Now passes the
+  // typed StrategySelectionInput shape, sourcing fields from gaps + context.
+  const strategyResult = await selectStrategy({
+    contactId,
+    tenantId,
+    objectiveId,
+    objectiveType: gaps.objectiveType,
+    overallProgress: gaps.overallProgress,
+    overallHealth: gaps.overallHealth,
+    gapCount: gaps.gapCount,
+    primaryGap: gaps.primaryGap,
+    recommendedStrategy: gaps.recommendedStrategy,
+    contactContext: {
+      lifecycleStage: context.contact.lifecycleStage,
+      segment: context.contact.segment,
+      lastInteractionDaysAgo: context.contact.lastInteractionDaysAgo,
+      totalInteractions: context.contact.totalInteractions,
+      responseRate: context.contact.responseRate,
+      preferredChannel: context.contact.preferredChannel,
+      dataQualityScore: context.contact.dataQualityScore,
+    },
+    brainContext: {
+      companyTruth: context.brain.companyTruth,
+      blueprintStrategies: context.brain.blueprintStrategies,
+      strategyWeights: context.brain.strategyWeights,
+    },
+  });
 
   // 4. Action Determiner.
-  const actionRaw: any = (determineAction as any)({
-    strategy,
-    contactContext: (context as any).contactContext ?? context,
-    brainContext: (context as any).brainContext ?? {},
+  // KAN-1025: stripped `(determineAction as any)({...})` cast. Now passes the
+  // typed ActionDeterminerInput shape, threading strategy result + simpler
+  // primaryGap shape (suggestedActions only, not weight/priorityScore).
+  const actionResult = determineAction({
+    contactId,
+    tenantId,
+    objectiveId,
+    selectedStrategy: strategyResult.selectedStrategy,
+    strategyConfidence: strategyResult.confidence,
+    strategyReasoning: strategyResult.reasoning,
+    primaryGap: gaps.primaryGap
+      ? {
+          subObjectiveId: gaps.primaryGap.subObjectiveId,
+          subObjectiveName: gaps.primaryGap.subObjectiveName,
+          category: gaps.primaryGap.category,
+          severity: gaps.primaryGap.severity,
+          reason: gaps.primaryGap.reason,
+          suggestedActions: gaps.primaryGap.suggestedActions,
+        }
+      : null,
+    contactContext: {
+      name: context.contact.name,
+      lifecycleStage: context.contact.lifecycleStage,
+      segment: context.contact.segment,
+      lastInteractionDaysAgo: context.contact.lastInteractionDaysAgo,
+      totalInteractions: context.contact.totalInteractions,
+      responseRate: context.contact.responseRate,
+      preferredChannel: context.contact.preferredChannel,
+      timezone: context.contact.timezone,
+    },
+    brainContext: {
+      companyTruth: context.brain.companyTruth,
+      products: context.brain.products,
+      tone: context.brain.tone,
+      constraints: context.brain.constraints,
+    },
   });
-  const action: any = actionRaw?.action ?? actionRaw;
 
   // 5. Confidence Scorer.
-  const confidenceRaw: any = await (scoreConfidence as any)({
-    strategy,
-    action,
-    contactContext: (context as any).contactContext ?? context,
-    brainContext: (context as any).brainContext ?? {},
+  // KAN-1025: stripped `(scoreConfidence as any)({...})` cast. Now passes the
+  // typed ConfidenceScorerInput shape, sourcing fields from strategy + action
+  // results + context.
+  const confidenceResult = await scoreConfidence({
+    contactId,
+    tenantId,
+    objectiveId,
+    strategyConfidence: strategyResult.confidence,
+    selectedStrategy: strategyResult.selectedStrategy,
+    actionType: actionResult.actionType,
+    actionReasoning: actionResult.reasoning,
+    contactSignals: {
+      dataQualityScore: context.contact.dataQualityScore,
+      responseRate: context.contact.responseRate,
+      lastInteractionDaysAgo: context.contact.lastInteractionDaysAgo,
+      totalInteractions: context.contact.totalInteractions,
+      lifecycleStage: context.contact.lifecycleStage,
+    },
+    gapContext: gaps.primaryGap
+      ? {
+          gapSeverity: gaps.primaryGap.severity,
+          gapReason: gaps.primaryGap.reason,
+          suggestedActionsCount: gaps.primaryGap.suggestedActions.length,
+        }
+      : undefined,
+    brainSignals: {
+      hasBlueprintStrategies: (context.brain.blueprintStrategies?.length ?? 0) > 0,
+      hasCompanyTruth: !!context.brain.companyTruth,
+    },
   });
-  const confidence: number =
-    typeof confidenceRaw === 'number'
-      ? confidenceRaw
-      : confidenceRaw?.score ?? confidenceRaw?.confidence ?? 0;
 
-  const strategyType: string = strategy?.type ?? strategy?.selected ?? String(strategy);
-  const actionType: string = action?.type ?? action?.actionType ?? String(action);
-  const channel: string | null = action?.channel ?? null;
+  // KAN-1025: typed return-field reads — replaces the previous fallback
+  // chains (`strategyRaw?.strategy ?? strategyRaw` etc.) that were masking
+  // the broken pipeline. The fallbacks coincidentally let whole-result-objects
+  // flow through; downstream `String(strategy)` produced `"[object Object]"`
+  // and `confidence` resolved to `0`. With typed access, all downstream
+  // consumers receive real semantic values.
+  //
+  // Variables retained for downstream code compatibility:
+  //   - `strategy` + `action`: full result objects (preserves audit-trail
+  //     intent in Decision.metadata + Escalation.context — same JSON
+  //     persistence shape the broken-fallback path was accidentally
+  //     producing, now cleanly typed).
+  //   - `strategyType` / `actionType` / `channel`: type strings for the
+  //     threshold gate's matrix-key lookup.
+  //   - `confidence`: normalized to 0..1 (scoreConfidence returns 0..100;
+  //     the downstream comparisons and gate input already expect/multiply
+  //     accordingly).
+  const strategy = strategyResult;
+  const action = actionResult;
+  const strategyType: string = strategyResult.selectedStrategy;
+  const actionType: string = actionResult.actionType;
+  const channel: string | null = actionResult.channel;
+  const confidence: number = confidenceResult.overallConfidence / 100;
 
   // 6. Threshold Gate — KAN-749 MVP: symmetric matrix wiring with runAgentic.
   //
@@ -904,13 +1035,13 @@ async function runFreeform(
       contact,
       actionType,
       channel,
-      actionPayload: (action?.payload ?? {}) as Record<string, unknown>,
+      actionPayload: (action?.actionPayload ?? {}) as Record<string, unknown>,
       actionReasoning: `Action: ${actionType}`,
       selectedStrategy: strategyType,
       strategyReasoning: `Strategy: ${strategyType}`,
-      objectiveId:
-        ((action?.payload as { objectiveId?: string } | undefined)?.objectiveId) ??
-        'unknown',
+      // KAN-1025: use the resolved objectiveId (loaded from active stack
+      // at the top of runShadow); no longer fall back to 'unknown' sentinel.
+      objectiveId,
       riskFlags: [],
       overallConfidence: confidence * 100, // 0..1 → 0..100 (gate input scale)
     });
@@ -1027,7 +1158,7 @@ async function runFreeform(
           objectiveId: (action as any)?.objectiveId ?? 'unknown',
           actionType,
           channel,
-          actionPayload: (action?.payload ?? action ?? {}) as Record<string, unknown>,
+          actionPayload: (action?.actionPayload ?? {}) as Record<string, unknown>,
           selectedStrategy: strategyType,
           confidenceScore: confidence,
           strategyReasoning: strategy?.reasoning ?? '',
@@ -1042,7 +1173,7 @@ async function runFreeform(
           proposedAction: {
             actionType,
             channel,
-            payload: (action?.payload ?? action ?? {}) as Record<string, unknown>,
+            payload: (action?.actionPayload ?? {}) as Record<string, unknown>,
           },
           strategy: strategyType,
           confidenceScore: confidence,
@@ -1057,7 +1188,7 @@ async function runFreeform(
   return {
     decisionId: decision.id,
     strategy: strategyType,
-    action: { type: actionType, payload: action?.payload ?? action },
+    action: { type: actionType, payload: action?.actionPayload ?? {} },
     confidence,
     outcome,
     reasoning,

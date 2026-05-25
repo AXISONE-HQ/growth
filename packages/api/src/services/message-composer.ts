@@ -142,7 +142,8 @@ export async function composeMessage(
   });
   if (!contact) throw new Error(`contact ${contactId} not in tenant ${tenantId}`);
 
-  const snapshot = await (prisma as any).brainSnapshot?.findFirst({
+  // KAN-1023 audit: stripped `(prisma as any).brainSnapshot?.` cast.
+  const snapshot = await prisma.brainSnapshot.findFirst({
     where: { tenantId },
     orderBy: { version: 'desc' },
   });
@@ -285,7 +286,8 @@ export async function resolveEmailConnectionId(
   prisma: PrismaClient,
   tenantId: string,
 ): Promise<string | null> {
-  const conn = await (prisma as any).channelConnection?.findFirst({
+  // KAN-1023 audit: stripped `(prisma as any).channelConnection?.` cast.
+  const conn = await prisma.channelConnection.findFirst({
     where: { tenantId, channelType: 'EMAIL', status: 'ACTIVE' },
     orderBy: { connectedAt: 'desc' },
   });
