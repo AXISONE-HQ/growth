@@ -460,7 +460,14 @@ export function createBehavioralLearnerRouter(
    */
   router.get('/behavioral/:tenantId/:contactId', async (req: Request, res: Response) => {
     try {
-      const profile = await deps.store.getProfile(req.params.tenantId, req.params.contactId);
+      // KAN-1022: Express's ParamsDictionary types params as string|string[]
+      // (matrix params edge-case); route :tenantId and :contactId are always
+      // single strings by URL parsing. Narrow defensively.
+      const tenantIdParam = req.params.tenantId;
+      const tenantId = Array.isArray(tenantIdParam) ? tenantIdParam[0] : tenantIdParam;
+      const contactIdParam = req.params.contactId;
+      const contactId = Array.isArray(contactIdParam) ? contactIdParam[0] : contactIdParam;
+      const profile = await deps.store.getProfile(tenantId, contactId);
       if (!profile) {
         res.status(404).json({ success: false, error: 'Profile not found' });
         return;

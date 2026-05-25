@@ -355,14 +355,19 @@ export async function evaluateDealState(
   if (options.redis && options.openai && queryText) {
     try {
       const { retrieveRelevantChunks } = await import('./knowledge-retrieval-service.js');
-      knowledge = await retrieveRelevantChunks(
+      // KAN-1022: RetrievalResult and KnowledgeRetrievalResult have
+      // identical shapes (chunks + tenantHasAnyKnowledge); the local mirror
+      // pattern is documented inline at the consumer interface declarations.
+      // Safe cast — if shapes diverge later, remove the cast and update
+      // the local mirror.
+      knowledge = (await retrieveRelevantChunks(
         prisma,
         options.redis as unknown as Parameters<typeof retrieveRelevantChunks>[1],
         options.openai as unknown as Parameters<typeof retrieveRelevantChunks>[2],
         deal.tenantId,
         dealId,
         queryText,
-      );
+      )) as KnowledgeRetrievalResult;
     } catch (err) {
       console.warn(
         `[brain-service] knowledge-retrieval-failed dealId=${dealId} err=${(err as Error)?.message ?? String(err)}`,

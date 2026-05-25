@@ -829,7 +829,11 @@ export function createGapAnalyzerRouter(prisma: PrismaClient): Router {
         return;
       }
 
-      const { contactId } = req.params;
+      // KAN-1022: Express's ParamsDictionary types route params as
+      // string | string[] (matrix params edge-case); route :contactId is
+      // always a single string by URL-parsing definition. Narrow defensively.
+      const contactIdParam = req.params.contactId;
+      const contactId = Array.isArray(contactIdParam) ? contactIdParam[0] : contactIdParam;
       const reports = await analyzeAllGapsForContact(prisma, tenantId, contactId);
 
       const summary = reports.map((r) => ({
@@ -876,9 +880,8 @@ export {
   generateSuggestedActions,
 };
 
-export type {
-  SubObjective,
-  Objective,
-  Gap,
-  GapReport,
-};
+// KAN-1022: SubObjective/Objective/Gap/GapReport are already exported at
+// lines 141-145 via `export type SubObjective = z.infer<...>`. This block
+// was a duplicate that produced TS2484 export-declaration conflicts; the
+// types are still publicly available via the upstream `export type`
+// declarations.

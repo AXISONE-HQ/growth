@@ -239,14 +239,17 @@ export async function shapeMessage(
     if (queryText) {
       try {
         const { retrieveRelevantChunks } = await import('./knowledge-retrieval-service.js');
-        knowledge = await retrieveRelevantChunks(
+        // KAN-1022: RetrievalResult and ShaperKnowledgeResult have identical
+        // shapes; the local mirror pattern is documented at the interface
+        // declaration. Safe cast.
+        knowledge = (await retrieveRelevantChunks(
           prisma,
           options.redis as unknown as Parameters<typeof retrieveRelevantChunks>[1],
           options.openai as unknown as Parameters<typeof retrieveRelevantChunks>[2],
           deal.tenantId,
           dealId,
           queryText,
-        );
+        )) as ShaperKnowledgeResult;
       } catch (err) {
         console.warn(
           `[message-shaper] knowledge-retrieval-failed dealId=${dealId} err=${(err as Error)?.message ?? String(err)}`,
