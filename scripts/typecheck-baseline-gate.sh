@@ -35,11 +35,20 @@
 #   npx tsc -p packages/api --noEmit 2>&1 \
 #     | grep -E "error TS" \
 #     | sed 's/([0-9][0-9]*,[0-9][0-9]*)//' \
-#     | sort -u \
+#     | LC_ALL=C sort -u \
 #     > packages/api/.tsc-baseline.txt
 #   git add packages/api/.tsc-baseline.txt
 #   git commit -m "chore(KAN-1017): refresh packages/api typecheck baseline (-N signatures)"
+#
+# LC_ALL=C is load-bearing: macOS default `sort` uses UTF-8 collation,
+# Linux CI default uses C (byte-wise). Without LC_ALL=C on both sides,
+# the baseline and the gate's current-snapshot can have identical
+# CONTENT but different SORT ORDER, and `comm -23` produces false NEW
+# signatures. The first CI run of this gate (PR #220) bit on this — the
+# script now exports LC_ALL=C as the first line so every sort/comm in
+# the script uses byte-wise collation.
 set -uo pipefail
+export LC_ALL=C
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PKG_DIR="$REPO_ROOT/packages/api"
@@ -47,7 +56,7 @@ BASELINE="$PKG_DIR/.tsc-baseline.txt"
 
 if [ ! -f "$BASELINE" ]; then
   echo "FATAL: baseline file $BASELINE missing. To create it:" >&2
-  echo "  npx tsc -p packages/api --noEmit 2>&1 | grep -E 'error TS' | sed 's/([0-9][0-9]*,[0-9][0-9]*)//' | sort -u > $BASELINE" >&2
+  echo "  npx tsc -p packages/api --noEmit 2>&1 | grep -E 'error TS' | sed 's/([0-9][0-9]*,[0-9][0-9]*)//' | LC_ALL=C sort -u > $BASELINE" >&2
   exit 2
 fi
 
@@ -60,7 +69,7 @@ cd "$REPO_ROOT"
 npx tsc -p packages/api --noEmit 2>&1 \
   | grep -E "error TS" \
   | sed 's/([0-9][0-9]*,[0-9][0-9]*)//' \
-  | sort -u \
+  | LC_ALL=C sort -u \
   > "$CURRENT" || true
 
 baseline_count=$(wc -l < "$BASELINE" | tr -d ' ')

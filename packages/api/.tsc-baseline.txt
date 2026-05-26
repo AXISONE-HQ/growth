@@ -3,10 +3,10 @@ packages/api/src/routes/contacts.ts: error TS2322: Type '"manual" | "csv_import"
 packages/api/src/routes/contacts.ts: error TS2322: Type '"manual" | "csv_import" | "crm_sync" | "webhook" | "lead_ads" | "api" | "form"' is not assignable to type 'ContactSource | null | undefined'.
 packages/api/src/routes/contacts.ts: error TS2322: Type '"new" | "lead" | "qualified" | "opportunity" | "customer" | "churned" | "reactivated"' is not assignable to type 'LifecycleStage | EnumLifecycleStageFilter<"Contact"> | undefined'.
 packages/api/src/routes/contacts.ts: error TS2322: Type '"new" | "lead" | "qualified" | "opportunity" | "customer" | "churned" | "reactivated"' is not assignable to type 'LifecycleStage | undefined'.
-packages/api/src/routes/contacts.ts: error TS2322: Type '{ source?: "manual" | "csv_import" | "crm_sync" | "webhook" | "lead_ads" | "api" | "form" | undefined; lifecycleStage?: "new" | "lead" | "qualified" | "opportunity" | "customer" | "churned" | "reactivated" | undefined; ... 5 more ...; email?: string | ... 1 more ... | undefined; }' is not assignable to type '(Without<ContactUpdateInput, ContactUncheckedUpdateInput> & ContactUncheckedUpdateInput) | (Without<...> & ContactUpdateInput)'.
 packages/api/src/routes/contacts.ts: error TS2322: Type 'string | string[]' is not assignable to type 'string | NestedStringFilter<"Contact"> | undefined'.
 packages/api/src/routes/contacts.ts: error TS2322: Type 'string | string[]' is not assignable to type 'string | StringFilter<"Contact"> | undefined'.
 packages/api/src/routes/contacts.ts: error TS2322: Type 'string | string[]' is not assignable to type 'string | undefined'.
+packages/api/src/routes/contacts.ts: error TS2322: Type '{ source?: "manual" | "csv_import" | "crm_sync" | "webhook" | "lead_ads" | "api" | "form" | undefined; lifecycleStage?: "new" | "lead" | "qualified" | "opportunity" | "customer" | "churned" | "reactivated" | undefined; ... 5 more ...; email?: string | ... 1 more ... | undefined; }' is not assignable to type '(Without<ContactUpdateInput, ContactUncheckedUpdateInput> & ContactUncheckedUpdateInput) | (Without<...> & ContactUpdateInput)'.
 packages/api/src/routes/data-quality.ts: error TS18048: 'avgScore._avg' is possibly 'undefined'.
 packages/api/src/routes/data-quality.ts: error TS2322: Type '"archived"' is not assignable to type 'LifecycleStage | NestedEnumLifecycleStageFilter<"Contact"> | undefined'.
 packages/api/src/routes/data-quality.ts: error TS2322: Type 'string | string[]' is not assignable to type 'string | StringFilter<"Contact"> | undefined'.
@@ -14,10 +14,10 @@ packages/api/src/routes/data-quality.ts: error TS2322: Type 'string | string[]' 
 packages/api/src/routes/data-quality.ts: error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
 packages/api/src/routes/identity-resolver.ts: error TS2322: Type '"archived"' is not assignable to type 'LifecycleStage | EnumLifecycleStageFieldUpdateOperationsInput | undefined'.
 packages/api/src/routes/identity-resolver.ts: error TS2322: Type '"new"' is not assignable to type 'LifecycleStage | undefined'.
-packages/api/src/routes/identity-resolver.ts: error TS2322: Type '{ id: { not: string; }; } | { lifecycleStage: { not: "archived"; }; }' is not assignable to type 'ContactWhereInput'.
-packages/api/src/routes/identity-resolver.ts: error TS2322: Type '{ not: "archived"; }' is not assignable to type 'LifecycleStage | EnumLifecycleStageFilter<"Contact"> | undefined'.
 packages/api/src/routes/identity-resolver.ts: error TS2322: Type 'string | string[]' is not assignable to type 'string | StringFilter<"Contact"> | undefined'.
 packages/api/src/routes/identity-resolver.ts: error TS2322: Type 'string' is not assignable to type 'ContactSource | null | undefined'.
+packages/api/src/routes/identity-resolver.ts: error TS2322: Type '{ id: { not: string; }; } | { lifecycleStage: { not: "archived"; }; }' is not assignable to type 'ContactWhereInput'.
+packages/api/src/routes/identity-resolver.ts: error TS2322: Type '{ not: "archived"; }' is not assignable to type 'LifecycleStage | EnumLifecycleStageFilter<"Contact"> | undefined'.
 packages/api/src/routes/identity-resolver.ts: error TS2551: Property 'pipelineCard' does not exist on type 'Omit<PrismaClient<PrismaClientOptions, never, DefaultArgs>, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">'. Did you mean 'pipeline'?
 packages/api/src/routes/tenants.ts: error TS2322: Type 'string | string[]' is not assignable to type 'string | undefined'.
 packages/api/src/routes/tenants.ts: error TS6059: File '/Users/fredericbinette/growth/packages/db/prisma/seeds/micro-objectives.ts' is not under 'rootDir' '/Users/fredericbinette/growth/packages/api/src'. 'rootDir' is expected to contain all source files.
