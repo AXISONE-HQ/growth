@@ -48,7 +48,29 @@ jobs:
       # Same "stop new, baseline existing" posture as the chronically-red
       # Build job + the comm-23 zero-new gate used during the M1 smoke.
       - name: 'KAN-1017: packages/api typecheck baseline gate'
-        run: ./scripts/typecheck-baseline-gate.sh
+        run: ./scripts/typecheck-baseline-gate.sh packages/api
+
+      # KAN-1011 (CI Gate Audit KAN-1016, second leg) — apps/web typecheck
+      # baseline gate. The web app ships with
+      # `typescript: { ignoreBuildErrors: true }` in next.config.mjs, so
+      # `next build` runs zero TypeScript checking — the gap that let
+      # M1-smoke bug #1 (activateMutation-undefined render crash) ship to
+      # PROD. This standalone gate runs the same tsc invocation `next
+      # build` would run if `ignoreBuildErrors` were false, against a
+      # committed signature baseline (apps/web/.tsc-baseline.txt). Only
+      # NEW error signatures fail.
+      #
+      # End-state target (separate follow-up PR, not this PR): once the
+      # cohort is shrunk, flip `ignoreBuildErrors: false` so `next build`
+      # itself typechecks — and this standalone gate retires. Until then,
+      # the gate runs alongside the untouched `next build` flow.
+      #
+      # Reuses the parameterized typecheck-baseline-gate.sh — same
+      # mechanism as KAN-1017 (packages/api), same portability fixes
+      # (LC_ALL=C sort, absolute-path strip, --incremental false for
+      # determinism across .tsbuildinfo cache states).
+      - name: 'KAN-1011: apps/web typecheck baseline gate'
+        run: ./scripts/typecheck-baseline-gate.sh apps/web
 
   test:
     name: Test

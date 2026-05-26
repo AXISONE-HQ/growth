@@ -1,0 +1,1 @@
+apps/web/src/app/settings/page.tsx: error TS2322: Type '"crm" | "payments" | "calendar" | "commerce" | "other" | "advertising" | "messaging"' is not assignable to type '"crm" | "payments" | "calendar" | "commerce" | "other"'.
