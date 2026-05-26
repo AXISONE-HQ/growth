@@ -20,6 +20,7 @@
 
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { TRPCError } from '@trpc/server';
+import { z } from 'zod';
 
 // ✅ VERIFIED exports against the real service files (2026-04-23):
 //    objective-gap-analyzer   → analyzeGapsForContact  (line 633)
@@ -131,6 +132,15 @@ export interface RunForContactInput {
   freshContext?: boolean;
   /** Actor identity for the audit log. Defaults to 'SYSTEM' for cron/Pub/Sub triggers. */
   actor?: { type: 'USER' | 'SYSTEM'; id: string };
+  /**
+   * KAN-1005 M2-1 — autonomous-action count for today (UTC), keyed per-tenant.
+   * Caller (decision-run-push) reads from Redis (action_count:tenant:<id>:<UTCYYYYMMDD>)
+   * BEFORE invoking the engine; engine threads to evaluateThresholdWithMatrix
+   * where the daily-action-limit gate consumes it. Omit (or 0) when not
+   * relevant (sync trpc paths, tests). Engine treats undefined as 0
+   * (gate skips daily-limit check when dailyActionLimit is also undefined).
+   */
+  dailyAutoActionCount?: number;
   /**
    * Adapter pattern (KAN-655): when set, the engine executes this predetermined step
    * instead of free-form deciding. Skips assembleContext/selectStrategy/determineAction/
@@ -511,6 +521,8 @@ async function runAgentic(
           'unknown',
         riskFlags: [],
         overallConfidence: agenticPayload.confidence * 100,
+        // KAN-1005 M2-1: thread caller-provided count to the gate
+        dailyAutoActionCount: input.dailyAutoActionCount,
       });
       if (gateDecision.outcome === 'ESCALATED') {
         outcome = 'ESCALATED';
@@ -667,6 +679,36 @@ async function runAgentic(
  * to tenantConfig.confidenceThreshold (legacy flat path). Vocab fall-through
  * telemetry tracked in KAN-768.
  */
+/**
+ * KAN-1005 M2-1 (Gap B) — defensive Zod parse for the autoEscalateFlags
+ * blob embedded inside Tenant.guardrailSettings (Json column).
+ *
+ * Schema: `{ autoEscalateFlags: string[] }` (with `.passthrough()` so
+ * unrelated keys in guardrailSettings don't trip the parse).
+ *
+ * Failure modes — all yield `[]` (safe default, matches current
+ * AxisOne PROD state where guardrailSettings is empty `{}`):
+ *   - input is null/undefined  → []
+ *   - input is not an object   → []
+ *   - autoEscalateFlags missing → []
+ *   - autoEscalateFlags is not an array of strings → []
+ *
+ * Empty array means the daily-limit + aiPermissions checks still gate
+ * autonomy; this is safe. KAN-1029 lesson: malformed blob fails toward
+ * the safer outcome (more escalations), not a crash.
+ */
+const GuardrailSettingsSchema = z
+  .object({
+    autoEscalateFlags: z.array(z.string()).default([]),
+  })
+  .passthrough();
+
+function parseAutoEscalateFlags(guardrailSettings: unknown): string[] {
+  const parsed = GuardrailSettingsSchema.safeParse(guardrailSettings ?? {});
+  if (!parsed.success) return [];
+  return parsed.data.autoEscalateFlags;
+}
+
 export async function evaluateThresholdWithMatrix(
   prisma: PrismaClient,
   args: {
@@ -682,6 +724,10 @@ export async function evaluateThresholdWithMatrix(
     objectiveId: string;
     riskFlags: string[];
     overallConfidence: number; // 0..100
+    /** KAN-1005 M2-1 — autonomous-action count today (UTC, per-tenant).
+     *  Caller passes from Redis read; gate enforces against
+     *  Tenant.dailyActionLimit. Defaults to 0 if not provided. */
+    dailyAutoActionCount?: number;
   },
 ): Promise<{ outcome: 'EXECUTED' | 'ESCALATED'; reasoning: string }> {
   const { tenantId, contactId, contact } = args;
@@ -720,14 +766,31 @@ export async function evaluateThresholdWithMatrix(
     strategyReasoning: args.strategyReasoning,
     tenantConfig: {
       confidenceThreshold: (tenantRaw.confidenceThreshold ?? 70) as number,
-      autoEscalateFlags: (tenantRaw.autoEscalateFlags ?? []) as string[],
+      // KAN-1005 M2-1 — Gap B: autoEscalateFlags lives inside
+      // Tenant.guardrailSettings Json (no schema migration). Defensive
+      // Zod parse with safe defaults — KAN-1029 lesson applied (malformed
+      // blob fails toward escalate by yielding [], same as missing).
+      autoEscalateFlags: parseAutoEscalateFlags(tenantRaw.guardrailSettings),
+      // M2-3 territory — left as-is (stub returns [], same as today).
       blockedActionTypes: (tenantRaw.blockedActionTypes ?? []) as string[],
       requireHumanApproval: (tenantRaw.requireHumanApproval ?? false) as boolean,
       autoApproveEnabled: (tenantRaw.autoApproveEnabled ?? true) as boolean,
+      // KAN-1005 M2-1 — Gap A: real per-tenant daily limit, was stubbed
+      // to a non-existent column before (`tenantRaw.maxDailyAutoActions`
+      // undefined → gate skipped). Maps Prisma `dailyActionLimit` (Int,
+      // default 100) → gate's `maxDailyAutoActions`.
+      maxDailyAutoActions: (tenantRaw.dailyActionLimit ?? undefined) as number | undefined,
+      // KAN-1005 M2-1 — Gap C: stored-but-unenforced aiPermissions now
+      // passed to the gate. The gate parses defensively (default-deny)
+      // and escalates any action type not explicitly marked 'auto'.
+      // Empty {} (AxisOne today) → all actions escalate even with
+      // autoApproveEnabled=true: triple-gate safety (flip + permissions
+      // + redirect). M2-3 will populate actionTypes defaults.
+      aiPermissions: (tenantRaw.aiPermissions ?? {}) as Record<string, unknown>,
     },
     stageMatrix: stageMatrix as ThresholdGateInput['stageMatrix'],
     pipelineMatrix: pipelineMatrix as ThresholdGateInput['pipelineMatrix'],
-    dailyAutoActionCount: 0,
+    dailyAutoActionCount: args.dailyAutoActionCount ?? 0,
   };
 
   const result = await evaluateThreshold(gateInput);
@@ -1066,6 +1129,8 @@ async function runFreeform(
       objectiveId,
       riskFlags: [],
       overallConfidence: confidence * 100, // 0..1 → 0..100 (gate input scale)
+      // KAN-1005 M2-1: thread caller-provided count to the gate
+      dailyAutoActionCount: input.dailyAutoActionCount,
     });
   } catch (err) {
     // Mirror runAgentic's posture (line 451-455): gate evaluation failure

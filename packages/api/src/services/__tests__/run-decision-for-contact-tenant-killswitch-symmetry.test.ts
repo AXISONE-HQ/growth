@@ -34,6 +34,16 @@ function buildContact(killSwitch: boolean) {
       blockedActionTypes: [],
       requireHumanApproval: false,
       autoApproveEnabled: !killSwitch,
+      // KAN-1005 M2-1 — opt-in: kill-switch symmetry test isolates the
+      // kill-switch behavior; aiPermissions must permit so the test
+      // exercises ONLY the kill-switch boundary, not default-deny.
+      aiPermissions: {
+        actionTypes: {
+          send_message: 'auto',
+          send_followup_email: 'auto',
+          send_email: 'auto',
+        },
+      },
     },
   } as any;
 }

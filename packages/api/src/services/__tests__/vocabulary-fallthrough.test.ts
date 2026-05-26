@@ -45,6 +45,22 @@ const BASE_INPUT: ThresholdGateInput = {
     blockedActionTypes: [],
     requireHumanApproval: false,
     autoApproveEnabled: true,
+    // KAN-1005 M2-1 — explicit per-action-type opt-in for action types
+    // this file exercises in its matrix-vs-legacy fall-through tests.
+    // No wildcard by design: default-deny is the safety property and
+    // every action type that should bypass the gate must be named.
+    // The "completely unknown vocab" test below DELIBERATELY omits
+    // its action type from this list to exercise the default-deny
+    // path. Default-deny enforcement matrix lives in
+    // threshold-gate-kan-1005-enforcement.test.ts.
+    aiPermissions: {
+      actionTypes: {
+        send_followup_email: 'auto',
+        send_message: 'auto',
+        send_email: 'auto',
+        schedule_follow_up: 'auto',
+      },
+    },
   },
   stageMatrix: null,
   pipelineMatrix: null,
@@ -99,16 +115,21 @@ describe('KAN-749 — vocabulary fall-through (MVP shape)', () => {
     expect(result.reasoning).toContain('legacy threshold');
   });
 
-  it('completely unknown vocab + no matrices → PLATFORM_AUTO_APPROVE_DEFAULTS miss → legacy path', () => {
-    // resolveAutoApproveEntry returns null at all 3 tiers.
-    // Gate uses tenantConfig.confidenceThreshold (legacy KAN-450 path).
+  it('completely unknown vocab + no aiPermissions entry → KAN-1005 M2-1 default-deny escalates', () => {
+    // KAN-1005 M2-1: an actionType absent from tenant.aiPermissions.actionTypes
+    // is default-deny — the gate escalates BEFORE the matrix-vs-legacy
+    // fall-through runs. High confidence does NOT bypass default-deny
+    // (this is the safety property: missing → escalate, no exceptions,
+    // no wildcard). This test proves the deny path for unenumerated
+    // action types instead of routing around it.
     const result = evaluateThreshold({
       ...BASE_INPUT,
-      actionType: 'unknown_action_v9_nonexistent',
-      overallConfidence: 60, // < 70 → human_review under legacy
+      actionType: 'unknown_action_v9_nonexistent', // deliberately NOT in aiPermissions
+      overallConfidence: 95, // high confidence — must NOT bypass default-deny
     });
     expect(result.decision).toBe('human_review');
-    expect(result.reasoning).toContain('legacy threshold 70');
+    expect(result.reasoning).toContain('default-deny');
+    expect(result.reasoning).toContain('unknown_action_v9_nonexistent');
   });
 
   it('vocab fall-through + low confidence + tenant.autoApproveEnabled=true → human_review (legacy)', () => {
