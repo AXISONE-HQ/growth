@@ -32,8 +32,10 @@
 # To regenerate the baseline (only on intentional cohort change — Sprint-6
 # G1-G4 cleanups, or after a Prisma client regeneration that morphs error
 # shapes):
+#   REPO_ROOT="$(git rev-parse --show-toplevel)"  # strip absolute paths
 #   npx tsc -p packages/api --noEmit 2>&1 \
 #     | grep -E "error TS" \
+#     | sed "s|$REPO_ROOT/||g" \
 #     | sed 's/([0-9][0-9]*,[0-9][0-9]*)//' \
 #     | LC_ALL=C sort -u \
 #     > packages/api/.tsc-baseline.txt
@@ -66,8 +68,20 @@ trap 'rm -f "$CURRENT"' EXIT
 cd "$REPO_ROOT"
 # Don't propagate tsc's non-zero exit — we expect errors. The signature
 # diff is the actual gate.
+#
+# Normalization (two passes):
+#   1. `sed "s|$REPO_ROOT/||g"` — strip the absolute repo-root prefix
+#      from error messages. Some TS errors (notably TS6059 rootDir
+#      violations) embed absolute paths in the message itself. Locally
+#      that's `/Users/fredericbinette/growth/...`; CI is
+#      `/home/runner/work/growth/growth/...`. Without this strip, the
+#      same semantic error has different signatures across runners. PR
+#      #220's second CI run bit on this.
+#   2. `sed 's/([0-9][0-9]*,[0-9][0-9]*)//'` — drop the (line,col) prefix
+#      so code-shuffles don't drift the signature.
 npx tsc -p packages/api --noEmit 2>&1 \
   | grep -E "error TS" \
+  | sed "s|$REPO_ROOT/||g" \
   | sed 's/([0-9][0-9]*,[0-9][0-9]*)//' \
   | LC_ALL=C sort -u \
   > "$CURRENT" || true

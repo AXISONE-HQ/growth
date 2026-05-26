@@ -20,7 +20,7 @@ packages/api/src/routes/identity-resolver.ts: error TS2322: Type '{ id: { not: s
 packages/api/src/routes/identity-resolver.ts: error TS2322: Type '{ not: "archived"; }' is not assignable to type 'LifecycleStage | EnumLifecycleStageFilter<"Contact"> | undefined'.
 packages/api/src/routes/identity-resolver.ts: error TS2551: Property 'pipelineCard' does not exist on type 'Omit<PrismaClient<PrismaClientOptions, never, DefaultArgs>, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">'. Did you mean 'pipeline'?
 packages/api/src/routes/tenants.ts: error TS2322: Type 'string | string[]' is not assignable to type 'string | undefined'.
-packages/api/src/routes/tenants.ts: error TS6059: File '/Users/fredericbinette/growth/packages/db/prisma/seeds/micro-objectives.ts' is not under 'rootDir' '/Users/fredericbinette/growth/packages/api/src'. 'rootDir' is expected to contain all source files.
+packages/api/src/routes/tenants.ts: error TS6059: File 'packages/db/prisma/seeds/micro-objectives.ts' is not under 'rootDir' 'packages/api/src'. 'rootDir' is expected to contain all source files.
 packages/api/src/services/analytics-pipeline.ts: error TS2323: Cannot redeclare exported variable 'routeEventToRow'.
 packages/api/src/services/analytics-pipeline.ts: error TS2484: Export declaration conflicts with exported declaration of 'routeEventToRow'.
 packages/api/src/services/blueprint-loader.ts: error TS2339: Property 'blueprintId' does not exist on type '{ version: number; tenantId: string; createdAt: Date; id: string; companyTruth: JsonValue; behavioralModel: JsonValue; outcomeModel: JsonValue; }'.
