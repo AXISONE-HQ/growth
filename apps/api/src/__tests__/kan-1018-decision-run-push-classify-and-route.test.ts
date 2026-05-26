@@ -245,6 +245,44 @@ describe('KAN-1018 — A2: counter incremented on success AND engine throw', () 
   });
 });
 
+describe('KAN-1005 M2-1 — action-count read fail-closed on Redis error', () => {
+  it('Redis throws on action-count GET → 200-ack, NO engine call, NO count=0 fall-through', async () => {
+    // KAN-1005 M2-1 hardening (founder review 2026-05-26): the M2-1
+    // gate's local Redis read fails CLOSED, not OPEN. Without this,
+    // a Redis blip mid-handler — once the cost-cap shield's ordering
+    // is broken by M2-7's cron — would let count=0 < limit through
+    // and uncap autonomous actions. Mirror cost_signal_unavailable.
+    //
+    // The cost-cap gate runs FIRST in the handler and shares the
+    // Redis client; in practice it would also fail-closed and we'd
+    // never reach this branch. This test isolates the M2-1 read by
+    // mocking only its specific call to throw (cost-cap reads stay
+    // successful). The point: the gate is independently safe.
+    redisGet
+      .mockResolvedValueOnce('500000') // cost-cap GET succeeds (half-spent, well under cap)
+      .mockRejectedValueOnce(new Error('Redis connection lost mid-handler')); // M2-1 read throws
+
+    runDecisionForContact.mockImplementation(async () => ({
+      decisionId: 'should-never-be-set',
+      outcome: 'EXECUTED',
+      strategy: 'direct',
+      action: { type: 'send_message' },
+      confidence: 0.9,
+      reasoning: '',
+      latencyMs: 0,
+    }));
+
+    const res = await postOne(baseEvent, 'msg-m21-failclosed');
+    expect(res.status).toBe(200);
+    // Engine MUST NOT run if the action-count read failed.
+    expect(runDecisionForContact).not.toHaveBeenCalled();
+    // No DLQ publish (it's a planned ack, not a persistent classifier).
+    expect(dlqPublishMessage).not.toHaveBeenCalled();
+    // No counter increment (nothing executed).
+    expect(incrby).not.toHaveBeenCalled();
+  });
+});
+
 describe('KAN-1018 — Cost cap bounds transient retries (storm protection)', () => {
   it('Once counter hits cap, subsequent transient retries hit cost_cap_exceeded BEFORE the engine', async () => {
     // Simulate Redis already at cap. USD_TO_INTEGER_UNITS=100_000 so

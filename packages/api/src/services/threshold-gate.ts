@@ -175,6 +175,21 @@ export const ThresholdGateInputSchema = z.object({
     requireHumanApproval: z.boolean().default(false),
     maxDailyAutoActions: z.number().optional(),
     /**
+     * KAN-1005 M2-1 (Gap C) — per-action-type AI permissions, loaded
+     * verbatim from Tenant.aiPermissions Json. Defensive parsing happens
+     * inside `checkAiPermissions` (default-deny on missing/malformed).
+     * M2-1 enforces the mechanism; M2-3 will populate the actionTypes
+     * defaults (safe-auto vs high-stakes-escalate).
+     *
+     * Expected shape (parsed by AiPermissionsSchema below):
+     *   { actionTypes: { send_message: 'auto', send_quote: 'escalate', … } }
+     *
+     * Default {} → with default-deny semantics, every action type
+     * escalates → autonomy is locked until M2-3 ships defaults. Means
+     * autoApproveEnabled=true alone doesn't auto-execute anything.
+     */
+    aiPermissions: z.record(z.unknown()).default({}),
+    /**
      * KAN-704: tenant-level kill-switch. When false, EVERY action routes to
      * human_review regardless of stage/pipeline matrix configuration. Hard
      * cut-off — runs before matrix resolution. (`requireHumanApproval` above
@@ -275,6 +290,61 @@ function checkBlockedActions(
   return blockedActionTypes.includes(actionType);
 }
 
+/**
+ * KAN-1005 M2-1 (Gap C) — Per-action-type AI-permissions enforcement.
+ *
+ * Default-deny posture (founder-confirmed 2026-05-26): an action type
+ * auto-executes ONLY when explicitly marked 'auto' in
+ * Tenant.aiPermissions.actionTypes. Missing entry, non-'auto' value,
+ * malformed blob shape, or empty {} → permitted=false (escalate).
+ *
+ * Triple-gate consequence: with default-deny + autoApproveEnabled=true
+ * (M2-6b flip), nothing actually auto-executes until M2-3 populates
+ * actionTypes. So M2-1 ships safe even if M2-3 slips — the flip alone
+ * can't accidentally enable autonomy.
+ *
+ * Expected shape inside Tenant.aiPermissions Json:
+ *   { actionTypes: { send_message: 'auto', send_quote: 'escalate', … } }
+ *
+ * Other keys inside aiPermissions are passthrough (e.g.
+ * `dataQualityThreshold`, `truthInferenceThreshold` — pre-existing
+ * non-M2 consumers; .passthrough() preserves them).
+ */
+const AiPermissionsSchema = z
+  .object({
+    actionTypes: z.record(z.string()).optional(),
+  })
+  .passthrough();
+
+function checkAiPermissions(
+  actionType: string,
+  aiPermissions: Record<string, unknown>,
+): { permitted: boolean; reason: string } {
+  const parsed = AiPermissionsSchema.safeParse(aiPermissions ?? {});
+  if (!parsed.success) {
+    // Malformed blob → fail toward escalate (KAN-1029 lesson:
+    // contract-mismatch surfaces don't crash, they default safe).
+    return {
+      permitted: false,
+      reason: 'aiPermissions blob malformed — defaulting to escalate (default-deny)',
+    };
+  }
+  const entry = parsed.data.actionTypes?.[actionType];
+  if (entry === 'auto') return { permitted: true, reason: 'permitted by tenant aiPermissions' };
+  if (entry === undefined) {
+    return {
+      permitted: false,
+      reason: `aiPermissions.actionTypes has no entry for "${actionType}" — default-deny`,
+    };
+  }
+  // Any value other than 'auto' (e.g. 'escalate', 'blocked', anything else)
+  // means not-autonomous. Escalate.
+  return {
+    permitted: false,
+    reason: `aiPermissions.actionTypes.${actionType} = "${entry}" (not 'auto')`,
+  };
+}
+
 function checkDailyLimit(
   dailyCount: number,
   maxDaily: number | undefined,
@@ -351,6 +421,13 @@ export function evaluateThreshold(
     // the calibration explicitly says "never auto."
     decision = 'human_review';
     reasoning = `Action type "${parsed.actionType}" is configured for human review by the auto-approve matrix${matrixEntry?.rationale ? ` (rationale: ${matrixEntry.rationale})` : ''}.`;
+  } else if (!checkAiPermissions(parsed.actionType, parsed.tenantConfig.aiPermissions).permitted) {
+    // KAN-1005 M2-1 (Gap C) — default-deny on Tenant.aiPermissions.
+    // With autoApproveEnabled=true (M2-6b flip), this is the gate that
+    // keeps autonomy locked until M2-3 explicitly populates actionTypes.
+    const check = checkAiPermissions(parsed.actionType, parsed.tenantConfig.aiPermissions);
+    decision = 'human_review';
+    reasoning = `Action type "${parsed.actionType}" is not permitted for autonomous execution (${check.reason}). Routing to human review.`;
   } else {
     const escalation = checkAutoEscalation(
       parsed.riskFlags,

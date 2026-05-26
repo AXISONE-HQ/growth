@@ -64,6 +64,10 @@ import {
   // USD-typed convenience wrappers around it.
   getTodayCostUsd,
   incrementTodayCostUsd,
+  // KAN-1005 M2-1 — generic integer-counter primitives, reused for the
+  // autonomous-action counter (ACTION_COUNT_COUNTER_SCOPE above).
+  getTodayCount,
+  incrementToday,
 } from '../lib/per-tenant-daily-counter.js';
 import { getRedisClient } from '../services/redis-client.js';
 
@@ -111,7 +115,16 @@ export function __setDecisionRunPushPubsubForTest(client: PubSub | null): void {
 interface RunDecisionModule {
   runDecisionForContact: (
     prisma: unknown,
-    input: { tenantId: string; contactId: string; actor?: { type: 'USER' | 'SYSTEM'; id: string } },
+    input: {
+      tenantId: string;
+      contactId: string;
+      actor?: { type: 'USER' | 'SYSTEM'; id: string };
+      // KAN-1005 M2-1 — autonomous-action count for the daily-limit gate.
+      // Caller computes from Redis BEFORE invoking the engine; engine
+      // threads to evaluateThresholdWithMatrix. Defaults to 0 in the
+      // engine if omitted (back-compat).
+      dailyAutoActionCount?: number;
+    },
   ) => Promise<unknown>;
 }
 let _runDecisionModule: RunDecisionModule | null = null;
@@ -270,6 +283,23 @@ export const DEDUP_WINDOW_MINUTES = 30;
 
 /** Redis counter scope. Keys: cost_cap_usd:tenant:<tenantId>:<UTCYYYYMMDD>. */
 export const COST_CAP_COUNTER_SCOPE = 'cost_cap_usd';
+
+/**
+ * KAN-1005 (M2-1) — Autonomous-action counter scope.
+ * Keys: action_count:tenant:<tenantId>:<UTCYYYYMMDD>.
+ *
+ * Single counter, TWO consumers:
+ *   1. M2-1 daily-action-limit gate (this PR) — read at gate-input
+ *      build, written on the EXECUTE branch when outcome='EXECUTED'.
+ *   2. M2-4 circuit breaker (future) — reads the same counter for
+ *      autonomous-action-rate signal. No parallel rate-tracker.
+ *
+ * Today (auto-approve OFF PROD-wide), the EXECUTE branch is unreachable
+ * so the counter is never incremented in PROD. M2-6b's auto-approve
+ * flip makes the writer side live; this PR ships the gate enforcement
+ * + the writer + the read site, all behind that flip.
+ */
+export const ACTION_COUNT_COUNTER_SCOPE = 'action_count';
 
 export type CostCapDedupOutcome =
   | { ok: true; resolvedCapUsd: number; spendTodayUsd: number }
@@ -497,6 +527,45 @@ decisionRunPushApp.post('/decision-run', async (c) => {
   //       500 → Pub/Sub auto-retries up to maxAttempts=5 → auto-DLQ if
   //       still failing. Both DLQ flows land in the same consumer with
   //       a `dlqSource` attribute discriminating them.
+  // KAN-1005 M2-1 — read the daily autonomous-action count BEFORE the
+  // engine call, pass it as input. The gate uses this to enforce the
+  // per-tenant daily limit.
+  //
+  // FAIL-CLOSED on Redis error — defense-in-depth. The upstream cost-cap
+  // gate is also fail-closed on the same Redis dependency, so in
+  // practice this branch never fires (cost-cap aborts first). But the
+  // shield is a load-bearing structural dependency; if a future code
+  // path ever reaches the engine without replaying the cost-cap gate
+  // (M2-7 recurring cron is the imminent example), a fail-OPEN
+  // count=0 fall-through here would let unbounded autonomous actions
+  // through (`0 < dailyActionLimit` always true). Mirror cost-cap's
+  // pattern: Redis error → 200-ack + structured log + skip the eval.
+  // A safety gate should be independently fail-safe, not dependent on
+  // another gate's position in the call order.
+  let dailyAutoActionCount: number;
+  try {
+    dailyAutoActionCount = await getTodayCount(
+      getRedisClient(),
+      ACTION_COUNT_COUNTER_SCOPE,
+      event.tenantId,
+    );
+  } catch (err) {
+    console.error(
+      JSON.stringify({
+        type: 'decision_run_gate_rejected',
+        reason: 'action_count_unavailable',
+        tenantId: event.tenantId,
+        contactId: event.contactId,
+        campaignId: event.campaignId,
+        messageId: envelope.message.messageId,
+        error: err instanceof Error ? err.message : String(err),
+      }),
+    );
+    // Same posture as cost_signal_unavailable: 200-ack (no Pub/Sub
+    // retry storm against a Redis outage), ops investigates.
+    return c.text('ok', 200);
+  }
+
   let engineStarted = false;
   try {
     const { runDecisionForContact } = await loadRunDecisionModule();
@@ -505,7 +574,44 @@ decisionRunPushApp.post('/decision-run', async (c) => {
       tenantId: event.tenantId,
       contactId: event.contactId,
       actor: { type: 'SYSTEM', id: 'decision-run-push' },
+      dailyAutoActionCount,
     });
+
+    // KAN-1005 M2-1 — increment the autonomous-action counter on the
+    // EXECUTE branch (outcome='EXECUTED' = autonomous-dispatch path).
+    // Today (auto-approve OFF PROD-wide) the engine routes EVERY
+    // evaluation to ESCALATED → this branch is unreachable in PROD,
+    // counter stays 0. M2-6b's flip makes it live. The fire-and-forget
+    // increment failure logs but doesn't fail the response (same posture
+    // as the cost counter increment).
+    const outcome = (decision as { outcome?: string })?.outcome;
+    if (outcome === 'EXECUTED') {
+      void (async () => {
+        try {
+          const newTotal = await incrementToday(
+            getRedisClient(),
+            ACTION_COUNT_COUNTER_SCOPE,
+            event.tenantId,
+            1,
+          );
+          console.log(
+            JSON.stringify({
+              type: 'autonomous_action_count_incremented',
+              tenantId: event.tenantId,
+              newDailyCount: newTotal,
+            }),
+          );
+        } catch (counterErr) {
+          console.error(
+            JSON.stringify({
+              type: 'autonomous_action_count_failed',
+              tenantId: event.tenantId,
+              error: counterErr instanceof Error ? counterErr.message : String(counterErr),
+            }),
+          );
+        }
+      })();
+    }
 
     // KAN-1010 F2 — stack lastEvaluatedAt update. Success-path only:
     // if the engine threw, NOT updating preserves the redeliver-after-fix
