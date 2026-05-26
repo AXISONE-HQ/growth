@@ -1,4 +1,20 @@
 {
+  "//": [
+    "KAN-1017 — engine core typecheck. Standalone (NOT in apps/api's compile graph;",
+    "the dynamic-import boundary per reference_variable_specifier_dynamic_import is",
+    "intentional and preserved here). The CI gate at .github/workflows/ci.yml runs",
+    "this config via scripts/typecheck-baseline-gate.sh and compares the output",
+    "against the committed baseline at .tsc-baseline.txt (signature diff; line/col",
+    "shifts don't false-trip — only NEW error classes fail the gate).",
+    "",
+    "src/services/hubspot-sync.ts is excluded because the file is genuinely",
+    "byte-corrupted (~9040 invalid bytes starting at line 505) in the original",
+    "commit afe6885 (KAN-25, 2026-04-15) — not a re-encoding fix. The file has",
+    "never been touched since first-commit. Restoring it requires re-deriving from",
+    "the KAN-25 spec or a clean source, tracked as a separate ticket. Excluded here",
+    "so tsc can produce a clean parse-tree for the rest of the engine. Tests are",
+    "excluded too — the cross-workspace runner (apps/connectors vitest) handles them."
+  ],
   "extends": "../../tsconfig.json",
   "compilerOptions": {
     "noEmit": true,

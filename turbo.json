@@ -6,6 +6,7 @@
     "dev": { "cache": false, "persistent": true },
     "lint": { "dependsOn": ["^build"] },
     "test": { "dependsOn": ["^build"] },
+    "typecheck": { "dependsOn": ["^build"] },
     "clean": { "cache": false }
   }
 }
