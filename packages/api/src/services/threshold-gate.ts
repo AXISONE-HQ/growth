@@ -329,33 +329,23 @@ function checkAiPermissions(
       reason: 'aiPermissions blob malformed — defaulting to escalate (default-deny)',
     };
   }
-  const map = parsed.data.actionTypes;
-  // Specific entry wins over wildcard. Allows admin to set
-  // `'*': 'auto', 'send_quote': 'escalate'` (broad autonomy with
-  // specific carve-outs).
-  const specific = map?.[actionType];
-  if (specific === 'auto') return { permitted: true, reason: 'permitted by tenant aiPermissions' };
-  if (specific !== undefined) {
-    // Specific entry exists and is not 'auto' (e.g. 'escalate', 'blocked').
-    // Escalate — specific override beats any wildcard.
+  const entry = parsed.data.actionTypes?.[actionType];
+  if (entry === 'auto') return { permitted: true, reason: 'permitted by tenant aiPermissions' };
+  if (entry === undefined) {
+    // No entry → default-deny. No wildcard support by design:
+    // broad-autonomy must be a deliberate M2-3 policy decision with
+    // high-stakes hard-coded to escalate, not a one-line config that
+    // inverts the safety property (default-deny → default-allow).
     return {
       permitted: false,
-      reason: `aiPermissions.actionTypes.${actionType} = "${specific}" (not 'auto')`,
+      reason: `aiPermissions.actionTypes has no entry for "${actionType}" — default-deny`,
     };
   }
-  // No specific entry — check wildcard. `'*': 'auto'` is the admin's
-  // explicit "permit all autonomy" opt-in (one entry replaces an
-  // enumeration of every possible action type). This is still a
-  // deliberate admin choice; default-deny without any entries holds.
-  const wildcard = map?.['*'];
-  if (wildcard === 'auto') {
-    return { permitted: true, reason: 'permitted by aiPermissions wildcard "*"' };
-  }
-  // No specific entry + no wildcard (or wildcard is not 'auto') →
-  // default-deny.
+  // Any value other than 'auto' (e.g. 'escalate', 'blocked') means
+  // not-autonomous. Escalate.
   return {
     permitted: false,
-    reason: `aiPermissions.actionTypes has no entry for "${actionType}" — default-deny`,
+    reason: `aiPermissions.actionTypes.${actionType} = "${entry}" (not 'auto')`,
   };
 }
 
