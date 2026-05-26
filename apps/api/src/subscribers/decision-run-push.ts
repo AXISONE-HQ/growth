@@ -56,6 +56,7 @@
 
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { PubSub } from '@google-cloud/pubsub';
 import { prisma } from '../prisma.js';
 import { verifyPubsubOidc } from '../lib/oidc-pubsub-verify.js';
 import {
@@ -65,6 +66,42 @@ import {
   incrementTodayCostUsd,
 } from '../lib/per-tenant-daily-counter.js';
 import { getRedisClient } from '../services/redis-client.js';
+
+// ─────────────────────────────────────────────
+// KAN-1018 — error classifier (persistent vs transient routing).
+// Variable-specifier dynamic import to match the rest of cross-rootDir
+// access in apps/api (per reference_variable_specifier_dynamic_import).
+// ─────────────────────────────────────────────
+interface ErrorClassifierModule {
+  classifyError: (err: unknown) => { category: 'persistent' | 'transient'; reasonCode: string };
+}
+let _errorClassifierModule: ErrorClassifierModule | null = null;
+async function loadErrorClassifierModule(): Promise<ErrorClassifierModule> {
+  if (_errorClassifierModule) return _errorClassifierModule;
+  const spec = '../../../../packages/api/src/services/error-classifier.js';
+  _errorClassifierModule = (await import(spec)) as ErrorClassifierModule;
+  return _errorClassifierModule;
+}
+
+// ─────────────────────────────────────────────
+// KAN-1018 — DLQ publisher. On persistent classification, the handler
+// EXPLICITLY publishes to decision.run.dlq (rather than waiting for 5
+// nack-retries to auto-dead-letter — which would re-fire the eval up to
+// 5× and cost-storm). Transient errors take the auto-dead-letter path
+// (handler returns 500 → Pub/Sub retries up to maxAttempts=5 → DLQ).
+// Both flows land in the same DLQ consumer (decision-run-dlq subscriber),
+// distinguished by the `dlqSource` attribute below.
+// ─────────────────────────────────────────────
+const DECISION_RUN_DLQ_TOPIC = 'decision.run.dlq';
+let _pubsubClient: PubSub | null = null;
+function getPubSubClient(): PubSub {
+  if (!_pubsubClient) _pubsubClient = new PubSub();
+  return _pubsubClient;
+}
+/** Test seam. */
+export function __setDecisionRunPushPubsubForTest(client: PubSub | null): void {
+  _pubsubClient = client;
+}
 
 // ─────────────────────────────────────────────
 // Variable-specifier dynamic import for the cross-rootDir Decision Engine
@@ -447,46 +484,35 @@ decisionRunPushApp.post('/decision-run', async (c) => {
   // Under autoApproveEnabled=false the kill-switch routes to ESCALATED
   // outcome → Escalation row written + escalation.triggered Pub/Sub; NO
   // action.decided publish, NO outbound. See KAN-1002 Phase 1 Finding 2.
+  // ─── KAN-1018 — engine-call try / catch / finally ─────────────────
+  //
+  // Replaces #217's interim catch-all-ack (which silently swallowed every
+  // throw, ack 200, no retry) with A2 + A4:
+  //   A2: counter increment moves to finally, gated on `engineStarted`.
+  //       Pre-engine throws (dynamic-import fail, etc.) → flag stays
+  //       false → no increment. Engine-execution throws → increment fires
+  //       so retry-storm cost is bounded by the daily cap.
+  //   A4: catch classifies the error. Persistent → ack 200 + EXPLICIT
+  //       DLQ publish (no waste of 5 nack-retries). Transient → return
+  //       500 → Pub/Sub auto-retries up to maxAttempts=5 → auto-DLQ if
+  //       still failing. Both DLQ flows land in the same consumer with
+  //       a `dlqSource` attribute discriminating them.
+  let engineStarted = false;
   try {
     const { runDecisionForContact } = await loadRunDecisionModule();
+    engineStarted = true; // → finally will increment the counter on throw too
     const decision = await runDecisionForContact(prisma, {
       tenantId: event.tenantId,
       contactId: event.contactId,
       actor: { type: 'SYSTEM', id: 'decision-run-push' },
     });
 
-    // KAN-1009 — post-success: bump the cost counter + update the
-    // stack's lastEvaluatedAt. Both are best-effort; failures here
-    // structured-log but don't fail the response (the eval already
-    // happened; the consumer-side accounting can lag).
-    void (async () => {
-      try {
-        const newTotalUsd = await incrementTodayCostUsd(
-          getRedisClient(),
-          COST_CAP_COUNTER_SCOPE,
-          event.tenantId,
-          ESTIMATED_COST_PER_EVAL_USD,
-        );
-        console.log(
-          JSON.stringify({
-            type: 'decision_run_cost_counter_incremented',
-            tenantId: event.tenantId,
-            estimateDeltaUsd: ESTIMATED_COST_PER_EVAL_USD,
-            newDailyTotalUsd: newTotalUsd,
-            resolvedCapUsd: gateResult.resolvedCapUsd,
-          }),
-        );
-      } catch (counterErr) {
-        console.error(
-          JSON.stringify({
-            type: 'decision_run_cost_counter_failed',
-            tenantId: event.tenantId,
-            error: counterErr instanceof Error ? counterErr.message : String(counterErr),
-          }),
-        );
-      }
-    })();
-
+    // KAN-1010 F2 — stack lastEvaluatedAt update. Success-path only:
+    // if the engine threw, NOT updating preserves the redeliver-after-fix
+    // workflow (operator pushes a code fix + re-publishes the same
+    // decision.run; dedup gate wouldn't block it). The storm concern
+    // that originally motivated updating-on-error is now handled by the
+    // classifier (persistent → no retry; transient → cap-bounded).
     void (async () => {
       try {
         await prisma.contactObjectiveStack.update({
@@ -527,37 +553,131 @@ decisionRunPushApp.post('/decision-run', async (c) => {
     );
     return c.text('ok', 200);
   } catch (err) {
+    // ── A4: classify ──────────────────────────────────────────────────
+    let classified: { category: 'persistent' | 'transient'; reasonCode: string };
+    try {
+      const { classifyError } = await loadErrorClassifierModule();
+      classified = classifyError(err);
+    } catch {
+      // Classifier load failure should never happen, but if it does,
+      // fail-safe to persistent (don't auto-storm).
+      classified = { category: 'persistent', reasonCode: 'classifier_load_failed' };
+    }
+
+    const errorPayload = {
+      tenantId: event.tenantId,
+      contactId: event.contactId,
+      campaignId: event.campaignId,
+      messageId: envelope.message.messageId,
+      error: err instanceof Error ? err.message : String(err),
+      errorName: err instanceof Error ? err.constructor?.name ?? err.name : typeof err,
+      // Truncated stack — preserves diagnostic signal in the 200-ack path
+      // without flooding logs with full stack traces from same-class
+      // recurring errors.
+      stack: err instanceof Error ? err.stack?.split('\n').slice(0, 5).join(' | ') : undefined,
+      classification: classified,
+      engineStarted,
+    };
+
+    if (classified.category === 'transient') {
+      // ── Transient: return 500 so Pub/Sub auto-retries up to
+      // maxAttempts=5. Counter increment in finally bounds storm cost.
+      // After 5 nack-retries, the message auto-dead-letters to
+      // decision.run.dlq (handled by the DLQ subscriber).
+      console.warn(
+        JSON.stringify({
+          type: 'decision_run_transient_error',
+          ...errorPayload,
+        }),
+      );
+      return c.text('transient_error', 500);
+    }
+
+    // ── Persistent: ack 200 + EXPLICIT DLQ publish ────────────────────
+    // Don't wait for 5 nack-retries to auto-dead-letter (that's a storm
+    // we know can't recover). Publish the original event payload + the
+    // classification context to the DLQ topic NOW.
+    let dlqPublishedId: string | null = null;
+    let dlqPublishError: string | null = null;
+    try {
+      const dlqMessage = JSON.stringify({
+        originalEvent: event,
+        originalMessageId: envelope.message.messageId,
+        originalAttributes: envelope.message.attributes ?? {},
+        classification: classified,
+        error: errorPayload.error,
+        errorName: errorPayload.errorName,
+        stack: errorPayload.stack,
+        engineStarted,
+        publishedAt: new Date().toISOString(),
+      });
+      dlqPublishedId = await getPubSubClient()
+        .topic(DECISION_RUN_DLQ_TOPIC)
+        .publishMessage({
+          data: Buffer.from(dlqMessage, 'utf8'),
+          attributes: {
+            dlqSource: 'persistent_classifier',
+            originalMessageId: envelope.message.messageId ?? '',
+            reasonCode: classified.reasonCode,
+            tenantId: event.tenantId,
+          },
+        });
+    } catch (publishErr) {
+      // DLQ publish failed — best-effort. Log loudly so we know the
+      // dead-letter signal got lost. Still ack 200 (the alternative is
+      // returning 500 → retry storm, which is worse than losing one
+      // DLQ-visibility signal).
+      dlqPublishError = publishErr instanceof Error ? publishErr.message : String(publishErr);
+    }
+
     console.error(
       JSON.stringify({
-        type: 'decision_run_dispatched',
-        status: 'failed',
-        tenantId: event.tenantId,
-        contactId: event.contactId,
-        campaignId: event.campaignId,
-        error: err instanceof Error ? err.message : String(err),
-        // KAN-1028 — interim: capture a truncated stack for triage so the
-        // 200-ack doesn't lose the diagnostic signal. KAN-1018 full design
-        // will extract this into structured fields.
-        stack: err instanceof Error ? err.stack?.split('\n').slice(0, 5).join(' | ') : undefined,
-        messageId: envelope.message.messageId,
+        type: 'decision_run_persistent_error',
+        ...errorPayload,
+        dlqPublishedId,
+        dlqPublishError,
       }),
     );
-    // KAN-1028 — interim throw-protection (KAN-1018 core pulled forward).
-    // ACK with 200 instead of 500: NO Pub/Sub retry. Bounds future engine
-    // crashes to 1 delivery attempt instead of the 3-8 retries we observed
-    // across the 2026-05-25 incidents (microObjectiveProgress crash:
-    // $0.31/8-retry; calling-convention crash: $0.0955/3-retry; Objective
-    // vocab mismatch: $0.0746/3-retry). The retry-storm has demonstrably
-    // not helped recover from ANY of the 3 throws — they were all
-    // persistent errors that needed code fixes, not transient retries.
-    //
-    // Trade-off: legitimate transient errors (DB connection blip, LLM
-    // timeout) now also get ACKed and lost. KAN-1018 full A4 design adds
-    // error categorization (Prisma codes, TRPCError codes, Anthropic 5xx
-    // vs 4xx) so transient errors retry and persistent errors burn to
-    // DLQ. Until then, the bounded-loss-on-transient is acceptable: the
-    // contact's stack row will be re-evaluated on the next scheduled
-    // pass (PR7 re-eval cron) or the next user-triggered activate.
     return c.text('persistent_error', 200);
+  } finally {
+    // ── A2: increment cost counter on EVERY engine-started invocation,
+    // whether success or throw. Pre-engine throws (dynamic-import fail,
+    // etc.) skip this because `engineStarted` stays false. For M1
+    // (shadow off + runFreeform LLM-free), the structural correctness
+    // matters more than the per-eval value — when shadow flips on in M2,
+    // this path bounds transient-retry storms by the daily cap.
+    //
+    // Fire-and-forget; counter failure is logged but never affects the
+    // response (the eval already happened; the consumer-side accounting
+    // can lag without blocking subsequent decisions).
+    if (engineStarted) {
+      void (async () => {
+        try {
+          const newTotalUsd = await incrementTodayCostUsd(
+            getRedisClient(),
+            COST_CAP_COUNTER_SCOPE,
+            event.tenantId,
+            ESTIMATED_COST_PER_EVAL_USD,
+          );
+          console.log(
+            JSON.stringify({
+              type: 'decision_run_cost_counter_incremented',
+              tenantId: event.tenantId,
+              estimateDeltaUsd: ESTIMATED_COST_PER_EVAL_USD,
+              newDailyTotalUsd: newTotalUsd,
+              resolvedCapUsd: gateResult.resolvedCapUsd,
+            }),
+          );
+        } catch (counterErr) {
+          console.error(
+            JSON.stringify({
+              type: 'decision_run_cost_counter_failed',
+              tenantId: event.tenantId,
+              error: counterErr instanceof Error ? counterErr.message : String(counterErr),
+            }),
+          );
+        }
+      })();
+    }
   }
 });
