@@ -193,3 +193,74 @@ resource "google_cloud_run_v2_service_iam_member" "sae_growth_api_invoker" {
   role     = "roles/run.invoker"
   member   = "serviceAccount:${data.google_service_account.sae_pubsub_invoker.email}"
 }
+
+# ─── KAN-1018 — decision.run.dlq subscription (observability) ─────────────
+#
+# DLQ topic is provisioned above (sae_decision_run_dlq). Until KAN-1018,
+# the topic had no subscription — dead-lettered messages expired silently.
+# The new DLQ subscription pushes to /pubsub/decision-run-dlq, which logs
+# the dead-lettered event with full context (tenant/contact/campaign/
+# error/reasonCode/deliveryAttempts) and ACKs 200.
+#
+# Two flows land here:
+#   1. EXPLICIT publish from decision-run-push when the error classifier
+#      categorizes a throw as 'persistent' (attribute dlqSource=persistent_
+#      classifier; immediate — no wait for 5 nack-retries).
+#   2. AUTO dead-letter after 5 transient nack-retries on the upstream
+#      sae_decision_run_push subscription (deadLetterPolicy above).
+#
+# NO dead_letter_policy on this subscription — would create a loop. The
+# handler always ACKs 200 (even on malformed envelopes) so retries never
+# happen and the message-retention TTL is the only terminal.
+#
+# Same OIDC posture as the upstream sub (pubsub-invoker SA; audience
+# derived from request URL per KAN-732 audience-mismatch elimination).
+resource "google_pubsub_subscription" "sae_decision_run_dlq_push" {
+  name    = "growth-api-decision-run-dlq"
+  project = var.project_id
+  topic   = google_pubsub_topic.sae_decision_run_dlq.name
+
+  ack_deadline_seconds = 60
+  # 7d retention — longer than the upstream 24h. DLQ messages may sit until
+  # human triage; losing them after a day would defeat the observability
+  # purpose.
+  message_retention_duration = "604800s" # 7 days
+
+  push_config {
+    push_endpoint = "${data.google_cloud_run_v2_service.sae_growth_api.uri}/pubsub/decision-run-dlq"
+    oidc_token {
+      service_account_email = data.google_service_account.sae_pubsub_invoker.email
+    }
+    attributes = { "x-goog-version" = "v1" }
+  }
+
+  # Intentionally NO dead_letter_policy — DLQ-of-DLQ is a loop. Handler
+  # always ACKs 200; if the handler itself crashes (Cloud Run cold start
+  # fail, etc.), Pub/Sub's default exponential backoff retries until ack
+  # or retention TTL.
+
+  retry_policy {
+    minimum_backoff = "10s"
+    maximum_backoff = "600s"
+  }
+}
+
+# Subscription IAM for the DLQ topic — same pattern as the others.
+resource "google_pubsub_topic_iam_member" "sae_decision_run_dlq_invoker" {
+  project = var.project_id
+  topic   = google_pubsub_topic.sae_decision_run_dlq.name
+  role    = "roles/pubsub.subscriber"
+  member  = "serviceAccount:${data.google_service_account.sae_pubsub_invoker.email}"
+}
+
+# Publisher IAM for the DLQ topic — explicit grant for the compute SA
+# (growth-api runs as the compute SA) so the handler can publishMessage
+# to decision.run.dlq for the persistent-classifier flow. Without this,
+# the explicit-publish branch silently fails (caught by best-effort
+# log; auto-dead-letter still works as fallback after 5 nack-retries).
+resource "google_pubsub_topic_iam_member" "sae_decision_run_dlq_publisher" {
+  project = var.project_id
+  topic   = google_pubsub_topic.sae_decision_run_dlq.name
+  role    = "roles/pubsub.publisher"
+  member  = "serviceAccount:${data.google_compute_default_service_account.sae_runtime.email}"
+}

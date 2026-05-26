@@ -38,6 +38,11 @@ import { knowledgeSourceIngestedPushApp } from "./subscribers/knowledge-source-i
 // in-process worker; folds KAN-1003).
 import { campaignMaterializePushApp } from "./subscribers/campaign-materialize-push.js";
 import { decisionRunPushApp } from "./subscribers/decision-run-push.js";
+// KAN-1018 — DLQ observability subscriber on decision.run.dlq topic.
+// Receives explicit persistent-classifier publishes from decision-run-
+// push AND auto-dead-lettered transient retries that exhausted
+// maxAttempts=5. Structured-logs + ACKs; no retry (DLQ is terminal).
+import { decisionRunDlqApp } from "./subscribers/decision-run-dlq.js";
 import { leadApiApp } from "./routes/lead-api.js";
 import { knowledgeSourcesApp } from "./routes/knowledge-sources.js";
 import { faqEntriesApp } from "./routes/faq-entries.js";
@@ -112,6 +117,7 @@ app.route("/pubsub", knowledgeSourceIngestedPushApp);
 // (matches Terraform push_endpoint paths in infra/terraform/sae-pubsub.tf).
 app.route("/pubsub", campaignMaterializePushApp);
 app.route("/pubsub", decisionRunPushApp);
+app.route("/pubsub", decisionRunDlqApp);
 
 // KAN-814 — Cloud Scheduler cron HTTP target. Mounted at
 // /internal/cron/deferred-send-evaluator. OIDC-protected (reuses

@@ -492,14 +492,19 @@ describe('decision-run-push end-to-end — PR4 gates wired in correct ORDER', ()
     expect(runDecisionForContactMock).not.toHaveBeenCalled();
   });
 
-  it('runDecisionForContact transient throw → 500 nack, counter NOT incremented', async () => {
+  it('runDecisionForContact transient throw → 500 nack, counter IS incremented (KAN-1018 A2 — bounds retry-storm cost)', async () => {
     runDecisionForContactMock.mockRejectedValue(new Error('LLM timeout'));
     const res = await postEnvelope(buildEnvelope());
     expect(res.status).toBe(500);
-    // The fire-and-forget counter increment shouldn't have happened because
-    // the eval threw; verify after microtask drain.
+    // KAN-1018 A2 (replaces prior assertion that the counter did NOT
+    // increment on throw): the counter MUST increment on engine throws —
+    // success or failure — so a transient-error retry storm is bounded
+    // by the daily cost cap. The engine may have spent LLM tokens before
+    // throwing (especially when shadow flips on in M2); not counting
+    // throw-spend was the original Gate-4 bypass that motivated this
+    // ticket. See decision-run-push.ts finally block (engineStarted flag).
     await new Promise((resolve) => setImmediate(resolve));
-    expect(redisIncrbyMock).not.toHaveBeenCalled();
+    expect(redisIncrbyMock).toHaveBeenCalled();
   });
 });
 
