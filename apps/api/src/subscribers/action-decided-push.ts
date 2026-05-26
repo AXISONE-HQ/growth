@@ -31,6 +31,40 @@ import {
 } from '../../../../packages/api/src/services/message-composer.js';
 import { loadKnowledge } from '../../../../packages/api/src/services/context-assembler.js';
 
+// ─────────────────────────────────────────────
+// KAN-1005 M2-2 — Send-policy module loaded via variable-specifier dynamic
+// import (cross-rootDir / TS6059 bypass — same pattern as
+// lead-received-push.ts loadSendPolicyModule). The send-policy gate is the
+// single upstream choke-point on the engine dispatch path: every autonomous
+// + approve-to-send action.decided event passes through this subscriber, so
+// gating once here covers all 4 production publishActionDecided call sites
+// (run-decision-for-contact runAgentic/runPlaybookStep/runFreeform +
+// recommendations.accept). KAN-1030's applyRedirect is the downstream
+// counterpart; together the order is policy → compose → guardrail →
+// dispatch → redirect → provider.
+// ─────────────────────────────────────────────
+
+type SendPolicyResult =
+  | { type: 'allow'; reason: string }
+  | { type: 'deny'; reason: string; ruleViolated: 'suppression' | 'rate_limit' }
+  | { type: 'defer'; reason: string; deferUntil: Date };
+
+interface SendPolicyModule {
+  evaluateSendPolicy: (
+    prisma: unknown,
+    tenantId: string,
+    contactId: string,
+    message: { channel: 'email' | 'sms' | 'social' },
+  ) => Promise<SendPolicyResult>;
+}
+let _sendPolicyModule: SendPolicyModule | null = null;
+async function loadSendPolicyModule(): Promise<SendPolicyModule> {
+  if (_sendPolicyModule) return _sendPolicyModule;
+  const spec = '../../../../packages/api/src/services/send-policy.js';
+  _sendPolicyModule = (await import(spec)) as SendPolicyModule;
+  return _sendPolicyModule;
+}
+
 export const actionDecidedPushApp = new Hono();
 
 const PushEnvelopeSchema = z.object({
@@ -97,9 +131,118 @@ actionDecidedPushApp.post('/action-decided', async (c) => {
     return c.text('ok', 200);
   }
 
-  const publicWebhookBaseUrl = process.env.PUBLIC_WEBHOOK_BASE_URL ?? 'https://example.invalid';
-
+  // ─────────────────────────────────────────────
+  // KAN-1005 M2-2 — Send-policy gate.
+  // BEFORE composeMessage so we don't burn an LLM call composing a message
+  // that policy will deny/defer. First-deny ordering inside the gate is
+  // suppression > rate-limit > time-of-day (defer).
+  //
+  // Three outcomes:
+  //   - allow → fall through to compose + guardrail + dispatch (existing flow)
+  //   - defer → persist deferred_sends row with replay_via='action_decided'
+  //             so the cron evaluator (KAN-814) re-publishes the
+  //             ActionDecidedEvent at window-open. Full chain reruns post-defer
+  //             (compose + guardrail + dispatch) — different from Lead Inbox's
+  //             replay_via='action_send' (skips re-compose).
+  //   - deny  → best-effort AuditLog row (fire-and-forget + catch) + 200-ack.
+  //             No dispatch. Greppable via actionType='engine.send_policy_denied'.
+  // ─────────────────────────────────────────────
   try {
+    const { evaluateSendPolicy } = await loadSendPolicyModule();
+    const policyResult = await evaluateSendPolicy(prisma, event.tenantId, event.contactId, {
+      channel: 'email',
+    });
+
+    if (policyResult.type === 'deny') {
+      console.warn(
+        `[action-decided-push] send-policy-denied decisionId=${event.decisionId} ruleViolated=${policyResult.ruleViolated} reason=${policyResult.reason}`,
+      );
+      // Best-effort AuditLog — fire-and-forget + catch. A failed audit
+      // write must not destabilize the deny path or block the ack.
+      void prisma.auditLog
+        .create({
+          data: {
+            tenantId: event.tenantId,
+            actor: 'engine_send_policy',
+            actionType: 'engine.send_policy_denied',
+            reasoning: policyResult.reason,
+            payload: {
+              decisionId: event.decisionId,
+              contactId: event.contactId,
+              objectiveId: event.objectiveId,
+              ruleViolated: policyResult.ruleViolated,
+              source: 'action_decided',
+              eventId: event.eventId,
+            },
+          },
+        })
+        .catch((err: unknown) => {
+          console.warn(
+            `[action-decided-push] audit-emit-send-policy-denied-failed decisionId=${event.decisionId} err=${(err as Error)?.message ?? String(err)}`,
+          );
+        });
+      return c.text('ok', 200);
+    }
+
+    if (policyResult.type === 'defer') {
+      // Persist the deferred send so the cron worker can re-publish the
+      // ActionDecidedEvent at window-open. Engine-path replay = full chain
+      // rerun (compose + guardrail + dispatch); replay_via discriminator
+      // routes the cron to publishActionDecided (vs Lead Inbox's
+      // publishActionSend with pre-shaped message).
+      try {
+        await (
+          prisma as unknown as {
+            deferredSend: {
+              create: (args: { data: Record<string, unknown> }) => Promise<{ id: string }>;
+            };
+          }
+        ).deferredSend.create({
+          data: {
+            tenantId: event.tenantId,
+            // KAN-1005 M2-2 — engine-path defers have no Deal anchor today.
+            // DeferredSend.dealId is nullable (additive migration in this PR);
+            // cron evaluator doesn't depend on it for dispatch (replay_via
+            // determines path; dealId is only legacy metadata for Lead Inbox
+            // Decision-row writes).
+            dealId: null,
+            contactId: event.contactId,
+            deferUntil: policyResult.deferUntil,
+            deferReason: policyResult.reason,
+            status: 'pending',
+            attempts: 0,
+            replayVia: 'action_decided',
+            payload: {
+              // Stash the full ActionDecidedEvent verbatim so the cron
+              // can re-publish it via publishActionDecided. Zod-revalidated
+              // at read-time against ActionDecidedEventSchema.
+              actionDecidedEvent: event as unknown as Record<string, unknown>,
+              originalEventId: event.eventId,
+            },
+          },
+        });
+        console.log(
+          `[action-decided-push] send-policy-deferred decisionId=${event.decisionId} deferUntil=${policyResult.deferUntil.toISOString()} reason=${policyResult.reason} persisted=true replayVia=action_decided`,
+        );
+      } catch (err) {
+        // Persistence failure is observable but non-fatal: 200-ack so
+        // Pub/Sub doesn't storm; the message is lost the same as
+        // pre-M2-2 (no defer at all), but the failure is audited.
+        console.error(
+          `[action-decided-push] send-policy-deferred-persist-failed decisionId=${event.decisionId} err=${(err as Error)?.message ?? String(err)}`,
+        );
+      }
+      return c.text('ok', 200);
+    }
+
+    // policyResult.type === 'allow' → fall through to compose + dispatch.
+    console.log(
+      `[action-decided-push] send-policy-allowed decisionId=${event.decisionId} reason=${policyResult.reason}`,
+    );
+
+    const publicWebhookBaseUrl =
+      process.env.PUBLIC_WEBHOOK_BASE_URL ?? 'https://example.invalid';
+
     // KAN-698: pull top-K Knowledge Center entries for this tenant + the
     // current instruction so the composed email grounds in tenant facts.
     // loadKnowledge degrades gracefully (returns []) if RAG is unavailable.

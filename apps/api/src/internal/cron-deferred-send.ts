@@ -76,6 +76,25 @@ async function loadMessageComposerModule(): Promise<MessageComposerModule> {
   return _messageComposerModule;
 }
 
+/**
+ * KAN-1005 M2-2 — engine-path replay publisher. Loaded separately from
+ * message-composer because publishActionDecided lives in
+ * action-decided-publisher.ts (different module).
+ */
+interface ActionDecidedPublisherModule {
+  publishActionDecided: (
+    pubsubClient: unknown,
+    event: unknown,
+  ) => Promise<{ messageId: string }>;
+}
+let _actionDecidedPublisherModule: ActionDecidedPublisherModule | null = null;
+async function loadActionDecidedPublisherModule(): Promise<ActionDecidedPublisherModule> {
+  if (_actionDecidedPublisherModule) return _actionDecidedPublisherModule;
+  const spec = '../../../../packages/api/src/services/action-decided-publisher.js';
+  _actionDecidedPublisherModule = (await import(spec)) as ActionDecidedPublisherModule;
+  return _actionDecidedPublisherModule;
+}
+
 interface PubSubClientModule {
   getPubSubClient: () => unknown;
 }
@@ -99,11 +118,15 @@ cronDeferredSendApp.post('/cron/deferred-send-evaluator', async (c) => {
     const { evaluateSendPolicy } = await loadSendPolicyModule();
     const { publishActionSend, resolveEmailConnectionId, resolveReplyToForTenant } =
       await loadMessageComposerModule();
+    // KAN-1005 M2-2 — engine-path replay needs publishActionDecided
+    // alongside publishActionSend. Cron evaluator switches on row.replay_via.
+    const { publishActionDecided } = await loadActionDecidedPublisherModule();
     const { getPubSubClient } = await loadPubSubClientModule();
 
     const result = await processPendingDeferredSends(prisma, {
       evaluateSendPolicy,
       publishActionSend,
+      publishActionDecided,
       resolveEmailConnectionId,
       resolveReplyToForTenant,
       getPubSubClient,

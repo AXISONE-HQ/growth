@@ -1059,6 +1059,33 @@ async function dispatchPhase2Send(
     console.warn(
       `[lead-received-push] phase-2-send-policy-denied dealId=${dealId} eventId=${eventId} ruleViolated=${policyResult.ruleViolated} reason=${policyResult.reason}`,
     );
+    // KAN-1005 M2-2 — symmetric best-effort AuditLog on deny. Mirrors the
+    // engine-path action-decided-push.ts pattern: opt-out / suppression
+    // blocks are compliance-relevant and belong in the immutable audit
+    // log where they're greppable, not just in ephemeral console output.
+    // Fire-and-forget + catch so a failed audit write can't destabilize
+    // the deny path or the live Lead Inbox flow.
+    void prisma.auditLog
+      .create({
+        data: {
+          tenantId: deal.tenantId,
+          actor: 'lead_inbox_send_policy',
+          actionType: 'lead_inbox.send_policy_denied',
+          reasoning: policyResult.reason,
+          payload: {
+            dealId,
+            contactId: deal.contactId,
+            eventId,
+            ruleViolated: policyResult.ruleViolated,
+            source: 'lead_received',
+          },
+        },
+      })
+      .catch((err: unknown) => {
+        console.warn(
+          `[lead-received-push] audit-emit-send-policy-denied-failed dealId=${dealId} eventId=${eventId} err=${(err as Error)?.message ?? String(err)}`,
+        );
+      });
     return;
   }
   if (policyResult.type === 'defer') {

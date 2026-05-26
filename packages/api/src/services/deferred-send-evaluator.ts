@@ -52,6 +52,17 @@ export interface DeferredSendPayload {
   originalEventId?: string;
 }
 
+/**
+ * KAN-1005 M2-2 — engine-path payload shape. Stashed verbatim by
+ * action-decided-push.ts when send-policy returns `defer`; the cron worker
+ * re-publishes the event via publishActionDecided so the full chain
+ * (compose + guardrail + dispatch) reruns post-defer.
+ */
+export interface DeferredEngineActionDecidedPayload {
+  actionDecidedEvent: Record<string, unknown>;
+  originalEventId?: string;
+}
+
 export interface ProcessOptions {
   /** Default 100 — max rows claimed per cron invocation. */
   batchSize?: number;
@@ -71,7 +82,8 @@ export interface ProcessOptions {
     | { type: 'deny'; reason: string; ruleViolated: string }
     | { type: 'defer'; reason: string; deferUntil: Date }
   >;
-  /** publishActionSend from message-composer.ts. */
+  /** publishActionSend from message-composer.ts. Used for replayVia='action_send'
+   *  (Lead Inbox, pre-shaped message). */
   publishActionSend: (
     pubsubClient: unknown,
     args: {
@@ -84,6 +96,16 @@ export interface ProcessOptions {
       replyTo?: string;
     },
   ) => Promise<string>;
+  /**
+   * KAN-1005 M2-2 — publishActionDecided from action-decided-publisher.ts.
+   * Used for replayVia='action_decided' (engine path): cron re-publishes
+   * the verbatim ActionDecidedEvent so the full chain reruns. Optional
+   * for back-compat with callers that only handle Lead Inbox rows.
+   */
+  publishActionDecided?: (
+    pubsubClient: unknown,
+    event: Record<string, unknown>,
+  ) => Promise<{ messageId: string }>;
   /** resolveEmailConnectionId from message-composer.ts. */
   resolveEmailConnectionId: (prisma: PrismaClient, tenantId: string) => Promise<string | null>;
   /** resolveReplyToForTenant from message-composer.ts. */
@@ -121,11 +143,17 @@ export interface RowResult {
 interface ClaimedRow {
   id: string;
   tenant_id: string;
-  deal_id: string;
+  /** KAN-1005 M2-2 — nullable. Engine-path defers may have no Deal anchor. */
+  deal_id: string | null;
   contact_id: string;
-  payload: DeferredSendPayload;
+  /** Shape depends on replay_via — Lead Inbox: DeferredSendPayload;
+   *  engine path: DeferredEngineActionDecidedPayload. */
+  payload: DeferredSendPayload | DeferredEngineActionDecidedPayload;
   defer_until: Date;
   attempts: number;
+  /** KAN-1005 M2-2 — defaults to 'action_send' for pre-M2-2 rows (column
+   *  default in the migration). */
+  replay_via: string;
 }
 
 // ─────────────────────────────────────────────
@@ -165,7 +193,7 @@ export async function processPendingDeferredSends(
   // process each id in its own tx. Avoids holding a long lock if any
   // single row's dispatch hangs (e.g., publishActionSend blocked).
   const claimed = await prisma.$queryRaw<ClaimedRow[]>`
-    SELECT id, tenant_id, deal_id, contact_id, payload, defer_until, attempts
+    SELECT id, tenant_id, deal_id, contact_id, payload, defer_until, attempts, replay_via
     FROM deferred_sends
     WHERE status = 'pending' AND defer_until <= NOW()
     ORDER BY defer_until ASC
@@ -258,6 +286,92 @@ async function processOneRow(
   }
 
   // policy.type === 'allow' → dispatch.
+  // KAN-1005 M2-2 — switch on replay_via discriminator.
+  //   - 'action_send'    → Lead Inbox path (pre-shaped message, skip
+  //                        re-compose, dispatch directly).
+  //   - 'action_decided' → engine path (re-publish ActionDecidedEvent;
+  //                        full chain reruns).
+  // Default 'action_send' (the column default) covers pre-M2-2 rows
+  // written by KAN-814 Lead Inbox before this PR shipped.
+  if (row.replay_via === 'action_decided') {
+    return dispatchActionDecidedReplay(prisma, row, opts);
+  }
+  return dispatchActionSendReplay(prisma, row, opts);
+}
+
+/**
+ * KAN-1005 M2-2 — engine-path replay. Re-publishes the stashed
+ * ActionDecidedEvent so the subscriber chain (action-decided-push.ts →
+ * compose + guardrail + dispatch) reruns. Send-policy is NOT re-evaluated
+ * here — the caller (processOneRow) already did that and confirmed
+ * 'allow'; the subscriber will skip its own send-policy gate as a
+ * harmless redundancy (the gate is idempotent + cheap).
+ *
+ * Decision row NOT written here; the downstream subscriber doesn't write
+ * one either (engine path's decisionId comes from the original
+ * runDecisionForContact emission, which already wrote a Decision before
+ * publishing action.decided).
+ */
+async function dispatchActionDecidedReplay(
+  prisma: PrismaClient,
+  row: ClaimedRow,
+  opts: ProcessOptions & { maxAttempts: number; retryIntervalMs: number },
+): Promise<RowResult> {
+  if (!opts.publishActionDecided) {
+    // Caller didn't wire the engine-path publisher but has an
+    // engine-path row claimed. Treat as configuration error: cancel
+    // with audit, alert operator. Better than silent loss.
+    await markCancelled(prisma, row.id, 'engine_replay_unconfigured');
+    console.error(
+      `[deferred-send-evaluator] row-cancelled id=${row.id} reason=engine_replay_unconfigured replayVia=action_decided — caller did not provide publishActionDecided`,
+    );
+    return {
+      id: row.id,
+      outcome: 'cancelled',
+      reason: 'engine_replay_unconfigured',
+    };
+  }
+
+  const enginePayload = row.payload as DeferredEngineActionDecidedPayload;
+  if (!enginePayload.actionDecidedEvent) {
+    // Payload shape doesn't match replay_via — defensive guard. Cancel.
+    await markCancelled(prisma, row.id, 'engine_replay_payload_malformed');
+    console.error(
+      `[deferred-send-evaluator] row-cancelled id=${row.id} reason=engine_replay_payload_malformed — payload missing actionDecidedEvent field`,
+    );
+    return {
+      id: row.id,
+      outcome: 'cancelled',
+      reason: 'engine_replay_payload_malformed',
+    };
+  }
+
+  const pubsubClient = opts.getPubSubClient();
+  const result = await opts.publishActionDecided(pubsubClient, enginePayload.actionDecidedEvent);
+
+  await markDispatched(prisma, row.id, row.attempts + 1);
+
+  console.log(
+    `[deferred-send-evaluator] engine-row-dispatched id=${row.id} pubsubMessageId=${result.messageId} replayVia=action_decided attempts=${row.attempts + 1}`,
+  );
+
+  return {
+    id: row.id,
+    outcome: 'dispatched',
+    pubsubMessageId: result.messageId,
+  };
+}
+
+/**
+ * KAN-814 Lead Inbox path — pre-shaped message, dispatch via
+ * publishActionSend. Decision row written at re-dispatch time
+ * (KAN-815c shim).
+ */
+async function dispatchActionSendReplay(
+  prisma: PrismaClient,
+  row: ClaimedRow,
+  opts: ProcessOptions & { maxAttempts: number; retryIntervalMs: number },
+): Promise<RowResult> {
   // Resolve current connectionId + replyTo at re-dispatch time (Brain's
   // T1 message intent stays fixed; transport resolves to current state).
   const connectionId = await opts.resolveEmailConnectionId(prisma, row.tenant_id);
@@ -273,8 +387,10 @@ async function processOneRow(
 
   const replyTo = await opts.resolveReplyToForTenant(prisma, row.tenant_id);
 
+  const leadPayload = row.payload as DeferredSendPayload;
+
   // Write Decision row at re-dispatch time (KAN-815c shim pattern).
-  const brainDecision = row.payload.brainDecision as {
+  const brainDecision = leadPayload.brainDecision as {
     nextBestAction?: { type?: string; reasoning?: string };
     confidence?: number;
     modelTier?: string;
@@ -296,17 +412,17 @@ async function processOneRow(
         redispatchedFromDeferredSendId: row.id,
         deferredSendCreatedAt: undefined, // filled by analytics join on deferred_sends.created_at
         dealId: row.deal_id,
-        originalEventId: row.payload.originalEventId,
+        originalEventId: leadPayload.originalEventId,
         brainEvaluatedAt: brainDecision.evaluatedAt,
         brainModelTier: brainDecision.modelTier,
         brainInputTokens: brainDecision.llmInputTokens,
         brainOutputTokens: brainDecision.llmOutputTokens,
         currentStageName: brainDecision.currentStateSnapshot?.currentStageName,
         daysInCurrentStage: brainDecision.currentStateSnapshot?.daysInCurrentStage,
-        shaperTier: row.payload.shaperTier,
-        shaperInputTokens: row.payload.shaperInputTokens,
-        shaperOutputTokens: row.payload.shaperOutputTokens,
-        shapedTone: row.payload.composed.tone,
+        shaperTier: leadPayload.shaperTier,
+        shaperInputTokens: leadPayload.shaperInputTokens,
+        shaperOutputTokens: leadPayload.shaperOutputTokens,
+        shapedTone: leadPayload.composed.tone,
       },
     },
   });
@@ -314,8 +430,8 @@ async function processOneRow(
   const publicWebhookBaseUrl =
     opts.publicWebhookBaseUrl ?? process.env.PUBLIC_WEBHOOK_BASE_URL ?? 'https://example.invalid';
   const composedWithUnsubscribe = {
-    subject: row.payload.composed.subject,
-    body: row.payload.composed.body,
+    subject: leadPayload.composed.subject,
+    body: leadPayload.composed.body,
     unsubscribeUrl: `${publicWebhookBaseUrl}/unsubscribe/${row.contact_id}`,
   };
 
@@ -324,7 +440,7 @@ async function processOneRow(
     tenantId: row.tenant_id,
     contactId: row.contact_id,
     decisionId: decisionRow.id,
-    toEmail: row.payload.contactEmail,
+    toEmail: leadPayload.contactEmail,
     composed: composedWithUnsubscribe,
     connectionId,
     ...(replyTo ? { replyTo } : {}),
