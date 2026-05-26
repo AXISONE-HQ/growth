@@ -48,6 +48,16 @@ function buildContact(overrides: {
       blockedActionTypes: [],
       requireHumanApproval: false,
       autoApproveEnabled: true,
+      // KAN-1005 M2-1 — opt-in to aiPermissions for action types this
+      // file's matrix-fall-through tests exercise. Default-deny enforcement
+      // matrix is in threshold-gate-kan-1005-enforcement.test.ts.
+      aiPermissions: {
+        actionTypes: {
+          send_followup_email: 'auto',
+          send_message: 'auto',
+          send_warm_up_email: 'auto',
+        },
+      },
       ...(overrides.tenantOverrides ?? {}),
     },
   } as any;

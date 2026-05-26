@@ -329,19 +329,33 @@ function checkAiPermissions(
       reason: 'aiPermissions blob malformed — defaulting to escalate (default-deny)',
     };
   }
-  const entry = parsed.data.actionTypes?.[actionType];
-  if (entry === 'auto') return { permitted: true, reason: 'permitted by tenant aiPermissions' };
-  if (entry === undefined) {
+  const map = parsed.data.actionTypes;
+  // Specific entry wins over wildcard. Allows admin to set
+  // `'*': 'auto', 'send_quote': 'escalate'` (broad autonomy with
+  // specific carve-outs).
+  const specific = map?.[actionType];
+  if (specific === 'auto') return { permitted: true, reason: 'permitted by tenant aiPermissions' };
+  if (specific !== undefined) {
+    // Specific entry exists and is not 'auto' (e.g. 'escalate', 'blocked').
+    // Escalate — specific override beats any wildcard.
     return {
       permitted: false,
-      reason: `aiPermissions.actionTypes has no entry for "${actionType}" — default-deny`,
+      reason: `aiPermissions.actionTypes.${actionType} = "${specific}" (not 'auto')`,
     };
   }
-  // Any value other than 'auto' (e.g. 'escalate', 'blocked', anything else)
-  // means not-autonomous. Escalate.
+  // No specific entry — check wildcard. `'*': 'auto'` is the admin's
+  // explicit "permit all autonomy" opt-in (one entry replaces an
+  // enumeration of every possible action type). This is still a
+  // deliberate admin choice; default-deny without any entries holds.
+  const wildcard = map?.['*'];
+  if (wildcard === 'auto') {
+    return { permitted: true, reason: 'permitted by aiPermissions wildcard "*"' };
+  }
+  // No specific entry + no wildcard (or wildcard is not 'auto') →
+  // default-deny.
   return {
     permitted: false,
-    reason: `aiPermissions.actionTypes.${actionType} = "${entry}" (not 'auto')`,
+    reason: `aiPermissions.actionTypes has no entry for "${actionType}" — default-deny`,
   };
 }
 

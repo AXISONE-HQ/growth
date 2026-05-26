@@ -45,6 +45,18 @@ const BASE_INPUT: ThresholdGateInput = {
     blockedActionTypes: [],
     requireHumanApproval: false,
     autoApproveEnabled: true,
+    // KAN-1005 M2-1 — default-deny permits-all opt-in for action types
+    // this vocab fall-through file exercises. Tests use diverse action
+    // types (transport, determiner, sentinel, unknown vocab) — wildcard
+    // '*' is cleaner than enumerating each. Default-deny enforcement
+    // matrix lives in threshold-gate-kan-1005-enforcement.test.ts; here
+    // we want the M2-1 gate to pass through so matrix-vs-legacy fall-
+    // through behavior is what gets tested.
+    aiPermissions: {
+      actionTypes: {
+        '*': 'auto',
+      },
+    },
   },
   stageMatrix: null,
   pipelineMatrix: null,

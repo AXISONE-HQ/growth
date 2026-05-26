@@ -41,6 +41,22 @@ const BASE_INPUT: ThresholdGateInput = {
     blockedActionTypes: [],
     requireHumanApproval: false,
     autoApproveEnabled: true,
+    // KAN-1005 M2-1 — default-deny aiPermissions: this pre-existing
+    // KAN-704 matrix-integration test set is about matrix-vs-legacy
+    // threshold resolution, not aiPermissions enforcement. Permit all
+    // the action types this file exercises so the M2-1 gate doesn't
+    // pre-empt the matrix-tier assertions. The actual aiPermissions
+    // enforcement matrix lives in threshold-gate-kan-1005-enforcement.test.ts.
+    aiPermissions: {
+      actionTypes: {
+        send_followup_email: 'auto',
+        send_warm_up_email: 'auto',
+        send_quote: 'auto',
+        reply_to_complaint: 'auto',
+        totally_unknown_action_xyz: 'auto',
+        send_message: 'auto',
+      },
+    },
   },
   stageMatrix: null,
   pipelineMatrix: null,

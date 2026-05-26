@@ -373,6 +373,11 @@ describe('KAN-1025 — runShadow pipeline calling-convention regression', () => 
           blockedActionTypes: [],
           requireHumanApproval: false,
           agenticModeEnabled: false,
+          // KAN-1005 M2-1 — opt-in: this KAN-1025 regression test is
+          // about the *100 scale boundary on the threshold gate; let
+          // aiPermissions pass through so the threshold comparison is
+          // the load-bearing check.
+          aiPermissions: { actionTypes: { send_message: 'auto' } },
         },
       });
 
