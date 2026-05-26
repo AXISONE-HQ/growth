@@ -30,6 +30,26 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      # KAN-1017 (CI Gate Audit KAN-1016, third leg) — packages/api typecheck
+      # baseline gate. The engine's core package (runDecisionForContact,
+      # agentic-tools, strategy/action/confidence pipeline, gap analyzer,
+      # message-composer, brain-service) was previously not typechecked in
+      # CI — four of the seven M1 closing-smoke bugs hid behind that gap
+      # (schema drift, `as any` cast bombs, Zod vocab + nullability
+      # mismatches; bugs #4–#7 in the M1 closing report).
+      #
+      # The gate normalizes tsc output (drops (line,col) so code-shuffles
+      # don't false-trip) and compares against the committed baseline at
+      # packages/api/.tsc-baseline.txt. Only NEW error CLASSES fail. The
+      # existing ~79-signature cohort (Sprint-6 G1-G4, KAN-1019/1020/1021
+      # cleanup territory) is allowed to pass; reductions are encouraged
+      # (gate emits a hint to refresh the baseline when signatures drop).
+      #
+      # Same "stop new, baseline existing" posture as the chronically-red
+      # Build job + the comm-23 zero-new gate used during the M1 smoke.
+      - name: 'KAN-1017: packages/api typecheck baseline gate'
+        run: ./scripts/typecheck-baseline-gate.sh
+
   test:
     name: Test
     runs-on: ubuntu-latest

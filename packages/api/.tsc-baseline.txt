@@ -1,0 +1,79 @@
+packages/api/src/routes/contacts.ts: error TS2322: Type '"archived"' is not assignable to type 'LifecycleStage | EnumLifecycleStageFieldUpdateOperationsInput | undefined'.
+packages/api/src/routes/contacts.ts: error TS2322: Type '"manual" | "csv_import" | "crm_sync" | "webhook" | "lead_ads" | "api" | "form"' is not assignable to type 'ContactSource | EnumContactSourceNullableFilter<"Contact"> | null | undefined'.
+packages/api/src/routes/contacts.ts: error TS2322: Type '"manual" | "csv_import" | "crm_sync" | "webhook" | "lead_ads" | "api" | "form"' is not assignable to type 'ContactSource | null | undefined'.
+packages/api/src/routes/contacts.ts: error TS2322: Type '"new" | "lead" | "qualified" | "opportunity" | "customer" | "churned" | "reactivated"' is not assignable to type 'LifecycleStage | EnumLifecycleStageFilter<"Contact"> | undefined'.
+packages/api/src/routes/contacts.ts: error TS2322: Type '"new" | "lead" | "qualified" | "opportunity" | "customer" | "churned" | "reactivated"' is not assignable to type 'LifecycleStage | undefined'.
+packages/api/src/routes/contacts.ts: error TS2322: Type 'string | string[]' is not assignable to type 'string | NestedStringFilter<"Contact"> | undefined'.
+packages/api/src/routes/contacts.ts: error TS2322: Type 'string | string[]' is not assignable to type 'string | StringFilter<"Contact"> | undefined'.
+packages/api/src/routes/contacts.ts: error TS2322: Type 'string | string[]' is not assignable to type 'string | undefined'.
+packages/api/src/routes/contacts.ts: error TS2322: Type '{ source?: "manual" | "csv_import" | "crm_sync" | "webhook" | "lead_ads" | "api" | "form" | undefined; lifecycleStage?: "new" | "lead" | "qualified" | "opportunity" | "customer" | "churned" | "reactivated" | undefined; ... 5 more ...; email?: string | ... 1 more ... | undefined; }' is not assignable to type '(Without<ContactUpdateInput, ContactUncheckedUpdateInput> & ContactUncheckedUpdateInput) | (Without<...> & ContactUpdateInput)'.
+packages/api/src/routes/data-quality.ts: error TS18048: 'avgScore._avg' is possibly 'undefined'.
+packages/api/src/routes/data-quality.ts: error TS2322: Type '"archived"' is not assignable to type 'LifecycleStage | NestedEnumLifecycleStageFilter<"Contact"> | undefined'.
+packages/api/src/routes/data-quality.ts: error TS2322: Type 'string | string[]' is not assignable to type 'string | StringFilter<"Contact"> | undefined'.
+packages/api/src/routes/data-quality.ts: error TS2322: Type 'string | string[]' is not assignable to type 'string | undefined'.
+packages/api/src/routes/data-quality.ts: error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+packages/api/src/routes/identity-resolver.ts: error TS2322: Type '"archived"' is not assignable to type 'LifecycleStage | EnumLifecycleStageFieldUpdateOperationsInput | undefined'.
+packages/api/src/routes/identity-resolver.ts: error TS2322: Type '"new"' is not assignable to type 'LifecycleStage | undefined'.
+packages/api/src/routes/identity-resolver.ts: error TS2322: Type 'string | string[]' is not assignable to type 'string | StringFilter<"Contact"> | undefined'.
+packages/api/src/routes/identity-resolver.ts: error TS2322: Type 'string' is not assignable to type 'ContactSource | null | undefined'.
+packages/api/src/routes/identity-resolver.ts: error TS2322: Type '{ id: { not: string; }; } | { lifecycleStage: { not: "archived"; }; }' is not assignable to type 'ContactWhereInput'.
+packages/api/src/routes/identity-resolver.ts: error TS2322: Type '{ not: "archived"; }' is not assignable to type 'LifecycleStage | EnumLifecycleStageFilter<"Contact"> | undefined'.
+packages/api/src/routes/identity-resolver.ts: error TS2551: Property 'pipelineCard' does not exist on type 'Omit<PrismaClient<PrismaClientOptions, never, DefaultArgs>, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">'. Did you mean 'pipeline'?
+packages/api/src/routes/tenants.ts: error TS2322: Type 'string | string[]' is not assignable to type 'string | undefined'.
+packages/api/src/routes/tenants.ts: error TS6059: File 'packages/db/prisma/seeds/micro-objectives.ts' is not under 'rootDir' 'packages/api/src'. 'rootDir' is expected to contain all source files.
+packages/api/src/services/analytics-pipeline.ts: error TS2323: Cannot redeclare exported variable 'routeEventToRow'.
+packages/api/src/services/analytics-pipeline.ts: error TS2484: Export declaration conflicts with exported declaration of 'routeEventToRow'.
+packages/api/src/services/blueprint-loader.ts: error TS2339: Property 'blueprintId' does not exist on type '{ version: number; tenantId: string; createdAt: Date; id: string; companyTruth: JsonValue; behavioralModel: JsonValue; outcomeModel: JsonValue; }'.
+packages/api/src/services/blueprint-loader.ts: error TS2339: Property 'metadata' does not exist on type '{ version: number; tenantId: string; createdAt: Date; id: string; companyTruth: JsonValue; behavioralModel: JsonValue; outcomeModel: JsonValue; }'.
+packages/api/src/services/blueprint-loader.ts: error TS2339: Property 'status' does not exist on type '{ version: number; tenantId: string; createdAt: Date; id: string; companyTruth: JsonValue; behavioralModel: JsonValue; outcomeModel: JsonValue; }'.
+packages/api/src/services/blueprint-loader.ts: error TS2339: Property 'updatedAt' does not exist on type '{ version: number; tenantId: string; createdAt: Date; id: string; companyTruth: JsonValue; behavioralModel: JsonValue; outcomeModel: JsonValue; }'.
+packages/api/src/services/blueprint-loader.ts: error TS2353: Object literal may only specify known properties, and 'blueprintId' does not exist in type 'Without<BrainSnapshotCreateInput, BrainSnapshotUncheckedCreateInput> & BrainSnapshotUncheckedCreateInput'.
+packages/api/src/services/blueprint-loader.ts: error TS2353: Object literal may only specify known properties, and 'brainStatus' does not exist in type 'Without<TenantUpdateInput, TenantUncheckedUpdateInput> & TenantUncheckedUpdateInput'.
+packages/api/src/services/blueprint-loader.ts: error TS2353: Object literal may only specify known properties, and 'status' does not exist in type '(Without<BrainSnapshotUpdateManyMutationInput, BrainSnapshotUncheckedUpdateManyInput> & BrainSnapshotUncheckedUpdateManyInput) | (Without<...> & BrainSnapshotUpdateManyMutationInput)'.
+packages/api/src/services/blueprint-loader.ts: error TS2353: Object literal may only specify known properties, and 'status' does not exist in type 'BrainSnapshotWhereInput'.
+packages/api/src/services/brain-embeddings.ts: error TS2353: Object literal may only specify known properties, and 'status' does not exist in type 'BrainSnapshotWhereInput'.
+packages/api/src/services/brain-events.ts: error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+packages/api/src/services/brain-events.ts: error TS2351: This expression is not constructable.
+packages/api/src/services/brain-events.ts: error TS2709: Cannot use namespace 'Redis' as a type.
+packages/api/src/services/brain-events.ts: error TS7006: Parameter 'err' implicitly has an 'any' type.
+packages/api/src/services/company-truth.ts: error TS2322: Type 'JsonValue' is not assignable to type 'JsonNull | InputJsonValue'.
+packages/api/src/services/company-truth.ts: error TS2322: Type 'string | string[]' is not assignable to type 'string | StringFilter<"AuditLog"> | undefined'.
+packages/api/src/services/company-truth.ts: error TS2339: Property 'metadata' does not exist on type '{ version: number; tenantId: string; createdAt: Date; id: string; companyTruth: JsonValue; behavioralModel: JsonValue; outcomeModel: JsonValue; }'.
+packages/api/src/services/company-truth.ts: error TS2339: Property 'status' does not exist on type '{ version: number; tenantId: string; createdAt: Date; id: string; companyTruth: JsonValue; behavioralModel: JsonValue; outcomeModel: JsonValue; }'.
+packages/api/src/services/company-truth.ts: error TS2339: Property 'updatedAt' does not exist on type '{ version: number; tenantId: string; createdAt: Date; id: string; companyTruth: JsonValue; behavioralModel: JsonValue; outcomeModel: JsonValue; }'.
+packages/api/src/services/company-truth.ts: error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+packages/api/src/services/company-truth.ts: error TS2353: Object literal may only specify known properties, and 'metadata' does not exist in type '(Without<BrainSnapshotUpdateInput, BrainSnapshotUncheckedUpdateInput> & BrainSnapshotUncheckedUpdateInput) | (Without<...> & BrainSnapshotUpdateInput)'.
+packages/api/src/services/company-truth.ts: error TS2353: Object literal may only specify known properties, and 'status' does not exist in type '(Without<BrainSnapshotUpdateInput, BrainSnapshotUncheckedUpdateInput> & BrainSnapshotUncheckedUpdateInput) | (Without<...> & BrainSnapshotUpdateInput)'.
+packages/api/src/services/company-truth.ts: error TS2353: Object literal may only specify known properties, and 'status' does not exist in type 'BrainSnapshotSelect<DefaultArgs>'.
+packages/api/src/services/company-truth.ts: error TS2353: Object literal may only specify known properties, and 'status' does not exist in type 'BrainSnapshotWhereInput'.
+packages/api/src/services/contacts-router.ts: error TS2322: Type 'string | null' is not assignable to type 'ContactSource | null | undefined'.
+packages/api/src/services/contacts-router.ts: error TS2322: Type 'string' is not assignable to type 'LifecycleStage | undefined'.
+packages/api/src/services/default-pipeline-bootstrap.ts: error TS2322: Type '{ pipelineId: string; name: string; order: number; isInitial: boolean; isTerminal: boolean; outcomeType: "open" | "terminal_won" | "terminal_lost"; followUpCadence: Record<string, unknown>; }[]' is not assignable to type 'StageCreateManyInput | StageCreateManyInput[]'.
+packages/api/src/services/facebook-leads.ts: error TS18046: 'data' is of type 'unknown'.
+packages/api/src/services/facebook-leads.ts: error TS2322: Type '"facebook_lead_ad"' is not assignable to type 'ContactSource | EnumContactSourceNullableFilter<"Contact"> | null | undefined'.
+packages/api/src/services/facebook-leads.ts: error TS2322: Type '"facebook_lead_ad"' is not assignable to type 'ContactSource | null | undefined'.
+packages/api/src/services/facebook-leads.ts: error TS2339: Property 'contactEvent' does not exist on type 'PrismaClient<PrismaClientOptions, never, DefaultArgs>'.
+packages/api/src/services/facebook-leads.ts: error TS2339: Property 'integration' does not exist on type 'PrismaClient<PrismaClientOptions, never, DefaultArgs>'.
+packages/api/src/services/health-scorer.ts: error TS2323: Cannot redeclare exported variable 'resolveHealthTier'.
+packages/api/src/services/health-scorer.ts: error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+packages/api/src/services/health-scorer.ts: error TS2484: Export declaration conflicts with exported declaration of 'resolveHealthTier'.
+packages/api/src/services/import-commit.ts: error TS2345: Argument of type '{ tenantId: string; email: string | null; phone: string | null; firstName: string | null; lastName: string | null; externalIds: JsonValue; lifecycleStage: LifecycleStage | null; ... 12 more ...; targetContactId: string | null; }' is not assignable to parameter of type 'StagingContact'.
+packages/api/src/services/import-commit.ts: error TS2352: Conversion of type 'string | number | boolean | JsonObject | JsonArray' to type 'CommitErrorEntry[]' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first.
+packages/api/src/services/knowledge-center.ts: error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+packages/api/src/services/knowledge-center.ts: error TS2835: Relative import paths need explicit file extensions in ECMAScript imports when '--moduleResolution' is 'node16' or 'nodenext'. Did you mean './brain-embeddings.js'?
+packages/api/src/services/knowledge-retrieval-service.ts: error TS2709: Cannot use namespace 'Redis' as a type.
+packages/api/src/services/knowledge-source-ingest-publisher.ts: error TS2339: Property 'topic' does not exist on type 'PubSubClient'.
+packages/api/src/services/lib/import-inspector.ts: error TS2322: Type 'Record<string, unknown>[]' is not assignable to type 'InputJsonValue | NullableJsonNullValueInput | undefined'.
+packages/api/src/services/onboarding-wizard.ts: error TS18046: 'data' is of type 'unknown'.
+packages/api/src/services/onboarding-wizard.ts: error TS2339: Property 'metadata' does not exist on type '{ version: number; tenantId: string; createdAt: Date; id: string; companyTruth: JsonValue; behavioralModel: JsonValue; outcomeModel: JsonValue; }'.
+packages/api/src/services/onboarding-wizard.ts: error TS2339: Property 'onboardingSession' does not exist on type 'PrismaClient<PrismaClientOptions, never, DefaultArgs>'.
+packages/api/src/services/onboarding-wizard.ts: error TS2353: Object literal may only specify known properties, and 'description' does not exist in type 'Without<ObjectiveCreateInput, ObjectiveUncheckedCreateInput> & ObjectiveUncheckedCreateInput'.
+packages/api/src/services/onboarding-wizard.ts: error TS2353: Object literal may only specify known properties, and 'metadata' does not exist in type '(Without<BrainSnapshotUpdateInput, BrainSnapshotUncheckedUpdateInput> & BrainSnapshotUncheckedUpdateInput) | (Without<...> & BrainSnapshotUpdateInput)'.
+packages/api/src/services/onboarding-wizard.ts: error TS2353: Object literal may only specify known properties, and 'metadata' does not exist in type 'ContactSelect<DefaultArgs>'.
+packages/api/src/services/onboarding-wizard.ts: error TS2353: Object literal may only specify known properties, and 'onboardingCompleted' does not exist in type '(Without<TenantUpdateInput, TenantUncheckedUpdateInput> & TenantUncheckedUpdateInput) | (Without<...> & TenantUpdateInput)'.
+packages/api/src/services/onboarding-wizard.ts: error TS2353: Object literal may only specify known properties, and 'status' does not exist in type 'BrainSnapshotWhereInput'.
+packages/api/src/services/onboarding-wizard.ts: error TS2835: Relative import paths need explicit file extensions in ECMAScript imports when '--moduleResolution' is 'node16' or 'nodenext'. Did you mean './blueprint-loader.js'?
+packages/api/src/services/pipeline-proposer.ts: error TS2305: Module '"@growth/shared"' has no exported member 'ObjectiveEntityScope'.
+packages/api/src/services/product-catalog.ts: error TS18046: 'data' is of type 'unknown'.
+packages/api/src/services/product-catalog.ts: error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
+packages/api/src/services/strategy-tracker.ts: error TS2345: Argument of type 'string | string[]' is not assignable to parameter of type 'string'.
