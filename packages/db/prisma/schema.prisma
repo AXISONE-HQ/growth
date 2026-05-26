@@ -1821,12 +1821,19 @@ model Deal {
 model DeferredSend {
   id            String    @id @default(uuid())
   tenantId      String    @map("tenant_id")
-  dealId        String    @map("deal_id")
+  /// KAN-1005 M2-2 — nullable. Lead Inbox writes (KAN-814) always carry a
+  /// Deal anchor; engine-path writes (`replayVia='action_decided'`) may not
+  /// (autonomous actions can be objective-driven without a current Deal).
+  dealId        String?   @map("deal_id")
   contactId     String    @map("contact_id")
-  /// Full payload to re-dispatch — brainDecision blob + composedMessage +
-  /// connectionId + replyTo + tone/token metadata. Captured at defer-time
-  /// to honor Brain's T1 intent (don't re-shape on re-dispatch — see
-  /// feedback note in deferred-send-evaluator.ts).
+  /// Full payload to re-dispatch. Shape depends on `replayVia`:
+  ///   - 'action_send'    (KAN-814 Lead Inbox): { brainDecision, composed,
+  ///                       contactEmail, shaperTier, ... }
+  ///   - 'action_decided' (KAN-1005 M2-2 engine path): the full
+  ///                       ActionDecidedEvent re-publish payload, so the
+  ///                       cron replays via publishActionDecided and the
+  ///                       full chain (compose + guardrail + dispatch)
+  ///                       reruns.
   payload       Json
   deferUntil    DateTime  @map("defer_until")
   deferReason   String    @map("defer_reason")
@@ -1834,6 +1841,11 @@ model DeferredSend {
   status        String    @default("pending")
   attempts      Int       @default(0)
   lastAttemptAt DateTime? @map("last_attempt_at")
+  /// KAN-1005 M2-2 — replay discriminator. Cron switches on this:
+  ///   - 'action_send'    → publishActionSend with composed payload (Lead Inbox)
+  ///   - 'action_decided' → publishActionDecided with ActionDecidedEvent (engine)
+  /// Default 'action_send' preserves back-compat for pre-M2-2 rows.
+  replayVia     String    @default("action_send") @map("replay_via")
   /// Set when status='cancelled'. Known values:
   ///   - 'superseded_by_fresh_inbound' (KAN-814 supersession path)
   ///   - 'policy_now_denies' (Send Policy returned deny on re-eval)
@@ -1841,9 +1853,9 @@ model DeferredSend {
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
 
-  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  deal    Deal    @relation(fields: [dealId], references: [id], onDelete: Cascade)
-  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  tenant  Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  deal    Deal?    @relation(fields: [dealId], references: [id], onDelete: Cascade)
+  contact Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
 
   // Cron worker scan: pending rows whose defer_until has elapsed
   @@index([status, deferUntil])
