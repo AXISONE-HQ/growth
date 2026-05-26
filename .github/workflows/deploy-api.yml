@@ -416,6 +416,67 @@ jobs:
           echo "- vpc-egress=$ACTUAL_VPC_EGRESS ✓" >> $GITHUB_STEP_SUMMARY
           echo "- network-interfaces=$ACTUAL_NETWORK_INTERFACES ✓" >> $GITHUB_STEP_SUMMARY
 
+      # KAN-1013 (CI Gate Audit KAN-1016, third leg) — post-deploy
+      # readiness smoke. Fails the deploy if the just-deployed revision
+      # can't reach its critical dependencies.
+      #
+      # The prior /health-200 "smoke" verified container startup but
+      # never asserted Redis / Cloud SQL / engine module connectivity in
+      # the actual deployed PROD environment. That's how cost-cap-dead
+      # shipped silent for weeks (secret = "placeholder", no VPC egress
+      # → Redis unreachable → Gate 4 silently fail-closed; KAN-747 +
+      # KAN-920 both passed because they don't touch real Memorystore).
+      #
+      # /readyz on the deployed service does Redis PING + DB SELECT 1 +
+      # engine module-load + canonical-Objective parse (sibling to
+      # KAN-1029 contract test, enforced at DEPLOY time). Returns 503
+      # on any dep failure — `curl -fsS` exits non-zero naturally.
+      #
+      # 15s timeout budget covers the 3×5s parallel per-dep timeout
+      # ceiling plus slack. Sibling-pattern to KAN-920 (config drift):
+      # both run post-deploy; both fail the workflow if assertions fail
+      # (the bad revision is already serving traffic; alerting + manual
+      # rollback follow). See KAN-1010 SAE M1 closing report for the
+      # original incident this guards against.
+      - name: 'KAN-1013: post-deploy readiness smoke (real Redis PING + DB + engine)'
+        run: |
+          set -euo pipefail
+          URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
+            --region ${{ env.REGION }} \
+            --format 'value(status.url)')
+          READYZ="$URL/readyz"
+          echo "[KAN-1013] probing $READYZ (15s budget; expect HTTP 200 + all deps ok)"
+
+          # -f exits non-zero on HTTP 4xx/5xx (so 503 from /readyz naturally fails the step).
+          # -sS silent but show errors. --max-time bounds total HTTP roundtrip.
+          # Capture body for the per-dep assert below + step summary.
+          BODY=$(curl -fsS --max-time 15 "$READYZ")
+          echo "[KAN-1013] response: $BODY"
+
+          # Defense-in-depth: even with -f on, parse + assert every dep is
+          # ok. Catches any future shape regression that returns 200 with
+          # ok:false somewhere (drift between handler + smoke).
+          REDIS_OK=$(echo "$BODY" | jq -r '.deps.redis.ok')
+          DB_OK=$(echo "$BODY" | jq -r '.deps.db.ok')
+          ENGINE_OK=$(echo "$BODY" | jq -r '.deps.engine.ok')
+
+          if [ "$REDIS_OK" != "true" ] || [ "$DB_OK" != "true" ] || [ "$ENGINE_OK" != "true" ]; then
+            echo "::error::KAN-1013 post-deploy readiness FAILED — one or more deps not ready (redis=$REDIS_OK db=$DB_OK engine=$ENGINE_OK)"
+            echo "Bad revision is already serving traffic. Manual recovery (per KAN-920 header)."
+            exit 1
+          fi
+
+          echo "[KAN-1013] ✓ all deps ready (redis + db + engine)"
+          REDIS_MS=$(echo "$BODY" | jq -r '.deps.redis.latencyMs')
+          DB_MS=$(echo "$BODY" | jq -r '.deps.db.latencyMs')
+          ENGINE_MS=$(echo "$BODY" | jq -r '.deps.engine.latencyMs')
+          {
+            echo "## KAN-1013 Readiness Smoke"
+            echo "- redis PING: ✓ (${REDIS_MS}ms)"
+            echo "- db SELECT 1: ✓ (${DB_MS}ms)"
+            echo "- engine module-load + canonical-Objective parse: ✓ (${ENGINE_MS}ms)"
+          } >> $GITHUB_STEP_SUMMARY
+
       - name: Show deployment URL
         run: |
           URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \

@@ -53,6 +53,7 @@ import { accountFieldUpdatedSubscriberApp } from "./internal/account-field-updat
 import { accountDetectEventsSseApp } from "./internal/account-detect-events-sse.js";
 import { getPubSubClient } from "../../../packages/api/src/lib/pubsub-client.js";
 import { setLLMCostPublisher } from "../../../packages/api/src/services/llm-client.js";
+import { readyzApp } from "./routes/readyz.js";
 
 const app = new Hono();
 const PORT = parseInt(process.env.PORT || "8080", 10);
@@ -73,10 +74,21 @@ app.use(
   })
 );
 
-// Health check
+// Health check — LIVENESS only. Static 200. Cloud Run's traffic router
+// hits this; coupling it to dependency health would cascade a transient
+// dep blip into a yanked revision. See /readyz for the deep-dep probe.
 app.get("/health", (c) => {
   return c.json({ status: "ok", timestamp: new Date().toISOString() });
 });
+
+// KAN-1013 — Readiness probe. Deep dep checks (Redis PING + DB SELECT 1
+// + engine module-load + canonical-Objective parse). Used by the
+// post-deploy smoke in deploy-api.yml; the deploy goes red if any dep
+// can't be reached. Closes the gap that shipped cost-cap-dead silently
+// (secret-drift + missing VPC egress passed the prior /health-200
+// "smoke"). See apps/api/src/routes/readyz.ts for the full rationale +
+// public-auth trade-off documentation.
+app.route("/", readyzApp);
 
 // ============================================================================
 // META LEAD ADS INTEGRATION (plain HTTP — not tRPC)
