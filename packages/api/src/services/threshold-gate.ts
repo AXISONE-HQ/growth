@@ -38,6 +38,71 @@ export type AutoApproveActionType =
   | 'reply_to_complaint'
   | 'send_marketing_message';
 
+// ─────────────────────────────────────────────
+// KAN-1005 M2-3 — System-level high-stakes clamp.
+//
+// THE central M2 safety property: a hardcoded set of action types that
+// ALWAYS resolve to escalate, regardless of:
+//   - tenant aiPermissions.actionTypes[type] (even 'auto')
+//   - matrix entries (even at threshold=0 with default='auto')
+//   - confidence scores (even at 100%)
+//
+// The clamp is a CEILING, not a floor:
+//   - tenant 'auto'     → escalate (clamp overrides)
+//   - tenant 'escalate' → escalate (honored — same effect)
+//   - tenant 'blocked'  → blocked (honored — MORE restrictive than clamp)
+//   - tenant unset      → escalate (M2-1 default-deny preserved)
+//
+// Unbypassability test pins this hard (kan-1005-m2-3-clamp-unbypassable
+// test): no aiPermissions config — including malformed, wildcard, future
+// shapes — can route a high-stakes action to auto.
+//
+// Coverage spans 3 vocabs (Transport / Determiner / Semantic) plus
+// defensive Brain entries so a future code-path change can't slip a
+// money-moving / irreversible action to auto. Rule of inclusion:
+//   - money-bearing artifact (quotes, payments — none yet)
+//   - reputational triage (complaint replies)
+//   - irreversible state change (closing a deal/objective)
+//
+// NOT high-stakes (deliberately): conversational sends (send_message /
+// send_email / send_warm_up_email etc.), scheduling, internal progression
+// (transition_to_qualified, advance_stage), CRM writes (update_crm —
+// borderline; follow-up ticket KAN-XXXX will payload-split into
+// note vs field-mutation).
+//
+// To ADD a high-stakes type:
+//   1. Add the string to HIGH_STAKES_ACTION_TYPES below
+//   2. Add a row to the clamp unit-test matrix
+//   3. The clamp's no-bypass property is already guaranteed by ordering;
+//      the test confirms.
+// ─────────────────────────────────────────────
+export const HIGH_STAKES_ACTION_TYPES: ReadonlySet<string> = new Set<string>([
+  // Semantic vocab (AutoApproveActionType — matrix-keyed)
+  'send_quote',                  // money-bearing artifact
+  'reply_to_complaint',          // reputational triage
+  'transition_to_closed_won',    // irreversible reporting-financial event
+  'transition_to_closed_lost',   // irreversible flow termination
+  // Determiner vocab (engine emits)
+  'close_objective',             // irreversible work closure
+  // Brain vocab (Lead-Inbox-only today; defensive coverage so a future
+  // change that routes Brain through threshold-gate can't bypass)
+  'close_deal_lost',             // Brain analog of transition_to_closed_lost
+]);
+
+/**
+ * KAN-1005 M2-3 — Unified per-action-type permission tri-value.
+ *
+ * `aiPermissions.actionTypes` is a Record<string, AiActionPermission>.
+ * Tenant config surface; default-deny via undefined.
+ *
+ *   'auto'     → autonomous execute (subject to high-stakes clamp + downstream gates)
+ *   'escalate' → AI proposes; routes to human review (M1 behavior)
+ *   'blocked'  → AI never does this action type at all — hard off, not even queued
+ *
+ * `undefined` (missing entry) → escalate (default-deny, M2-1 preserved)
+ */
+export type AiActionPermission = 'auto' | 'escalate' | 'blocked';
+
 export type AutoApproveMode = 'auto' | 'human_review';
 
 export interface AutoApproveEntry {
@@ -171,7 +236,11 @@ export const ThresholdGateInputSchema = z.object({
      */
     confidenceThreshold: z.number().min(0).max(100).default(70),
     autoEscalateFlags: z.array(z.string()).default([]),
-    blockedActionTypes: z.array(z.string()).default([]),
+    // KAN-1005 M2-3 — `blockedActionTypes` removed. The dead stub
+    // (Tenant column never existed) collapsed into the unified
+    // aiPermissions.actionTypes tri-value model: 'blocked' is the
+    // third value, semantically stronger than 'escalate' (hard off,
+    // not even queued for review).
     requireHumanApproval: z.boolean().default(false),
     maxDailyAutoActions: z.number().optional(),
     /**
@@ -283,25 +352,24 @@ function checkAutoEscalation(
   };
 }
 
-function checkBlockedActions(
-  actionType: string,
-  blockedActionTypes: string[],
-): boolean {
-  return blockedActionTypes.includes(actionType);
-}
-
 /**
- * KAN-1005 M2-1 (Gap C) — Per-action-type AI-permissions enforcement.
+ * KAN-1005 M2-1 (Gap C) + M2-3 — Per-action-type AI-permissions enforcement.
  *
  * Default-deny posture (founder-confirmed 2026-05-26): an action type
  * auto-executes ONLY when explicitly marked 'auto' in
  * Tenant.aiPermissions.actionTypes. Missing entry, non-'auto' value,
- * malformed blob shape, or empty {} → permitted=false (escalate).
+ * malformed blob shape, or empty {} → escalate (M2-1).
  *
- * Triple-gate consequence: with default-deny + autoApproveEnabled=true
- * (M2-6b flip), nothing actually auto-executes until M2-3 populates
- * actionTypes. So M2-1 ships safe even if M2-3 slips — the flip alone
- * can't accidentally enable autonomy.
+ * M2-3 extends the model to a unified tri-value:
+ *   'auto'     → permit (subject to high-stakes clamp — see resolveAiPermission)
+ *   'escalate' → escalate (AI proposes; human review)
+ *   'blocked'  → blocked (AI never even queues this type — hard off)
+ *   undefined  → escalate (default-deny, M2-1)
+ *
+ * The high-stakes clamp is applied in `resolveAiPermission` (the public
+ * tri-value function) AFTER reading the tenant value: a high-stakes action
+ * with tenant='auto' is overridden to 'escalate'; tenant='blocked' is
+ * MORE restrictive and honored (clamp is a ceiling, not a floor).
  *
  * Expected shape inside Tenant.aiPermissions Json:
  *   { actionTypes: { send_message: 'auto', send_quote: 'escalate', … } }
@@ -316,36 +384,91 @@ const AiPermissionsSchema = z
   })
   .passthrough();
 
-function checkAiPermissions(
+/**
+ * KAN-1005 M2-3 — Resolve effective AI permission for an action type.
+ *
+ * Returns the unified tri-value outcome after applying the high-stakes
+ * clamp. Caller (`evaluateThreshold`) dispatches:
+ *   'permit'   → continue to matrix/confidence path
+ *   'escalate' → decision = 'human_review'
+ *   'blocked'  → decision = 'blocked'
+ *
+ * Clamp ordering (the safety property M2-3 ships):
+ *   1. Read tenant value from aiPermissions.actionTypes[actionType] (or undefined)
+ *   2. If actionType ∈ HIGH_STAKES_ACTION_TYPES:
+ *      - tenant 'blocked' → blocked (HONOR — stricter than clamp)
+ *      - otherwise → escalate (CLAMP — overrides 'auto', preserves 'escalate'/undefined)
+ *   3. Else (non-high-stakes):
+ *      - 'auto'     → permit
+ *      - 'blocked'  → blocked
+ *      - 'escalate' → escalate
+ *      - undefined  → escalate (default-deny, M2-1)
+ *
+ * Malformed blob → escalate with a flagged reason. Same fail-safe posture
+ * as M2-1 (KAN-1029 lesson: contract-mismatch defaults safe, no crash).
+ */
+export function resolveAiPermission(
   actionType: string,
   aiPermissions: Record<string, unknown>,
-): { permitted: boolean; reason: string } {
+): { outcome: 'permit' | 'escalate' | 'blocked'; reason: string } {
   const parsed = AiPermissionsSchema.safeParse(aiPermissions ?? {});
   if (!parsed.success) {
-    // Malformed blob → fail toward escalate (KAN-1029 lesson:
-    // contract-mismatch surfaces don't crash, they default safe).
     return {
-      permitted: false,
+      outcome: 'escalate',
       reason: 'aiPermissions blob malformed — defaulting to escalate (default-deny)',
     };
   }
-  const entry = parsed.data.actionTypes?.[actionType];
-  if (entry === 'auto') return { permitted: true, reason: 'permitted by tenant aiPermissions' };
-  if (entry === undefined) {
-    // No entry → default-deny. No wildcard support by design:
-    // broad-autonomy must be a deliberate M2-3 policy decision with
-    // high-stakes hard-coded to escalate, not a one-line config that
-    // inverts the safety property (default-deny → default-allow).
+  const tenantValue = parsed.data.actionTypes?.[actionType];
+  const isHighStakes = HIGH_STAKES_ACTION_TYPES.has(actionType);
+
+  if (isHighStakes) {
+    // 'blocked' is MORE restrictive than the clamp — honor it.
+    if (tenantValue === 'blocked') {
+      return {
+        outcome: 'blocked',
+        reason: `aiPermissions.actionTypes.${actionType} = "blocked" (tenant override, stricter than high-stakes clamp)`,
+      };
+    }
+    // Clamp authoritative: 'auto' / 'escalate' / undefined all → escalate.
+    if (tenantValue === 'auto') {
+      return {
+        outcome: 'escalate',
+        reason: `"${actionType}" is a high-stakes action — system clamp overrides tenant aiPermissions="auto" to escalate (KAN-1005 M2-3 safety invariant)`,
+      };
+    }
+    // 'escalate' or undefined — same outcome as the clamp would've produced.
     return {
-      permitted: false,
+      outcome: 'escalate',
+      reason: `"${actionType}" is a high-stakes action — system clamp routes to human review (tenant aiPermissions=${tenantValue === undefined ? 'unset (default-deny)' : `"${tenantValue}"`}; clamp does not lower restriction)`,
+    };
+  }
+
+  // Non-high-stakes: tri-value passthrough.
+  if (tenantValue === 'auto') {
+    return { outcome: 'permit', reason: 'permitted by tenant aiPermissions' };
+  }
+  if (tenantValue === 'blocked') {
+    return {
+      outcome: 'blocked',
+      reason: `aiPermissions.actionTypes.${actionType} = "blocked"`,
+    };
+  }
+  if (tenantValue === 'escalate') {
+    return {
+      outcome: 'escalate',
+      reason: `aiPermissions.actionTypes.${actionType} = "escalate"`,
+    };
+  }
+  if (tenantValue === undefined) {
+    return {
+      outcome: 'escalate',
       reason: `aiPermissions.actionTypes has no entry for "${actionType}" — default-deny`,
     };
   }
-  // Any value other than 'auto' (e.g. 'escalate', 'blocked') means
-  // not-autonomous. Escalate.
+  // Unknown value (typo, future shape) → escalate (fail-safe).
   return {
-    permitted: false,
-    reason: `aiPermissions.actionTypes.${actionType} = "${entry}" (not 'auto')`,
+    outcome: 'escalate',
+    reason: `aiPermissions.actionTypes.${actionType} = "${tenantValue}" (unknown value, not in tri-value 'auto'|'escalate'|'blocked') — default-deny`,
   };
 }
 
@@ -409,30 +532,55 @@ export function evaluateThreshold(
   let decision: GateDecisionValue;
   let reasoning: string;
 
-  if (checkBlockedActions(parsed.actionType, parsed.tenantConfig.blockedActionTypes)) {
-    decision = 'blocked';
-    reasoning = `Action type "${parsed.actionType}" is blocked by tenant configuration.`;
-  } else if (parsed.tenantConfig.requireHumanApproval) {
+  // KAN-1005 M2-3 — Unified tri-value permission + high-stakes clamp.
+  // resolveAiPermission encapsulates BOTH the tenant aiPermissions read
+  // AND the high-stakes clamp. By dispatching on the tri-value here, we
+  // guarantee the clamp is authoritative over EVERY auto-routing path
+  // below (matrix, legacy confidence, daily-limit, risk-flag) — there
+  // is no flow that reaches `decision = 'approved'` without first
+  // confirming the action is permit-eligible.
+  const aiPerm = resolveAiPermission(parsed.actionType, parsed.tenantConfig.aiPermissions);
+
+  if (parsed.tenantConfig.requireHumanApproval) {
     decision = 'human_review';
     reasoning = 'Tenant requires human approval for all AI actions.';
   } else if (parsed.tenantConfig.autoApproveEnabled === false) {
     // KAN-704 kill-switch: tenant-level disable runs BEFORE matrix resolution.
     decision = 'human_review';
     reasoning = 'Tenant auto-approve is disabled (kill-switch). Routing all actions to human review.';
+  } else if (aiPerm.outcome === 'blocked') {
+    // KAN-1005 M2-3 — 'blocked' is the third tri-value: hard off, not
+    // even queued for review. Stricter than 'escalate'. This is also
+    // the path a tenant takes to mark a high-stakes type as
+    // "definitely never" (clamp would already escalate it; 'blocked'
+    // signals stronger intent: "don't even propose").
+    decision = 'blocked';
+    reasoning = `Action type "${parsed.actionType}" is blocked (${aiPerm.reason}).`;
+  } else if (aiPerm.outcome === 'escalate') {
+    // KAN-1005 M2-3 clamp / M2-1 default-deny — both produce 'escalate'
+    // here. The clamp's reasoning string carries "high-stakes" + "system
+    // clamp" markers so audit/grep can distinguish clamp-fires from
+    // generic default-deny without needing two parallel signals.
+    //
+    // Ordering: this gate fires BEFORE the matrix-sentinel branch below,
+    // so even when a high-stakes action ALSO has matrix-sentinel-1.0
+    // (send_quote, reply_to_complaint), the clamp's reasoning is the
+    // single canonical attribution. The matrix-sentinel branch below
+    // remains as defense-in-depth for non-clamp action types that a
+    // tenant or pipeline matrix explicitly pins to human_review.
+    decision = 'human_review';
+    reasoning = `Action type "${parsed.actionType}" is not permitted for autonomous execution (${aiPerm.reason}). Routing to human review.`;
   } else if (matrixDefault === 'human_review') {
-    // Matrix entry is sentinel-level (e.g., send_quote / reply_to_complaint
-    // at threshold 1.0 + default human_review). Skip the confidence check —
-    // the calibration explicitly says "never auto."
+    // Matrix entry is sentinel-level. Today the platform-default 1.0
+    // sentinels (send_quote, reply_to_complaint) are also high-stakes-
+    // clamped above, so this branch is reached only for tenant-supplied
+    // stage/pipeline matrices that pin a SAFE action type to human_review
+    // (e.g., a tenant during a sensitive product launch). Preserved as
+    // defense-in-depth and tenant-config respect.
     decision = 'human_review';
     reasoning = `Action type "${parsed.actionType}" is configured for human review by the auto-approve matrix${matrixEntry?.rationale ? ` (rationale: ${matrixEntry.rationale})` : ''}.`;
-  } else if (!checkAiPermissions(parsed.actionType, parsed.tenantConfig.aiPermissions).permitted) {
-    // KAN-1005 M2-1 (Gap C) — default-deny on Tenant.aiPermissions.
-    // With autoApproveEnabled=true (M2-6b flip), this is the gate that
-    // keeps autonomy locked until M2-3 explicitly populates actionTypes.
-    const check = checkAiPermissions(parsed.actionType, parsed.tenantConfig.aiPermissions);
-    decision = 'human_review';
-    reasoning = `Action type "${parsed.actionType}" is not permitted for autonomous execution (${check.reason}). Routing to human review.`;
   } else {
+    // aiPerm.outcome === 'permit' — continue to matrix/confidence path.
     const escalation = checkAutoEscalation(
       parsed.riskFlags,
       parsed.tenantConfig.autoEscalateFlags,
@@ -526,7 +674,6 @@ export function createThresholdGateRouter(): Router {
 
 export {
   checkAutoEscalation,
-  checkBlockedActions,
   checkDailyLimit,
   buildReviewRequest,
   DEFAULT_AUTO_ESCALATE_FLAGS,

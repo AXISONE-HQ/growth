@@ -771,8 +771,9 @@ export async function evaluateThresholdWithMatrix(
       // Zod parse with safe defaults — KAN-1029 lesson applied (malformed
       // blob fails toward escalate by yielding [], same as missing).
       autoEscalateFlags: parseAutoEscalateFlags(tenantRaw.guardrailSettings),
-      // M2-3 territory — left as-is (stub returns [], same as today).
-      blockedActionTypes: (tenantRaw.blockedActionTypes ?? []) as string[],
+      // KAN-1005 M2-3 — `blockedActionTypes` removed. Collapsed into the
+      // unified aiPermissions.actionTypes tri-value: 'blocked' is the
+      // third value (hard off). Eliminates the dead column-less stub.
       requireHumanApproval: (tenantRaw.requireHumanApproval ?? false) as boolean,
       autoApproveEnabled: (tenantRaw.autoApproveEnabled ?? true) as boolean,
       // KAN-1005 M2-1 — Gap A: real per-tenant daily limit, was stubbed

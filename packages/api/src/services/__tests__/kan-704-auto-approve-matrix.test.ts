@@ -229,7 +229,11 @@ describe('evaluateThreshold matrix integration', () => {
   // Sentinel routing — never auto
   // ─────────────────────────────────────────────
 
-  it('send_quote ALWAYS routes to human_review even at confidence 100 (sentinel)', () => {
+  it('send_quote ALWAYS routes to human_review even at confidence 100 (KAN-1005 M2-3: high-stakes clamp; pre-M2-3: matrix sentinel)', () => {
+    // Outcome unchanged from M2-3 (still human_review). Reasoning
+    // attribution moved from "matrix sentinel" to "system clamp" because
+    // the clamp fires BEFORE the matrix-default branch (single
+    // canonical signal for high-stakes safety property).
     const out = evaluateThreshold({
       ...BASE_INPUT,
       actionType: 'send_quote',
@@ -238,7 +242,7 @@ describe('evaluateThreshold matrix integration', () => {
       pipelineMatrix: null,
     });
     expect(out.decision).toBe('human_review');
-    expect(out.reasoning).toMatch(/configured for human review/);
+    expect(out.reasoning).toMatch(/high-stakes|system clamp|configured for human review/);
   });
 
   it('reply_to_complaint ALWAYS routes to human_review (sentinel)', () => {
@@ -284,12 +288,20 @@ describe('evaluateThreshold matrix integration', () => {
   // Existing checks still fire
   // ─────────────────────────────────────────────
 
-  it('blocked action types still get blocked (matrix does not bypass blocklist)', () => {
+  it('blocked action types still get blocked (matrix does not bypass blocklist) — KAN-1005 M2-3: via aiPermissions.actionTypes', () => {
+    // KAN-1005 M2-3 — the legacy `blockedActionTypes` array collapsed
+    // into the unified aiPermissions.actionTypes tri-value model.
+    // 'blocked' is the third value; semantically stronger than 'escalate'
+    // (hard off, never queued). This test pins back-compat for the
+    // blocking behavior; tenants migrate from blockedActionTypes=[…]
+    // to aiPermissions.actionTypes={…: 'blocked'}.
     const out = evaluateThreshold({
       ...BASE_INPUT,
       tenantConfig: {
         ...BASE_INPUT.tenantConfig,
-        blockedActionTypes: ['send_followup_email'],
+        aiPermissions: {
+          actionTypes: { send_followup_email: 'blocked' },
+        },
       },
     });
     expect(out.decision).toBe('blocked');
