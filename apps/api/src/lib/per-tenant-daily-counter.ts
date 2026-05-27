@@ -79,6 +79,35 @@ export function counterKey(
 }
 
 /**
+ * KAN-1005 M2-4 — sibling hourly-bucket key factory. Same generic shape
+ * as `counterKey` but at hour granularity for sub-day signals (action-
+ * rate spikes, error-rate climbs).
+ *
+ * Key format: `<scope>:tenant:<tenantId>:<YYYYMMDDHH>` (UTC clock hour).
+ * Same `incrementToday` / `getTodayCount` accessors work because the
+ * accessors take an arbitrary `scope` string and the `key` is built
+ * inside; callers select daily vs hourly by choosing which key-factory
+ * they pass through. No parallel counter lib — same primitive, second
+ * window.
+ *
+ * **Bucket semantics (intentional, document next to the threshold):**
+ * The hourly bucket is a fixed clock-hour bucket, NOT a sliding window.
+ * Implication for breaker reset: after a 60-min cooldown TTL auto-
+ * clears, if we're still inside a clock hour whose bucket is over
+ * threshold, the next action re-trips immediately. This is the safe
+ * direction (re-trip-while-still-hot) for a safety gate; sliding-
+ * window math would be more code for marginally smoother UX.
+ */
+export function counterKeyHourly(
+  scope: string,
+  tenantId: string,
+  now: Date = new Date(),
+): string {
+  const yyyymmddhh = utcDateHourString(now);
+  return `${scope}:tenant:${tenantId}:${yyyymmddhh}`;
+}
+
+/**
  * UTC date string in `YYYYMMDD` form. Stable across timezones; matches
  * the LlmCostRollup hour_bucket UTC convention.
  */
@@ -87,6 +116,15 @@ export function utcDateString(d: Date): string {
   const m = String(d.getUTCMonth() + 1).padStart(2, '0');
   const day = String(d.getUTCDate()).padStart(2, '0');
   return `${y}${m}${day}`;
+}
+
+/**
+ * UTC date+hour string in `YYYYMMDDHH` form. Stable across timezones.
+ */
+export function utcDateHourString(d: Date): string {
+  const base = utcDateString(d);
+  const hh = String(d.getUTCHours()).padStart(2, '0');
+  return `${base}${hh}`;
 }
 
 /**
@@ -148,6 +186,60 @@ export async function incrementToday(
   // increments is harmless but extra round-trip — skip when not needed.
   if (newTotal === delta) {
     await redis.expire(key, COUNTER_KEY_TTL_SECONDS);
+  }
+  return newTotal;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// KAN-1005 M2-4 — hourly-window sibling accessors.
+//
+// Same primitive as the daily counter, second window for sub-day signals.
+// Both windows live in the same lib (PRD: "one counter, two consumers";
+// extends to "one lib, two windows"). M2-4 uses hourly for action-rate
+// spike + error-rate climb signals; daily continues to be M2-1's
+// action_count + M1's cost_cap_usd window.
+//
+// TTL = 90 minutes (covers the 60-min cooldown + slack). Auto-expires
+// stale buckets so old keys don't accumulate.
+// ─────────────────────────────────────────────────────────────────────────
+
+const HOURLY_KEY_TTL_SECONDS = 90 * 60;
+
+/**
+ * Read current hour's accumulated counter value for a tenant. Returns 0
+ * when the hourly bucket hasn't been touched.
+ *
+ * Bucket boundary is UTC clock hour; not a sliding window. See
+ * `counterKeyHourly` docs for the intentional bucket semantics.
+ */
+export async function getHourlyCount(
+  redis: Pick<Redis, 'get'>,
+  scope: string,
+  tenantId: string,
+  now: Date = new Date(),
+): Promise<number> {
+  const key = counterKeyHourly(scope, tenantId, now);
+  const raw = await redis.get(key);
+  if (raw == null) return 0;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/**
+ * Atomically increment current hour's counter by `delta` and return the
+ * new total. Sets the 90-minute TTL on first increment.
+ */
+export async function incrementHourly(
+  redis: Pick<Redis, 'incrby' | 'expire'>,
+  scope: string,
+  tenantId: string,
+  delta: number,
+  now: Date = new Date(),
+): Promise<number> {
+  const key = counterKeyHourly(scope, tenantId, now);
+  const newTotal = await redis.incrby(key, delta);
+  if (newTotal === delta) {
+    await redis.expire(key, HOURLY_KEY_TTL_SECONDS);
   }
   return newTotal;
 }

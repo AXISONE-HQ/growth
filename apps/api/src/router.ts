@@ -6365,6 +6365,174 @@ const usersRouter = router({
     }),
 });
 
+// ─────────────────────────────────────────────
+// KAN-1005 M2-4 — Circuit breaker admin router.
+//
+// Manual trip + reset + status for the machine-speed auto-pause. All
+// mutations adminProcedure — Firebase token + ADMIN_EMAILS allowlist
+// (same gate as recommendations + dangerous mutations). Status query
+// is admin-only too; tenant-internal Breaker state shouldn't leak to
+// non-admins.
+//
+// Variable-specifier dynamic imports — cross-rootDir per
+// reference_variable_specifier_dynamic_import.
+// ─────────────────────────────────────────────
+
+interface CircuitBreakerLib {
+  evaluateBreakerState: (
+    redis: unknown,
+    tenantId: string,
+  ) => Promise<{
+    tripped: boolean;
+    scope?: string;
+    isGlobal?: boolean;
+    reason?: string;
+    failClosed?: boolean;
+  }>;
+  tripBreaker: (
+    redis: unknown,
+    scope: string,
+    target: string,
+    ttlSeconds: number,
+    reason: string,
+  ) => Promise<void>;
+  resetBreaker: (
+    redis: unknown,
+    scope: string,
+    target: string,
+  ) => Promise<boolean>;
+  BREAKER_SCOPE_COST: string;
+  BREAKER_SCOPE_RATE: string;
+  BREAKER_SCOPE_ERROR: string;
+  GLOBAL_TARGET: string;
+  COOLDOWN_SECONDS: number;
+  secondsUntilUtcMidnight: () => number;
+}
+let _circuitBreakerLib: CircuitBreakerLib | null = null;
+async function loadCircuitBreakerLib(): Promise<CircuitBreakerLib> {
+  if (_circuitBreakerLib) return _circuitBreakerLib;
+  const spec = "./lib/circuit-breaker.js";
+  _circuitBreakerLib = (await import(spec)) as CircuitBreakerLib;
+  return _circuitBreakerLib;
+}
+
+interface RedisClientLib {
+  getRedisClient: () => unknown;
+}
+let _redisClientLib: RedisClientLib | null = null;
+async function loadRedisClientLib(): Promise<RedisClientLib> {
+  if (_redisClientLib) return _redisClientLib;
+  const spec = "./services/redis-client.js";
+  _redisClientLib = (await import(spec)) as RedisClientLib;
+  return _redisClientLib;
+}
+
+const BreakerScopeSchema = z.enum([
+  "breaker_tripped_cost",
+  "breaker_tripped_rate",
+  "breaker_tripped_error",
+]);
+
+const circuitBreakerRouter = router({
+  // ── Status: read current breaker state for the requesting tenant ──
+  status: adminProcedure.query(async ({ ctx }) => {
+    const lib = await loadCircuitBreakerLib();
+    const { getRedisClient } = await loadRedisClientLib();
+    const state = await lib.evaluateBreakerState(getRedisClient(), ctx.tenantId);
+    return state;
+  }),
+
+  // ── Manual reset: clear a specific scope for tenant OR global ──
+  reset: adminProcedure
+    .input(
+      z.object({
+        scope: BreakerScopeSchema,
+        // null/undefined target → tenant-scoped (uses ctx.tenantId).
+        // 'global' literal → global breaker (admin-only by definition).
+        target: z.enum(["tenant", "global"]).default("tenant"),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const lib = await loadCircuitBreakerLib();
+      const { getRedisClient } = await loadRedisClientLib();
+      const target = input.target === "global" ? lib.GLOBAL_TARGET : ctx.tenantId;
+      const wasTripped = await lib.resetBreaker(getRedisClient(), input.scope, target);
+      // Audit-log every reset (best-effort).
+      void ctx.prisma.auditLog
+        .create({
+          data: {
+            tenantId: target === lib.GLOBAL_TARGET ? "__global__" : ctx.tenantId,
+            actor: "circuit_breaker_admin",
+            actionType: "circuit_breaker_reset",
+            reasoning: `Manual reset by admin user ${ctx.firebaseUser?.email ?? "unknown"}`,
+            payload: {
+              scope: input.scope,
+              target: input.target,
+              wasTripped,
+              resetByEmail: ctx.firebaseUser?.email,
+              resetByUid: ctx.firebaseUser?.uid,
+            },
+          },
+        })
+        .catch((err: unknown) => {
+          console.warn(
+            `[circuit-breaker] audit-emit-reset-failed scope=${input.scope} target=${input.target} err=${(err as Error)?.message ?? String(err)}`,
+          );
+        });
+      return { ok: true, scope: input.scope, target: input.target, wasTripped };
+    }),
+
+  // ── Manual trip: ops-controlled trip path (e.g., to pause a tenant
+  // during an investigation or to test the breaker without simulating
+  // the underlying signal). Global trip is also admin-only.
+  trip: adminProcedure
+    .input(
+      z.object({
+        scope: BreakerScopeSchema,
+        target: z.enum(["tenant", "global"]).default("tenant"),
+        reason: z.string().min(1).max(500),
+        // TTL override; defaults per scope (cost = until UTC midnight,
+        // rate/error = COOLDOWN_SECONDS).
+        ttlSeconds: z.number().int().min(60).max(86400).optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const lib = await loadCircuitBreakerLib();
+      const { getRedisClient } = await loadRedisClientLib();
+      const target = input.target === "global" ? lib.GLOBAL_TARGET : ctx.tenantId;
+      const ttl =
+        input.ttlSeconds ??
+        (input.scope === lib.BREAKER_SCOPE_COST
+          ? lib.secondsUntilUtcMidnight()
+          : lib.COOLDOWN_SECONDS);
+      const reasonAnnotated = `manual_admin_trip: ${input.reason} (by ${ctx.firebaseUser?.email ?? "unknown"})`;
+      await lib.tripBreaker(getRedisClient(), input.scope, target, ttl, reasonAnnotated);
+      void ctx.prisma.auditLog
+        .create({
+          data: {
+            tenantId: target === lib.GLOBAL_TARGET ? "__global__" : ctx.tenantId,
+            actor: "circuit_breaker_admin",
+            actionType: "circuit_breaker_tripped",
+            reasoning: `Manual admin trip: ${input.reason}`,
+            payload: {
+              scope: input.scope,
+              target: input.target,
+              ttlSeconds: ttl,
+              trippedByEmail: ctx.firebaseUser?.email,
+              trippedByUid: ctx.firebaseUser?.uid,
+              source: "manual_admin",
+            },
+          },
+        })
+        .catch((err: unknown) => {
+          console.warn(
+            `[circuit-breaker] audit-emit-manual-trip-failed scope=${input.scope} target=${input.target} err=${(err as Error)?.message ?? String(err)}`,
+          );
+        });
+      return { ok: true, scope: input.scope, target: input.target, ttlSeconds: ttl };
+    }),
+});
+
 export const appRouter = router({
   contacts: contactsRouter,
   // KAN-883 — CRM read-layer cohort 1 (PR 1 of 3). UI lands in PR 2-3.
@@ -6403,6 +6571,8 @@ export const appRouter = router({
   account: accountRouter,
   // KAN-997 — Campaign Layer Slice 1 — text-to-segment (read-only).
   audience: audienceRouter,
+  // KAN-1005 M2-4 — Circuit breaker admin surface (status/reset/trip).
+  circuitBreaker: circuitBreakerRouter,
 });
 
 export type AppRouter = typeof appRouter;

@@ -228,7 +228,11 @@ describe('KAN-1018 — A2: counter incremented on success AND engine throw', () 
     const res = await postOne(baseEvent, 'msg-persistent-counter');
     expect(res.status).toBe(200);
     await new Promise((r) => setTimeout(r, 20));
-    expect(incrby).toHaveBeenCalledTimes(1);
+    // KAN-1005 M2-4 — two increments fire on throw now: the cost
+    // counter (in finally, KAN-1018 A2 storm-bound) AND the hourly
+    // error counter (in catch, M2-4 error-rate signal source).
+    // Both intended; both bound separate runaway dimensions.
+    expect(incrby).toHaveBeenCalledTimes(2);
     // Stack update does NOT fire on throw (preserves redeliver-after-fix)
     expect(stackUpdate).not.toHaveBeenCalled();
   });
@@ -240,7 +244,11 @@ describe('KAN-1018 — A2: counter incremented on success AND engine throw', () 
     const res = await postOne(baseEvent, 'msg-transient-counter');
     expect(res.status).toBe(500);
     await new Promise((r) => setTimeout(r, 20));
-    expect(incrby).toHaveBeenCalledTimes(1);
+    // KAN-1005 M2-4 — cost counter (finally) + error counter (catch)
+    // both increment. Note: transient errors count toward the error-
+    // rate signal too — intentional per founder refinement (a retry
+    // storm on one stuck message IS a runaway worth pausing on).
+    expect(incrby).toHaveBeenCalledTimes(2);
     expect(stackUpdate).not.toHaveBeenCalled();
   });
 });

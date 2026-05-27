@@ -728,6 +728,19 @@ export async function evaluateThresholdWithMatrix(
      *  Caller passes from Redis read; gate enforces against
      *  Tenant.dailyActionLimit. Defaults to 0 if not provided. */
     dailyAutoActionCount?: number;
+    /** KAN-1005 M2-4 — circuit breaker state. Caller (apps/api) reads
+     *  from Redis via `evaluateBreakerState(redis, tenantId)` BEFORE
+     *  invoking the engine, threads through here, gate enforces at
+     *  step 3 of the evaluateThreshold ladder. Optional for back-
+     *  compat (omitted → no breaker check); production caller always
+     *  reads + passes. */
+    breakerState?: {
+      tripped: boolean;
+      scope?: string;
+      isGlobal?: boolean;
+      reason?: string;
+      failClosed?: boolean;
+    };
   },
 ): Promise<{ outcome: 'EXECUTED' | 'ESCALATED'; reasoning: string }> {
   const { tenantId, contactId, contact } = args;
@@ -792,6 +805,11 @@ export async function evaluateThresholdWithMatrix(
     stageMatrix: stageMatrix as ThresholdGateInput['stageMatrix'],
     pipelineMatrix: pipelineMatrix as ThresholdGateInput['pipelineMatrix'],
     dailyAutoActionCount: args.dailyAutoActionCount ?? 0,
+    // KAN-1005 M2-4 — caller-provided circuit breaker state. Falls
+    // through to default { tripped: false } when omitted (back-compat
+    // for callers that haven't migrated; production caller in
+    // apps/api always reads + passes).
+    breakerState: args.breakerState ?? { tripped: false },
   };
 
   const result = await evaluateThreshold(gateInput);
