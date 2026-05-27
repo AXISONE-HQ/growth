@@ -7,6 +7,12 @@ export * from "./knowledge-ingest.js";
 export * from "./knowledge-source-ingest.js";
 export * from "./knowledge-validation.js";
 export * from "./decision-payload.js";
+// KAN-1005 M2-4 follow-up — canonical run-decision input types.
+// Single source of truth for RunForContactInput + BreakerStateInput +
+// PlaybookStepContext so the apps/api dynamic-import boundary can't
+// silently drop fields (the M2-4 breaker plumbing was a sibling of the
+// cast-loose Prisma + synthetic decisionId drift class).
+export * from "./run-decision-types.js";
 export * from "./agentic-tool-schemas.js";
 export * from "./action-types.js";
 export * from "./lead-received.js";

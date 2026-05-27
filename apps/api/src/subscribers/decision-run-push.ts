@@ -127,32 +127,23 @@ export function __setDecisionRunPushPubsubForTest(client: PubSub | null): void {
 // ─────────────────────────────────────────────
 // Variable-specifier dynamic import for the cross-rootDir Decision Engine
 // entry point. Same pattern the rest of apps/api uses.
+//
+// KAN-1005 M2-4 follow-up — the input type is now imported from
+// @growth/shared (the canonical, cross-rootDir-clean cohort) rather
+// than hand-redeclared locally. The hand-redeclaration class silently
+// drifted three times: cast-loose Prisma access, KAN-1005 M2-6b
+// synthetic decisionId, and the M2-4 breakerState drop that the S4
+// smoke surfaced. Shared types eliminate the drift class structurally
+// — both this caller and the packages/api implementation compile-check
+// against the same single source of truth.
 // ─────────────────────────────────────────────
+
+import type { RunForContactInput } from '@growth/shared';
 
 interface RunDecisionModule {
   runDecisionForContact: (
     prisma: unknown,
-    input: {
-      tenantId: string;
-      contactId: string;
-      actor?: { type: 'USER' | 'SYSTEM'; id: string };
-      // KAN-1005 M2-1 — autonomous-action count for the daily-limit gate.
-      // Caller computes from Redis BEFORE invoking the engine; engine
-      // threads to evaluateThresholdWithMatrix. Defaults to 0 in the
-      // engine if omitted (back-compat).
-      dailyAutoActionCount?: number;
-      // KAN-1005 M2-4 — circuit breaker state from Redis. Same caller-
-      // reads-Redis-passes-to-engine pattern as dailyAutoActionCount.
-      // Engine threads to evaluateThresholdWithMatrix → evaluateThreshold
-      // step 3 (machine-speed pause).
-      breakerState?: {
-        tripped: boolean;
-        scope?: string;
-        isGlobal?: boolean;
-        reason?: string;
-        failClosed?: boolean;
-      };
-    },
+    input: RunForContactInput,
   ) => Promise<unknown>;
 }
 let _runDecisionModule: RunDecisionModule | null = null;
