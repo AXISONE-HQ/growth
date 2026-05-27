@@ -1,0 +1,48 @@
+-- KAN-1005 M2-6a — Per-tenant send-redirect gate.
+--
+-- Adds 1 column to the `tenants` table:
+--   - send_redirect_enabled  BOOLEAN  NOT NULL  DEFAULT true
+--
+-- Semantics:
+--   true (default)  → redirect this tenant's outbound sends to the
+--                     founder test inbox (current behavior for ALL
+--                     tenants today; preserved by the default).
+--   false           → deliver to the real recipient (real-send mode).
+--                     Real-send go-live is a SEPARATE deliberate per-
+--                     tenant flip, NOT part of this PR. KAN-808
+--                     (CAN-SPAM/CASL compliance) is a HARD prerequisite
+--                     before any tenant flips to false.
+--
+-- Migration shape: purely additive.
+--   - ADD COLUMN with constant DEFAULT is a metadata-only change in
+--     PG ≥11 (DEFAULT applied at read time for existing rows; no
+--     backfill scan).
+--   - NOT NULL with DEFAULT is safe — existing rows acquire the
+--     default at read time, no NULL ever exists in this column.
+--   - Safe under concurrent writes; no advisory lock required.
+--   - Zero data loss, zero destroy.
+--
+-- Backward compat: all existing tenants inherit `true`, which matches
+-- today's behavior (env SEND_REDIRECT_ENABLED=true forces redirect for
+-- every send). After M2-6a's read-site wires up:
+--   - PROD env SEND_REDIRECT_ENABLED stays `true` → still forces redirect
+--     for everyone (step 1 of the precedence ladder catches before any
+--     per-tenant read fires). Zero behavioral change at merge.
+--   - Future ops flip env to `false` to make per-tenant column governing.
+--     At that point, every existing tenant's `true` default still
+--     redirects; new tenants default `true`; deliberate per-tenant flips
+--     to `false` enable real-send for that tenant only (KAN-808-gated).
+--
+-- Consumers:
+--   - apps/connectors/src/adapters/_shared/send-redirect.ts (this PR — DB
+--     lookup of Tenant.sendRedirectEnabled inside applyRedirect, when
+--     env SEND_REDIRECT_ENABLED=false).
+--   - Future Admin UI (KAN-XXXX) for tenant-by-tenant flip operation.
+--
+-- Drift artifacts: this migration is hand-written + comment-annotated,
+-- then verified against `prisma migrate diff --from-schema-datamodel
+-- <main> --to-schema-datamodel <head> --script` (Phase 4 paste-eyeball
+-- artifact). Anything Prisma's diff inserted beyond this ALTER TABLE
+-- is the drift-strip pattern (per feedback_prisma_vector_index_silent_drop_drift).
+
+ALTER TABLE "tenants" ADD COLUMN "send_redirect_enabled" BOOLEAN NOT NULL DEFAULT true;
