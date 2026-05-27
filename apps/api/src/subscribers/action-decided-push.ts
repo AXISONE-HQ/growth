@@ -30,6 +30,13 @@ import {
   gateAndPublishComposed,
 } from '../../../../packages/api/src/services/message-composer.js';
 import { loadKnowledge } from '../../../../packages/api/src/services/context-assembler.js';
+// KAN-1005 M2-5 — human-review sampling lives in apps/api/src/lib/
+// (M2-4 pattern). Same-rootDir import; engine never sees this module
+// so no new TS6059 in the KAN-689 cohort.
+import {
+  maybeEnqueueSampledReview,
+  resolveSampleRate,
+} from '../lib/human-review-sampling.js';
 
 // ─────────────────────────────────────────────
 // KAN-1005 M2-2 — Send-policy module loaded via variable-specifier dynamic
@@ -303,6 +310,68 @@ actionDecidedPushApp.post('/action-decided', async (c) => {
     console.log(
       `[action-decided-push] published action.send decisionId=${event.decisionId} messageId=${sendResult.messageId} guardrail=${sendResult.decision}`,
     );
+
+    // ─────────────────────────────────────────────
+    // KAN-1005 M2-5 — non-blocking human-review sampling fork.
+    //
+    // Real action is already in Pub/Sub by this point (publishActionSend
+    // fired inside gateAndPublishComposed above). Sampling is a post-hoc
+    // observability concern; this fork is fire-and-forget — any throw
+    // here is caught + logged with "action UNAFFECTED", never blocks or
+    // retries the ack-200 response.
+    //
+    // Filters on event.decision.decisionSource (M2-5 wire-format
+    // discriminator): 'agentic_live' + 'freeform' sample; 'playbook' +
+    // 'approve_to_send' skip; undefined (pre-M2-5 in-flight messages)
+    // also skip (safe back-compat).
+    //
+    // Rate read from Tenant.settings.humanReviewSampling.rate via
+    // fail-safe parse (defaults to DEFAULT_SAMPLE_RATE on any malformed
+    // input; never falls back to 0 or runaway).
+    //
+    // M2-4 pattern: module lives in apps/api/src/lib/ (same rootDir);
+    // engine never imports it, so zero new TS6059 in the KAN-689
+    // cohort. Sampling fork lives where it semantically belongs —
+    // post-execution observability in the dispatch layer.
+    // ─────────────────────────────────────────────
+    void (async () => {
+      try {
+        const tenantRow = await prisma.tenant.findUnique({
+          where: { id: event.tenantId },
+          select: { settings: true },
+        });
+        const sampleRate = resolveSampleRate(tenantRow?.settings);
+        const result = await maybeEnqueueSampledReview(prisma, {
+          tenantId: event.tenantId,
+          contactId: event.contactId,
+          decisionId: event.decisionId,
+          actionType: event.action.actionType,
+          channel: event.action.channel,
+          confidence: event.decision.confidenceScore,
+          decisionSource: event.decision.decisionSource,
+          reasoning: event.decision.actionReasoning,
+          sampleRate,
+        });
+        if (result.sampled) {
+          console.log(
+            JSON.stringify({
+              type: 'human_review_sample_enqueued',
+              tenantId: event.tenantId,
+              decisionId: event.decisionId,
+              escalationId: result.escalationId,
+              sampleRate,
+              decisionSource: event.decision.decisionSource,
+            }),
+          );
+        }
+      } catch (sampleErr) {
+        console.error(
+          `[action-decided-push] human-review sampling failed decisionId=${event.decisionId} (action UNAFFECTED):`,
+          sampleErr,
+        );
+      }
+    })();
+
     return c.text('ok', 200);
   } catch (err) {
     console.error(

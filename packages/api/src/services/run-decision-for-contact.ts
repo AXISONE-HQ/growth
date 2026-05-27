@@ -615,6 +615,11 @@ async function runAgentic(
       confidenceScore: agenticPayload.confidence,
       strategyReasoning: reasoning,
       actionReasoning: reasoning,
+      // KAN-1005 M2-5 — decision-source discriminator. agentic_live
+      // is sample-eligible (downstream action-decided-push.ts samples
+      // a configurable % into the human-review queue for drift
+      // detection).
+      decisionSource: 'agentic_live',
     }).catch((err: unknown) => {
       console.error(`[runAgentic] publishActionDecided failed decisionId=${decision.id}:`, err);
     });
@@ -918,6 +923,11 @@ async function runPlaybookStep(
       confidenceScore: confidence, // 1.0 = certainty the predetermined step will execute, not outcome probability
       strategyReasoning: reasoning,
       actionReasoning: step.instruction,
+      // KAN-1005 M2-5 — decision-source discriminator. Playbook steps are
+      // human-curated and pre-vetted at creation; NOT autonomous
+      // decisions. Marked 'playbook' so action-decided-push.ts SKIPS
+      // sampling for these.
+      decisionSource: 'playbook',
     }).catch((err: unknown) => {
       console.error(
         `[runPlaybookStep] publishActionDecided failed decisionId=${decision.id} contactId=${contactId}:`,
@@ -1269,6 +1279,10 @@ async function runFreeform(
           confidenceScore: confidence,
           strategyReasoning: strategy?.reasoning ?? '',
           actionReasoning: action?.reasoning ?? '',
+          // KAN-1005 M2-5 — runFreeform (rules-based engine) is sample-
+          // eligible alongside runAgentic. action-decided-push.ts samples
+          // a configurable % for drift detection.
+          decisionSource: 'freeform',
         })
       : publishEscalationTriggered(client, {
           tenantId,
