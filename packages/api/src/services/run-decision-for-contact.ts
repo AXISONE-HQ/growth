@@ -39,7 +39,8 @@ import { z } from 'zod';
 // the `selectStrategy` and `scoreConfidence` signatures are similar. When
 // you see the first compile error, trace it back to the Input schema in
 // that service file — it's the source of truth.
-import { type DecisionPayload, computeDivergence, type DivergenceFlag } from '@growth/shared';
+// KAN-1005 M2-4 follow-up — RunForContactInput moved to @growth/shared (canonical, both sides compile-check against single source — eliminates hand-written-type drift class that dropped breakerState).
+import { type DecisionPayload, computeDivergence, type DivergenceFlag, type RunForContactInput as SharedRunForContactInput, type PlaybookStepContext as SharedPlaybookStepContext, type BreakerStateInput } from '@growth/shared';
 import { analyzeGapsForContact } from './objective-gap-analyzer.js';
 import { selectStrategy } from './strategy-selector.js';
 import { determineAction } from './action-determiner.js';
@@ -112,44 +113,14 @@ import {
 } from './action-decided-publisher.js';
 import { getPubSubClient } from '../lib/pubsub-client.js';
 
-export interface PlaybookStepContext {
-  /** Unique step identifier, e.g. "dormant_reactivation_14d:day_0". */
-  playbookStep: string;
-  /** Exact instruction for the downstream send agent (no LLM planning upstream). */
-  instruction: string;
-  /** Whitelist of actions the step is allowed to emit (enforced downstream). */
-  allowedActions: string[];
-  /** Channel to send on. */
-  channel: 'email' | 'sms' | 'meta';
-  /** Freeform metadata attached to the Decision row (playbook name, dryRun, etc.). */
-  additionalContext?: Record<string, unknown>;
-}
-
-export interface RunForContactInput {
-  tenantId: string;
-  contactId: string;
-  /** If true, bypass Redis cache when assembling Brain context (useful for demos). */
-  freshContext?: boolean;
-  /** Actor identity for the audit log. Defaults to 'SYSTEM' for cron/Pub/Sub triggers. */
-  actor?: { type: 'USER' | 'SYSTEM'; id: string };
-  /**
-   * KAN-1005 M2-1 — autonomous-action count for today (UTC), keyed per-tenant.
-   * Caller (decision-run-push) reads from Redis (action_count:tenant:<id>:<UTCYYYYMMDD>)
-   * BEFORE invoking the engine; engine threads to evaluateThresholdWithMatrix
-   * where the daily-action-limit gate consumes it. Omit (or 0) when not
-   * relevant (sync trpc paths, tests). Engine treats undefined as 0
-   * (gate skips daily-limit check when dailyActionLimit is also undefined).
-   */
-  dailyAutoActionCount?: number;
-  /**
-   * Adapter pattern (KAN-655): when set, the engine executes this predetermined step
-   * instead of free-form deciding. Skips assembleContext/selectStrategy/determineAction/
-   * scoreConfidence/evaluateThreshold. Writes a Decision row with strategy='playbook_driven'
-   * and the step's instruction/channel as the action. Free-form mode (this field omitted)
-   * is unchanged.
-   */
-  playbookStepContext?: PlaybookStepContext;
-}
+// KAN-1005 M2-4 follow-up — canonical types now live in @growth/shared
+// (packages/shared/src/run-decision-types.ts) so both this implementation
+// and the apps/api dynamic-import caller compile-check against the same
+// single source of truth. Re-exported here for in-package call-site
+// back-compat (existing imports of `RunForContactInput` from this module
+// keep working unchanged).
+export type PlaybookStepContext = SharedPlaybookStepContext;
+export type RunForContactInput = SharedRunForContactInput;
 
 export interface RunForContactResult {
   decisionId: string;
@@ -523,6 +494,12 @@ async function runAgentic(
         overallConfidence: agenticPayload.confidence * 100,
         // KAN-1005 M2-1: thread caller-provided count to the gate
         dailyAutoActionCount: input.dailyAutoActionCount,
+        // KAN-1005 M2-4 follow-up: thread caller-provided breaker state.
+        // Caller (decision-run-push) reads via evaluateBreakerState(redis,
+        // tenantId). Without this thread the gate defaults to {tripped:
+        // false} regardless of Redis state — the M2-4 silent-drop bug
+        // surfaced by the S4 smoke.
+        breakerState: input.breakerState,
       });
       if (gateDecision.outcome === 'ESCALATED') {
         outcome = 'ESCALATED';
@@ -1168,6 +1145,11 @@ async function runFreeform(
       overallConfidence: confidence * 100, // 0..1 → 0..100 (gate input scale)
       // KAN-1005 M2-1: thread caller-provided count to the gate
       dailyAutoActionCount: input.dailyAutoActionCount,
+      // KAN-1005 M2-4 follow-up: thread caller-provided breaker state.
+      // See agentic-path comment for rationale — without this thread the
+      // gate's step-4 breaker check defaults to {tripped:false} and never
+      // fires (the M2-4 silent-drop surfaced by S4).
+      breakerState: input.breakerState,
     });
   } catch (err) {
     // Mirror runAgentic's posture (line 451-455): gate evaluation failure
