@@ -83,15 +83,16 @@ export class ResendAdapter implements ChannelAdapter {
 
   // ── send() ────────────────────────────────────────────────
   async send(connection: ChannelConnection, msg: OutboundMessage): Promise<SendResult> {
-    // KAN-1030 — send-redirect guardrail. MUST be the first line: every
-    // provider SDK call below this point sees the (possibly) redirected
-    // recipient. When SEND_REDIRECT_ENABLED=true (default), msg.recipient.email
-    // is swapped to SEND_REDIRECT_EMAIL and subject/body are annotated.
+    // KAN-1030 + KAN-1005 M2-6a — send-redirect guardrail. MUST be the
+    // first line: every provider SDK call below this point sees the
+    // (possibly) redirected recipient. Precedence: env force-ON > per-
+    // tenant Tenant.sendRedirectEnabled > fail-safe redirect-ON. ASYNC
+    // since M2-6a (per-tenant DB lookup); existing send() is already async.
     // When the target env is missing, applyRedirect THROWS — propagates
     // up to the action-send-push subscriber which catches + logs + ACKs.
     // Structural CI gate enforces this is the first line of EVERY adapter
     // send() — see adapters/_shared/__tests__/send-redirect-no-bypass.test.ts.
-    msg = applyRedirect(msg, 'EMAIL');
+    msg = await applyRedirect(msg, 'EMAIL');
 
     if (!msg.recipient.email) {
       return {

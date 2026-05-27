@@ -68,6 +68,19 @@ model Tenant {
   strategyPermissions             Json                  @default("{}") @map("strategy_permissions")
   guardrailSettings               Json                  @default("{}") @map("guardrail_settings")
   settings                        Json                  @default("{}")
+  // KAN-1005 M2-6a — per-tenant send-redirect gate. The delivery-time
+  // switch (paired with M2-6b's decision-time autonomy flip — two
+  // independent switches). DEFAULT true so every existing + new tenant
+  // continues redirecting to the founder test inbox. Real-send go-live
+  // is a separate deliberate per-tenant flip to false, KAN-808 (CAN-SPAM/
+  // CASL) compliance HARD prerequisite. This PR ships the mechanism
+  // only; no tenant flips in this PR.
+  //
+  // Read site: apps/connectors/src/adapters/_shared/send-redirect.ts
+  // (applyRedirect, called as first line of every adapter send()).
+  // Precedence: env SEND_REDIRECT_ENABLED=true (global force-ON master)
+  // > per-tenant column > fail-safe redirect-ON on any DB error.
+  sendRedirectEnabled             Boolean               @default(true) @map("send_redirect_enabled")
   createdAt                       DateTime              @default(now()) @map("created_at")
   updatedAt                       DateTime              @updatedAt @map("updated_at")
 
