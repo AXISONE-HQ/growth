@@ -188,11 +188,11 @@ Return ONLY the JSON object, no markdown formatting.`;
   }
 
   const parsed = JSON.parse(jsonStr) as { subject?: unknown; body?: unknown };
-  return ComposedMessageSchema.parse({
-    subject: parsed.subject,
-    body: parsed.body,
-    unsubscribeUrl: `${publicWebhookBaseUrl.replace(/\/$/, '')}/unsubscribe/${contactId}`,
-  });
+  // KAN-1005 M2-6b — append CAN-SPAM unsubscribe footer; guardrail-layer body keyword check requires it. KAN-808 owns final HTML polish.
+  const unsubscribeUrl = `${publicWebhookBaseUrl.replace(/\/$/, '')}/unsubscribe/${contactId}`;
+  const bodyText = typeof parsed.body === 'string' ? parsed.body : '';
+  const body = `${bodyText.trimEnd()}\n\n---\nUnsubscribe: ${unsubscribeUrl}`;
+  return ComposedMessageSchema.parse({ subject: parsed.subject, body, unsubscribeUrl });
 }
 
 export interface PublishActionSendInput {
@@ -397,6 +397,9 @@ export async function gateAndPublishComposed(
         tenantId: ctx.tenantId,
         contactId: ctx.contactId,
         objectiveId: ctx.objectiveId,
+        // KAN-1005 M2-6b — flow the real Decision row id from ctx so the
+        // escalation.triggered event FK-resolves against decisions.id.
+        decisionId: ctx.decisionId,
         reason: `guardrail_block: ${blockedReason}`,
         riskFlags: result.violations.map((v) => `${v.checkType}:${v.severity}`),
         proposedAction: {

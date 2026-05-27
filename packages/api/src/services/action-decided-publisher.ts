@@ -159,9 +159,13 @@ function generateEventId(): string {
   return `evt_${crypto.randomUUID()}`;
 }
 
-function generateDecisionId(): string {
-  return `dec_${crypto.randomUUID()}`;
-}
+// KAN-1005 M2-6b — generateDecisionId removed 2026-05-26. The synthetic
+// `dec_<uuid>` value never resolved to a `decisions.id` row, so every
+// downstream FK reference on event.decisionId (guardrail-block
+// Escalation row, M2-5 sample-fork Escalation row, M2-2 deferred-send
+// replay) silently FK-violated whenever the agentic chain actually
+// fired. All event-builders now require a real Decision.id from the
+// caller — see PublishActionInput.decisionId etc. (required field).
 
 // ─────────────────────────────────────────────
 // Agent Type Resolution
@@ -198,6 +202,15 @@ export interface PublishActionInput {
   tenantId: string;
   contactId: string;
   objectiveId: string;
+  /**
+   * KAN-1005 M2-6b — REQUIRED. Must be the real `decisions.id` row UUID
+   * (created by Decision row writes in run-decision-for-contact.ts or
+   * the originating decisionId on recommendations.accept). Downstream
+   * consumers FK-reference this on Escalation writes (guardrail-block,
+   * M2-5 sample fork); synthetic IDs caused silent FK violations in the
+   * pre-M2-6b dispatch chain.
+   */
+  decisionId: string;
   actionType: string;
   channel: string | null;
   actionPayload: Record<string, unknown>;
@@ -213,7 +226,6 @@ export interface PublishActionInput {
 export function buildActionDecidedEvent(
   input: PublishActionInput,
 ): ActionDecidedEvent {
-  const decisionId = generateDecisionId();
   const priority = resolvePriority(input.selectedStrategy, input.confidenceScore);
 
   return ActionDecidedEventSchema.parse({
@@ -224,7 +236,7 @@ export function buildActionDecidedEvent(
     tenantId: input.tenantId,
     contactId: input.contactId,
     objectiveId: input.objectiveId,
-    decisionId,
+    decisionId: input.decisionId,
     action: {
       actionType: input.actionType,
       channel: input.channel,
@@ -251,6 +263,13 @@ export interface PublishEscalationInput {
   tenantId: string;
   contactId: string;
   objectiveId: string;
+  /**
+   * KAN-1005 M2-6b — REQUIRED. Real `decisions.id` row UUID. See
+   * PublishActionInput.decisionId — same rationale: synthetic IDs FK-
+   * violated downstream Escalation writes. Pass the Decision row written
+   * by the engine before publish.
+   */
+  decisionId: string;
   reason: string;
   riskFlags: string[];
   proposedAction: {
@@ -276,7 +295,7 @@ export function buildEscalationTriggeredEvent(
     tenantId: input.tenantId,
     contactId: input.contactId,
     objectiveId: input.objectiveId,
-    decisionId: generateDecisionId(),
+    decisionId: input.decisionId,
     escalation: {
       reason: input.reason,
       riskFlags: input.riskFlags,
@@ -296,6 +315,11 @@ export interface PublishDecisionLogInput {
   tenantId: string;
   contactId: string;
   objectiveId: string;
+  /**
+   * KAN-1005 M2-6b — REQUIRED. Real `decisions.id` row UUID. See
+   * PublishActionInput.decisionId — same rationale.
+   */
+  decisionId: string;
   gateDecision: string;
   selectedStrategy: string;
   actionType: string;
@@ -317,7 +341,7 @@ export function buildDecisionLoggedEvent(
     tenantId: input.tenantId,
     contactId: input.contactId,
     objectiveId: input.objectiveId,
-    decisionId: generateDecisionId(),
+    decisionId: input.decisionId,
     audit: {
       gateDecision: input.gateDecision,
       selectedStrategy: input.selectedStrategy,
@@ -567,7 +591,6 @@ export function createActionDecidedPublisherRouter(
 
 export {
   generateEventId,
-  generateDecisionId,
   resolveAgentType,
   resolvePriority,
   topicName,

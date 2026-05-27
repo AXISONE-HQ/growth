@@ -198,6 +198,8 @@ const TENANT_A = '11111111-1111-1111-1111-111111111111';
 const CONTACT_A = '22222222-2222-2222-2222-222222222222';
 const CAMPAIGN_A = '33333333-3333-3333-3333-333333333333';
 const STACK_A = '44444444-4444-4444-4444-444444444444';
+// KAN-1005 M2-6b — fixture decisionId uses real-UUID format (FK-shape).
+const DECISION_A = '55555555-5555-5555-5555-555555555555';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -426,7 +428,7 @@ describe('decision-run-push end-to-end — PR4 gates wired in correct ORDER', ()
     redisIncrbyMock.mockResolvedValue(10_000); // $0.10 in millidollars
     redisExpireMock.mockResolvedValue(1);
     runDecisionForContactMock.mockResolvedValue({
-      decisionId: 'dec_test',
+      decisionId: DECISION_A,
       strategy: 'direct',
       outcome: 'ESCALATED',
     });

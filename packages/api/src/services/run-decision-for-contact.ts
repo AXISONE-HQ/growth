@@ -608,6 +608,10 @@ async function runAgentic(
       tenantId,
       contactId,
       objectiveId,
+      // KAN-1005 M2-6b — real Decision row id; consumed by action-
+      // decided-push for guardrail-block Escalation FK + M2-5 sample
+      // fork FK (synthetic IDs were silently FK-violating pre-M2-6b).
+      decisionId: decision.id,
       actionType,
       channel,
       actionPayload: (agenticPayload.action.payload ?? {}) as Record<string, unknown>,
@@ -628,6 +632,8 @@ async function runAgentic(
       tenantId,
       contactId,
       objectiveId,
+      // KAN-1005 M2-6b — real Decision row id (see above).
+      decisionId: decision.id,
       reason: 'AGENTIC_GATE_DECISION',
       riskFlags: [],
       proposedAction: {
@@ -916,6 +922,8 @@ async function runPlaybookStep(
       tenantId,
       contactId,
       objectiveId,
+      // KAN-1005 M2-6b — real Decision row id.
+      decisionId: decision.id,
       actionType,
       channel: step.channel,
       actionPayload: { instruction: step.instruction },
@@ -1272,6 +1280,8 @@ async function runFreeform(
           tenantId,
           contactId,
           objectiveId: (action as any)?.objectiveId ?? 'unknown',
+          // KAN-1005 M2-6b — real Decision row id.
+          decisionId: decision.id,
           actionType,
           channel,
           actionPayload: (action?.actionPayload ?? {}) as Record<string, unknown>,
@@ -1288,6 +1298,8 @@ async function runFreeform(
           tenantId,
           contactId,
           objectiveId: (action as any)?.objectiveId ?? 'unknown',
+          // KAN-1005 M2-6b — real Decision row id.
+          decisionId: decision.id,
           reason: 'CONFIDENCE_BELOW_THRESHOLD',
           riskFlags: [],
           proposedAction: {
