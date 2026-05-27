@@ -1553,9 +1553,12 @@ interface RecsModule {
     tenantId: string,
     input: {
       status?: "open" | "claimed" | "resolved" | "dismissed";
-      severity?: "low" | "medium" | "high" | "critical";
+      // KAN-1005 M2-5 — 'info' for sampled post-hoc reviews.
+      severity?: "low" | "medium" | "high" | "critical" | "info";
       limit?: number;
       offset?: number;
+      // KAN-1005 M2-5 — queue partition (default 'pending' excludes samples).
+      kind?: "pending" | "sample" | "all";
     },
   ) => Promise<unknown>;
   getRecommendationDetail: (prisma: unknown, tenantId: string, id: string) => Promise<unknown>;
@@ -1604,9 +1607,15 @@ const recommendationsRouter = router({
     .input(
       z.object({
         status: z.enum(["open", "claimed", "resolved", "dismissed"]).optional(),
-        severity: z.enum(["low", "medium", "high", "critical"]).optional(),
+        // KAN-1005 M2-5 — 'info' added for sampled post-hoc reviews.
+        severity: z.enum(["low", "medium", "high", "critical", "info"]).optional(),
         limit: z.number().min(1).max(100).default(20),
         offset: z.number().min(0).default(0),
+        // KAN-1005 M2-5 — queue partition. Default 'pending' EXCLUDES
+        // sampled post-hoc reviews so they never surface as actionable
+        // pending approvals. UI opts in to view samples via 'sample'
+        // or 'all'.
+        kind: z.enum(["pending", "sample", "all"]).default("pending"),
       }),
     )
     .query(async ({ ctx, input }) => {

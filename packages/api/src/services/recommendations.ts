@@ -31,6 +31,14 @@ import {
   type PubSubClient,
   type PublishActionInput,
 } from './action-decided-publisher.js';
+// KAN-1005 M2-5 — single canonical marker for sampled review entries.
+// Lives in packages/shared so both apps/api (the sampling fork) and
+// packages/api (this file's guard + queue filter) can import without
+// crossing the rootDir boundary. Used here (a) to FILTER samples out
+// of the default pending-approval queue (`listRecommendations`
+// default kind='pending') and (b) to REJECT accept/modify on samples
+// (the double-dispatch guard).
+import { SAMPLED_TRIGGER_TYPE } from '@growth/shared';
 
 // ─────────────────────────────────────────────
 // Input shapes — keep zod-equivalent here so tests can import without zod
@@ -38,9 +46,23 @@ import {
 
 export interface ListInput {
   status?: 'open' | 'claimed' | 'resolved' | 'dismissed';
-  severity?: 'low' | 'medium' | 'high' | 'critical';
+  severity?: 'low' | 'medium' | 'high' | 'critical' | 'info';
   limit?: number;
   offset?: number;
+  /**
+   * KAN-1005 M2-5 — queue partition:
+   *   - 'pending' (default): blocking escalations awaiting human decision.
+   *     EXCLUDES sampled post-hoc reviews. This is the safety-critical
+   *     default — a sample must never be presented as an actionable
+   *     pending approval (the accept-guard prevents the double-dispatch,
+   *     but the UX would be misleading without this filter).
+   *   - 'sample':  post-hoc samples only (M2-5 auto-approve drift review).
+   *   - 'all':     both (admin / dashboard view).
+   *
+   * Default 'pending' is intentional — operator default view stays
+   * pending-only; sample review is an explicit opt-in.
+   */
+  kind?: 'pending' | 'sample' | 'all';
 }
 
 export interface SuggestedAction {
@@ -83,10 +105,21 @@ export async function listRecommendations(
 ) {
   const limit = clampLimit(input.limit);
   const offset = Math.max(0, input.offset ?? 0);
+  // KAN-1005 M2-5 — kind filter. Default 'pending' EXCLUDES sampled
+  // post-hoc reviews so a sample never appears as an actionable
+  // pending approval. UI opts in via kind='sample' or kind='all'.
+  const kind = input.kind ?? 'pending';
+  const triggerTypeFilter =
+    kind === 'sample'
+      ? { triggerType: SAMPLED_TRIGGER_TYPE }
+      : kind === 'pending'
+        ? { triggerType: { not: SAMPLED_TRIGGER_TYPE } }
+        : {}; // 'all' — no triggerType filter
   const where = {
     tenantId,
     ...(input.status ? { status: input.status } : {}),
     ...(input.severity ? { severity: input.severity } : {}),
+    ...triggerTypeFilter,
   };
 
   const [rows, total] = await Promise.all([
@@ -200,6 +233,8 @@ async function loadEscalation(
   contactId: string;
   decisionId: string | null;
   severity: string;
+  // KAN-1005 M2-5 — exposed so accept/modify can guard against samples.
+  triggerType: string;
   aiSuggestion: string | null;
   context: unknown;
   decision: { strategySelected: string; confidence: number; reasoning: string | null } | null;
@@ -214,6 +249,36 @@ async function loadEscalation(
     throw new TRPCError({ code: 'NOT_FOUND', message: 'Recommendation not found' });
   }
   return row;
+}
+
+/**
+ * KAN-1005 M2-5 — double-dispatch guard. The single canonical check used
+ * by accept() and modify() to reject sampled post-hoc review entries.
+ *
+ * Keys on `triggerType === SAMPLED_TRIGGER_TYPE` (NOT a combination of
+ * fields — single source of truth, closed loop with maybeEnqueueSampledReview
+ * which ALWAYS sets that marker). Re-publishing action.decided for a
+ * sampled (already-executed) action would cause a double-dispatch; this
+ * guard makes that impossible.
+ *
+ * Throws TRPCError FORBIDDEN (not BAD_REQUEST) — semantic: this action is
+ * categorically not permitted on this entry type, not a transient
+ * validation issue. dismiss() is the correct disposition for samples
+ * (means "acknowledged").
+ */
+function assertNotSample(
+  escalation: { triggerType: string },
+  operation: 'accept' | 'modify',
+): void {
+  if (escalation.triggerType === SAMPLED_TRIGGER_TYPE) {
+    throw new TRPCError({
+      code: 'FORBIDDEN',
+      message:
+        `Cannot ${operation} an auto-approve sampled review — the action ` +
+        `already executed. Use dismiss to acknowledge, or flag for drift ` +
+        `via the sample review surface.`,
+    });
+  }
 }
 
 async function writeAuditBestEffort(
@@ -244,6 +309,12 @@ export async function acceptRecommendation(
   input: AcceptInput,
 ) {
   const before = await loadEscalation(ctx.prisma, ctx.tenantId, input.id);
+
+  // KAN-1005 M2-5 — double-dispatch guard. Samples (auto-approve
+  // post-hoc reviews) cannot be accepted; the action already executed.
+  // MUST run BEFORE the terminal-status guard so a sample is always
+  // rejected on its own merits (not as a side effect of being terminal).
+  assertNotSample(before, 'accept');
 
   // Guard against double-resolve (status already terminal).
   if (before.status === 'resolved' || before.status === 'dismissed') {
@@ -283,6 +354,11 @@ export async function acceptRecommendation(
       confidenceScore: before.decision?.confidence ?? 1.0,
       strategyReasoning: before.decision?.reasoning ?? `Operator accepted recommendation ${before.id}`,
       actionReasoning: `human_override via recommendations.accept`,
+      // KAN-1005 M2-5 — approve-to-send path is an OPERATOR-curated
+      // decision (the operator explicitly accepted/modified the AI's
+      // proposed action). Marked 'approve_to_send' so action-decided-
+      // push.ts SKIPS sampling.
+      decisionSource: 'approve_to_send',
     };
     try {
       const result = await publishActionDecided(ctx.pubsubClient, publishInput);
@@ -319,6 +395,11 @@ export async function modifyRecommendation(
   input: ModifyInput,
 ) {
   const before = await loadEscalation(ctx.prisma, ctx.tenantId, input.id);
+
+  // KAN-1005 M2-5 — double-dispatch guard. Samples cannot be modified
+  // (action already executed; modifying the AI's suggestion is
+  // semantically nonsense post-hoc).
+  assertNotSample(before, 'modify');
 
   if (before.status === 'resolved' || before.status === 'dismissed') {
     throw new TRPCError({

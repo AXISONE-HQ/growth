@@ -55,6 +55,23 @@ export const ActionDecidedEventSchema = z.object({
     confidenceScore: z.number(),
     strategyReasoning: z.string(),
     actionReasoning: z.string(),
+    /**
+     * KAN-1005 M2-5 — decision-source discriminator. Tells downstream
+     * consumers (action-decided-push.ts sampling fork) whether this
+     * dispatch originated from an autonomous decision (sample-eligible)
+     * or a human-curated/operator-approved path (skip sampling).
+     *
+     * Optional for back-compat — in-flight pre-M2-5 events omit the
+     * field; consumer treats missing as "skip sampling" (safe direction).
+     * Producers added 2026-05-27:
+     *   - runAgentic     → 'agentic_live'
+     *   - runFreeform    → 'freeform'
+     *   - runPlaybookStep → 'playbook'
+     *   - recommendations.accept → 'approve_to_send'
+     */
+    decisionSource: z
+      .enum(['agentic_live', 'freeform', 'playbook', 'approve_to_send'])
+      .optional(),
   }),
   routing: z.object({
     agentType: z.string(),
@@ -188,6 +205,9 @@ export interface PublishActionInput {
   confidenceScore: number;
   strategyReasoning: string;
   actionReasoning: string;
+  /** KAN-1005 M2-5 — decision-source discriminator. See ActionDecidedEventSchema
+   *  docstring. Optional for back-compat; missing → consumer skips sampling. */
+  decisionSource?: 'agentic_live' | 'freeform' | 'playbook' | 'approve_to_send';
 }
 
 export function buildActionDecidedEvent(
@@ -215,6 +235,8 @@ export function buildActionDecidedEvent(
       confidenceScore: input.confidenceScore,
       strategyReasoning: input.strategyReasoning,
       actionReasoning: input.actionReasoning,
+      // KAN-1005 M2-5 — optional decision-source discriminator (back-compat).
+      ...(input.decisionSource ? { decisionSource: input.decisionSource } : {}),
     },
     routing: {
       agentType: resolveAgentType(input.actionType),
