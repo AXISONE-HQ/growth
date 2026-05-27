@@ -68,7 +68,24 @@ import {
   // autonomous-action counter (ACTION_COUNT_COUNTER_SCOPE above).
   getTodayCount,
   incrementToday,
+  // KAN-1005 M2-4 — hourly-window sibling for sub-day rate / error
+  // signals (the breaker's action-rate spike + error-rate climb
+  // sources). Same lib, second window — no parallel tracker.
+  incrementHourly,
 } from '../lib/per-tenant-daily-counter.js';
+import {
+  // KAN-1005 M2-4 — circuit breaker (machine-speed auto-pause).
+  evaluateBreakerState,
+  tripBreaker,
+  resolveBreakerThresholds,
+  secondsUntilUtcMidnight,
+  BREAKER_SCOPE_COST,
+  BREAKER_SCOPE_RATE,
+  BREAKER_SCOPE_ERROR,
+  ACTION_COUNT_HOURLY_SCOPE,
+  ERROR_COUNT_HOURLY_SCOPE,
+  COOLDOWN_SECONDS,
+} from '../lib/circuit-breaker.js';
 import { getRedisClient } from '../services/redis-client.js';
 
 // ─────────────────────────────────────────────
@@ -124,6 +141,17 @@ interface RunDecisionModule {
       // threads to evaluateThresholdWithMatrix. Defaults to 0 in the
       // engine if omitted (back-compat).
       dailyAutoActionCount?: number;
+      // KAN-1005 M2-4 — circuit breaker state from Redis. Same caller-
+      // reads-Redis-passes-to-engine pattern as dailyAutoActionCount.
+      // Engine threads to evaluateThresholdWithMatrix → evaluateThreshold
+      // step 3 (machine-speed pause).
+      breakerState?: {
+        tripped: boolean;
+        scope?: string;
+        isGlobal?: boolean;
+        reason?: string;
+        failClosed?: boolean;
+      };
     },
   ) => Promise<unknown>;
 }
@@ -502,6 +530,49 @@ decisionRunPushApp.post('/decision-run', async (c) => {
         counterError: gateResult.counterError,
       }),
     );
+
+    // KAN-1005 M2-4 — trip the circuit breaker on cost-cap exceedance
+    // (HARD pause). TTL = seconds until next UTC midnight (auto-clears
+    // when the daily cost counter resets). The cost gate ABOVE already
+    // wrote its own structured log (`decision_run_gate_rejected reason=
+    // cost_cap_exceeded`); per founder refinement 2026-05-27, M2-4 does
+    // NOT emit a redundant audit row for this trigger — the trip is
+    // reconstructable by joining the cost-gate log → breaker key
+    // existence. Rate/error triggers (below) DO emit audit rows since
+    // they're net-new signals.
+    if (gateResult.reason === 'cost_cap_exceeded') {
+      void (async () => {
+        try {
+          await tripBreaker(
+            getRedisClient(),
+            BREAKER_SCOPE_COST,
+            event.tenantId,
+            secondsUntilUtcMidnight(),
+            `cost_cap_exceeded: ${gateResult.spendTodayUsd}/${gateResult.resolvedCapUsd} USD`,
+          );
+          console.log(
+            JSON.stringify({
+              type: 'circuit_breaker_tripped',
+              scope: BREAKER_SCOPE_COST,
+              tenantId: event.tenantId,
+              reason: 'cost_cap_exceeded',
+              spendTodayUsd: gateResult.spendTodayUsd,
+              resolvedCapUsd: gateResult.resolvedCapUsd,
+            }),
+          );
+        } catch (tripErr) {
+          console.error(
+            JSON.stringify({
+              type: 'circuit_breaker_trip_failed',
+              scope: BREAKER_SCOPE_COST,
+              tenantId: event.tenantId,
+              error: tripErr instanceof Error ? tripErr.message : String(tripErr),
+            }),
+          );
+        }
+      })();
+    }
+
     // Ack — same posture as PR3 guard rejections. The cap/dedup state
     // is stateful (will keep rejecting until the day resets or the
     // dedup window expires); redelivery would only re-fire the rejection.
@@ -566,6 +637,19 @@ decisionRunPushApp.post('/decision-run', async (c) => {
     return c.text('ok', 200);
   }
 
+  // KAN-1005 M2-4 — read circuit breaker state (3 scopes × 2 targets =
+  // 6 keys via single MGET). Caller-reads-Redis-passes-to-engine pattern
+  // mirrors dailyAutoActionCount (M2-1). Fail-CLOSED on Redis error:
+  // `evaluateBreakerState` returns { tripped: true, failClosed: true }
+  // so the gate escalates with an observable signal.
+  //
+  // Why read here (not skip to ack-200 like cost_signal_unavailable):
+  // the breaker is intentionally tolerant of false-positives at the
+  // expense of false-negatives — fail-closed means we escalate during
+  // a Redis outage, which is the safe direction. The engine still gets
+  // invoked but the threshold gate routes to escalate.
+  const breakerState = await evaluateBreakerState(getRedisClient(), event.tenantId);
+
   let engineStarted = false;
   try {
     const { runDecisionForContact } = await loadRunDecisionModule();
@@ -575,6 +659,7 @@ decisionRunPushApp.post('/decision-run', async (c) => {
       contactId: event.contactId,
       actor: { type: 'SYSTEM', id: 'decision-run-push' },
       dailyAutoActionCount,
+      breakerState,
     });
 
     // KAN-1005 M2-1 — increment the autonomous-action counter on the
@@ -588,19 +673,101 @@ decisionRunPushApp.post('/decision-run', async (c) => {
     if (outcome === 'EXECUTED') {
       void (async () => {
         try {
-          const newTotal = await incrementToday(
-            getRedisClient(),
-            ACTION_COUNT_COUNTER_SCOPE,
-            event.tenantId,
-            1,
-          );
+          // KAN-1005 M2-1 daily counter + M2-4 hourly counter — both
+          // incremented on every EXECUTE so the breaker can read either
+          // window. Same lib, two windows; not a parallel tracker.
+          const [newDailyTotal, newHourlyTotal] = await Promise.all([
+            incrementToday(
+              getRedisClient(),
+              ACTION_COUNT_COUNTER_SCOPE,
+              event.tenantId,
+              1,
+            ),
+            incrementHourly(
+              getRedisClient(),
+              ACTION_COUNT_HOURLY_SCOPE,
+              event.tenantId,
+              1,
+            ),
+          ]);
           console.log(
             JSON.stringify({
               type: 'autonomous_action_count_incremented',
               tenantId: event.tenantId,
-              newDailyCount: newTotal,
+              newDailyCount: newDailyTotal,
+              newHourlyCount: newHourlyTotal,
             }),
           );
+
+          // KAN-1005 M2-4 — check thresholds + trip the rate breaker
+          // if exceeded. Per-tenant tunable via Tenant.settings.circuitBreaker.
+          // Either hourly OR daily exceedance trips this scope.
+          const tenantRow = await prisma.tenant.findUnique({
+            where: { id: event.tenantId },
+            select: { settings: true },
+          });
+          const thresholds = resolveBreakerThresholds(tenantRow?.settings);
+          const dailyExceeded = newDailyTotal >= thresholds.dailyActionCap;
+          const hourlyExceeded = newHourlyTotal >= thresholds.hourlyActionRate;
+          if (dailyExceeded || hourlyExceeded) {
+            const triggerSignal = hourlyExceeded
+              ? `hourly_action_rate: ${newHourlyTotal}/${thresholds.hourlyActionRate}`
+              : `daily_action_cap: ${newDailyTotal}/${thresholds.dailyActionCap}`;
+            try {
+              await tripBreaker(
+                getRedisClient(),
+                BREAKER_SCOPE_RATE,
+                event.tenantId,
+                COOLDOWN_SECONDS,
+                triggerSignal,
+              );
+              console.log(
+                JSON.stringify({
+                  type: 'circuit_breaker_tripped',
+                  scope: BREAKER_SCOPE_RATE,
+                  tenantId: event.tenantId,
+                  reason: triggerSignal,
+                  newDailyCount: newDailyTotal,
+                  newHourlyCount: newHourlyTotal,
+                  cooldownSeconds: COOLDOWN_SECONDS,
+                }),
+              );
+              // Audit-log the trip (best-effort). Rate-trip IS net-new
+              // signal so we emit a row (unlike cost-cap which is already
+              // audited by the cost gate).
+              void prisma.auditLog
+                .create({
+                  data: {
+                    tenantId: event.tenantId,
+                    actor: 'circuit_breaker',
+                    actionType: 'circuit_breaker_tripped',
+                    reasoning: `Action-rate breaker tripped: ${triggerSignal}`,
+                    payload: {
+                      scope: BREAKER_SCOPE_RATE,
+                      newDailyCount: newDailyTotal,
+                      newHourlyCount: newHourlyTotal,
+                      dailyThreshold: thresholds.dailyActionCap,
+                      hourlyThreshold: thresholds.hourlyActionRate,
+                      cooldownSeconds: COOLDOWN_SECONDS,
+                    },
+                  },
+                })
+                .catch((auditErr: unknown) => {
+                  console.warn(
+                    `[circuit-breaker] audit-emit-rate-trip-failed tenantId=${event.tenantId} err=${(auditErr as Error)?.message ?? String(auditErr)}`,
+                  );
+                });
+            } catch (tripErr) {
+              console.error(
+                JSON.stringify({
+                  type: 'circuit_breaker_trip_failed',
+                  scope: BREAKER_SCOPE_RATE,
+                  tenantId: event.tenantId,
+                  error: tripErr instanceof Error ? tripErr.message : String(tripErr),
+                }),
+              );
+            }
+          }
         } catch (counterErr) {
           console.error(
             JSON.stringify({
@@ -684,6 +851,81 @@ decisionRunPushApp.post('/decision-run', async (c) => {
       classification: classified,
       engineStarted,
     };
+
+    // KAN-1005 M2-4 — increment the hourly error counter on EVERY
+    // classified error (persistent + transient). Counts include retries
+    // by design: a retry storm on a single poison message reads as N
+    // error-events, which IS a runaway worth pausing on (intentional
+    // interpretation; calibration done with this in mind).
+    void (async () => {
+      try {
+        const newHourlyErrorCount = await incrementHourly(
+          getRedisClient(),
+          ERROR_COUNT_HOURLY_SCOPE,
+          event.tenantId,
+          1,
+        );
+        const tenantRow = await prisma.tenant.findUnique({
+          where: { id: event.tenantId },
+          select: { settings: true },
+        });
+        const thresholds = resolveBreakerThresholds(tenantRow?.settings);
+        if (newHourlyErrorCount >= thresholds.hourlyErrorRate) {
+          const triggerSignal = `hourly_error_rate: ${newHourlyErrorCount}/${thresholds.hourlyErrorRate}`;
+          await tripBreaker(
+            getRedisClient(),
+            BREAKER_SCOPE_ERROR,
+            event.tenantId,
+            COOLDOWN_SECONDS,
+            triggerSignal,
+          );
+          console.log(
+            JSON.stringify({
+              type: 'circuit_breaker_tripped',
+              scope: BREAKER_SCOPE_ERROR,
+              tenantId: event.tenantId,
+              reason: triggerSignal,
+              newHourlyErrorCount,
+              cooldownSeconds: COOLDOWN_SECONDS,
+            }),
+          );
+          // Audit-log the trip (best-effort, distinct from rate trip
+          // by scope in payload).
+          void prisma.auditLog
+            .create({
+              data: {
+                tenantId: event.tenantId,
+                actor: 'circuit_breaker',
+                actionType: 'circuit_breaker_tripped',
+                reasoning: `Error-rate breaker tripped: ${triggerSignal}`,
+                payload: {
+                  scope: BREAKER_SCOPE_ERROR,
+                  newHourlyErrorCount,
+                  hourlyThreshold: thresholds.hourlyErrorRate,
+                  cooldownSeconds: COOLDOWN_SECONDS,
+                  // Diagnostic anchor — recent errors can be joined
+                  // via this messageId on the structured-log side.
+                  messageId: envelope.message.messageId,
+                  classification: classified,
+                },
+              },
+            })
+            .catch((auditErr: unknown) => {
+              console.warn(
+                `[circuit-breaker] audit-emit-error-trip-failed tenantId=${event.tenantId} err=${(auditErr as Error)?.message ?? String(auditErr)}`,
+              );
+            });
+        }
+      } catch (counterErr) {
+        console.error(
+          JSON.stringify({
+            type: 'circuit_breaker_error_counter_failed',
+            tenantId: event.tenantId,
+            error: counterErr instanceof Error ? counterErr.message : String(counterErr),
+          }),
+        );
+      }
+    })();
 
     if (classified.category === 'transient') {
       // ── Transient: return 500 so Pub/Sub auto-retries up to

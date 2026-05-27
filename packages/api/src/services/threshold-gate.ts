@@ -272,6 +272,36 @@ export const ThresholdGateInputSchema = z.object({
   /** KAN-704: Pipeline.defaultAutoApproveMatrix — second tier. Loaded by caller from Contact.currentPipelineId. */
   pipelineMatrix: AutoApproveMatrixSchema,
   dailyAutoActionCount: z.number().default(0),
+  /**
+   * KAN-1005 M2-4 — Circuit breaker state. Caller reads from Redis via
+   * `evaluateBreakerState(redis, tenantId)` BEFORE invoking the gate,
+   * passes the result here. The gate is sync (mirrors the M2-1
+   * dailyAutoActionCount pattern — async Redis at caller, sync gate
+   * logic for testability).
+   *
+   * When `tripped: true`, the gate routes to human_review at step 3 of
+   * the ladder (after kill-switch, before per-action-type gates) so
+   * a tripped breaker pauses EVERY autonomous action regardless of
+   * which action type is being attempted. Distinct from the deliberate-
+   * human kill-switch (autoApproveEnabled=false) — observably separate.
+   *
+   * Tripped breaker routes to `human_review` (NOT `blocked`): the
+   * queue keeps filling so humans see the runaway and can drain;
+   * blocked would make the AI go silent during an incident.
+   *
+   * Optional for back-compat — callers that don't pass it get
+   * { tripped: false } (gate skips the breaker check). Production
+   * caller (evaluateThresholdWithMatrix) always reads + passes.
+   */
+  breakerState: z
+    .object({
+      tripped: z.boolean(),
+      scope: z.string().optional(),
+      isGlobal: z.boolean().optional(),
+      reason: z.string().optional(),
+      failClosed: z.boolean().optional(),
+    })
+    .default({ tripped: false }),
 });
 
 export const ThresholdGateResultSchema = z.object({
@@ -550,12 +580,46 @@ export function evaluateThreshold(
     reasoning = 'Tenant auto-approve is disabled (kill-switch). Routing all actions to human review.';
   } else if (aiPerm.outcome === 'blocked') {
     // KAN-1005 M2-3 — 'blocked' is the third tri-value: hard off, not
-    // even queued for review. Stricter than 'escalate'. This is also
-    // the path a tenant takes to mark a high-stakes type as
-    // "definitely never" (clamp would already escalate it; 'blocked'
-    // signals stronger intent: "don't even propose").
+    // even queued for review. Stricter than 'escalate' AND stricter
+    // than the M2-4 breaker's human_review (founder precedence call
+    // 2026-05-27): "AI never does this action type at all, not even
+    // escalated" — a blocked action has no autonomy to pause, so the
+    // breaker can't usefully convert it. Evaluated BEFORE the breaker
+    // so blocked stays blocked through a trip; the queue stays clean
+    // of tenant-configured never-touch types even during an incident.
+    //
+    // Precedence ladder: blocked is MORE-restrictive than human_review,
+    // and the gate moves toward more-restrictive, never away. (The
+    // kill-switch and requireHumanApproval above are deliberate
+    // human/emergency overrides where "eyes-on everything" is a
+    // defensible intent; their precedence over blocked is a separable
+    // consistency question, tracked as a follow-up rather than folded
+    // into M2-4.)
     decision = 'blocked';
     reasoning = `Action type "${parsed.actionType}" is blocked (${aiPerm.reason}).`;
+  } else if (parsed.breakerState.tripped) {
+    // KAN-1005 M2-4 — machine-speed circuit breaker. Distinct from the
+    // deliberate-human kill-switch above (resetting the breaker doesn't
+    // un-pause an autoApproveEnabled=false tenant; and vice versa).
+    //
+    // Routes to human_review (NOT blocked) — the queue keeps filling so
+    // humans see the runaway and can drain; blocked would make the AI go
+    // silent during an incident. Reasoning carries "circuit_breaker_tripped"
+    // marker so audit/grep can distinguish from kill-switch + clamp +
+    // default-deny.
+    //
+    // Catches everything that's actually autonomy-eligible: permit and
+    // escalate actions reach here and get paused to human_review. Blocked
+    // actions (step above) stay blocked — they were never going to
+    // execute, so there's no autonomy to pause.
+    decision = 'human_review';
+    const scopeLabel = parsed.breakerState.scope ?? 'unknown';
+    const globalLabel = parsed.breakerState.isGlobal ? ' [GLOBAL]' : '';
+    const reasonSuffix = parsed.breakerState.reason ? `: ${parsed.breakerState.reason}` : '';
+    const failClosedSuffix = parsed.breakerState.failClosed
+      ? ' (fail-closed: Redis state unavailable)'
+      : '';
+    reasoning = `circuit_breaker_tripped${globalLabel} scope=${scopeLabel}${reasonSuffix}${failClosedSuffix}. Routing to human review.`;
   } else if (aiPerm.outcome === 'escalate') {
     // KAN-1005 M2-3 clamp / M2-1 default-deny — both produce 'escalate'
     // here. The clamp's reasoning string carries "high-stakes" + "system
