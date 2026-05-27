@@ -90,6 +90,11 @@ const TENANT_A = '11111111-1111-1111-1111-111111111111';
 const CONTACT_A = '22222222-2222-2222-2222-222222222222';
 const CAMPAIGN_A = '33333333-3333-3333-3333-333333333333';
 const STACK_A = '44444444-4444-4444-4444-444444444444';
+// KAN-1005 M2-6b — fixture decisionId now uses real-UUID format (matches
+// `decisions.id` PK shape). Old `dec_test` literal was a sibling of the
+// synthetic dec_<uuid> bug surfaced in the autonomy flip — banned in tests
+// so we don't anchor the next mock around the discredited shape.
+const DECISION_A = '55555555-5555-5555-5555-555555555555';
 
 function buildMaterializeEnvelope(overrides: Partial<{ tenantId: string; campaignId: string; conditions: unknown }> = {}) {
   const event = {
@@ -386,7 +391,7 @@ describe('decision-run-push — 3 HARD GUARDS (safety surface)', () => {
       lastEvaluatedAt: new Date('2026-01-01T00:00:00Z'),
     });
     runDecisionForContactMock.mockResolvedValue({
-      decisionId: 'dec_test',
+      decisionId: DECISION_A,
       strategy: 'direct',
       outcome: 'ESCALATED', // under autoApproveEnabled=false, this is the expected outcome
     });

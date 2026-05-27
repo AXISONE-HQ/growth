@@ -341,32 +341,47 @@ export async function acceptRecommendation(
   // a real downstream emit.
   let publishedEventId: string | null = null;
   if (input.modifiedAction && ctx.pubsubClient) {
-    const publishInput: PublishActionInput = {
-      tenantId: ctx.tenantId,
-      contactId: before.contactId,
-      objectiveId:
-        ((before.context as Record<string, unknown> | null)?.objectiveId as string | undefined) ??
-        'unknown',
-      actionType: input.modifiedAction.actionType,
-      channel: input.modifiedAction.channel,
-      actionPayload: input.modifiedAction.payload,
-      selectedStrategy: before.decision?.strategySelected ?? 'human_override',
-      confidenceScore: before.decision?.confidence ?? 1.0,
-      strategyReasoning: before.decision?.reasoning ?? `Operator accepted recommendation ${before.id}`,
-      actionReasoning: `human_override via recommendations.accept`,
-      // KAN-1005 M2-5 — approve-to-send path is an OPERATOR-curated
-      // decision (the operator explicitly accepted/modified the AI's
-      // proposed action). Marked 'approve_to_send' so action-decided-
-      // push.ts SKIPS sampling.
-      decisionSource: 'approve_to_send',
-    };
-    try {
-      const result = await publishActionDecided(ctx.pubsubClient, publishInput);
-      publishedEventId = result.messageId ?? null;
-    } catch (err) {
-      console.error(`[recommendations.accept] publishActionDecided failed escalationId=${before.id}:`, err);
-      // Don't fail the mutation — operator already committed. The escalation
-      // still resolves; missing emit is logged for ops to retry manually.
+    // KAN-1005 M2-6b — decisionId is now REQUIRED on PublishActionInput.
+    // The originating Escalation MUST carry a real Decision row id for
+    // the operator-accept dispatch to be FK-clean downstream. Skip
+    // emission with a warn-log when the escalation was guardrail-block
+    // or lead-assignment (decisionId=null per the Null-safe pattern at
+    // line 23-25 docstring) — the status-transition still commits.
+    if (!before.decisionId) {
+      console.warn(
+        `[recommendations.accept] skip publishActionDecided escalationId=${before.id} reason=null_decisionId — status-transition only; operator may need to manually dispatch the modified action`,
+      );
+    } else {
+      const publishInput: PublishActionInput = {
+        tenantId: ctx.tenantId,
+        contactId: before.contactId,
+        objectiveId:
+          ((before.context as Record<string, unknown> | null)?.objectiveId as string | undefined) ??
+          'unknown',
+        // KAN-1005 M2-6b — real Decision row id from the originating
+        // escalation; downstream consumers FK-reference this.
+        decisionId: before.decisionId,
+        actionType: input.modifiedAction.actionType,
+        channel: input.modifiedAction.channel,
+        actionPayload: input.modifiedAction.payload,
+        selectedStrategy: before.decision?.strategySelected ?? 'human_override',
+        confidenceScore: before.decision?.confidence ?? 1.0,
+        strategyReasoning: before.decision?.reasoning ?? `Operator accepted recommendation ${before.id}`,
+        actionReasoning: `human_override via recommendations.accept`,
+        // KAN-1005 M2-5 — approve-to-send path is an OPERATOR-curated
+        // decision (the operator explicitly accepted/modified the AI's
+        // proposed action). Marked 'approve_to_send' so action-decided-
+        // push.ts SKIPS sampling.
+        decisionSource: 'approve_to_send',
+      };
+      try {
+        const result = await publishActionDecided(ctx.pubsubClient, publishInput);
+        publishedEventId = result.messageId ?? null;
+      } catch (err) {
+        console.error(`[recommendations.accept] publishActionDecided failed escalationId=${before.id}:`, err);
+        // Don't fail the mutation — operator already committed. The escalation
+        // still resolves; missing emit is logged for ops to retry manually.
+      }
     }
   }
 

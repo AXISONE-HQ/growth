@@ -1202,11 +1202,20 @@ async function dispatchPhase2Send(
   //    email without subject — sibling discipline to KAN-794
   //    VALID_ACTION_TYPES allowlist). Falls back to a synthetic subject
   //    only as defense-in-depth.
+  //
+  //    KAN-1005 M2-6b dispatch-fix — Lead Inbox writes the same plain-
+  //    text unsubscribe footer as composeMessage (CAN-SPAM body keyword
+  //    + real recipient link). Lead Inbox doesn't currently pass through
+  //    gateAndPublishComposed, so guardrail-block isn't the gate here —
+  //    this is a correctness improvement (every Lead Inbox AI reply
+  //    will carry the footer going forward, aligning with the composer
+  //    path). KAN-808 owns the HTML-styled compliance footer.
   const publicWebhookBaseUrl = process.env.PUBLIC_WEBHOOK_BASE_URL ?? 'https://example.invalid';
+  const unsubscribeUrl = `${publicWebhookBaseUrl}/unsubscribe/${deal.contactId}`;
   const composed = {
     subject: shaped.subject ?? '(no subject)',
-    body: shaped.body,
-    unsubscribeUrl: `${publicWebhookBaseUrl}/unsubscribe/${deal.contactId}`,
+    body: shaped.body.trimEnd() + `\n\n---\nUnsubscribe: ${unsubscribeUrl}`,
+    unsubscribeUrl,
   };
 
   // 8. KAN-816: resolve tenant Reply-To for customer-reply routing.
