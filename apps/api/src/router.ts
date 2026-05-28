@@ -6542,6 +6542,91 @@ const circuitBreakerRouter = router({
     }),
 });
 
+// ─────────────────────────────────────────────────────────────────────
+// M3-1c — sub-objectives router (operator UI surface)
+// ─────────────────────────────────────────────────────────────────────
+
+interface SubObjectivesModule {
+  computeGapState: (
+    prisma: unknown,
+    tenantId: string,
+    contactId: string,
+    contact: { currentStageName?: string; nextStageName?: string },
+  ) => Promise<import("@growth/shared").SubObjectiveGapState>;
+  transitionSubObjectiveState: (
+    prisma: unknown,
+    tenantId: string,
+    actor: string,
+    input: {
+      contactId: string;
+      subObjectiveKey: string;
+      toState: "known" | "not_applicable";
+      value?: string | number | null;
+    },
+  ) => Promise<{ ok: true; previousState: string }>;
+}
+let _subObjectivesModule: SubObjectivesModule | null = null;
+async function loadSubObjectivesModule(): Promise<SubObjectivesModule> {
+  if (_subObjectivesModule) return _subObjectivesModule;
+  const spec = "../../../packages/api/src/services/sub-objective-gap-tracker.js";
+  _subObjectivesModule = (await import(spec)) as SubObjectivesModule;
+  return _subObjectivesModule;
+}
+
+const subObjectivesRouter = router({
+  // Read — fetch prioritized gap-state for a contact. UI panel calls
+  // this; engine path uses the same fn via the decision-run-push caller.
+  // tenantId is enforced via ctx; cross-tenant contact lookups return
+  // empty (computeGapState read returns no rows since contact_id doesn't
+  // exist within tenant scope).
+  getStateForContact: protectedProcedure
+    .input(z.object({ contactId: z.string().uuid() }))
+    .query(async ({ ctx, input }) => {
+      // Resolve stage name for hard-trigger detection (same shape the
+      // engine-side caller uses in decision-run-push.ts).
+      const contact = await ctx.prisma.contact.findFirst({
+        where: { id: input.contactId, tenantId: ctx.tenantId },
+        select: { currentStageId: true },
+      });
+      if (!contact) {
+        // Cross-tenant or missing → empty state, UI renders empty panel.
+        return { prioritizedGaps: [], topCandidate: undefined };
+      }
+      let currentStageName: string | undefined;
+      if (contact.currentStageId) {
+        const stage = await ctx.prisma.stage.findUnique({
+          where: { id: contact.currentStageId },
+          select: { name: true },
+        });
+        currentStageName = stage?.name ?? undefined;
+      }
+      const { computeGapState } = await loadSubObjectivesModule();
+      return computeGapState(ctx.prisma, ctx.tenantId, input.contactId, {
+        ...(currentStageName ? { currentStageName } : {}),
+      });
+    }),
+
+  // Mutation — operator manual transition (the fallback path; primary
+  // fill is engine generation + future extraction/enrichment slices).
+  // Cross-tenant rejection enforced server-side via the service's
+  // contact-tenant check.
+  transitionState: protectedProcedure
+    .input(
+      z.object({
+        contactId: z.string().uuid(),
+        subObjectiveKey: z.enum(["timeline", "budget", "authority", "need", "motivation"]),
+        toState: z.enum(["known", "not_applicable"]),
+        value: z.union([z.string(), z.number(), z.null()]).optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const { transitionSubObjectiveState } = await loadSubObjectivesModule();
+      const actor =
+        ctx.firebaseUser?.uid ?? ctx.firebaseUser?.email ?? "unknown_actor";
+      return transitionSubObjectiveState(ctx.prisma, ctx.tenantId, actor, input);
+    }),
+});
+
 export const appRouter = router({
   contacts: contactsRouter,
   // KAN-883 — CRM read-layer cohort 1 (PR 1 of 3). UI lands in PR 2-3.
@@ -6582,6 +6667,8 @@ export const appRouter = router({
   audience: audienceRouter,
   // KAN-1005 M2-4 — Circuit breaker admin surface (status/reset/trip).
   circuitBreaker: circuitBreakerRouter,
+  // M3-1c — Sub-objective gap-state read + operator manual transition.
+  subObjectives: subObjectivesRouter,
 });
 
 export type AppRouter = typeof appRouter;

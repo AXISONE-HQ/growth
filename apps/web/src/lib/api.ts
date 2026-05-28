@@ -2096,3 +2096,35 @@ export type CampaignCommitResult = {
   membershipSnapshotCountSync: number;
 };
 
+// M3-1c — Sub-objective gap-state read + manual transition surface.
+// Mirrors the SubObjectiveGapState shape from @growth/shared (the API
+// returns the same shape the engine threads internally).
+export type SubObjectiveStateValue = 'unknown' | 'partial' | 'known' | 'not_applicable';
+export type SubObjectiveValueTypeValue = 'text' | 'date' | 'numeric' | 'enum';
+export interface DiscoveryStatePrioritizedGap {
+  key: string;
+  label: string;
+  valueType: SubObjectiveValueTypeValue;
+  state: SubObjectiveStateValue;
+  valueIfPartial?: string;
+  priorityWeight: number;
+  requiredAtStage?: string;
+  recencyDaysSinceLastEval: number;
+  score: number;
+  hardTrigger: boolean;
+}
+export interface DiscoveryStateForContact {
+  prioritizedGaps: DiscoveryStatePrioritizedGap[];
+  topCandidate?: { key: string; label: string; score: number; hardTrigger: boolean };
+}
+
+export const subObjectivesApi = {
+  getStateForContact: (contactId: string) =>
+    trpcQuery<DiscoveryStateForContact>('subObjectives.getStateForContact', { contactId }),
+  transitionState: (input: {
+    contactId: string;
+    subObjectiveKey: 'timeline' | 'budget' | 'authority' | 'need' | 'motivation';
+    toState: 'known' | 'not_applicable';
+    value?: string | number | null;
+  }) => trpcMutation<{ ok: true; previousState: SubObjectiveStateValue }>('subObjectives.transitionState', input),
+};
