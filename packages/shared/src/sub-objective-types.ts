@@ -89,6 +89,29 @@ export interface PrioritizedGap {
 }
 
 /**
+ * M3-1c-followup — what the engine has learned about this contact.
+ * Carries the value + provenance so the operator UI can show "✓ Timeline:
+ * Q3 2026 — set by you, just now." The engine itself ignores this list
+ * (it only consumes `prioritizedGaps` for scoring). Additive to the
+ * SubObjectiveGapState contract.
+ */
+export interface ResolvedGap {
+  key: string;
+  label: string;
+  valueType: SubObjectiveValueType;
+  state: 'known' | 'not_applicable';
+  /** Single-string rendering of the typed value column for the UI.
+   *  null for not_applicable rows. */
+  value: string | null;
+  source: SubObjectiveSource;
+  /** Whatever the writer recorded — Firebase email when available,
+   *  uid fallback, or 'system:gap-tracker' for engine-side seeds. */
+  setBy: string | null;
+  /** ISO timestamp string for stable client-side relative-time render. */
+  setAt: string;
+}
+
+/**
  * Engine input — caller computes via computeGapState() and threads
  * through RunForContactInput.subObjectiveGapState.
  */
@@ -104,6 +127,14 @@ export interface SubObjectiveGapState {
     score: number;
     hardTrigger: boolean;
   };
+  /**
+   * M3-1c-followup — known + not_applicable rows for UI rendering.
+   * Engine ignores this list (only consumes prioritizedGaps). Allows the
+   * Discovery state panel to show "what the engine has learned" alongside
+   * the unfilled list per PRD §AC "Contact view UI shows gap-state per
+   * sub-objective". Empty when no resolved rows.
+   */
+  resolvedGaps: ResolvedGap[];
 }
 
 // ─────────────────────────────────────────────

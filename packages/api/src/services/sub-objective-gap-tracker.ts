@@ -21,7 +21,9 @@ import {
   DEFAULT_SUB_OBJECTIVES_GENERIC_B2B,
   SOFT_TRIGGER_THRESHOLD,
   type PrioritizedGap,
+  type ResolvedGap,
   type SubObjectiveGapState,
+  type SubObjectiveSource,
   type SubObjectiveState,
   type SubObjectiveValueType,
 } from '@growth/shared';
@@ -75,7 +77,7 @@ export async function computeGapState(
       contactId,
       error: err instanceof Error ? err.message : String(err),
     });
-    return { prioritizedGaps: [], topCandidate: undefined };
+    return { prioritizedGaps: [], topCandidate: undefined, resolvedGaps: [] };
   }
 }
 
@@ -135,6 +137,14 @@ interface GapRow {
   state: SubObjectiveState;
   valueType: SubObjectiveValueType | 'enum_value';
   valueText: string | null;
+  // M3-1c-followup — extended fields for the resolvedGaps UI rendering.
+  // Optional + nullable for back-compat with existing test fixtures that
+  // only pass the prioritization-relevant fields.
+  valueDate?: Date | null;
+  valueNumeric?: number | null;
+  valueEnum?: string | null;
+  source?: SubObjectiveSource | null;
+  setBy?: string | null;
   setAt: Date;
 }
 
@@ -161,6 +171,7 @@ export function prioritize(
   for (const r of rows) byKey.set(r.subObjectiveKey, r);
 
   const prioritizedGaps: PrioritizedGap[] = [];
+  const resolvedGaps: ResolvedGap[] = [];
 
   for (const def of DEFAULT_SUB_OBJECTIVES_GENERIC_B2B) {
     const row = byKey.get(def.key);
@@ -168,8 +179,35 @@ export function prioritize(
     // seed should have run; this is back-compat against pre-seed reads).
     const state: SubObjectiveState = row?.state ?? 'unknown';
 
-    // Only unfilled gaps compete.
-    if (state === 'known' || state === 'not_applicable') continue;
+    // M3-1c-followup — known + not_applicable rows surface in resolvedGaps
+    // for the operator UI ("what the engine has learned about this contact").
+    // Engine itself ignores resolvedGaps (only consumes prioritizedGaps for
+    // scoring); the additive split keeps the engine path identical.
+    if (state === 'known' || state === 'not_applicable') {
+      if (row) {
+        // Render the single string the UI shows. For known: the typed-value
+        // column matching valueType. For not_applicable: null (UI renders
+        // a hyphen + "not applicable" label).
+        let value: string | null = null;
+        if (state === 'known' && row) {
+          if (def.valueType === 'text') value = row.valueText ?? null;
+          else if (def.valueType === 'date') value = row.valueDate ? new Date(row.valueDate).toISOString().slice(0, 10) : null;
+          else if (def.valueType === 'numeric') value = row.valueNumeric != null ? String(row.valueNumeric) : null;
+          else if (def.valueType === 'enum') value = row.valueEnum ?? null;
+        }
+        resolvedGaps.push({
+          key: def.key,
+          label: def.label,
+          valueType: def.valueType,
+          state,
+          value,
+          source: row.source ?? 'decision_initialize',
+          setBy: row.setBy ?? null,
+          setAt: row.setAt.toISOString(),
+        });
+      }
+      continue;
+    }
 
     // M3-1b — lowercase-normalize stage comparison so hard-trigger is
     // reachable regardless of tenant stage-name casing. M3-1a substrate
@@ -217,6 +255,7 @@ export function prioritize(
   const head = prioritizedGaps[0];
   return {
     prioritizedGaps,
+    resolvedGaps,
     ...(head
       ? {
           topCandidate: {

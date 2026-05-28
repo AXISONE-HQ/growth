@@ -2113,9 +2113,26 @@ export interface DiscoveryStatePrioritizedGap {
   score: number;
   hardTrigger: boolean;
 }
+// M3-1c-followup — resolved (known + not_applicable) rows. Engine ignores;
+// the panel renders these in a collapsed "Known (n)" section below the
+// active intent list so operators see what the engine has learned.
+export interface DiscoveryStateResolvedGap {
+  key: string;
+  label: string;
+  valueType: SubObjectiveValueTypeValue;
+  state: 'known' | 'not_applicable';
+  /** Single-string rendering for the row body; null on not_applicable. */
+  value: string | null;
+  source: 'decision_initialize' | 'manual' | 'extraction' | 'enrichment';
+  /** Email > UID > "system:gap-tracker" depending on writer. */
+  setBy: string | null;
+  /** ISO timestamp for client-side relative-time rendering. */
+  setAt: string;
+}
 export interface DiscoveryStateForContact {
   prioritizedGaps: DiscoveryStatePrioritizedGap[];
   topCandidate?: { key: string; label: string; score: number; hardTrigger: boolean };
+  resolvedGaps: DiscoveryStateResolvedGap[];
 }
 
 export const subObjectivesApi = {

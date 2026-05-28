@@ -6621,8 +6621,12 @@ const subObjectivesRouter = router({
     )
     .mutation(async ({ ctx, input }) => {
       const { transitionSubObjectiveState } = await loadSubObjectivesModule();
+      // M3-1c-followup — prefer email over UID so the audit row + the
+      // operator-facing "set by ..." UI render is human-readable. UID
+      // fallback for non-email Firebase users; literal "unknown_actor"
+      // is the last-resort defensive value.
       const actor =
-        ctx.firebaseUser?.uid ?? ctx.firebaseUser?.email ?? "unknown_actor";
+        ctx.firebaseUser?.email ?? ctx.firebaseUser?.uid ?? "unknown_actor";
       return transitionSubObjectiveState(ctx.prisma, ctx.tenantId, actor, input);
     }),
 });
