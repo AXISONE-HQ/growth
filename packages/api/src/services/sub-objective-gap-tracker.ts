@@ -171,10 +171,19 @@ export function prioritize(
     // Only unfilled gaps compete.
     if (state === 'known' || state === 'not_applicable') continue;
 
+    // M3-1b — lowercase-normalize stage comparison so hard-trigger is
+    // reachable regardless of tenant stage-name casing. M3-1a substrate
+    // smoke caught this: PRD default-set has `requiredAtStage: 'qualified'`
+    // but the PROD AxisOne stage name is `Qualified` — exact-string match
+    // missed and soft-trigger fired instead. Normalization makes the
+    // hard-trigger path work cross-tenant without coupling the default
+    // set to any tenant's exact stage casing.
+    const requiredLower = def.requiredAtStage?.toLowerCase();
+    const currentLower = contact.currentStageName?.toLowerCase();
+    const nextLower = contact.nextStageName?.toLowerCase();
     const stageMatch =
-      def.requiredAtStage !== undefined &&
-      (contact.currentStageName === def.requiredAtStage ||
-        contact.nextStageName === def.requiredAtStage);
+      requiredLower !== undefined &&
+      (currentLower === requiredLower || nextLower === requiredLower);
 
     const hardTrigger = stageMatch;
     const stageWeight = hardTrigger ? 1.0 : 0.7;

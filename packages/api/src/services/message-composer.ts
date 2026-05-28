@@ -66,8 +66,9 @@ export interface ComposeMessageInput {
   pipeline?: PipelineContext;
   stage?: StageContext;
   microObjectives?: MicroObjectiveContext[];
-  /** Per-MicroObjective progress: `{ moId: { completed, completedAt, evidence } }`. */
+  /** Per-MicroObjective progress: `{ moId: { completed, completedAt, evidence } }`. M3-1b adds `gapContext` below. */
   microObjectiveProgress?: Record<string, unknown>;
+  gapContext?: { subObjectiveKey: string; label: string; currentState?: 'unknown' | 'partial'; valueIfPartial?: string; compound?: boolean }; // M3-1b discovery
 }
 
 /** KAN-698: render knowledge hits as a compact prompt block. */
@@ -119,7 +120,7 @@ function formatPipelineBlock(
   }
   return parts.join('\n') + '\n';
 }
-
+const formatDiscoveryBlock = (gap: NonNullable<ComposeMessageInput['gapContext']> | undefined): string => !gap ? '' : `\nDiscovery Target (the engine needs to learn this to advance the deal):\n- Topic: ${gap.label}${gap.currentState === 'partial' && gap.valueIfPartial ? ` (partial signal so far: "${gap.valueIfPartial}" — confirm or refine, don't restart)` : ''}\n- ${gap.compound !== false ? 'Style: COMPOUND — weave this discovery naturally into a routine touch. Do NOT lead with the question; open conversationally, then ask near the end.' : 'Style: DEDICATED — make this discovery the primary intent of the message, but keep the tone warm and not interrogative.'}\n`; // M3-1b discovery (compound default = weave naturally; CAN-SPAM footer unaffected)
 export async function composeMessage(
   prisma: PrismaClient,
   input: ComposeMessageInput,
@@ -165,7 +166,7 @@ export async function composeMessage(
 Instruction: "${instruction}"
 Recipient first name: ${firstName}
 Brand voice: ${tone}
-${pipelineBlock}${knowledgeBlock}
+${pipelineBlock}${formatDiscoveryBlock(input.gapContext)}${knowledgeBlock}
 Respond with a JSON object with these fields:
 1. "subject" — a natural subject line that includes the recipient's first name. Keep under 60 characters.
 2. "body" — the email body, plain text, 3-5 sentences, reflecting the instruction intent and the brand voice. Sign off with a warm closing but no name (the connector layer appends sender identity).

@@ -255,6 +255,27 @@ actionDecidedPushApp.post('/action-decided', async (c) => {
     // loadKnowledge degrades gracefully (returns []) if RAG is unavailable.
     const knowledge = await loadKnowledge(event.tenantId, instruction);
 
+    // M3-1b — read discovery target from action.payload (populated by
+    // action-determiner.ts when discovery candidate wins). Additive:
+    // omitted on non-discovery decisions → composeMessage receives no
+    // gapContext → prompt identical to pre-M3-1b path.
+    const discoveryTarget = event.action.payload?.discoveryTarget as
+      | { subObjectiveKey: string; label: string }
+      | undefined;
+    const gapContext = discoveryTarget
+      ? {
+          subObjectiveKey: discoveryTarget.subObjectiveKey,
+          label: discoveryTarget.label,
+          currentState: 'unknown' as const,
+          compound: true,
+        }
+      : undefined;
+    if (gapContext) {
+      console.log(
+        `[action-decided-push] M3-1b discovery dispatch decisionId=${event.decisionId} subObjectiveKey=${gapContext.subObjectiveKey}`,
+      );
+    }
+
     const composed = await composeMessage(prisma, {
       tenantId: event.tenantId,
       contactId: event.contactId,
@@ -262,6 +283,7 @@ actionDecidedPushApp.post('/action-decided', async (c) => {
       instruction,
       publicWebhookBaseUrl,
       knowledge,
+      ...(gapContext ? { gapContext } : {}),
     });
 
     const connectionId =
@@ -341,6 +363,12 @@ actionDecidedPushApp.post('/action-decided', async (c) => {
           select: { settings: true },
         });
         const sampleRate = resolveSampleRate(tenantRow?.settings);
+        // M3-1b — carry the discovery target into the sample's
+        // context.discoveryTarget so operators spot-check the engine's
+        // discovery judgment alongside the routine action.
+        const sampleDiscoveryTarget = event.action.payload?.discoveryTarget as
+          | { subObjectiveKey: string; label: string; triggerType: 'hard' | 'soft' }
+          | undefined;
         const result = await maybeEnqueueSampledReview(prisma, {
           tenantId: event.tenantId,
           contactId: event.contactId,
@@ -351,6 +379,7 @@ actionDecidedPushApp.post('/action-decided', async (c) => {
           decisionSource: event.decision.decisionSource,
           reasoning: event.decision.actionReasoning,
           sampleRate,
+          ...(sampleDiscoveryTarget ? { discoveryTarget: sampleDiscoveryTarget } : {}),
         });
         if (result.sampled) {
           console.log(
