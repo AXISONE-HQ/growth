@@ -13,6 +13,8 @@ export * from "./decision-payload.js";
 // silently drop fields (the M2-4 breaker plumbing was a sibling of the
 // cast-loose Prisma + synthetic decisionId drift class).
 export * from "./run-decision-types.js";
+// M3-1 Sub-Objective Framework MVP — single source of truth for gap-state types + Generic-B2B default set + score-scale constants.
+export * from "./sub-objective-types.js";
 export * from "./agentic-tool-schemas.js";
 export * from "./action-types.js";
 export * from "./lead-received.js";

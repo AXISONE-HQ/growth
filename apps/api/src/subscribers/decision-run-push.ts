@@ -154,6 +154,27 @@ async function loadRunDecisionModule(): Promise<RunDecisionModule> {
   return _runDecisionModule;
 }
 
+// M3-1a — sub-objective gap-tracker module loader (variable-specifier
+// pattern per KAN-689 cohort hygiene). Type signature uses the canonical
+// SubObjectiveGapState from @growth/shared, so the compile-time boundary
+// is checked against the single source of truth (same discipline as the
+// M2-4 follow-up that fixed the breakerState silent-drop class).
+interface GapTrackerModule {
+  computeGapState: (
+    prisma: unknown,
+    tenantId: string,
+    contactId: string,
+    contact: { currentStageName?: string; nextStageName?: string },
+  ) => Promise<import('@growth/shared').SubObjectiveGapState>;
+}
+let _gapTrackerModule: GapTrackerModule | null = null;
+async function loadGapTrackerModule(): Promise<GapTrackerModule> {
+  if (_gapTrackerModule) return _gapTrackerModule;
+  const spec = '../../../../packages/api/src/services/sub-objective-gap-tracker.js';
+  _gapTrackerModule = (await import(spec)) as GapTrackerModule;
+  return _gapTrackerModule;
+}
+
 // ─────────────────────────────────────────────
 // Schemas
 // ─────────────────────────────────────────────
@@ -642,6 +663,42 @@ decisionRunPushApp.post('/decision-run', async (c) => {
   const breakerState = await evaluateBreakerState(getRedisClient(), event.tenantId);
 
   let engineStarted = false;
+  // M3-1a — compute sub-objective gap-state BEFORE invoking the engine.
+  // Same caller-reads-context-passes-to-engine pattern as breakerState
+  // (M2-4) and dailyAutoActionCount (M2-1). gap-tracker is fail-safe:
+  // any error returns empty list + audit row, engine behaves as today.
+  //
+  // Loads the contact's current stage NAME (for hard-trigger matching
+  // against SubObjectiveDefault.requiredAtStage). Next-stage match is
+  // omitted in this slice — refinement deferred to learning-loop slice.
+  let subObjectiveGapState:
+    | import('@growth/shared').SubObjectiveGapState
+    | undefined;
+  try {
+    const contactWithStage = await prisma.contact.findFirst({
+      where: { id: event.contactId, tenantId: event.tenantId },
+      select: { currentStageId: true },
+    });
+    let currentStageName: string | undefined;
+    if (contactWithStage?.currentStageId) {
+      const stage = await prisma.stage.findUnique({
+        where: { id: contactWithStage.currentStageId },
+        select: { name: true },
+      });
+      currentStageName = stage?.name;
+    }
+    const { computeGapState } = await loadGapTrackerModule();
+    subObjectiveGapState = await computeGapState(prisma, event.tenantId, event.contactId, {
+      ...(currentStageName ? { currentStageName } : {}),
+    });
+  } catch (gapErr) {
+    // Fail-safe — engine proceeds without gap-state.
+    console.error(
+      `[decision-run-push] gap-state load failed contactId=${event.contactId}:`,
+      gapErr,
+    );
+  }
+
   try {
     const { runDecisionForContact } = await loadRunDecisionModule();
     engineStarted = true; // → finally will increment the counter on throw too
@@ -651,6 +708,7 @@ decisionRunPushApp.post('/decision-run', async (c) => {
       actor: { type: 'SYSTEM', id: 'decision-run-push' },
       dailyAutoActionCount,
       breakerState,
+      ...(subObjectiveGapState ? { subObjectiveGapState } : {}),
     });
 
     // KAN-1005 M2-1 — increment the autonomous-action counter on the

@@ -1057,6 +1057,13 @@ async function runFreeform(
       tone: context.brain.tone,
       constraints: context.brain.constraints,
     },
+    // M3-1a — thread caller-computed gap-state into action determination.
+    // scoreActions emits a discovery-flavored send_message candidate when
+    // topCandidate is hard-trigger OR soft-trigger above threshold; competes
+    // via existing line-259 sort. discoveryTarget metadata + reasoning
+    // directive automatically populated by determineAction when discovery
+    // wins (no caller-side wiring needed beyond this thread).
+    subObjectiveGapState: input.subObjectiveGapState,
   });
 
   // 5. Confidence Scorer.
@@ -1162,7 +1169,13 @@ async function runFreeform(
   }
   const outcome: 'EXECUTED' | 'ESCALATED' = gateResult.outcome;
 
+  // M3-1a — when discovery wins, prepend the action's reasoning (carries
+  // the human-readable "Discovery target: ask about <X>..." directive)
+  // so it surfaces verbatim in the M1 escalation review queue.
+  // Non-discovery decisions: actionResult.reasoning is the standard
+  // "Action: \"X\" (score: N)..." string — included for consistency.
   const reasoning = [
+    actionResult.reasoning,
     `Strategy: ${strategyType}`,
     `Action: ${actionType}`,
     `Confidence: ${(confidence * 100).toFixed(0)}% vs threshold ${(confidenceThreshold * 100).toFixed(0)}%`,
