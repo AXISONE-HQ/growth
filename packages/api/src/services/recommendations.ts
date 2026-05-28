@@ -237,12 +237,16 @@ async function loadEscalation(
   triggerType: string;
   aiSuggestion: string | null;
   context: unknown;
-  decision: { strategySelected: string; confidence: number; reasoning: string | null } | null;
+  // M3-1b follow-up — `metadata` exposed so the accept route can auto-carry
+  // discoveryTarget from the original Decision when the operator's
+  // modifiedAction.payload omits it (the route was silently stripping
+  // discovery directives on accept-to-dispatch).
+  decision: { strategySelected: string; confidence: number; reasoning: string | null; metadata: unknown } | null;
 }> {
   const row = await prisma.escalation.findFirst({
     where: { id, tenantId },
     include: {
-      decision: { select: { strategySelected: true, confidence: true, reasoning: true } },
+      decision: { select: { strategySelected: true, confidence: true, reasoning: true, metadata: true } },
     },
   });
   if (!row) {
@@ -352,6 +356,28 @@ export async function acceptRecommendation(
         `[recommendations.accept] skip publishActionDecided escalationId=${before.id} reason=null_decisionId — status-transition only; operator may need to manually dispatch the modified action`,
       );
     } else {
+      // M3-1b follow-up — auto-carry discoveryTarget from the original
+      // Decision when the operator's modifiedAction.payload omits it.
+      // Pre-fix gap: the accept route assigned `actionPayload =
+      // input.modifiedAction.payload` unconditionally → operator
+      // accepting a discovery escalation through the standard UI flow
+      // (which doesn't echo back the engine's discoveryTarget) stripped
+      // the discovery directive → composeMessage downstream got no
+      // gapContext → routine body produced instead of discovery body.
+      // Operator-override-wins: if operator explicitly provides
+      // discoveryTarget (even pointing at a different sub-objective),
+      // their value is preserved, the original is NOT shadowed.
+      const originalDiscoveryTarget = (
+        before.decision?.metadata as
+          | { action?: { actionPayload?: { discoveryTarget?: unknown } } }
+          | undefined
+      )?.action?.actionPayload?.discoveryTarget;
+      const operatorPayload = input.modifiedAction.payload;
+      const mergedActionPayload =
+        originalDiscoveryTarget !== undefined && operatorPayload.discoveryTarget === undefined
+          ? { ...operatorPayload, discoveryTarget: originalDiscoveryTarget }
+          : operatorPayload;
+
       const publishInput: PublishActionInput = {
         tenantId: ctx.tenantId,
         contactId: before.contactId,
@@ -363,7 +389,7 @@ export async function acceptRecommendation(
         decisionId: before.decisionId,
         actionType: input.modifiedAction.actionType,
         channel: input.modifiedAction.channel,
-        actionPayload: input.modifiedAction.payload,
+        actionPayload: mergedActionPayload,
         selectedStrategy: before.decision?.strategySelected ?? 'human_override',
         confidenceScore: before.decision?.confidence ?? 1.0,
         strategyReasoning: before.decision?.reasoning ?? `Operator accepted recommendation ${before.id}`,
