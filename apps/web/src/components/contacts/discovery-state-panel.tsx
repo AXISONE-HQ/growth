@@ -15,12 +15,13 @@
 
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Sparkles, Check, HelpCircle, MinusCircle } from 'lucide-react';
+import { Sparkles, Check, HelpCircle, MinusCircle, ChevronDown, ChevronRight } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   subObjectivesApi,
   type DiscoveryStateForContact,
   type DiscoveryStatePrioritizedGap,
+  type DiscoveryStateResolvedGap,
   type SubObjectiveStateValue,
 } from '@/lib/api';
 import { Input } from '@/components/ui/input';
@@ -61,15 +62,78 @@ export function DiscoveryStatePanel({ contactId }: DiscoveryStatePanelProps) {
         {engineIntentLine(data)}
       </p>
       <ul className="mt-3 flex flex-col gap-2" data-testid="discovery-sub-objective-rows">
-        {data.prioritizedGaps.length === 0 ? (
+        {data.prioritizedGaps.length === 0 && data.resolvedGaps.length === 0 ? (
           <PanelEmptyState />
         ) : null}
         {data.prioritizedGaps.map((gap) => (
           <SubObjectiveRow key={gap.key} gap={gap} contactId={contactId} />
         ))}
       </ul>
+      {data.resolvedGaps.length > 0 ? (
+        <ResolvedSection rows={data.resolvedGaps} />
+      ) : null}
     </div>
   );
+}
+
+// M3-1c-followup — collapsed "Known (n)" section below the active list so
+// operators see what the engine has learned about this contact. Default
+// collapsed to keep the active intent (Asking next:) focal; expand shows
+// "✓ <label>: <value> — set by <actor> · <relative time>" per row.
+function ResolvedSection({ rows }: { rows: DiscoveryStateResolvedGap[] }) {
+  const [open, setOpen] = useState(false);
+  const knownCount = rows.filter((r) => r.state === 'known').length;
+  const naCount = rows.filter((r) => r.state === 'not_applicable').length;
+  const label = `Known (${knownCount})${naCount > 0 ? ` · N/A (${naCount})` : ''}`;
+  return (
+    <div className="mt-3 border-t border-[var(--ds-border)] pt-2" data-testid="discovery-resolved-section">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-1 text-caption text-muted-foreground hover:text-foreground"
+        aria-expanded={open}
+      >
+        {open ? <ChevronDown className="h-3 w-3" aria-hidden /> : <ChevronRight className="h-3 w-3" aria-hidden />}
+        {label}
+      </button>
+      {open ? (
+        <ul className="mt-2 flex flex-col gap-1.5" data-testid="discovery-resolved-rows">
+          {rows.map((r) => (
+            <li key={r.key} className="flex items-start gap-2 text-caption" data-testid={`discovery-resolved-row-${r.key}`}>
+              {r.state === 'known' ? (
+                <Check className="mt-0.5 h-3 w-3 text-emerald-600" aria-hidden />
+              ) : (
+                <MinusCircle className="mt-0.5 h-3 w-3 text-muted-foreground" aria-hidden />
+              )}
+              <span className="text-foreground">
+                {r.label}
+                {r.state === 'known' && r.value ? (
+                  <>: <span className="font-medium">{r.value}</span></>
+                ) : r.state === 'not_applicable' ? (
+                  <> — not applicable</>
+                ) : null}
+              </span>
+              <span className="ml-auto text-muted-foreground italic">
+                set by {r.setBy ?? 'unknown'} · {relativeTime(r.setAt)}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
+// Minimal inline relative-time formatter — same shape used elsewhere in
+// the app (recent engagements / decisions sections). Avoids pulling a
+// new dep for one render site.
+function relativeTime(iso: string): string {
+  const then = new Date(iso).getTime();
+  const diffSec = Math.max(0, Math.floor((Date.now() - then) / 1000));
+  if (diffSec < 60) return 'just now';
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
+  return `${Math.floor(diffSec / 86400)}d ago`;
 }
 
 // "Engine view" header chrome — Sparkles icon + small label to differentiate
