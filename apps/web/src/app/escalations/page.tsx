@@ -742,6 +742,27 @@ function DetailPanel({
               </div>
             </div>
           </div>
+          {/* M3-1c — discoveryTarget marker. Renders when the engine emitted
+              a discovery candidate (decision.metadata.action.actionPayload.
+              discoveryTarget present). Additive: non-discovery decisions
+              omit cleanly. Reads tenant-scoped from existing payload. */}
+          {(() => {
+            const dt = (
+              (detail.decision.metadata as { action?: { actionPayload?: { discoveryTarget?: { label?: string; triggerType?: string } } } } | null | undefined)
+                ?.action?.actionPayload?.discoveryTarget
+            );
+            if (!dt?.label) return null;
+            return (
+              <div className="mt-3 flex items-center gap-2" data-testid="discovery-target-marker">
+                <span className="inline-flex items-center rounded-[var(--ds-radius-input)] bg-primary/10 px-2 py-0.5 text-caption font-medium text-primary">
+                  Discovery: {dt.label}
+                </span>
+                {dt.triggerType ? (
+                  <span className="text-caption text-muted-foreground">({dt.triggerType} trigger)</span>
+                ) : null}
+              </div>
+            );
+          })()}
           {detail.decision.reasoning ? (
             <details className="mt-3 group">
               <summary className="flex cursor-pointer items-center gap-1 text-caption text-muted-foreground hover:text-foreground">

@@ -246,6 +246,112 @@ export function shouldEmitDiscovery(state: SubObjectiveGapState): boolean {
 }
 
 // ─────────────────────────────────────────────
+// M3-1c — operator manual transition
+// ─────────────────────────────────────────────
+
+/**
+ * Operator manually transitions a sub-objective's state for a contact —
+ * the fallback path when info comes from off-platform (phone call, meeting,
+ * a quick contact-form note). Doctrine: this is a fallback, NOT the
+ * primary fill path; engine generation + extraction (later slice) +
+ * enrichment (later slice) are primary.
+ *
+ * Validates:
+ *   - contactId belongs to tenantId (cross-tenant rejection; throws)
+ *   - sub_objective_key is one of the canonical SUB_OBJECTIVE_KEYS
+ *   - toState is 'known' OR 'not_applicable' (manual can't set 'unknown' —
+ *     that's the initial state — or 'partial' — that's extraction-only)
+ *   - For 'known': value present and matches the per-valueType shape
+ *
+ * Writes:
+ *   - UPSERT the gap-state row with source='manual'; setBy=actor
+ *   - Best-effort audit-log row capturing prev → new transition
+ *
+ * Returns the updated PrioritizedGap shape for the caller to refresh UI.
+ */
+export async function transitionSubObjectiveState(
+  prisma: PrismaClient,
+  tenantId: string,
+  actor: string,
+  input: {
+    contactId: string;
+    subObjectiveKey: string;
+    toState: 'known' | 'not_applicable';
+    value?: string | number | null;
+  },
+): Promise<{ ok: true; previousState: SubObjectiveState }> {
+  // Cross-tenant guard — contact MUST belong to tenant.
+  const contact = await prisma.contact.findFirst({
+    where: { id: input.contactId, tenantId },
+    select: { id: true },
+  });
+  if (!contact) {
+    throw new Error(`contact ${input.contactId} not in tenant ${tenantId}`);
+  }
+  const def = DEFAULT_SUB_OBJECTIVES_GENERIC_B2B.find((d) => d.key === input.subObjectiveKey);
+  if (!def) {
+    throw new Error(`unknown sub_objective_key: ${input.subObjectiveKey}`);
+  }
+  if (input.toState === 'known' && (input.value === undefined || input.value === null || input.value === '')) {
+    throw new Error('value required when toState=known');
+  }
+  // Resolve typed value column for state='known'; nulls for state='not_applicable'.
+  const valueText = input.toState === 'known' && def.valueType === 'text' ? String(input.value) : null;
+  const valueDate = input.toState === 'known' && def.valueType === 'date' && input.value
+    ? new Date(String(input.value)) : null;
+  const valueNumeric = input.toState === 'known' && def.valueType === 'numeric' && input.value != null
+    ? Number(input.value) : null;
+  const valueEnum = input.toState === 'known' && def.valueType === 'enum' ? String(input.value) : null;
+  const valueTypeForDb = (def.valueType === 'enum' ? 'enum_value' : def.valueType) as
+    | 'text' | 'date' | 'numeric' | 'enum_value';
+
+  // Read previous state for audit + return.
+  const existing = await prisma.contactSubObjectiveGapState.findUnique({
+    where: { tenantId_contactId_subObjectiveKey: { tenantId, contactId: input.contactId, subObjectiveKey: input.subObjectiveKey } },
+    select: { state: true },
+  });
+  const previousState: SubObjectiveState = existing?.state ?? 'unknown';
+
+  await prisma.contactSubObjectiveGapState.upsert({
+    where: { tenantId_contactId_subObjectiveKey: { tenantId, contactId: input.contactId, subObjectiveKey: input.subObjectiveKey } },
+    create: {
+      tenantId,
+      contactId: input.contactId,
+      subObjectiveKey: input.subObjectiveKey,
+      state: input.toState,
+      valueType: valueTypeForDb,
+      valueText,
+      valueDate,
+      valueNumeric,
+      valueEnum,
+      source: 'manual',
+      setBy: actor,
+    },
+    update: {
+      state: input.toState,
+      valueText,
+      valueDate,
+      valueNumeric,
+      valueEnum,
+      source: 'manual',
+      setBy: actor,
+      setAt: new Date(),
+    },
+  });
+
+  await writeAuditBestEffort(prisma, tenantId, 'sub_objective_gap_state.transitioned', {
+    contactId: input.contactId,
+    subObjectiveKey: input.subObjectiveKey,
+    previousState,
+    newState: input.toState,
+    actor,
+    source: 'manual',
+  });
+
+  return { ok: true, previousState };
+}
+
+// ─────────────────────────────────────────────
 // Best-effort audit-log write
 // ─────────────────────────────────────────────
 

@@ -34,6 +34,8 @@ import {
 } from '@/components/ui/detail-page-shell';
 import { fmtDate, fmtDateTime } from '@/lib/fmt-date';
 import { CONTACT_SOURCE_LABELS, enumLabel } from '@/lib/enum-labels';
+// M3-1c — Discovery state panel (engine-view chrome between Address and Customer status).
+import { DiscoveryStatePanel } from '@/components/contacts/discovery-state-panel';
 
 function displayName(c: ContactDetail): string {
   const name = [c.firstName, c.lastName].filter(Boolean).join(' ').trim();
@@ -205,6 +207,9 @@ export default function ContactDetailPage() {
               />
             )}
           </SectionCard>
+
+          {/* M3-1c — engine intent surface. Designer eyeball at Phase 4. */}
+          <DiscoveryStatePanel contactId={contact.id} />
 
           {contact.customer ? (
             <SectionCard title="Customer status">
