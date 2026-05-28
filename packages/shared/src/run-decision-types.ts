@@ -120,6 +120,24 @@ export interface RunForContactInput {
    */
   breakerState?: BreakerStateInput;
   /**
+   * M3-1a Sub-Objective Framework — caller-computed gap-state for the
+   * contact, threaded into action-determination. Engine consults the
+   * `topCandidate` (hard-trigger forces a discovery send_message at
+   * score 95; soft-trigger competes via score = 60 + score×20). When
+   * a discovery candidate wins, `Decision.metadata.discoveryTarget` is
+   * populated + `actionReasoning` carries the human-readable directive.
+   *
+   * Omit (or pass `{ prioritizedGaps: [] }`) → engine behaves as today,
+   * no discovery candidates emitted. Caller computes via
+   * `computeGapState(prisma, tenantId, contactId, contact)` in
+   * packages/api; production caller is decision-run-push.ts adjacent
+   * to the existing breakerState read.
+   *
+   * Imported here using cross-module typeOf to avoid the cycle:
+   * `SubObjectiveGapState` lives in sub-objective-types.ts.
+   */
+  subObjectiveGapState?: import('./sub-objective-types.js').SubObjectiveGapState;
+  /**
    * Adapter pattern (KAN-655): when set, the engine executes this
    * predetermined step instead of free-form deciding. See
    * PlaybookStepContext docstring above.

@@ -25,6 +25,18 @@
  */
 
 import { z } from 'zod';
+// M3-1a — score-scale constants pinned in @growth/shared (evidence-pinned
+// against measured scoreActions literals 55..100; see sub-objective-types.ts
+// docstring). HARD=95 above realistic routine max 85, below sentinel 100;
+// SOFT = base 60 + score × 20 → range 72..80, loses to message-aligned routine 85.
+import {
+  DISCOVERY_HARD_TRIGGER_SCORE,
+  DISCOVERY_SOFT_TRIGGER_BASE,
+  DISCOVERY_SOFT_TRIGGER_MULTIPLIER,
+  SOFT_TRIGGER_THRESHOLD,
+  type SubObjectiveGapState,
+  type DiscoveryTargetMetadata,
+} from '@growth/shared';
 
 // ─────────────────────────────────────────────
 // Schemas
@@ -118,6 +130,12 @@ export const ActionDeterminerInputSchema = z.object({
       requireHumanApproval: z.boolean().optional(),
     })
     .optional(),
+  // M3-1a — gap-state from computeGapState(). When topCandidate is
+  // hard-trigger OR soft-trigger above threshold, scoreActions emits a
+  // discovery-flavored send_message candidate competing in the existing
+  // line-259 ranking. Omitted/empty → no discovery candidate, engine
+  // behavior identical to pre-M3-1a.
+  subObjectiveGapState: z.custom<SubObjectiveGapState>().optional(),
 });
 
 export const ActionDeterminerResultSchema = z.object({
@@ -137,6 +155,11 @@ export const ActionDeterminerResultSchema = z.object({
     closeReason: z.string().optional(),
     followUpDelayHours: z.number().optional(),
     followUpActionType: ActionType.optional(),
+    // M3-1a — set when the engine emits a discovery-flavored send_message
+    // (hard or soft trigger). Slice 1b (dispatch path) reads this to
+    // populate composeMessage's gapContext. Slice 1c (UI) renders the
+    // marker in the escalation drawer.
+    discoveryTarget: z.custom<DiscoveryTargetMetadata>().optional(),
   }),
   reasoning: z.string(),
   determinedAt: z.string().datetime(),
@@ -255,6 +278,31 @@ function scoreActions(input: ActionDeterminerInput): ActionCandidate[] {
     if (suggestions.some((s) => s.toLowerCase().includes('escalat'))) candidates.push({ actionType: 'escalate_human', channel: null, score: 60, reason: 'Gap suggests escalation' });
     if (suggestions.some((s) => s.toLowerCase().includes('meeting') || s.toLowerCase().includes('book'))) candidates.push({ actionType: 'book_meeting', channel: null, score: 55, reason: 'Gap suggests meeting' });
   }
+  // M3-1a — discovery candidate (unfilled high-priority sub-objective).
+  // Adds a send_message-typed candidate that competes via the existing
+  // line-259 sort. Hard-trigger score 95 (above realistic routine max 85,
+  // below human-override sentinels 100). Soft-trigger 60 + score×20 →
+  // 72..80 range, loses to message-aligned routine 85, beats baseline 70.
+  // Magnitudes evidence-pinned in @growth/shared/sub-objective-types.ts.
+  const gapState = input.subObjectiveGapState;
+  if (gapState?.topCandidate && strategyMap.primary === 'send_message') {
+    const top = gapState.topCandidate;
+    if (top.hardTrigger) {
+      candidates.push({
+        actionType: 'send_message',
+        channel,
+        score: DISCOVERY_HARD_TRIGGER_SCORE,
+        reason: `Discovery (hard): "${top.label}" required at stage`,
+      });
+    } else if (top.score >= SOFT_TRIGGER_THRESHOLD) {
+      candidates.push({
+        actionType: 'send_message',
+        channel,
+        score: DISCOVERY_SOFT_TRIGGER_BASE + top.score * DISCOVERY_SOFT_TRIGGER_MULTIPLIER,
+        reason: `Discovery (soft): "${top.label}" (score=${top.score.toFixed(2)})`,
+      });
+    }
+  }
   if (input.tenantPermissions?.requireHumanApproval) candidates.push({ actionType: 'escalate_human', channel: null, score: 100, reason: 'Tenant requires human approval for all actions' });
   return candidates.sort((a, b) => b.score - a.score);
 }
@@ -279,7 +327,36 @@ export function determineAction(input: ActionDeterminerInput): ActionDeterminerR
   const strategyMap = STRATEGY_ACTION_MAP[parsed.selectedStrategy];
   const channel = winner.actionType === 'send_message' ? winner.channel ?? selectChannel(parsed, strategyMap?.channels ?? []) : null;
   const payload = buildActionPayload(winner.actionType, parsed);
-  const result: ActionDeterminerResult = { contactId: parsed.contactId, tenantId: parsed.tenantId, objectiveId: parsed.objectiveId, actionType: winner.actionType, channel, actionPayload: payload, reasoning: `Action: "${winner.actionType}" (score: ${winner.score}). ${winner.reason}.`, determinedAt: new Date().toISOString() };
+
+  // M3-1a — when a discovery candidate wins the line-259 sort, populate
+  // payload.discoveryTarget (downstream observability + slice-1b compose
+  // hook) AND emit a human-readable reasoning directive (surfaced to
+  // operators in the M1 escalation review queue via decision.reasoning).
+  let reasoning = `Action: "${winner.actionType}" (score: ${winner.score}). ${winner.reason}.`;
+  const top = parsed.subObjectiveGapState?.topCandidate;
+  const discoveryWon =
+    winner.actionType === 'send_message' &&
+    top !== undefined &&
+    winner.reason.startsWith('Discovery (');
+  if (discoveryWon && top !== undefined) {
+    const triggerType: 'hard' | 'soft' = top.hardTrigger ? 'hard' : 'soft';
+    const gapDef = parsed.subObjectiveGapState?.prioritizedGaps.find((g) => g.key === top.key);
+    payload.discoveryTarget = {
+      subObjectiveKey: top.key,
+      label: top.label,
+      triggerType,
+      priorityWeight: gapDef?.priorityWeight ?? 0,
+      ...(gapDef?.requiredAtStage ? { requiredAtStage: gapDef.requiredAtStage } : {}),
+    };
+    // Human-readable directive — what the M1 reviewer sees in the queue.
+    // Phrasing avoids serialized schema dumps per founder discipline.
+    const stageContext = gapDef?.requiredAtStage
+      ? ` Engine needs this to advance the contact to ${gapDef.requiredAtStage}.`
+      : ' Engine flagged this as the highest-priority unfilled discovery target.';
+    reasoning = `Discovery target: ask about ${top.label.toLowerCase().replace(/\?$/, '')}.${stageContext} (Trigger: ${triggerType}; score ${top.score.toFixed(2)}.)`;
+  }
+
+  const result: ActionDeterminerResult = { contactId: parsed.contactId, tenantId: parsed.tenantId, objectiveId: parsed.objectiveId, actionType: winner.actionType, channel, actionPayload: payload, reasoning, determinedAt: new Date().toISOString() };
   return ActionDeterminerResultSchema.parse(result);
 }
 

@@ -140,6 +140,9 @@ model Tenant {
 
   //   tenantSettings  TenantSettings[]  // commented out for smoke build (model missing on main)
   channelConnections ChannelConnection[]
+  // M3-1 Sub-Objective Framework MVP — tenant-scoped discovery state.
+  // RESTRICT delete: tenant deletion should never silently drop gap-state.
+  subObjectiveGapStates ContactSubObjectiveGapState[]
 
   @@map("tenants")
 }
@@ -280,6 +283,9 @@ model Contact {
   orders                Order[]
   // KAN-1001 Campaign Slice 0 — Contact ↔ CampaignMembership back-relation.
   campaignMemberships   CampaignMembership[]
+  // M3-1 Sub-Objective Framework MVP — discovery checkpoints per contact.
+  // Cascading delete: removing a contact removes its gap-state rows.
+  subObjectiveGapStates ContactSubObjectiveGapState[]
 
   @@index([tenantId])
   @@index([tenantId, email])
@@ -2931,4 +2937,81 @@ model ImportStagingOrder {
   @@index([tenantId, providerOrderId])
   @@index([targetOrderId])
   @@map("import_staging_orders")
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// M3-1 — Sub-Objective Framework + Gap Tracker MVP
+//
+// Per-contact discovery checkpoints: the typed gap-state the engine
+// consults on every decision. Sibling to `contacts` (NOT extension of
+// ContactObjectiveStack — different semantics: stack = goals we pursue;
+// this table = info we need to learn).
+//
+// Doctrine: configuration is a failure mode — sub_objective_key is
+// free-form text in the schema so a future Blueprint loader can ship
+// per-vertical sets without an enum migration. MVP hardcodes 5 keys
+// in @growth/shared.
+//
+// Initialize-on-touch: computeGapState() seeds 5 default rows on read
+// using createMany(skipDuplicates: true) on every call — self-heals
+// partial-seed states. UNIQUE constraint on (tenant_id, contact_id,
+// sub_objective_key) makes this idempotent.
+// ─────────────────────────────────────────────────────────────────────
+
+enum SubObjectiveState {
+  unknown
+  partial
+  known
+  not_applicable
+
+  @@map("sub_objective_state")
+}
+
+enum SubObjectiveValueType {
+  text
+  date
+  numeric
+  enum_value // 'enum' is a reserved Prisma keyword — mapped to enum at the DB layer
+
+  @@map("sub_objective_value_type")
+}
+
+enum SubObjectiveSource {
+  decision_initialize
+  manual
+  extraction
+  enrichment
+
+  @@map("sub_objective_source")
+}
+
+model ContactSubObjectiveGapState {
+  id              String                @id @default(uuid())
+  tenantId        String                @map("tenant_id")
+  contactId       String                @map("contact_id")
+  // sub_objective_key is free-form text (not enum) so Blueprint loaders
+  // ship per-vertical sets without schema migration.
+  subObjectiveKey String                @map("sub_objective_key")
+  state           SubObjectiveState     @default(unknown)
+  valueType       SubObjectiveValueType @map("value_type")
+  // Polymorphic typed-value columns — chosen over JSON for queryability
+  // (Learning System correlation queries: "% qualified contacts with
+  // timeline=known"). Writer populates ONLY the column matching value_type.
+  valueText       String?               @map("value_text")
+  valueDate       DateTime?             @map("value_date")
+  valueNumeric    Float?                @map("value_numeric")
+  valueEnum       String?               @map("value_enum")
+  source          SubObjectiveSource
+  setAt           DateTime              @default(now()) @map("set_at")
+  setBy           String?               @map("set_by")
+  createdAt       DateTime              @default(now()) @map("created_at")
+  updatedAt       DateTime              @updatedAt @map("updated_at")
+
+  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  tenant  Tenant  @relation(fields: [tenantId], references: [id])
+
+  @@unique([tenantId, contactId, subObjectiveKey], map: "contact_sub_objective_gap_state_unique")
+  @@index([tenantId, contactId], map: "contact_sub_objective_gap_state_tenant_contact_idx")
+  @@index([tenantId, subObjectiveKey, state], map: "contact_sub_objective_gap_state_tenant_key_state_idx")
+  @@map("contact_sub_objective_gap_state")
 }
