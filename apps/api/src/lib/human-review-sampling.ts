@@ -131,6 +131,22 @@ export interface MaybeEnqueueSampledReviewArgs {
   reasoning: string;
   /** Pre-resolved sample rate (from already-loaded tenant context). */
   sampleRate: number;
+  /**
+   * M3-1b — when this auto-approved action was a discovery dispatch,
+   * the engine wrote discoveryTarget into Decision.metadata.action.
+   * actionPayload. Carrying it through to the sampled Escalation's
+   * context.discoveryTarget so operators reviewing the sample queue
+   * can spot-check the engine's discovery judgment alongside its
+   * routine ones (PRD §6 sampling carry-through requirement).
+   *
+   * Omitted on non-discovery sampled decisions → context omits the
+   * field cleanly; UI renders only when present.
+   */
+  discoveryTarget?: {
+    subObjectiveKey: string;
+    label: string;
+    triggerType: 'hard' | 'soft';
+  };
 }
 
 /**
@@ -178,6 +194,10 @@ export async function maybeEnqueueSampledReview(
         confidence: args.confidence,
         decisionSource: args.decisionSource,
         reasoning: args.reasoning,
+        // M3-1b — discovery-judgment carry-through. Operators reviewing
+        // sampled rows see the engine's discovery target alongside its
+        // routine action so the spot-check covers both axes.
+        ...(args.discoveryTarget ? { discoveryTarget: args.discoveryTarget } : {}),
       } as unknown as Prisma.InputJsonValue,
     },
     select: { id: true },
