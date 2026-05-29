@@ -22,6 +22,7 @@ const verifyPubsubOidcMock = vi.fn();
 const decisionFindFirstMock = vi.fn();
 const actionOutcomeCreateMock = vi.fn();
 const engagementCreateMock = vi.fn();
+const engagementEmailMetadataCreateMock = vi.fn();
 const tenantFindUniqueMock = vi.fn();
 const pubsubPublishMock = vi.fn();
 
@@ -29,12 +30,23 @@ vi.mock('../lib/oidc-pubsub-verify.js', () => ({
   verifyPubsubOidc: verifyPubsubOidcMock,
 }));
 
+// M3-2.5a: handler now wraps Engagement+sidecar in prisma.$transaction.
+// The $transaction mock delegates tx.engagement.create back to the existing
+// engagementCreateMock so all the historical assertions stay valid; the new
+// sidecar create is captured separately for shape-only assertions.
 vi.mock('../prisma.js', () => ({
   prisma: {
     decision: { findFirst: decisionFindFirstMock },
     actionOutcome: { create: actionOutcomeCreateMock },
     engagement: { create: engagementCreateMock },
+    engagementEmailMetadata: { create: engagementEmailMetadataCreateMock },
     tenant: { findUnique: tenantFindUniqueMock },
+    $transaction: vi.fn(async (cb: (tx: unknown) => Promise<unknown>) =>
+      cb({
+        engagement: { create: engagementCreateMock },
+        engagementEmailMetadata: { create: engagementEmailMetadataCreateMock },
+      }),
+    ),
   },
 }));
 
@@ -91,6 +103,8 @@ beforeEach(() => {
   actionOutcomeCreateMock.mockResolvedValue({ id: 'outcome_id_a' });
   engagementCreateMock.mockReset();
   engagementCreateMock.mockResolvedValue({ id: 'engagement_id_a' });
+  engagementEmailMetadataCreateMock.mockReset();
+  engagementEmailMetadataCreateMock.mockResolvedValue({ engagementId: 'engagement_id_a' });
   tenantFindUniqueMock.mockReset();
   pubsubPublishMock.mockReset();
 });

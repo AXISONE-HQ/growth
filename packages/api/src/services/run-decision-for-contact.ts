@@ -46,6 +46,33 @@ import { selectStrategy } from './strategy-selector.js';
 import { determineAction } from './action-determiner.js';
 import { scoreConfidence } from './confidence-scorer.js';
 import { evaluateThreshold, type ThresholdGateInput } from './threshold-gate.js';
+// M3-2.5a — shared helper resolves the active Deal for a Decision so the
+// 3 engine-Decision-write sites (runFreeform, runAgentic, runPlaybookStep)
+// all stamp metadata.dealId via one source. Closes the silent gap where
+// engine-emitted dispatches skipped Engagement writes entirely (action-
+// executed-push.ts:146 guard `if (dealId && ...)` was never satisfied).
+// Variable-specifier dynamic import keeps resolve-active-deal.ts out of
+// the apps/api static graph (TS6059 cohort, same pattern as
+// agentic-decision-runner load below — tactical until KAN-689 lands).
+type ResolveActiveDealForContactFn = (
+  prisma: PrismaClient,
+  tenantId: string,
+  contactId: string,
+) => Promise<string | null>;
+
+let _resolveActiveDealForContactFn: ResolveActiveDealForContactFn | null = null;
+async function loadResolveActiveDealForContact(): Promise<ResolveActiveDealForContactFn> {
+  if (_resolveActiveDealForContactFn) return _resolveActiveDealForContactFn;
+  const spec = './resolve-active-deal.js';
+  const mod = (await import(spec)) as {
+    resolveActiveDealForContact?: ResolveActiveDealForContactFn;
+  };
+  if (typeof mod.resolveActiveDealForContact !== 'function') {
+    throw new Error('resolve-active-deal did not export resolveActiveDealForContact');
+  }
+  _resolveActiveDealForContactFn = mod.resolveActiveDealForContact;
+  return _resolveActiveDealForContactFn;
+}
 
 // KAN-738: variable-specifier dynamic import keeps agentic-decision-runner.ts
 // out of the apps/api static graph (TS6059 cohort). Same pattern as
@@ -513,6 +540,10 @@ async function runAgentic(
     }
   }
 
+  // M3-2.5a — stamp metadata.dealId so action-executed-push.ts's existing
+  // guard fires for engine-emitted dispatches. Null → guard skips cleanly.
+  const resolveActiveDealForContact = await loadResolveActiveDealForContact();
+  const dealIdForMetadata = await resolveActiveDealForContact(prisma, tenantId, contactId);
   const decision = await prisma.decision.create({
     data: {
       tenantId,
@@ -525,6 +556,7 @@ async function runAgentic(
         outcome,
         agenticPayload: agenticPayload.action.payload ?? {},
         mode: 'agentic_live',
+        ...(dealIdForMetadata ? { dealId: dealIdForMetadata } : {}),
       } as unknown as Prisma.InputJsonValue,
     },
   });
@@ -842,6 +874,9 @@ async function runPlaybookStep(
   const outcome: 'EXECUTED' = 'EXECUTED';
   const reasoning = `Playbook step: ${step.playbookStep} · ${step.instruction}`;
 
+  // M3-2.5a — stamp metadata.dealId (see runAgentic comment).
+  const resolveActiveDealForContact = await loadResolveActiveDealForContact();
+  const dealIdForMetadata = await resolveActiveDealForContact(prisma, tenantId, contactId);
   const decision = await prisma.decision.create({
     data: {
       tenantId,
@@ -857,6 +892,7 @@ async function runPlaybookStep(
         allowedActions: step.allowedActions,
         instruction: step.instruction,
         ...(step.additionalContext ?? {}),
+        ...(dealIdForMetadata ? { dealId: dealIdForMetadata } : {}),
       } as unknown as Prisma.InputJsonValue,
     },
   });
@@ -1188,6 +1224,9 @@ async function runFreeform(
   // cast hid the schema-mismatch bug at line ~857 on every ESCALATED outcome:
   // decisionId/reason/priority/context fields didn't exist, Prisma rejected
   // the create at runtime, try/catch swallowed the error, the row was lost.
+  // M3-2.5a — stamp metadata.dealId (see runAgentic comment).
+  const resolveActiveDealForContact = await loadResolveActiveDealForContact();
+  const dealIdForMetadata = await resolveActiveDealForContact(prisma, tenantId, contactId);
   const decision = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     const row = await tx.decision.create({
       data: {
@@ -1203,6 +1242,7 @@ async function runFreeform(
           threshold: confidenceThreshold,
           outcome,
           gaps: Array.isArray(gaps) ? gaps.slice(0, 10) : gaps,
+          ...(dealIdForMetadata ? { dealId: dealIdForMetadata } : {}),
         } as unknown as Prisma.InputJsonValue,
       },
     });
