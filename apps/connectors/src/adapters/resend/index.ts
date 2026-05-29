@@ -191,6 +191,33 @@ export class ResendAdapter implements ChannelAdapter {
       listUnsubscribe = '<mailto:unsubscribe@growth.axisone.ca?subject=unsubscribe>';
     }
 
+    // KAN-1036 Phase 2.0 — gate experiment for β.3 (sender-controlled
+    // Message-ID). Flag-gated via KAN_1036_GATE_ENABLED env var so the
+    // experiment doesn't affect any other dispatch. Value format
+    // `<kan-1036-{actionId}@growth.axisone.ca>` is deterministic per send
+    // and grep-identifiable.
+    //
+    // Empirical gate: if recipient's MUA "show original" view shows this
+    // exact value in the Message-ID header, β.3 works and we adopt it as
+    // Phase 2.1's capture mechanism (drop the flag, header becomes
+    // unconditional, store value in the new wire_message_id sidecar
+    // column at send time).
+    //
+    // If recipient sees `<...@email.amazonses.com>` instead, SES overrode
+    // the sender-set value → β.3 dead → fall back to β.2 (deploy
+    // full-payload logging on email.sent webhook, observe payload, decide).
+    const kan1036GateEnabled = process.env.KAN_1036_GATE_ENABLED === 'true';
+    const kan1036GateMessageId = kan1036GateEnabled
+      ? `<kan-1036-${msg.actionId}@growth.axisone.ca>`
+      : null;
+
+    if (kan1036GateMessageId) {
+      log.info(
+        { actionId: msg.actionId, gateMessageId: kan1036GateMessageId },
+        '[kan-1036-gate] setting sender Message-ID on send',
+      );
+    }
+
     try {
       const result = await resend.emails.send({
         from: fromName ? `${fromName} <${fromEmail}>` : fromEmail,
@@ -208,6 +235,8 @@ export class ResendAdapter implements ChannelAdapter {
           'List-Unsubscribe': listUnsubscribe,
           'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
           'Idempotency-Key': msg.actionId,
+          // KAN-1036 gate — flag-gated. See block above for rationale.
+          ...(kan1036GateMessageId ? { 'Message-ID': kan1036GateMessageId } : {}),
         },
         // Resend tags map analogously to SendGrid customArgs/categories — used
         // for filtering in the Resend dashboard; KAN-684 webhook handler keys
