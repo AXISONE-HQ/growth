@@ -440,6 +440,27 @@ export async function gateAndPublishComposed(
     return { sent: false, decision: 'block', blockedReason: gate.blockedReason };
   }
 
+  // KAN-1035: thread the tenant Reply-To into the action.send wire so
+  // recipient replies route to <inboxSlug>@leads.<LEAD_INBOX_DOMAIN>, not to
+  // the From address (hello@growth.axisone.ca). Without this, M2-6a
+  // redirect-on dispatches send the actual email correctly but Gmail's Reply
+  // composer targets From — the customer's reply never reaches Resend
+  // Receiving's webhook → the M3-2.5b inbound correlation never has anything
+  // to correlate → the entire reply loop is silently broken.
+  //
+  // KAN-816 shipped the helper + the Lead Inbox-path inline wiring
+  // (lead-received-push.ts:1510). This call makes the same behavior the
+  // default for every gated send path (engine accept-dispatch + future
+  // callers), since gateAndPublishComposed is the single chokepoint between
+  // any guardrail-gated dispatch and the Resend adapter.
+  //
+  // Fail-mode posture (matches Lead Inbox): raw await, no try/catch. If
+  // resolveReplyToForTenant throws (DB blip), the dispatch fails — consistent
+  // failure semantics between the two outbound paths. Helper internally
+  // warn-logs + returns null when tenant has no inboxSlug; we omit Reply-To
+  // in that case rather than fail.
+  const replyTo = await resolveReplyToForTenant(prisma, ctx.tenantId);
+
   const messageId = await publishActionSend(pubsubClient, {
     tenantId: ctx.tenantId,
     contactId: ctx.contactId,
@@ -447,6 +468,7 @@ export async function gateAndPublishComposed(
     toEmail: ctx.toEmail,
     composed,
     connectionId: ctx.connectionId,
+    ...(replyTo ? { replyTo } : {}),
   });
   return { sent: true, messageId, decision: gate.decision };
 }

@@ -58,10 +58,19 @@ const ctx = {
   confidenceScore: 85,
 };
 
-function makeStubPrisma() {
+function makeStubPrisma(opts?: { inboxSlug?: string | null }) {
   return {
     escalation: {
       create: vi.fn(async () => ({ id: 'escalation-test-id' })),
+    },
+    // KAN-1035 — resolveReplyToForTenant queries tenant.findUnique inside
+    // gateAndPublishComposed. Default returns null (no slug → no Reply-To
+    // on the wire — preserves existing test expectations); per-test
+    // override exercises the slug-populated path.
+    tenant: {
+      findUnique: vi.fn(async () => ({
+        inboxSlug: opts?.inboxSlug ?? null,
+      })),
     },
   } as unknown as PrismaClient;
 }
@@ -230,5 +239,126 @@ describe('gateAndPublishComposed (KAN-697 active wedge path)', () => {
     // Pub/Sub still attempted
     const topics = (pubsub.publish as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0]);
     expect(topics).toContain('growth.escalation.triggered');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// KAN-1035 — Reply-To threading via resolveReplyToForTenant inside
+// gateAndPublishComposed. Engine accept-dispatch path missed this pre-fix
+// (Lead Inbox path threaded it inline at lead-received-push.ts:1510 — see
+// the docstring at the call site in message-composer.ts).
+// ─────────────────────────────────────────────────────────────────────────
+
+describe('KAN-1035 — Reply-To threaded into publishActionSend', () => {
+  // Re-pin the AxisOne tenant inbox_slug observed in the M3-2.5b live-verify.
+  // The slug value isn't load-bearing for the test itself (any non-empty
+  // string would prove the wire shape), but pinning it documents the
+  // PROD-observed value for future readers debugging the reply loop.
+  const AXISONE_INBOX_SLUG = 'c03065f6';
+
+  beforeEach(() => {
+    // LEAD_INBOX_DOMAIN is the env var resolveReplyToForTenant reads to
+    // build the final address; defaulting in the test guarantees the
+    // assertion is deterministic across local/CI/PROD.
+    process.env.LEAD_INBOX_DOMAIN = 'leads.axisone.ca';
+  });
+
+  it('tenant has inboxSlug → publishActionSend receives replyTo=<slug>@<DOMAIN>', async () => {
+    const prisma = makeStubPrisma({ inboxSlug: AXISONE_INBOX_SLUG });
+    const pubsub = makeStubPubSubClient();
+    const validator = vi.fn(() => makeResult([], 'pass'));
+
+    const out = await gateAndPublishComposed(prisma, pubsub, ctx, composed, {
+      extraHooks: { validate: validator },
+    });
+
+    expect(out.sent).toBe(true);
+    // Decode the action.send event payload — publishActionSend serializes
+    // the message into the data buffer that the connector subscriber
+    // re-parses with OutboundMessageSchema. The replyTo field lives
+    // inside the inner `message` object per packages/api/src/services/
+    // message-composer.ts:259-275.
+    const publishCalls = (pubsub.publish as ReturnType<typeof vi.fn>).mock.calls;
+    const sendCall = publishCalls.find((c) => c[0] === 'action.send');
+    expect(sendCall).toBeDefined();
+    const sentEvent = JSON.parse((sendCall![1] as Buffer).toString('utf8')) as {
+      message: { replyTo?: string };
+    };
+    expect(sentEvent.message.replyTo).toBe(`${AXISONE_INBOX_SLUG}@leads.axisone.ca`);
+  });
+
+  it('tenant inboxSlug is NULL → publishActionSend invoked WITHOUT replyTo (graceful fallback)', async () => {
+    const prisma = makeStubPrisma({ inboxSlug: null });
+    const pubsub = makeStubPubSubClient();
+    const validator = vi.fn(() => makeResult([], 'pass'));
+    // The helper's warn-log fires; spy to suppress + confirm.
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const out = await gateAndPublishComposed(prisma, pubsub, ctx, composed, {
+      extraHooks: { validate: validator },
+    });
+
+    expect(out.sent).toBe(true);
+    const sendCall = (pubsub.publish as ReturnType<typeof vi.fn>).mock.calls.find(
+      (c) => c[0] === 'action.send',
+    );
+    const sentEvent = JSON.parse((sendCall![1] as Buffer).toString('utf8')) as {
+      message: { replyTo?: string };
+    };
+    // replyTo omitted entirely (not null, not empty string — actually absent).
+    expect(sentEvent.message.replyTo).toBeUndefined();
+    expect('replyTo' in sentEvent.message).toBe(false);
+    // Warn log from the helper confirms the no-slug path was exercised.
+    expect(warnSpy).toHaveBeenCalled();
+    const warnText = warnSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(warnText).toMatch(/no inboxSlug/);
+    warnSpy.mockRestore();
+  });
+
+  it('guardrail BLOCK → resolveReplyToForTenant NOT called (no wasted DB read on block path)', async () => {
+    const prisma = makeStubPrisma({ inboxSlug: AXISONE_INBOX_SLUG });
+    const pubsub = makeStubPubSubClient();
+    const validator = vi.fn(() =>
+      makeResult([violation('injection', 'block', 'prompt injection detected')], 'block'),
+    );
+
+    const out = await gateAndPublishComposed(prisma, pubsub, ctx, composed, {
+      extraHooks: { validate: validator },
+    });
+
+    expect(out.sent).toBe(false);
+    expect(out.decision).toBe('block');
+    // The Reply-To resolve happens AFTER the gate check on the allow/warn
+    // path. On block, resolve is skipped entirely — tenant.findUnique
+    // never called.
+    const tenantMock = (prisma as unknown as { tenant: { findUnique: ReturnType<typeof vi.fn> } })
+      .tenant.findUnique;
+    expect(tenantMock).not.toHaveBeenCalled();
+  });
+
+  it('fail-mode posture matches Lead Inbox: helper throw propagates (no try/catch wrap)', async () => {
+    // Simulate a DB blip during resolveReplyToForTenant. Lead Inbox path
+    // does not catch this — dispatch fails. Match that posture so the two
+    // outbound paths have consistent failure semantics.
+    const prisma = {
+      escalation: { create: vi.fn(async () => ({ id: 'escalation-test-id' })) },
+      tenant: {
+        findUnique: vi.fn(async () => {
+          throw new Error('db-blip: connection refused');
+        }),
+      },
+    } as unknown as PrismaClient;
+    const pubsub = makeStubPubSubClient();
+    const validator = vi.fn(() => makeResult([], 'pass'));
+
+    await expect(
+      gateAndPublishComposed(prisma, pubsub, ctx, composed, {
+        extraHooks: { validate: validator },
+      }),
+    ).rejects.toThrow(/db-blip/);
+
+    // action.send NOT published (raw await blocks dispatch on resolver throw)
+    const topics = (pubsub.publish as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0]);
+    expect(topics).not.toContain('action.send');
   });
 });
