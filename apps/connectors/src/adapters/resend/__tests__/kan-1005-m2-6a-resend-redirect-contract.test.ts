@@ -195,3 +195,86 @@ describe('KAN-1005 M2-6a — ResendAdapter contract: redirected recipient reache
     sendRedirect.__setPrismaForTest(null);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────
+// KAN-1035 — wire-truth pin: Resend SDK actually receives the replyTo we
+// thread through OutboundMessage. Three properties:
+//   (a) msg.replyTo populated → SDK call carries reply_to (the actual
+//       header that lands in the recipient's MUA — when Reply-To is set,
+//       Gmail's Reply composer targets THIS address, not From).
+//   (b) M2-6a redirect doesn't strip replyTo — recipient is rewritten
+//       to fred but Reply-To stays as the originator-intended inbox slug.
+//   (c) Legacy fallback preserved — msg.replyTo absent but
+//       ChannelConnection.metadata.replyTo set → SDK still receives
+//       reply_to via the connection-level default.
+// ─────────────────────────────────────────────────────────────────────────
+
+describe('KAN-1035 — replyTo wire contract: Resend SDK receives reply_to', () => {
+  // The PROD AxisOne tenant inbox_slug observed in M3-2.5b live-verify.
+  // Re-pinned here so future readers tracing the reply loop can grep this
+  // value from either side (Phase 1 trace + this contract test).
+  const AXISONE_REPLY_TO = 'c03065f6@leads.axisone.ca';
+
+  beforeEach(() => {
+    vi.resetModules();
+    resendEmailsSendMock.mockClear();
+    setEnv(ENV_FIXTURE);
+  });
+
+  it('msg.replyTo populated + redirect ON → SDK call carries replyTo (To: rewritten to fred, Reply-To: stays as inbox slug)', async () => {
+    const { ResendAdapter } = await import('../index.js');
+    const adapter = new ResendAdapter();
+    await adapter.send(
+      baseConnection() as any,
+      { ...baseMsg(), replyTo: AXISONE_REPLY_TO } as any,
+    );
+
+    expect(resendEmailsSendMock).toHaveBeenCalledTimes(1);
+    const callTuple = resendEmailsSendMock.mock.calls[0] as unknown as [
+      { to: string[]; replyTo?: string },
+    ];
+    const args = callTuple[0];
+
+    // (a) Reply-To threaded
+    expect(args.replyTo).toBe(AXISONE_REPLY_TO);
+    // (b) Redirect still applied to To: (KAN-1005 M2-6a held)
+    expect(args.to[0]).toContain(REDIRECT_EMAIL_TARGET);
+    expect(args.to[0]).not.toContain(REAL_CUSTOMER_EMAIL);
+  });
+
+  it('msg.replyTo absent + ChannelConnection.metadata.replyTo set → SDK receives the connection-level fallback (legacy KAN-816 behavior preserved)', async () => {
+    const LEGACY_FALLBACK = 'fallback-inbox@axisone.legacy';
+    const connection = {
+      ...baseConnection(),
+      metadata: { ...(baseConnection().metadata as Record<string, unknown>), replyTo: LEGACY_FALLBACK },
+    };
+
+    const { ResendAdapter } = await import('../index.js');
+    const adapter = new ResendAdapter();
+    // msg.replyTo intentionally NOT set — exercises the adapter's
+    // `messageReplyTo ?? metadata.replyTo` fallback (index.ts:166-167).
+    await adapter.send(connection as any, baseMsg() as any);
+
+    const callTuple = resendEmailsSendMock.mock.calls[0] as unknown as [
+      { replyTo?: string },
+    ];
+    expect(callTuple[0].replyTo).toBe(LEGACY_FALLBACK);
+  });
+
+  it('msg.replyTo absent + no ChannelConnection fallback → SDK call omits replyTo entirely (pre-KAN-816 default — no Reply-To header on the wire)', async () => {
+    const connection = {
+      ...baseConnection(),
+      metadata: { mode: 'simple', fromEmail: 'hello@axisone.ca', fromName: 'AxisOne' },
+      // No replyTo key at all in metadata.
+    };
+
+    const { ResendAdapter } = await import('../index.js');
+    const adapter = new ResendAdapter();
+    await adapter.send(connection as any, baseMsg() as any);
+
+    const callTuple = resendEmailsSendMock.mock.calls[0] as unknown as [
+      Record<string, unknown>,
+    ];
+    expect('replyTo' in callTuple[0]).toBe(false);
+  });
+});
