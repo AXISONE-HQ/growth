@@ -248,4 +248,42 @@ describe("LeadReceivedEvent schema regression (KAN-741)", () => {
       LeadReceivedEventSchema.parse({ ...CANONICAL_SAMPLES[0].payload, contactId: "not-a-uuid" }),
     ).toThrow();
   });
+
+  // ── M3-2.5b — inboundHeaders extension (additive + optional) ──
+  it("M3-2.5b — accepts payload WITHOUT inboundHeaders (back-compat)", () => {
+    const parsed = LeadReceivedEventSchema.parse(CANONICAL_SAMPLES[0].payload);
+    expect(parsed.metadata.inboundHeaders).toBeUndefined();
+  });
+
+  it("M3-2.5b — accepts payload WITH inboundHeaders (full shape)", () => {
+    const parsed = LeadReceivedEventSchema.parse({
+      ...CANONICAL_SAMPLES[0].payload,
+      metadata: {
+        ...CANONICAL_SAMPLES[0].payload.metadata,
+        inboundHeaders: {
+          messageId: "<inbound-msg-id@gmail.com>",
+          inReplyTo: "<outbound-msg-id@resend.dev>",
+          references: "<r1@d1> <r2@d2>",
+        },
+      },
+    });
+    expect(parsed.metadata.inboundHeaders).toEqual({
+      messageId: "<inbound-msg-id@gmail.com>",
+      inReplyTo: "<outbound-msg-id@resend.dev>",
+      references: "<r1@d1> <r2@d2>",
+    });
+  });
+
+  it("M3-2.5b — inboundHeaders fields all optional individually", () => {
+    const parsed = LeadReceivedEventSchema.parse({
+      ...CANONICAL_SAMPLES[0].payload,
+      metadata: {
+        ...CANONICAL_SAMPLES[0].payload.metadata,
+        inboundHeaders: { inReplyTo: "<o@r.dev>" }, // only In-Reply-To
+      },
+    });
+    expect(parsed.metadata.inboundHeaders?.inReplyTo).toBe("<o@r.dev>");
+    expect(parsed.metadata.inboundHeaders?.messageId).toBeUndefined();
+    expect(parsed.metadata.inboundHeaders?.references).toBeUndefined();
+  });
 });

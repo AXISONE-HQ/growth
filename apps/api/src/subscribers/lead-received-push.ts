@@ -73,7 +73,11 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import OpenAI from 'openai';
-import { LeadReceivedEventSchema } from '@growth/shared';
+import {
+  LeadReceivedEventSchema,
+  stripMessageIdBrackets,
+  parseReferencesHeader,
+} from '@growth/shared';
 import { prisma } from '../prisma.js';
 import { verifyPubsubOidc } from '../lib/oidc-pubsub-verify.js';
 import { getRedisClient } from '../services/redis-client.js';
@@ -207,6 +211,24 @@ async function loadEngagementModule(): Promise<EngagementModule> {
   const spec = '../../../../packages/api/src/services/engagement-service.js';
   _engagementModule = (await import(spec)) as EngagementModule;
   return _engagementModule;
+}
+
+// M3-2.5b — resolve-active-deal loader. Variable-specifier dynamic import
+// keeps the helper out of the apps/api TS6059 cohort (same pattern as
+// engagement-service + lead-normalizer loaders above; tactical until KAN-689).
+interface ResolveActiveDealModule {
+  resolveActiveDealForContact: (
+    prisma: unknown,
+    tenantId: string,
+    contactId: string,
+  ) => Promise<string | null>;
+}
+let _resolveActiveDealModule: ResolveActiveDealModule | null = null;
+async function loadResolveActiveDealModule(): Promise<ResolveActiveDealModule> {
+  if (_resolveActiveDealModule) return _resolveActiveDealModule;
+  const spec = '../../../../packages/api/src/services/resolve-active-deal.js';
+  _resolveActiveDealModule = (await import(spec)) as ResolveActiveDealModule;
+  return _resolveActiveDealModule;
 }
 
 // ─────────────────────────────────────────────
@@ -604,6 +626,217 @@ leadReceivedPushApp.post('/lead-received', async (c) => {
 });
 
 // ─────────────────────────────────────────────
+// M3-2.5b — Inbound sidecar write + correlation lookup + override.
+// Shared between the first-turn (writePhase1Deal) and multi-turn
+// (writeInboundEngagementForExistingDeal) write paths. Runs INSIDE the
+// caller's $transaction so the inbound Engagement create, the sidecar
+// write, and the optional Engagement override are atomic.
+// ─────────────────────────────────────────────
+
+type LeadReceivedEvent = z.infer<typeof LeadReceivedEventSchema>;
+
+interface CorrelationOutcome {
+  /** Reason string for audit + observability. */
+  reason:
+    | 'inbound_correlated'
+    | 'no_in_reply_to_header'
+    | 'unmatched_in_reply_to'
+    | 'autoreply_race';
+  /** Matched originating Decision id (only set when reason='inbound_correlated'). */
+  matchedDecisionId: string | null;
+  /** Matched originating contact id (set when reason='inbound_correlated'). */
+  matchedContactId: string | null;
+  /** Resolved active Deal for matchedContactId (set when reason='inbound_correlated' AND originator has open Deal). */
+  matchedDealId: string | null;
+}
+
+/**
+ * Inside the caller's transaction: write the inbound sidecar row from the
+ * parsed headers, then look up the outbound sidecar (M3-2.5a) by stripped
+ * In-Reply-To. On match: override Engagement.{decisionId, contactId, dealId}
+ * per design call (B) — preserves the denormalization invariant so the
+ * conversation thread is findable via BOTH Engagement.contactId queries
+ * AND Deal.engagements queries. Override-dealId uses the SAME
+ * resolveActiveDealForContact helper the engine sites use (single
+ * source — three engine call sites + this one).
+ *
+ * Returns the outcome for the caller to audit-log post-transaction
+ * (audit is best-effort + fire-and-forget; the override is atomic).
+ */
+async function writeSidecarAndCorrelate(
+  tx: unknown,
+  args: {
+    tenantId: string;
+    engagementId: string;
+    headers: NonNullable<LeadReceivedEvent['metadata']['inboundHeaders']> | undefined;
+  },
+): Promise<CorrelationOutcome> {
+  // Cast to the minimal Prisma surface we use; the apps/api TS6059 cohort
+  // already swallows Prisma model surfacing at this consumer (mirror of
+  // existing patterns in this file).
+  const txAny = tx as {
+    engagementEmailMetadata: {
+      findFirst: (args: unknown) => Promise<{
+        engagement: { id: string; decisionId: string | null; contactId: string };
+      } | null>;
+      create: (args: unknown) => Promise<unknown>;
+    };
+    engagement: {
+      update: (args: unknown) => Promise<unknown>;
+    };
+  };
+
+  const headers = args.headers;
+  const rawInReplyTo = headers?.inReplyTo;
+  const ownMessageIdRaw = headers?.messageId;
+  const ownMessageId = stripMessageIdBrackets(ownMessageIdRaw);
+  const references = parseReferencesHeader(headers?.references);
+
+  // M3-2.5b sidecar write — fires when we have at least an own Message-ID
+  // (the inbound's own provider_message_id). Skipped when both are absent
+  // (no usable correlation/forensic signal). raw inReplyTo is stored as-is
+  // (wire form) for forensic value; references are stripped+filtered
+  // (queryable shape).
+  if (ownMessageId) {
+    await txAny.engagementEmailMetadata.create({
+      data: {
+        engagementId: args.engagementId,
+        provider: 'resend',
+        providerMessageId: ownMessageId,
+        ...(rawInReplyTo ? { inReplyTo: rawInReplyTo } : {}),
+        referencesArray: references,
+      },
+    });
+  }
+
+  // Correlation lookup — only fires when In-Reply-To is present + non-empty
+  // after strip. Absent → audit miss with reason='no_in_reply_to_header'.
+  const strippedInReplyTo = stripMessageIdBrackets(rawInReplyTo);
+  if (!strippedInReplyTo) {
+    return {
+      reason: 'no_in_reply_to_header',
+      matchedDecisionId: null,
+      matchedContactId: null,
+      matchedDealId: null,
+    };
+  }
+
+  // Tenant scope via relation filter — defense-in-depth on the global
+  // UNIQUE(provider, provider_message_id) which already makes cross-tenant
+  // collision impossible (Resend's id space is global).
+  const matched = await txAny.engagementEmailMetadata.findFirst({
+    where: {
+      provider: 'resend',
+      providerMessageId: strippedInReplyTo,
+      engagement: { tenantId: args.tenantId },
+    },
+    select: {
+      engagement: { select: { id: true, decisionId: true, contactId: true } },
+    },
+  });
+
+  if (!matched?.engagement) {
+    // Could be: outbound never happened (truly orphan inbound) OR autoreply
+    // arrived before outbound sidecar landed (race). We can't distinguish
+    // post-hoc; pick the more informative reason based on header heuristic
+    // (autoreplies typically have Auto-Submitted or X-Autoreply headers,
+    // but we don't propagate those today — Phase 2 of M3-2.5b could add).
+    return {
+      reason: 'unmatched_in_reply_to',
+      matchedDecisionId: null,
+      matchedContactId: null,
+      matchedDealId: null,
+    };
+  }
+
+  // Outbound matched but the originating Decision is unknown — shouldn't
+  // happen post-M3-2.5a (outbound always writes with top-level decisionId),
+  // but defend so we don't NULL-clobber and skip the override.
+  if (!matched.engagement.decisionId) {
+    return {
+      reason: 'unmatched_in_reply_to',
+      matchedDecisionId: null,
+      matchedContactId: matched.engagement.contactId,
+      matchedDealId: null,
+    };
+  }
+
+  // (B) override — look up the originator contact's active Deal so we can
+  // override BOTH dealId AND contactId, preserving the denormalization
+  // invariant. Falls back to leaving the inbound's existing dealId when
+  // the originator has no open Deal (edge: deal closed between dispatch
+  // and reply; still correlation-rescue contactId+decisionId; engagement
+  // attached to the from-address path's dealId remains).
+  const { resolveActiveDealForContact } = await loadResolveActiveDealModule();
+  const originatorDealId = await resolveActiveDealForContact(
+    tx,
+    args.tenantId,
+    matched.engagement.contactId,
+  );
+
+  await txAny.engagement.update({
+    where: { id: args.engagementId },
+    data: {
+      decisionId: matched.engagement.decisionId,
+      contactId: matched.engagement.contactId,
+      ...(originatorDealId ? { dealId: originatorDealId } : {}),
+    },
+  });
+
+  return {
+    reason: 'inbound_correlated',
+    matchedDecisionId: matched.engagement.decisionId,
+    matchedContactId: matched.engagement.contactId,
+    matchedDealId: originatorDealId,
+  };
+}
+
+/**
+ * Fire-and-forget audit emit. Best-effort + .catch() so a failed audit row
+ * cannot destabilize the inbound flow. Mirrors the kan-1005 M2-2 pattern
+ * elsewhere in this file.
+ */
+function emitCorrelationAudit(
+  args: {
+    tenantId: string;
+    engagementId: string;
+    eventId: string;
+    outcome: CorrelationOutcome;
+  },
+): void {
+  void prisma.auditLog
+    .create({
+      data: {
+        tenantId: args.tenantId,
+        actor: 'lead_inbox_correlation',
+        actionType:
+          args.outcome.reason === 'inbound_correlated'
+            ? 'lead_inbox.inbound_correlated'
+            : 'lead_inbox.inbound_correlation_miss',
+        reasoning: args.outcome.reason,
+        payload: {
+          engagementId: args.engagementId,
+          eventId: args.eventId,
+          ...(args.outcome.matchedDecisionId
+            ? { matchedDecisionId: args.outcome.matchedDecisionId }
+            : {}),
+          ...(args.outcome.matchedContactId
+            ? { matchedContactId: args.outcome.matchedContactId }
+            : {}),
+          ...(args.outcome.matchedDealId
+            ? { matchedDealId: args.outcome.matchedDealId }
+            : {}),
+        },
+      },
+    })
+    .catch((err: unknown) => {
+      console.warn(
+        `[lead-received-push] audit-emit-correlation-failed engagementId=${args.engagementId} eventId=${args.eventId} err=${(err as Error)?.message ?? String(err)}`,
+      );
+    });
+}
+
+// ─────────────────────────────────────────────
 // KAN-819 — Multi-turn Engagement-only write (no Deal/DealStageHistory)
 // ─────────────────────────────────────────────
 
@@ -637,28 +870,51 @@ async function writeInboundEngagementForExistingDeal(
   });
 
   const { logEngagement } = await loadEngagementModule();
-  await logEngagement(prisma, {
+
+  // M3-2.5b — wrap Engagement create + sidecar write + correlation override
+  // in a single $transaction so the multi-turn path has the same atomicity
+  // shape as the first-turn writePhase1Deal path. Pre-M3-2.5b this was a
+  // bare prisma.create call; the inbound sidecar + override now require
+  // transactional rollback symmetry with the outbound side (M3-2.5a).
+  const { engagementId, outcome } = await prisma.$transaction(async (tx) => {
+    const engagement = (await logEngagement(tx, {
+      tenantId,
+      dealId,
+      contactId: event.contactId,
+      engagementType: 'email_received',
+      channel: 'email',
+      occurredAt: new Date(event.receivedAt),
+      correlationId: `engagement:lead-received:${event.eventId}`,
+      metadata: {
+        senderEmail: normalized.preParsed.senderEmail,
+        subject: normalized.preParsed.subject,
+        // KAN-839 — persist inbound body so Shaper's `## Recent inbound from
+        // contact` section can render the customer's verbatim words. Cap
+        // matches Shaper's render cap (2000 chars) so DB and prompt see the
+        // same binding constraint. Mirrors KAN-817's outbound bodyPreview
+        // field naming for producer-consumer contract symmetry.
+        bodyPreview: normalized.preParsed.bodyText?.slice(0, 2000) ?? null,
+        extractionConfidence: normalized.extractionConfidence,
+        // KAN-819 marker — distinguishes follow-up Engagement rows from the
+        // first-turn write that's attached to the originating Deal create.
+        kan819Reused: true,
+      },
+    })) as { id: string };
+
+    const correlationOutcome = await writeSidecarAndCorrelate(tx, {
+      tenantId,
+      engagementId: engagement.id,
+      headers: event.metadata.inboundHeaders,
+    });
+    return { engagementId: engagement.id, outcome: correlationOutcome };
+  });
+
+  // Best-effort audit emit AFTER the tx commits.
+  emitCorrelationAudit({
     tenantId,
-    dealId,
-    contactId: event.contactId,
-    engagementType: 'email_received',
-    channel: 'email',
-    occurredAt: new Date(event.receivedAt),
-    correlationId: `engagement:lead-received:${event.eventId}`,
-    metadata: {
-      senderEmail: normalized.preParsed.senderEmail,
-      subject: normalized.preParsed.subject,
-      // KAN-839 — persist inbound body so Shaper's `## Recent inbound from
-      // contact` section can render the customer's verbatim words. Cap
-      // matches Shaper's render cap (2000 chars) so DB and prompt see the
-      // same binding constraint. Mirrors KAN-817's outbound bodyPreview
-      // field naming for producer-consumer contract symmetry.
-      bodyPreview: normalized.preParsed.bodyText?.slice(0, 2000) ?? null,
-      extractionConfidence: normalized.extractionConfidence,
-      // KAN-819 marker — distinguishes follow-up Engagement rows from the
-      // first-turn write that's attached to the originating Deal create.
-      kan819Reused: true,
-    },
+    engagementId,
+    eventId: event.eventId,
+    outcome,
   });
 }
 
@@ -718,78 +974,105 @@ async function writePhase1Deal(
   // Single transaction — Deal.correlationId UNIQUE catches Pub/Sub
   // redelivery; logEngagement does its own correlationId existence
   // check before insert.
-  const dealId = await prisma.$transaction(async (tx) => {
-    const deal = await tx.deal.create({
-      data: {
-        tenantId,
-        contactId: event.contactId,
-        pipelineId,
-        currentStageId: startingStage.id,
-        enteredStageAt: new Date(),
-        value: 0,
-        currency: 'USD',
-        // KAN-954 — Formspree-parsed events provide a meaningful deal
-        // name in metadata. Legacy/non-Formspree events omit it and the
-        // Prisma column default (`Untitled deal`) applies.
-        ...(event.metadata.dealName ? { name: event.metadata.dealName } : {}),
-        // KAN-954 — Formspree form fields land on Deal.customFields
-        // (Contact has no custom_fields column). Pre-KAN-954 events omit
-        // this; Prisma default `{}` applies.
-        ...(event.metadata.customFields ? { customFields: event.metadata.customFields } : {}),
-        // event.eventId is UUID-shaped + always present per
-        // LeadReceivedEventSchema; safe as the idempotency anchor across
-        // Pub/Sub redeliveries.
-        correlationId: `deal:lead-received:${event.eventId}`,
-        microObjectiveProgress: {},
-        metadata: {
-          source: 'track_a_email_inbound',
-          assignmentMode: assignment.mode,
-          normalizedLeadConfidence: normalized.extractionConfidence,
-          ...(normalized.extractionError && {
-            normalizerError: normalized.extractionError,
-          }),
-          // KAN-954 — propagate vendor + lead-source attribution.
-          ...(event.metadata.vendor && { leadVendor: event.metadata.vendor }),
-          ...(event.metadata.formSource && { formSource: event.metadata.formSource }),
-          ...(event.metadata.leadType && { leadType: event.metadata.leadType }),
+  const { dealId, engagementId, correlationOutcome } = await prisma.$transaction(
+    async (tx) => {
+      const deal = await tx.deal.create({
+        data: {
+          tenantId,
+          contactId: event.contactId,
+          pipelineId,
+          currentStageId: startingStage.id,
+          enteredStageAt: new Date(),
+          value: 0,
+          currency: 'USD',
+          // KAN-954 — Formspree-parsed events provide a meaningful deal
+          // name in metadata. Legacy/non-Formspree events omit it and the
+          // Prisma column default (`Untitled deal`) applies.
+          ...(event.metadata.dealName ? { name: event.metadata.dealName } : {}),
+          // KAN-954 — Formspree form fields land on Deal.customFields
+          // (Contact has no custom_fields column). Pre-KAN-954 events omit
+          // this; Prisma default `{}` applies.
+          ...(event.metadata.customFields ? { customFields: event.metadata.customFields } : {}),
+          // event.eventId is UUID-shaped + always present per
+          // LeadReceivedEventSchema; safe as the idempotency anchor across
+          // Pub/Sub redeliveries.
+          correlationId: `deal:lead-received:${event.eventId}`,
+          microObjectiveProgress: {},
+          metadata: {
+            source: 'track_a_email_inbound',
+            assignmentMode: assignment.mode,
+            normalizedLeadConfidence: normalized.extractionConfidence,
+            ...(normalized.extractionError && {
+              normalizerError: normalized.extractionError,
+            }),
+            // KAN-954 — propagate vendor + lead-source attribution.
+            ...(event.metadata.vendor && { leadVendor: event.metadata.vendor }),
+            ...(event.metadata.formSource && { formSource: event.metadata.formSource }),
+            ...(event.metadata.leadType && { leadType: event.metadata.leadType }),
+          },
         },
-      },
-    });
+      });
 
-    await tx.dealStageHistory.create({
-      data: {
+      await tx.dealStageHistory.create({
+        data: {
+          dealId: deal.id,
+          fromStageId: null,
+          toStageId: startingStage.id,
+          triggeredBy: 'normalizer',
+          metadata: { source: 'track_a_email_inbound', eventId: event.eventId },
+        },
+      });
+
+      const engagement = (await logEngagement(tx, {
+        tenantId,
         dealId: deal.id,
-        fromStageId: null,
-        toStageId: startingStage.id,
-        triggeredBy: 'normalizer',
-        metadata: { source: 'track_a_email_inbound', eventId: event.eventId },
-      },
-    });
+        contactId: event.contactId,
+        engagementType: 'email_received',
+        channel: 'email',
+        // event.receivedAt is the canonical inbound timestamp (root-level on
+        // LeadReceivedEventSchema, not nested in metadata).
+        occurredAt: new Date(event.receivedAt),
+        correlationId: `engagement:lead-received:${event.eventId}`,
+        metadata: {
+          senderEmail: normalized.preParsed.senderEmail,
+          subject: normalized.preParsed.subject,
+          // KAN-839 — see writeInboundEngagementForExistingDeal for full
+          // rationale. Same producer-consumer contract on both inbound write
+          // paths so first-turn and multi-turn Engagement rows render
+          // identically into the Shaper prompt.
+          bodyPreview: normalized.preParsed.bodyText?.slice(0, 2000) ?? null,
+          extractionConfidence: normalized.extractionConfidence,
+        },
+      })) as { id: string };
 
-    await logEngagement(tx, {
-      tenantId,
-      dealId: deal.id,
-      contactId: event.contactId,
-      engagementType: 'email_received',
-      channel: 'email',
-      // event.receivedAt is the canonical inbound timestamp (root-level on
-      // LeadReceivedEventSchema, not nested in metadata).
-      occurredAt: new Date(event.receivedAt),
-      correlationId: `engagement:lead-received:${event.eventId}`,
-      metadata: {
-        senderEmail: normalized.preParsed.senderEmail,
-        subject: normalized.preParsed.subject,
-        // KAN-839 — see writeInboundEngagementForExistingDeal for full
-        // rationale. Same producer-consumer contract on both inbound write
-        // paths so first-turn and multi-turn Engagement rows render
-        // identically into the Shaper prompt.
-        bodyPreview: normalized.preParsed.bodyText?.slice(0, 2000) ?? null,
-        extractionConfidence: normalized.extractionConfidence,
-      },
-    });
+      // M3-2.5b — inbound sidecar write + correlation lookup + override.
+      // Inside the same $transaction so the inbound Engagement, the sidecar,
+      // and the Engagement override are atomic. Override (per design call
+      // B) flips Engagement.{decisionId, contactId, dealId} when In-Reply-To
+      // matches an outbound sidecar from M3-2.5a — preserves the
+      // denormalization invariant so Brain/Shaper queries via either
+      // Engagement.contactId OR Deal.engagements find the inbound row.
+      const outcome = await writeSidecarAndCorrelate(tx, {
+        tenantId,
+        engagementId: engagement.id,
+        headers: event.metadata.inboundHeaders,
+      });
 
-    // Return dealId so the caller can pass it to KAN-815 Phase 2 wiring.
-    return deal.id as string;
+      // Return dealId so the caller can pass it to KAN-815 Phase 2 wiring.
+      return {
+        dealId: deal.id as string,
+        engagementId: engagement.id,
+        correlationOutcome: outcome,
+      };
+    },
+  );
+
+  // M3-2.5b — best-effort audit emit after the tx commits. Fire-and-forget.
+  emitCorrelationAudit({
+    tenantId,
+    engagementId,
+    eventId: event.eventId,
+    outcome: correlationOutcome,
   });
 
   return dealId;

@@ -17,6 +17,8 @@ export * from "./run-decision-types.js";
 export * from "./sub-objective-types.js";
 // M3-2.5a Inbound Reply Correlation — known email providers + soft validator + sidecar shape.
 export * from "./email-providers.js";
+// M3-2.5b Inbound Reply Correlation — RFC 5322 Message-ID/References normalization, shared between webhook publish + consumer lookup.
+export * from "./email-headers.js";
 export * from "./agentic-tool-schemas.js";
 export * from "./action-types.js";
 export * from "./lead-received.js";

@@ -71,8 +71,15 @@ vi.mock("../prisma.js", () => ({
       updateMany: deferredSendUpdateManyMock,
       create: deferredSendCreateMock,
     },
+    // M3-2.5b — audit-log create is fire-and-forget after correlation tx commits.
+    auditLog: { create: vi.fn().mockResolvedValue({ id: "audit_a" }) },
     $transaction: transactionMock,
   },
+}));
+
+// M3-2.5b — resolve-active-deal module loader.
+vi.mock("../../../../packages/api/src/services/resolve-active-deal.js", () => ({
+  resolveActiveDealForContact: vi.fn(async () => null),
 }));
 
 vi.mock("../../../../packages/api/src/services/lead-assignment.js", () => ({
@@ -205,11 +212,21 @@ function setupHappyPathMocks(opts: {
   });
   logEngagementMock.mockResolvedValue({ id: "eng_a" });
 
-  // $transaction: invoke the callback with a tx that has deal + dealStageHistory delegates
+  // $transaction: invoke the callback with a tx that has deal +
+  // dealStageHistory delegates + M3-2.5b sidecar/engagement-update delegates.
+  // The default sidecar findFirst returns null (no correlation match) so
+  // existing tests don't accidentally trigger override; tests that exercise
+  // correlation override per-case.
   transactionMock.mockImplementation(async (cb: (tx: unknown) => Promise<unknown>) => {
     const tx = {
       deal: { create: dealCreateMock },
       dealStageHistory: { create: dealStageHistoryCreateMock },
+      // M3-2.5b — inbound sidecar + correlation override + lookup paths.
+      engagement: { update: vi.fn() },
+      engagementEmailMetadata: {
+        findFirst: vi.fn(async () => null),
+        create: vi.fn(),
+      },
     };
     return cb(tx);
   });
@@ -1104,7 +1121,10 @@ describe("KAN-819 — Deal continuity for multi-turn AI conversations", () => {
     expect(assignLeadToPipelineMock).not.toHaveBeenCalled();
     expect(dealCreateMock).not.toHaveBeenCalled();
     expect(dealStageHistoryCreateMock).not.toHaveBeenCalled();
-    expect(transactionMock).not.toHaveBeenCalled();
+    // M3-2.5b — multi-turn path NOW wraps Engagement + sidecar + override in
+    // a $transaction for atomicity (pre-M3-2.5b it was bare prisma). The
+    // transaction does NOT do a Deal write — that's still the assertion above.
+    expect(transactionMock).toHaveBeenCalledOnce();
     // Still wrote Engagement attached to REUSED Deal
     expect(normalizeInboundMock).toHaveBeenCalledOnce();
     expect(logEngagementMock).toHaveBeenCalledOnce();
