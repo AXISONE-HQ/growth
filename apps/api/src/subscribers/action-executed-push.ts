@@ -146,41 +146,70 @@ actionExecutedPushApp.post('/action-executed', async (c) => {
     if (dealId && (event.status === 'sent' || event.status === 'delivered')) {
       const engagementType = `${event.channel.toLowerCase()}_send`;
       try {
-        await prisma.engagement.create({
-          data: {
-            tenantId: event.tenantId,
-            dealId,
-            contactId: event.contactId,
-            engagementType,
-            signalClass: 'neutral', // outbound action; not contact-initiated
-            channel: event.channel.toLowerCase(),
-            occurredAt: new Date(event.timestamp),
-            // Resend webhook may fire multiple events for the same outbound
-            // (sent → delivered → opened …). actionId is the canonical anchor
-            // for "this specific outbound Action's first observed engagement";
-            // UNIQUE catches retries within the same status AND across statuses
-            // (the first 'sent' wins; subsequent 'delivered' is a no-op).
-            correlationId: `engagement:outbound:${event.actionId}`,
-            metadata: {
-              actionId: event.actionId,
+        // M3-2.5a — Engagement + email-metadata sidecar wrapped in a single
+        // $transaction so the wire-correlation record is atomic with the
+        // business-event record. Either both write or neither (tx
+        // rollback). Sidecar only fires when providerMessageId is present
+        // — defense-in-depth on the outer status guard (sent/delivered
+        // always set providerMessageId; failed/suppressed never do).
+        await prisma.$transaction(async (tx) => {
+          const engagement = await tx.engagement.create({
+            data: {
+              tenantId: event.tenantId,
+              dealId,
+              contactId: event.contactId,
+              // M3-2.5a — promote decisionId from metadata Json to top-
+              // level FK column (was always there in metadata; promotion
+              // unlocks Decision→Engagement queries + the M3-2.5b
+              // correlation lookup). Kept in metadata too for back-compat
+              // with existing readers (KAN-817 anti-repetition).
               decisionId: event.decisionId,
-              status: event.status,
-              channel: event.channel,
-              provider: event.provider,
-              ...(event.providerMessageId ? { providerMessageId: event.providerMessageId } : {}),
-              // KAN-817 — content visibility for cross-turn anti-repetition.
-              // Populated by the send-side publisher (`action-send-push.ts`);
-              // webhook-side `publishExecuted` leaves these undefined and
-              // never wins the race (idempotent on actionId). Read by
-              // `buildShapePrompt` in `packages/api/src/services/message-shaper.ts`
-              // — field names MUST stay `subject` / `bodyPreview` (no rename).
-              ...(event.subject ? { subject: event.subject } : {}),
-              ...(event.bodyPreview ? { bodyPreview: event.bodyPreview } : {}),
+              engagementType,
+              signalClass: 'neutral', // outbound action; not contact-initiated
+              channel: event.channel.toLowerCase(),
+              occurredAt: new Date(event.timestamp),
+              // Resend webhook may fire multiple events for the same outbound
+              // (sent → delivered → opened …). actionId is the canonical anchor
+              // for "this specific outbound Action's first observed engagement";
+              // UNIQUE catches retries within the same status AND across statuses
+              // (the first 'sent' wins; subsequent 'delivered' is a no-op).
+              correlationId: `engagement:outbound:${event.actionId}`,
+              metadata: {
+                actionId: event.actionId,
+                decisionId: event.decisionId,
+                status: event.status,
+                channel: event.channel,
+                provider: event.provider,
+                ...(event.providerMessageId ? { providerMessageId: event.providerMessageId } : {}),
+                // KAN-817 — content visibility for cross-turn anti-repetition.
+                // Populated by the send-side publisher (`action-send-push.ts`);
+                // webhook-side `publishExecuted` leaves these undefined and
+                // never wins the race (idempotent on actionId). Read by
+                // `buildShapePrompt` in `packages/api/src/services/message-shaper.ts`
+                // — field names MUST stay `subject` / `bodyPreview` (no rename).
+                ...(event.subject ? { subject: event.subject } : {}),
+                ...(event.bodyPreview ? { bodyPreview: event.bodyPreview } : {}),
+              },
             },
-          },
+          });
+          // M3-2.5a — sidecar write. Skipped when providerMessageId absent
+          // (defense; outer status guard already covers normal cases).
+          // sidecar's global UNIQUE(provider, providerMessageId) catches
+          // Resend webhook retries the same way Engagement.correlationId
+          // does — P2002 path below covers both.
+          if (event.providerMessageId) {
+            await tx.engagementEmailMetadata.create({
+              data: {
+                engagementId: engagement.id,
+                provider: event.provider,
+                providerMessageId: event.providerMessageId,
+                // inReplyTo + referencesArray are inbound-only; populated by M3-2.5b.
+              },
+            });
+          }
         });
         console.log(
-          `[action-executed-push] wrote outbound Engagement actionId=${event.actionId} dealId=${dealId} engagementType=${engagementType}`,
+          `[action-executed-push] wrote outbound Engagement+sidecar actionId=${event.actionId} dealId=${dealId} engagementType=${engagementType} providerMessageId=${event.providerMessageId ?? 'absent'}`,
         );
       } catch (err) {
         // P2002 = unique constraint violation = Resend retry; dedup success.

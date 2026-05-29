@@ -15,6 +15,8 @@ export * from "./decision-payload.js";
 export * from "./run-decision-types.js";
 // M3-1 Sub-Objective Framework MVP — single source of truth for gap-state types + Generic-B2B default set + score-scale constants.
 export * from "./sub-objective-types.js";
+// M3-2.5a Inbound Reply Correlation — known email providers + soft validator + sidecar shape.
+export * from "./email-providers.js";
 export * from "./agentic-tool-schemas.js";
 export * from "./action-types.js";
 export * from "./lead-received.js";

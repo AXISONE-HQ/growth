@@ -647,6 +647,8 @@ model Decision {
   // KAN-791 — replaced LeadStageHistory[] with DealStageHistory[] (deal-scoped)
   dealStageHistory DealStageHistory[]
   escalations      Escalation[]
+  // M3-2.5a — back-relation for engagements.decision_id FK.
+  engagements      Engagement[]
 
   @@index([tenantId])
   @@index([tenantId, contactId])
@@ -1928,6 +1930,11 @@ model Engagement {
   dealId         String      @map("deal_id")
   contactId      String      @map("contact_id")
   correlationId  String?     @unique @map("correlation_id")
+  // M3-2.5a — Decision FK top-level (was buried in metadata Json pre-slice;
+  // makes Decision→Engagement queryable + indexable). Nullable for back-
+  // compat with engagements whose Decision row was deleted or for non-
+  // engine engagements (Lead Inbox pre-correlation, etc.).
+  decisionId     String?     @map("decision_id")
   engagementType String      @map("engagement_type")
   signalClass    SignalClass @map("signal_class")
   channel        String?
@@ -1938,11 +1945,50 @@ model Engagement {
   tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   deal    Deal    @relation(fields: [dealId], references: [id], onDelete: Restrict)
   contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  // M3-2.5a — Decision FK with SET NULL: an Engagement row stays as an
+  // audit record of "what happened" even if the originating Decision is
+  // ever purged.
+  decision Decision? @relation(fields: [decisionId], references: [id], onUpdate: Cascade, onDelete: SetNull)
+  // M3-2.5a — 1:1 sidecar holding email-wire metadata (provider, message-
+  // id, in-reply-to, references). Only email-type engagements have a row.
+  // CASCADE on engagement delete keeps the sidecar in lockstep.
+  emailMetadata EngagementEmailMetadata?
 
   @@index([tenantId, dealId, occurredAt])
   @@index([tenantId, contactId, occurredAt])
   @@index([tenantId, engagementType])
+  @@index([tenantId, decisionId])
   @@map("engagements")
+}
+
+// M3-2.5a — 1:1 sidecar for email-wire metadata (provider, providerMessageId,
+// in_reply_to, references_array). Holds the wire-protocol bits needed for
+// the M3-2.5b inbound In-Reply-To → outbound providerMessageId correlation
+// lookup. Tenant scope flows transitively through engagement_id →
+// engagement.tenant_id (sibling pattern: AccountProfile children — no
+// direct tenant_id column, parent FK enforces scope on query). NOT added
+// to TENANT_SCOPED_MODELS in tenant middleware for the same reason.
+model EngagementEmailMetadata {
+  engagementId      String   @id @map("engagement_id")
+  // Free-form TEXT not Postgres enum — KNOWN_EMAIL_PROVIDERS in
+  // @growth/shared is the reference list (Blueprint loader / sub_objective_key
+  // precedent). Enum-grow-by-migration is the trap we're avoiding.
+  provider          String
+  providerMessageId String   @map("provider_message_id")
+  // Inbound-only fields, populated in M3-2.5b. Outbound rows leave null.
+  inReplyTo         String?  @map("in_reply_to")
+  referencesArray   String[] @map("references_array")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  engagement Engagement @relation(fields: [engagementId], references: [id], onUpdate: Cascade, onDelete: Cascade)
+
+  // Global UNIQUE: providerMessageId is the provider's wire ID — globally
+  // unique within the provider's namespace, so cross-tenant collision is
+  // structurally impossible. The correlation lookup in M3-2.5b will hit
+  // this for O(1) sidecar resolution.
+  @@unique([provider, providerMessageId], map: "engagement_email_metadata_provider_provider_message_id_key")
+  @@index([inReplyTo], map: "engagement_email_metadata_in_reply_to_idx")
+  @@map("engagement_email_metadata")
 }
 
 enum SignalClass {
