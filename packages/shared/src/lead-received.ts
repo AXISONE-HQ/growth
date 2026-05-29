@@ -96,6 +96,29 @@ export const LeadReceivedEventSchema = z.object({
      * strings only for V1.
      */
     customFields: z.record(z.string(), z.string()).optional(),
+    /**
+     * M3-2.5b — Resend Receiving header propagation for inbound reply
+     * correlation. All three fields hold the RAW wire form
+     * (`<id@domain>` with brackets, References space-separated) so the
+     * forensic trail is preserved on the wire; the consumer normalizes
+     * via @growth/shared's stripMessageIdBrackets + parseReferencesHeader
+     * before sidecar write + outbound-sidecar correlation lookup.
+     *
+     * Additive + optional: pre-M3-2.5b producers (lead_api, Formspree pre-
+     * receiving-fetch) omit this entirely; consumer falls back to the no-
+     * correlation path (decisionId stays null; audit row records
+     * 'no_in_reply_to_header').
+     */
+    inboundHeaders: z
+      .object({
+        /** This inbound's own Message-ID — raw `<id@domain>` form. */
+        messageId: z.string().optional(),
+        /** Raw `In-Reply-To` header value — `<id@domain>`. */
+        inReplyTo: z.string().optional(),
+        /** Raw `References` header value — `<id1@d1> <id2@d2> ...`. */
+        references: z.string().optional(),
+      })
+      .optional(),
   }),
   receivedAt: z.string().datetime(),
 });

@@ -472,6 +472,23 @@ resendInboundWebhookApp.post(
     createdContactId: contact.id,
   });
 
+  // M3-2.5b — propagate raw Resend Receiving headers so the consumer can
+  // sidecar-write + correlation-lookup. Raw form (`<id@domain>`, References
+  // space-separated) is preserved on the wire for forensic value; the
+  // consumer normalizes via @growth/shared's stripMessageIdBrackets +
+  // parseReferencesHeader before lookup. Absent when fetchedContent is
+  // null (Resend Receiving API unreachable) — consumer falls back to the
+  // no-correlation path cleanly.
+  const headersRaw = fetchedContent?.headers ?? {};
+  const inboundHeaders =
+    fetchedContent && (headersRaw["message-id"] || headersRaw["in-reply-to"] || headersRaw["references"])
+      ? {
+          ...(headersRaw["message-id"] ? { messageId: headersRaw["message-id"] } : {}),
+          ...(headersRaw["in-reply-to"] ? { inReplyTo: headersRaw["in-reply-to"] } : {}),
+          ...(headersRaw["references"] ? { references: headersRaw["references"] } : {}),
+        }
+      : undefined;
+
   const event = buildLeadReceivedEvent({
     eventId: `evt_${randomUUID()}`,
     tenantId: tenant.id,
@@ -496,6 +513,7 @@ resendInboundWebhookApp.post(
             customFields: formspreeParsed.customFields,
           }
         : {}),
+      ...(inboundHeaders ? { inboundHeaders } : {}),
     },
   });
 
