@@ -195,6 +195,24 @@ resendWebhookApp.post('/', buildSvixMiddleware(), async (c) => {
       case 'email.delivery_delayed':
         // Informational only — the send-side action.executed already covers
         // the 'sent' state; delivery_delayed is transient.
+        //
+        // KAN-1036 β.2 gate — payload-inspect. Flag-gated empirical probe
+        // to determine whether Resend's email.sent webhook surfaces the SES
+        // Message-ID anywhere in the payload (data.headers, a top-level
+        // field, or genuinely absent). β.1 falsified yesterday (GET
+        // /emails/{id} structurally lacks headers); β.3 falsified tonight
+        // (SES at SMTP layer overrode our sender-set Message-ID). β.2 is
+        // the only path left for M3-2.5b correlation to land.
+        //
+        // We log `payload` (the Svix-verified raw object from
+        // getSvixContext) NOT the cast `evt` — the cast strips visibility
+        // into fields the TS interface doesn't declare, which is exactly
+        // what we need to see. Scope is `email.sent` only;
+        // `delivery_delayed` shares the case but would be noise for this
+        // probe.
+        if (process.env.KAN_1036_PAYLOAD_INSPECT === 'true' && type === 'email.sent') {
+          console.log('[kan-1036-payload-inspect]', JSON.stringify(payload, null, 2));
+        }
         break;
 
       case 'email.delivered':
