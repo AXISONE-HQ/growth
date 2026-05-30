@@ -174,7 +174,27 @@ export function setInboundHooks(hooks: InboundHandlerHooks): void {
 // Helpers
 // ─────────────────────────────────────────────
 
-export function extractSlugFromTo(toField: string | string[] | undefined): string | null {
+/**
+ * KAN-1036 — parse the inbound's To: field into {slug, replyToken}.
+ *
+ * The slug-only path (pre-KAN-1036) was driving tenant lookup via
+ * `resolveTenantBySlug`. For subaddress-anchored reply correlation, we
+ * split the local-part on `+` to recover the slug (still the tenant key)
+ * AND the per-decision token (passed downstream via LeadReceivedEvent
+ * metadata so lead-received-push can correlate against
+ * engagement_email_metadata.reply_token).
+ *
+ * Token shape validation: 16-char hex per producer. Tokens that fail
+ * the regex are rejected (returned as null) — defends against
+ * accidentally-correlated inbounds where a recipient manually typed a
+ * recipient with `+something` that isn't one of our tokens.
+ *
+ * Tenant lookup remains slug-only — the token is forensic at the
+ * webhook layer; correlation happens at the consumer.
+ */
+export function extractSlugAndToken(
+  toField: string | string[] | undefined,
+): { slug: string; replyToken: string | null } | null {
   if (!toField) return null;
   const first = Array.isArray(toField) ? toField[0] : toField;
   if (typeof first !== "string") return null;
@@ -183,7 +203,34 @@ export function extractSlugFromTo(toField: string | string[] | undefined): strin
   const addr = match[1] ?? first;
   const at = addr.indexOf("@");
   if (at < 1) return null;
-  return addr.slice(0, at).trim();
+  const localPart = addr.slice(0, at).trim();
+  const plusIdx = localPart.indexOf("+");
+  if (plusIdx < 0) {
+    return { slug: localPart, replyToken: null };
+  }
+  const slug = localPart.slice(0, plusIdx);
+  const candidate = localPart.slice(plusIdx + 1);
+  // Token shape pin — 16-char hex per producer (resolveReplyToForTenant).
+  // Anything else: user-typed `+foo`, mangled by an exotic gateway, or
+  // garbage. Return slug-only and let the consumer's `if (replyToken)`
+  // guard miss the correlation lookup gracefully.
+  if (!/^[0-9a-f]{16}$/.test(candidate)) {
+    return { slug, replyToken: null };
+  }
+  return { slug, replyToken: candidate };
+}
+
+/**
+ * Pre-KAN-1036 helper — returns the full local-part (slug+subaddress)
+ * as a single string. Kept shipped for back-compat with any external
+ * call sites or tests that still expect the old shape. Production
+ * webhook handler uses `extractSlugAndToken` (KAN-1036) instead.
+ *
+ * @deprecated Use `extractSlugAndToken` for the slug + token split.
+ */
+export function extractSlugFromTo(toField: string | string[] | undefined): string | null {
+  const parsed = extractSlugAndToken(toField);
+  return parsed?.slug ?? null;
 }
 
 type FromField = string | { email?: string; name?: string } | undefined;
@@ -242,7 +289,13 @@ resendInboundWebhookApp.post(
 
   const data = payload.data ?? {};
   const resendEmailId = data.email_id ?? null;
-  const slug = extractSlugFromTo(data.to);
+  // KAN-1036 — split data.to local-part on `+` to recover slug + per-decision
+  // reply correlation token. Tenant lookup remains slug-only; the token is
+  // propagated downstream via LeadReceivedEvent.metadata.replyToken so
+  // lead-received-push correlates against engagement_email_metadata.reply_token.
+  const parsedTo = extractSlugAndToken(data.to);
+  const slug = parsedTo?.slug ?? null;
+  const replyToken = parsedTo?.replyToken ?? null;
   const inboxAddress = Array.isArray(data.to) ? data.to[0] : data.to ?? "";
   const fromParsed = extractFromAddress(data.from);
   const fromAddress = fromParsed?.email ?? "unknown";
@@ -514,6 +567,13 @@ resendInboundWebhookApp.post(
           }
         : {}),
       ...(inboundHeaders ? { inboundHeaders } : {}),
+      // KAN-1036 — per-decision reply correlation token from data.to
+      // subaddress. NULL when the inbound's To: had no `+suffix`
+      // (e.g., direct inbound to <slug>@<domain>) or when the suffix
+      // didn't match the 16-char hex shape (e.g., user typed
+      // `+something` manually). Consumer's `if (replyToken)` guard
+      // skips the correlation lookup gracefully in both cases.
+      ...(replyToken ? { replyToken } : {}),
     },
   });
 

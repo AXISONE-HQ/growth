@@ -66,6 +66,18 @@ export const ActionExecutedEventSchema = z.object({
   // over-cap value.
   subject: z.string().max(200).optional(),
   bodyPreview: z.string().max(500).optional(),
+  // KAN-1036 — per-decision reply correlation token. Producer side: the
+  // send-side publisher (`apps/connectors/src/subscribers/action-send-push.ts`)
+  // reads it off the rendered OutboundMessage.replyToken (set by
+  // gateAndPublishComposed via resolveReplyToForTenant) and threads it
+  // here. Consumer side: action-executed-push persists it to the
+  // engagement_email_metadata.reply_token column inside the M3-2.5a
+  // sidecar $transaction. The webhook-side publisher
+  // (`apps/connectors/src/webhooks/resend.ts`) leaves it undefined for
+  // status=delivered/bounced events — those fire after the send-side
+  // event already won the actionId race; the sidecar already has the
+  // token from the first write. Optional + additive.
+  replyToken: z.string().regex(/^[0-9a-f]{16}$/).optional(),
 });
 export type ActionExecutedEvent = z.infer<typeof ActionExecutedEventSchema>;
 

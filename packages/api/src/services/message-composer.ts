@@ -10,7 +10,7 @@
  */
 
 import { z } from 'zod';
-import { randomUUID } from 'crypto';
+import { randomBytes, randomUUID } from 'crypto';
 import type { PrismaClient } from '@prisma/client';
 import type { PubSubClient } from './action-decided-publisher.js';
 import { complete as llmComplete } from './llm-client.js';
@@ -213,6 +213,21 @@ export interface PublishActionSendInput {
    * the From address).
    */
   replyTo?: string;
+  /**
+   * KAN-1036 — per-decision correlation token. 16-char hex minted at
+   * `resolveReplyToForTenant` send time, threaded into the Reply-To header
+   * subaddress (`<slug>+<replyToken>@<domain>`), and persisted to
+   * `engagement_email_metadata.reply_token` at the M3-2.5a outbound sidecar
+   * write site (action-executed-push.ts). The recipient's reply preserves
+   * the subaddress; Resend Receiving forwards it; the inbound consumer
+   * extracts the token and queries `reply_token` for O(1) correlation.
+   *
+   * Optional: back-compat callers (cron-deferred-send, deferred-send-
+   * evaluator without a decisionId in scope) omit it; the sidecar row
+   * leaves `reply_token NULL`; the inbound consumer's `if (replyToken)`
+   * guard misses gracefully.
+   */
+  replyToken?: string;
 }
 
 /**
@@ -226,10 +241,28 @@ export interface PublishActionSendInput {
  * `PublishActionSendInput.replyTo`. The Resend adapter reads the
  * per-message `replyTo` first, falls back to ChannelConnection metadata.
  */
+/**
+ * KAN-1036 — resolver return type. The pre-KAN-1036 return was `string | null`
+ * (just the Reply-To address). After KAN-1036, the resolver also mints a
+ * per-decision token that the caller threads through to the action.send
+ * event for sidecar persistence at outbound write time. The token is the
+ * correlation anchor on the recipient's reply.
+ *
+ * `replyToken: string | null` (NOT empty-string sentinel) — null means
+ * "back-compat caller, no decisionId in scope, no token to persist."
+ * The caller's `if (replyToken)` guard skips the sidecar token-write and
+ * the inbound consumer's lookup misses (as designed).
+ */
+export type ResolvedReplyTo = {
+  replyTo: string;
+  replyToken: string | null;
+};
+
 export async function resolveReplyToForTenant(
   prisma: PrismaClient,
   tenantId: string,
-): Promise<string | null> {
+  decisionId?: string,
+): Promise<ResolvedReplyTo | null> {
   const tenant = await prisma.tenant.findUnique({
     where: { id: tenantId },
     select: { inboxSlug: true },
@@ -241,7 +274,27 @@ export async function resolveReplyToForTenant(
     return null;
   }
   const domain = process.env.LEAD_INBOX_DOMAIN ?? 'leads.axisone.app';
-  return `${tenant.inboxSlug}@${domain}`;
+
+  // KAN-1036 back-compat: callers without a decisionId in scope
+  // (cron-deferred-send, deferred-send-evaluator) get the legacy non-
+  // subaddressed shape with no token. The unique index permits multiple
+  // NULLs (Postgres semantics — NULL ≠ NULL); sidecar write skips the
+  // token field; the inbound consumer's `if (replyToken)` guard misses
+  // the lookup and falls back to orphan-engagement behavior. Same as
+  // pre-KAN-1036 PROD posture for these callers.
+  if (!decisionId) {
+    return { replyTo: `${tenant.inboxSlug}@${domain}`, replyToken: null };
+  }
+
+  // KAN-1036 — mint a 16-char hex token per send. 64 bits of entropy,
+  // collision-resistant at any realistic scale (and the unique index
+  // catches the astronomically rare collision). Hex is email-safe
+  // (no `+`, `/`, `=` to confuse RFC 5322 parsers downstream).
+  const replyToken = randomBytes(8).toString('hex');
+  return {
+    replyTo: `${tenant.inboxSlug}+${replyToken}@${domain}`,
+    replyToken,
+  };
 }
 
 // KAN-661 fix: topic `action.send` exists in GCP; the previous `growth.` prefix
@@ -272,6 +325,12 @@ export async function publishActionSend(
       // adapter. Read by adapters/resend/index.ts:148-149 (`messageReplyTo`)
       // with fallback to ChannelConnection.metadata.replyTo.
       ...(input.replyTo ? { replyTo: input.replyTo } : {}),
+      // KAN-1036: per-decision correlation token. Wire-level field on
+      // OutboundMessageSchema (packages/connector-contracts/src/types.ts).
+      // Persisted at action-executed-push's sidecar $transaction; matched
+      // at lead-received-push's correlation lookup. See the resolver
+      // docstring for the full chain.
+      ...(input.replyToken ? { replyToken: input.replyToken } : {}),
     },
   };
 
@@ -454,12 +513,23 @@ export async function gateAndPublishComposed(
   // callers), since gateAndPublishComposed is the single chokepoint between
   // any guardrail-gated dispatch and the Resend adapter.
   //
+  // KAN-1036: extended to thread a per-decision token through Reply-To
+  // (`<slug>+<token>@<domain>`) for subaddress-anchored reply correlation.
+  // The token rides into the action.send event, persists at the
+  // action-executed-push sidecar $transaction (M3-2.5a's write site), and
+  // the inbound consumer matches against the engagement_email_metadata
+  // reply_token column on the recipient's reply. Replaces the wire-Message-
+  // ID-based Plan A that was empirically falsified — Resend has no API
+  // surface that exposes the SES wire Message-ID.
+  //
   // Fail-mode posture (matches Lead Inbox): raw await, no try/catch. If
   // resolveReplyToForTenant throws (DB blip), the dispatch fails — consistent
   // failure semantics between the two outbound paths. Helper internally
   // warn-logs + returns null when tenant has no inboxSlug; we omit Reply-To
   // in that case rather than fail.
-  const replyTo = await resolveReplyToForTenant(prisma, ctx.tenantId);
+  const resolvedReplyTo = await resolveReplyToForTenant(prisma, ctx.tenantId, ctx.decisionId);
+  const replyTo = resolvedReplyTo?.replyTo ?? null;
+  const replyToken = resolvedReplyTo?.replyToken ?? null;
 
   const messageId = await publishActionSend(pubsubClient, {
     tenantId: ctx.tenantId,
@@ -469,6 +539,7 @@ export async function gateAndPublishComposed(
     composed,
     connectionId: ctx.connectionId,
     ...(replyTo ? { replyTo } : {}),
+    ...(replyToken ? { replyToken } : {}),
   });
   return { sent: true, messageId, decision: gate.decision };
 }

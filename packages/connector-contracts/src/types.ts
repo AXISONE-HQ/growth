@@ -70,6 +70,15 @@ export const OutboundMessageSchema = z.object({
   // that don't set it preserve the legacy behavior (Reply-To omitted, OR
   // ChannelConnection.metadata.replyTo fallback in the adapter).
   replyTo: z.string().email().optional(),
+  // KAN-1036: per-decision correlation token. 16-char hex minted by
+  // `resolveReplyToForTenant` and threaded into the Reply-To header subaddress
+  // (`<slug>+<replyToken>@<domain>`) by `publishActionSend`. Persisted to
+  // `engagement_email_metadata.reply_token` at the M3-2.5a outbound sidecar
+  // write site (action-executed-push.ts), where the inbound consumer queries
+  // it on the recipient's reply for O(1) correlation. Optional + additive:
+  // pre-KAN-1036 producers omit, the column persists NULL, the consumer's
+  // `if (replyToken)` guard skips lookup gracefully.
+  replyToken: z.string().regex(/^[0-9a-f]{16}$/).optional(),
 });
 export type OutboundMessage = z.infer<typeof OutboundMessageSchema>;
 

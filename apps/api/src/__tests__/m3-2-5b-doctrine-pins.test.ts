@@ -101,3 +101,62 @@ describe('M3-2.5b doctrine pin — shared header-normalization helper at expecte
     expect(idx).toMatch(/export \* from\s+['"]\.\/email-headers\.js['"]/);
   });
 });
+
+// ─── KAN-1036 doctrine pins ──────────────────────────────────────────────
+
+describe('KAN-1036 doctrine pin — reply_token is TEXT (not Postgres enum)', () => {
+  it('schema.prisma EngagementEmailMetadata.replyToken is String? with @unique map', () => {
+    const schema = readFileSync(resolve(REPO_ROOT, 'packages/db/prisma/schema.prisma'), 'utf-8');
+    const modelMatch = schema.match(/model EngagementEmailMetadata \{([\s\S]*?)\n\}/);
+    expect(modelMatch).not.toBeNull();
+    const body = modelMatch![1];
+    // Field declared as `replyToken String?` with @unique and @map("reply_token")
+    expect(body).toMatch(/replyToken\s+String\?\s+@unique[\s\S]*@map\("reply_token"\)/);
+    // No enum named ReplyToken anywhere in the schema
+    expect(schema).not.toMatch(/enum ReplyToken /);
+  });
+
+  it('migration SQL declares the column as TEXT NULL, not a custom Postgres type', () => {
+    const migrationsDir = resolve(REPO_ROOT, 'packages/db/prisma/migrations');
+    const dir = readdirSync(migrationsDir).find((d) => d.toLowerCase().includes('kan_1036_reply_token'));
+    expect(dir).toBeDefined();
+    const sql = readFileSync(resolve(migrationsDir, dir!, 'migration.sql'), 'utf-8');
+    expect(sql).toMatch(/ADD COLUMN\s+"reply_token"\s+TEXT/i);
+    expect(sql).toMatch(/CREATE UNIQUE INDEX\s+"engagement_email_metadata_reply_token_idx"/i);
+  });
+});
+
+describe('KAN-1036 doctrine pin — no config UI added for reply correlation', () => {
+  it('no /settings/correlation or /settings/reply-token route exists', () => {
+    const settingsDir = resolve(REPO_ROOT, 'apps/web/src/app/settings');
+    if (!existsSync(settingsDir)) return;
+    const entries = readdirSync(settingsDir);
+    const banned = entries.filter((e) =>
+      ['correlation', 'reply-token', 'reply_token', 'subaddress'].includes(e.toLowerCase()),
+    );
+    expect(banned).toEqual([]);
+  });
+});
+
+describe('KAN-1036 doctrine pin — correlation lookup uses replyToken (grep-prove the swap)', () => {
+  it('lead-received-push.ts correlation lookup queries reply_token, not provider_message_id', () => {
+    const src = readFileSync(
+      resolve(REPO_ROOT, 'apps/api/src/subscribers/lead-received-push.ts'),
+      'utf-8',
+    );
+    // Positive: the writeSidecarAndCorrelate function calls findFirst with
+    // a where-clause that includes replyToken
+    const fnStart = src.indexOf('async function writeSidecarAndCorrelate');
+    expect(fnStart).toBeGreaterThan(0);
+    const fnEnd = src.indexOf('function emitCorrelationAudit', fnStart);
+    const fn = src.slice(fnStart, fnEnd);
+    expect(fn).toMatch(/replyToken:\s*args\.replyToken/);
+    // Negative: NO `providerMessageId: ` as a where-clause key inside this
+    // function (it can appear in the sidecar CREATE for the inbound's own
+    // Message-ID forensic write — guard scope to the findFirst block).
+    const findFirstIdx = fn.indexOf('findFirst');
+    expect(findFirstIdx).toBeGreaterThan(0);
+    const block = fn.slice(findFirstIdx, findFirstIdx + 400);
+    expect(block).not.toMatch(/where:\s*\{[^}]*providerMessageId/);
+  });
+});

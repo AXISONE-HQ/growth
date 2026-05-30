@@ -119,6 +119,22 @@ export const LeadReceivedEventSchema = z.object({
         references: z.string().optional(),
       })
       .optional(),
+    /**
+     * KAN-1036 — per-decision reply correlation token, parsed from the
+     * subaddressed To: at the webhook layer (`<slug>+<replyToken>@<domain>`).
+     * Producer side: `resend-inbound.ts` calls `extractSlugAndToken(data.to)`
+     * and propagates the 16-char hex token here. Consumer side:
+     * `lead-received-push.ts:writeSidecarAndCorrelate` queries
+     * `engagement_email_metadata.reply_token` for O(1) correlation against
+     * the originating outbound row.
+     *
+     * Strict 16-char hex regex on parse: an unexpected token shape fails
+     * Zod validation upstream of the consumer's lookup — belt-and-
+     * suspenders alongside the webhook-level shape validation. Optional +
+     * additive: pre-KAN-1036 producers + inbounds with no subaddress
+     * omit; consumer falls back to today's orphan-engagement behavior.
+     */
+    replyToken: z.string().regex(/^[0-9a-f]{16}$/).optional(),
   }),
   receivedAt: z.string().datetime(),
 });

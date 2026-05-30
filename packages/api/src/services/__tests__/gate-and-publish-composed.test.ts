@@ -263,7 +263,7 @@ describe('KAN-1035 — Reply-To threaded into publishActionSend', () => {
     process.env.LEAD_INBOX_DOMAIN = 'leads.axisone.ca';
   });
 
-  it('tenant has inboxSlug → publishActionSend receives replyTo=<slug>@<DOMAIN>', async () => {
+  it('tenant has inboxSlug → publishActionSend receives replyTo=<slug>+<token>@<DOMAIN> (KAN-1036 subaddressed; decisionId in scope mints the token)', async () => {
     const prisma = makeStubPrisma({ inboxSlug: AXISONE_INBOX_SLUG });
     const pubsub = makeStubPubSubClient();
     const validator = vi.fn(() => makeResult([], 'pass'));
@@ -278,13 +278,23 @@ describe('KAN-1035 — Reply-To threaded into publishActionSend', () => {
     // re-parses with OutboundMessageSchema. The replyTo field lives
     // inside the inner `message` object per packages/api/src/services/
     // message-composer.ts:259-275.
+    //
+    // KAN-1036 — `ctx.decisionId` is in scope at this call site (per
+    // KAN-1035's chokepoint pattern), so the resolver mints a per-
+    // decision token and returns the subaddressed shape
+    // <slug>+<16-hex>@<domain>. Pre-KAN-1036 this assertion was
+    // `<slug>@<domain>`; the subaddressed form is the new canonical
+    // shape (legacy callers that omit decisionId still get the bare
+    // form — covered separately in the KAN-1036 producer suite below).
     const publishCalls = (pubsub.publish as ReturnType<typeof vi.fn>).mock.calls;
     const sendCall = publishCalls.find((c) => c[0] === 'action.send');
     expect(sendCall).toBeDefined();
     const sentEvent = JSON.parse((sendCall![1] as Buffer).toString('utf8')) as {
       message: { replyTo?: string };
     };
-    expect(sentEvent.message.replyTo).toBe(`${AXISONE_INBOX_SLUG}@leads.axisone.ca`);
+    expect(sentEvent.message.replyTo).toMatch(
+      new RegExp(`^${AXISONE_INBOX_SLUG}\\+[0-9a-f]{16}@leads\\.axisone\\.ca$`),
+    );
   });
 
   it('tenant inboxSlug is NULL → publishActionSend invoked WITHOUT replyTo (graceful fallback)', async () => {
@@ -360,5 +370,97 @@ describe('KAN-1035 — Reply-To threaded into publishActionSend', () => {
     // action.send NOT published (raw await blocks dispatch on resolver throw)
     const topics = (pubsub.publish as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0]);
     expect(topics).not.toContain('action.send');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// KAN-1036 — per-decision reply correlation token minted in
+// resolveReplyToForTenant and threaded through publishActionSend wire.
+// Replaces M3-2.5b's empirically-falsified wire-Message-ID Plan A with a
+// value WE mint and control at send time.
+// ─────────────────────────────────────────────────────────────────────────
+
+describe('KAN-1036 — per-decision replyToken minted + threaded into wire', () => {
+  const AXISONE_INBOX_SLUG = 'c03065f6';
+
+  beforeEach(() => {
+    process.env.LEAD_INBOX_DOMAIN = 'leads.axisone.ca';
+  });
+
+  it('decisionId in scope → Reply-To becomes <slug>+<16-hex>@<domain> AND replyToken rides into action.send wire', async () => {
+    const prisma = makeStubPrisma({ inboxSlug: AXISONE_INBOX_SLUG });
+    const pubsub = makeStubPubSubClient();
+    const validator = vi.fn(() => makeResult([], 'pass'));
+
+    await gateAndPublishComposed(prisma, pubsub, ctx, composed, {
+      extraHooks: { validate: validator },
+    });
+
+    const sendCall = (pubsub.publish as ReturnType<typeof vi.fn>).mock.calls.find(
+      (c) => c[0] === 'action.send',
+    );
+    const sentEvent = JSON.parse((sendCall![1] as Buffer).toString('utf8')) as {
+      message: { replyTo?: string; replyToken?: string };
+    };
+    // Reply-To is subaddressed: <slug>+<token>@<domain>
+    expect(sentEvent.message.replyTo).toMatch(/^c03065f6\+[0-9a-f]{16}@leads\.axisone\.ca$/);
+    // replyToken is a 16-char hex value on the wire
+    expect(sentEvent.message.replyToken).toMatch(/^[0-9a-f]{16}$/);
+    // The token in Reply-To matches the standalone wire field (single mint, two carriers)
+    const tokenFromReplyTo = sentEvent.message.replyTo!.match(/\+([0-9a-f]{16})@/)?.[1];
+    expect(tokenFromReplyTo).toBe(sentEvent.message.replyToken);
+  });
+
+  it('tenant inboxSlug NULL → no Reply-To AND no replyToken on the wire (graceful resolver-null fallback)', async () => {
+    const prisma = makeStubPrisma({ inboxSlug: null });
+    const pubsub = makeStubPubSubClient();
+    const validator = vi.fn(() => makeResult([], 'pass'));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await gateAndPublishComposed(prisma, pubsub, ctx, composed, {
+      extraHooks: { validate: validator },
+    });
+
+    const sendCall = (pubsub.publish as ReturnType<typeof vi.fn>).mock.calls.find(
+      (c) => c[0] === 'action.send',
+    );
+    const sentEvent = JSON.parse((sendCall![1] as Buffer).toString('utf8')) as {
+      message: Record<string, unknown>;
+    };
+    expect('replyTo' in sentEvent.message).toBe(false);
+    expect('replyToken' in sentEvent.message).toBe(false);
+    warnSpy.mockRestore();
+  });
+
+  it('mint generates a fresh token per send (no global cache / no per-tenant memo)', async () => {
+    const prisma = makeStubPrisma({ inboxSlug: AXISONE_INBOX_SLUG });
+    const pubsub = makeStubPubSubClient();
+    const validator = vi.fn(() => makeResult([], 'pass'));
+
+    await gateAndPublishComposed(prisma, pubsub, ctx, composed, {
+      extraHooks: { validate: validator },
+    });
+    // Different decisionId → different mint call → different token
+    await gateAndPublishComposed(
+      prisma,
+      pubsub,
+      { ...ctx, decisionId: 'decision-different-test' },
+      composed,
+      { extraHooks: { validate: validator } },
+    );
+
+    const sendCalls = (pubsub.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+      (c) => c[0] === 'action.send',
+    );
+    expect(sendCalls).toHaveLength(2);
+    const tokens = sendCalls.map((c) => {
+      const ev = JSON.parse((c[1] as Buffer).toString('utf8')) as {
+        message: { replyToken?: string };
+      };
+      return ev.message.replyToken;
+    });
+    expect(tokens[0]).not.toBe(tokens[1]);
+    expect(tokens[0]).toMatch(/^[0-9a-f]{16}$/);
+    expect(tokens[1]).toMatch(/^[0-9a-f]{16}$/);
   });
 });
