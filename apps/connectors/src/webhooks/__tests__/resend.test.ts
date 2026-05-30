@@ -5,7 +5,7 @@
  * actually touched. The Svix middleware is mounted with an injected verifier
  * that just returns a fixed payload — bypassing real signature crypto.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('../../pubsub/index.js', () => ({
   publishEvent: vi.fn(async () => 'msgId-stub'),
@@ -185,6 +185,82 @@ describe('email.sent / email.delivery_delayed → no DB writes, no publishes', (
     });
     expect(res.status).toBe(200);
     expect(publishEvent).not.toHaveBeenCalled();
+  });
+
+  // ── KAN-1036 β.2 — payload-inspect flag-gated log ──
+  describe('KAN-1036 β.2 payload-inspect log', () => {
+    let consoleLogSpy: ReturnType<typeof vi.spyOn>;
+    let originalEnvValue: string | undefined;
+
+    beforeEach(() => {
+      consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      originalEnvValue = process.env.KAN_1036_PAYLOAD_INSPECT;
+    });
+
+    afterEach(() => {
+      consoleLogSpy.mockRestore();
+      if (originalEnvValue === undefined) {
+        delete process.env.KAN_1036_PAYLOAD_INSPECT;
+      } else {
+        process.env.KAN_1036_PAYLOAD_INSPECT = originalEnvValue;
+      }
+    });
+
+    it('flag OFF: email.sent does NOT emit the inspect-log', async () => {
+      delete process.env.KAN_1036_PAYLOAD_INSPECT;
+      const res = await post({
+        type: 'email.sent',
+        data: { email_id: 'em_kan1036_off', to: ['x@example.com'], tags: CORRELATION_TAGS },
+      });
+      expect(res.status).toBe(200);
+      const inspectCalls = consoleLogSpy.mock.calls.filter((c) =>
+        String(c[0]).includes('[kan-1036-payload-inspect]'),
+      );
+      expect(inspectCalls).toHaveLength(0);
+    });
+
+    it('flag ON: email.sent emits the inspect-log with the RAW Svix-verified payload (not the cast)', async () => {
+      process.env.KAN_1036_PAYLOAD_INSPECT = 'true';
+      // Payload includes a field NOT declared on ResendWebhookPayload — the
+      // cast would strip it but the raw log must include it. This is the
+      // load-bearing property of the experiment: we need to see every field
+      // Resend sends, including ones the TS interface doesn't model.
+      const payloadWithUndeclaredField = {
+        type: 'email.sent',
+        data: {
+          email_id: 'em_kan1036_on',
+          to: ['x@example.com'],
+          tags: CORRELATION_TAGS,
+          // Field NOT in ResendWebhookPayload — proves we log raw, not cast.
+          undeclared_field_for_test: 'must-appear-in-log',
+        },
+      };
+      const res = await post(payloadWithUndeclaredField);
+      expect(res.status).toBe(200);
+
+      const inspectCalls = consoleLogSpy.mock.calls.filter((c) =>
+        String(c[0]).includes('[kan-1036-payload-inspect]'),
+      );
+      expect(inspectCalls).toHaveLength(1);
+      const loggedJson = String(inspectCalls[0]![1]);
+      // The raw payload contains the undeclared field — proves the log
+      // emits the raw object, not the TS-typed cast.
+      expect(loggedJson).toContain('undeclared_field_for_test');
+      expect(loggedJson).toContain('must-appear-in-log');
+    });
+
+    it('flag ON: email.delivery_delayed does NOT emit the inspect-log (scope is email.sent only)', async () => {
+      process.env.KAN_1036_PAYLOAD_INSPECT = 'true';
+      const res = await post({
+        type: 'email.delivery_delayed',
+        data: { email_id: 'em_kan1036_delayed', to: ['x@example.com'], tags: CORRELATION_TAGS },
+      });
+      expect(res.status).toBe(200);
+      const inspectCalls = consoleLogSpy.mock.calls.filter((c) =>
+        String(c[0]).includes('[kan-1036-payload-inspect]'),
+      );
+      expect(inspectCalls).toHaveLength(0);
+    });
   });
 });
 
