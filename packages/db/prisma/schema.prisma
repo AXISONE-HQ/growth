@@ -1978,6 +1978,27 @@ model EngagementEmailMetadata {
   // Inbound-only fields, populated in M3-2.5b. Outbound rows leave null.
   inReplyTo         String?  @map("in_reply_to")
   referencesArray   String[] @map("references_array")
+  // KAN-1036 — subaddress-anchored reply correlation token. Outbound rows
+  // mint a per-decision 16-char hex token at send time; the outbound
+  // Reply-To header becomes `<inboxSlug>+<replyToken>@<DOMAIN>`. When a
+  // recipient replies, their MUA addresses to the subaddressed form;
+  // Resend Receiving forwards it preserving the +<token>; the consumer
+  // parses the token from data.to and looks up THIS column to recover
+  // the originating Engagement → Decision → Contact → Deal for the
+  // M3-2.5b redirect-shadowed rescue.
+  //
+  // Replaces the wire-Message-ID-based correlation (Plan A in M3-2.5b),
+  // which was empirically falsified — Resend has no API surface that
+  // exposes the SES-generated wire Message-ID. KAN-1036 pivots the
+  // correlation anchor from "value Resend opaquely owns" to "value WE
+  // mint and control at send time."
+  //
+  // Back-compat callers (cron-deferred-send, deferred-send-evaluator)
+  // that don't have a decisionId in scope leave this NULL. The unique
+  // index permits multiple NULLs (Postgres semantics — NULL ≠ NULL).
+  // The consumer's lookup guards on `if (replyToken)` before querying,
+  // so NULL rows are inert.
+  replyToken        String?  @unique(map: "engagement_email_metadata_reply_token_idx") @map("reply_token")
   createdAt         DateTime @default(now()) @map("created_at")
 
   engagement Engagement @relation(fields: [engagementId], references: [id], onUpdate: Cascade, onDelete: Cascade)
