@@ -71,6 +71,15 @@ import { ContactRepliedEventSchema } from '@growth/shared';
 import { prisma } from '../prisma.js';
 import { verifyPubsubOidc } from '../lib/oidc-pubsub-verify.js';
 import { getRedisClient } from '../services/redis-client.js';
+// KAN-1037-PR4.5 — wire PR4's cognitive eval through the Phase 2
+// dispatch chain (stage-transition, KAN-825/835 chains, send-policy,
+// engine-proposed escalation consumer). Precomputed-decision pattern
+// per KAN-834 — passing our pre-evaluated brainDecision in skips
+// wirePhase2Consumers' internal evaluateDealState, avoiding a
+// cognitive-blind double-eval that would discard PR4's latestInbound-
+// aware reasoning. Direct sibling import (both subscribers live under
+// apps/api/src/subscribers; no cross-rootDir boundary to bypass).
+import { wirePhase2Consumers, type Phase2BrainDecision } from './lead-received-push.js';
 
 // ─────────────────────────────────────────────
 // OpenAI client (KAN-828 — Knowledge Layer retrieval injection)
@@ -432,8 +441,51 @@ contactRepliedPushApp.post('/contact-replied', async (c) => {
           // engagement chain for full trace.
           inboundEngagementId: event.inboundEngagementId,
           outboundEngagementId: event.outboundEngagementId,
+          // KAN-1037-PR4.5 — marker that the dispatch chain was kicked off.
+          // Fire-and-forget on wirePhase2Consumers below; the boolean reads
+          // as "dispatch initiated" not "dispatch completed." Per-consumer
+          // observable artifacts (Escalation row, send-policy audit, etc.)
+          // are the ground truth for what actually happened downstream.
+          dispatchConsumersFired: true,
         },
       },
+    });
+
+    // ── KAN-1037-PR4.5 — wire dispatch chain ────────────────────
+    //
+    // Fire-and-forget per the lead-received-push.ts:607 precedent.
+    // Downstream consumer failures (stage-transition error, send-policy
+    // defer-write failure, escalation create reject, etc.) must NOT block
+    // the cooldown set below or trigger a Pub/Sub retry of the whole
+    // contact.replied chain — a retry would re-evaluate Brain (wasteful
+    // ~$0.01 of tokens + ~3s of latency) and could race the partial
+    // dispatch state we just kicked off. The cognitive audit row above
+    // is already committed; downstream observability comes from each
+    // consumer's own audit writes.
+    //
+    // PRECOMPUTED-DECISION PASS-THROUGH (KAN-834 pattern, the load-
+    // bearing PR4.5 mechanic): we pass the PR4-evaluated brainDecision
+    // through as the 4th arg. wirePhase2Consumers' internal eval at
+    // L1335-1341 (lead-received-push.ts) detects the precomputed value
+    // and SKIPS its own evaluateDealState call. Without this, the
+    // dispatch chain would re-evaluate Brain WITHOUT latestInbound —
+    // the reply-aware reasoning that PR4 just demonstrated (engine
+    // citing "Q3 timeline / Tuesday afternoon / 30-minute call" at 0.85
+    // confidence) would be discarded. PR4's empirical proof would not
+    // translate to observable production behavior.
+    //
+    // `isChainedInvocation: false` — this IS the initial dispatch on
+    // this inbound. The KAN-825/835 chains within wirePhase2Consumers
+    // self-flag their internal recursive calls.
+    void wirePhase2Consumers(
+      event.dealId,
+      event.eventId,
+      false,
+      brainDecision as Phase2BrainDecision,
+    ).catch((err: unknown) => {
+      console.warn(
+        `[contact-replied-push] wirePhase2Consumers-error eventId=${event.eventId} err=${(err as Error)?.message ?? String(err)}`,
+      );
     });
 
     // Set 5-min cooldown anchored to this delivery's decisionId so the

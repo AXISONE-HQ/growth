@@ -304,8 +304,13 @@ async function loadBrainServiceModule(): Promise<BrainServiceModule> {
   return _brainServiceModule;
 }
 
-/** Captured Brain decision shape — convenience alias for in-handler code. */
-type Phase2BrainDecision = Awaited<ReturnType<BrainServiceModule['evaluateDealState']>>;
+/**
+ * Captured Brain decision shape — convenience alias for in-handler code.
+ * Exported (KAN-1037-PR4.5) so cross-subscriber callers (specifically
+ * contact-replied-push) can declare the precomputedDecision param shape
+ * when calling wirePhase2Consumers with the PR4-evaluated decision.
+ */
+export type Phase2BrainDecision = Awaited<ReturnType<BrainServiceModule['evaluateDealState']>>;
 
 interface MessageShaperModule {
   shapeMessage: (
@@ -1282,7 +1287,19 @@ async function writePhase1Deal(
 // errors must not propagate (inbound Engagement is already committed).
 // ─────────────────────────────────────────────
 
-async function wirePhase2Consumers(
+/**
+ * KAN-815 Phase 2 orchestrator. Re-evaluates Brain (or accepts a
+ * precomputed decision per KAN-1037-PR4.5) and routes the decision
+ * through stage-transition (KAN-815b), KAN-825/835 follow-up chains,
+ * dispatch (KAN-815c), and the engine-proposed escalation consumer
+ * (KAN-1037-PR4.5).
+ *
+ * Exported (KAN-1037-PR4.5) so contact-replied-push can call this
+ * directly with the PR4-evaluated Brain decision. Legacy inbound-driven
+ * Phase 2 wiring at L607 still uses the 3-arg form (no precomputed
+ * decision; internal eval fires).
+ */
+export async function wirePhase2Consumers(
   dealId: string,
   eventId: string,
   // KAN-825 — chain-depth guard. Default `false` (initial inbound-driven
@@ -1292,6 +1309,23 @@ async function wirePhase2Consumers(
   // log a warning and stop. Local boolean (no DB column) is sufficient at
   // depth=1.
   isChainedInvocation: boolean = false,
+  // KAN-1037-PR4.5 — optional precomputed Brain decision. When provided,
+  // the internal evaluateDealState call at L1335-1341 is SKIPPED and the
+  // passed-in decision flows through the dispatch chain. Same KAN-834
+  // pattern that evaluateStageTransition uses (avoids double Brain eval).
+  //
+  // **Critical for contact.replied path:** PR4's subscriber evaluates
+  // Brain with `latestInbound` populated (the first time the prompt sees
+  // inbound body text — the load-bearing PRD §7 demonstration). Without
+  // this param, calling wirePhase2Consumers would re-evaluate Brain
+  // WITHOUT latestInbound — the cognitive-aware reasoning gets discarded
+  // for the dispatch routing, undoing PR4's empirical proof.
+  //
+  // Legacy callers (lead-received-push:606 inbound-driven Phase 2 wiring,
+  // and the internal chained calls at L1388 / L1432) pass nothing → the
+  // optional param defaults to undefined → the eval runs as before.
+  // Back-compat is zero-change for those callers.
+  precomputedDecision?: Phase2BrainDecision,
 ): Promise<void> {
   // KAN-814 — supersession path. A fresh inbound on this (dealId, contactId)
   // means any prior pending deferred_send for the same conversation is now
@@ -1332,16 +1366,25 @@ async function wirePhase2Consumers(
   // Step 1: Brain evaluation — single LLM call per inbound; same decision
   // is passed through to all consumers (no double-eval per Phase 2 design).
   // KAN-828: inject redis + openai so the Knowledge Layer retrieval fires.
+  //
+  // KAN-1037-PR4.5: when a precomputed Brain decision is passed in (from
+  // contact-replied-push's PR4-evaluated decision with latestInbound), the
+  // internal eval is SKIPPED entirely. Same single-call discipline; no
+  // double-eval. Caller's `redis` + `openai` clients are still constructed
+  // below because the downstream chain (stage-transition, dispatchPhase2Send,
+  // KAN-825/835 chained calls) consumes them.
   const { evaluateDealState } = await loadBrainServiceModule();
   const redis = getRedisClient();
   const openai = getOpenAIClient();
-  const brainDecision: Phase2BrainDecision = await evaluateDealState(prisma, dealId, {
-    redis,
-    openai,
-  });
+  const brainDecision: Phase2BrainDecision =
+    precomputedDecision ??
+    (await evaluateDealState(prisma, dealId, {
+      redis,
+      openai,
+    }));
 
   console.log(
-    `[lead-received-push] phase-2-brain-evaluated dealId=${dealId} eventId=${eventId} actionType=${brainDecision.nextBestAction.type} confidence=${brainDecision.confidence.toFixed(2)} tokens=${brainDecision.llmInputTokens}/${brainDecision.llmOutputTokens}${isChainedInvocation ? ' chained=true' : ''}`,
+    `[lead-received-push] phase-2-brain-evaluated dealId=${dealId} eventId=${eventId} actionType=${brainDecision.nextBestAction.type} confidence=${brainDecision.confidence.toFixed(2)} tokens=${brainDecision.llmInputTokens}/${brainDecision.llmOutputTokens}${isChainedInvocation ? ' chained=true' : ''}${precomputedDecision ? ' precomputed=true' : ''}`,
   );
 
   // KAN-815b stage-transition consumer. Brain decisions to advance or close
@@ -1476,6 +1519,188 @@ async function wirePhase2Consumers(
   if (brainDecision.nextBestAction.type === 'send_follow_up') {
     await dispatchPhase2Send(dealId, eventId, brainDecision);
   }
+
+  // KAN-1037-PR4.5 — engine-proposed escalation consumer.
+  //
+  // When Brain emits `escalate_to_human`, the engine has explicitly
+  // determined that this contact's reply (or current state) needs human
+  // judgment. Pre-PR4.5 this action class was UNHANDLED here — Brain
+  // emitted, telemetry logged, nothing observable downstream. PR4's
+  // empirical smoke (2026-05-31 23:21 UTC) demonstrated the engine
+  // emitting escalate_to_human at 0.85 confidence with reply-aware
+  // reasoning ("explicit 30-minute call next Tuesday afternoon request +
+  // outbound contained TEST REDIRECT guardrail warning"). Without this
+  // consumer, that cognitive proof produces zero operator-observable
+  // signal — milestone value-prop hollow.
+  //
+  // Consumer creates an Escalation row that surfaces in the Recommendations
+  // queue (per KAN-754) with:
+  //   - `triggerType: 'engine_proposed_action'` — new discriminator
+  //     alongside AGENTIC_GATE_DECISION / CONFIDENCE_BELOW_THRESHOLD /
+  //     guardrail_block / lead_assignment_below_threshold / SAMPLED_*.
+  //     Reads as "the engine proposed this action; operator decides."
+  //   - `aiSuggestion: brainDecision.nextBestAction.reasoning` —
+  //     human-readable summary the operator sees in the queue UI.
+  //   - `originalAction` — engine's structured action mapped to the
+  //     SuggestedAction shape (per KAN-1037 PR1's runFreeform / runAgentic
+  //     producer pattern at run-decision-for-contact.ts:566 / 1252).
+  //     Operator's accept-without-modify path dispatches via this column
+  //     per the KAN-1037 fix; for escalate_to_human the actionType is
+  //     itself escalate_to_human, so accept-without-modify is a status-
+  //     transition-only operation (no real dispatch — operator should
+  //     modify to compose a follow-up before accepting).
+  //   - `decisionId` — populated when the originating Decision is known
+  //     (from contact.replied path: matched outbound's decisionId; from
+  //     lead-received first-turn path: the just-created Decision row id).
+  //     Per Phase 1 confirmation #3, this ties the audit chain together
+  //     so operators tracing "what happened on this contact" can walk
+  //     the originating Decision → reply → engine eval → escalation.
+  //
+  // Chain-depth guard: skip if this is a chained invocation. A chained
+  // call returning escalate_to_human would create two escalations for
+  // the same inbound — once on the original Brain decision, once on the
+  // chained one. The KAN-825/835 chained paths already have their own
+  // escalate_to_human telemetry stubs (L1481) that we leave intact for
+  // now. KAN-1047 tracks chain-aware escalation discipline once we have
+  // empirical PROD signal on chain-loop frequency.
+  if (
+    brainDecision.nextBestAction.type === 'escalate_to_human' &&
+    !isChainedInvocation
+  ) {
+    await createEngineProposedEscalation(dealId, eventId, brainDecision);
+  }
+}
+
+/**
+ * KAN-1037-PR4.5 — write an Escalation row representing the engine's
+ * explicit `escalate_to_human` decision. Surfaces in the Recommendations
+ * queue (per KAN-754); the operator's accept-then-modify flow dispatches
+ * via the KAN-1037 PR1 path (`originalAction` populated below).
+ *
+ * Best-effort posture: on any failure (Deal lookup miss, Escalation
+ * create reject, audit write fail), log + return without throwing. The
+ * caller's outer `.catch` in contact-replied-push.ts is the
+ * fire-and-forget boundary; we don't want a downstream failure to
+ * destabilize the cognitive audit row that PR4 already committed.
+ */
+async function createEngineProposedEscalation(
+  dealId: string,
+  eventId: string,
+  brainDecision: Phase2BrainDecision,
+): Promise<void> {
+  // Load Deal for tenantId + contactId. dispatchPhase2Send at L1542-1550
+  // already shows this lookup pattern; we mirror it for symmetry.
+  const deal = await prisma.deal.findUnique({
+    where: { id: dealId },
+    select: { id: true, tenantId: true, contactId: true },
+  });
+  if (!deal) {
+    console.warn(
+      `[lead-received-push] kan-1037-pr4-5-escalate-no-deal dealId=${dealId} eventId=${eventId} — Deal lookup miss; escalation NOT created`,
+    );
+    return;
+  }
+
+  // Map Brain's nextBestAction shape (`{ type, reasoning,
+  // suggestedChannel?, suggestedTone?, targetStageId? }`) to the canonical
+  // SuggestedAction shape (`{ actionType, channel, payload }`) per
+  // KAN-1037 PR1's run-decision-for-contact.ts:566 producer pattern.
+  // The payload carries forensic context (reasoning + tone + confidence)
+  // so an operator inspecting the Recommendations detail drawer sees
+  // exactly what the engine reasoned.
+  const originalAction = {
+    actionType: brainDecision.nextBestAction.type,
+    channel: brainDecision.nextBestAction.suggestedChannel ?? null,
+    payload: {
+      reasoning: brainDecision.nextBestAction.reasoning,
+      ...(brainDecision.nextBestAction.suggestedTone
+        ? { suggestedTone: brainDecision.nextBestAction.suggestedTone }
+        : {}),
+      brainConfidence: brainDecision.confidence,
+      brainModelTier: brainDecision.modelTier,
+    },
+  };
+
+  // KAN-1037-PR4.5 — find the originating Decision id. Two callers:
+  //   - contact-replied-push (PR4.5 primary use case): the matched
+  //     outbound's `engagement.decisionId` flows through the
+  //     ContactRepliedEvent and ends up here. Looked up via the most
+  //     recent Decision row on this Deal+Contact (one indexed query;
+  //     the contact-replied path's eventId is the audit anchor, not
+  //     the foreign key).
+  //   - lead-received-push first-turn path: a Decision row was just
+  //     created upstream of this call; same lookup picks it up.
+  // Best-effort — null is acceptable per KAN-1005 M2-6b's null-safe
+  // Escalation pattern (the originally-broken state at recommendations.ts:354).
+  const recentDecision = await prisma.decision.findFirst({
+    where: { tenantId: deal.tenantId, contactId: deal.contactId },
+    orderBy: { createdAt: 'desc' },
+    select: { id: true },
+  });
+
+  let createdEscalationId: string | null = null;
+  try {
+    const created = await prisma.escalation.create({
+      data: {
+        tenantId: deal.tenantId,
+        contactId: deal.contactId,
+        decisionId: recentDecision?.id ?? null,
+        triggerType: 'engine_proposed_action',
+        triggerReason: brainDecision.nextBestAction.reasoning,
+        severity: brainDecision.confidence < 0.4 ? 'high' : 'medium',
+        aiSuggestion: brainDecision.nextBestAction.reasoning,
+        originalAction: originalAction as unknown as object,
+        status: 'open',
+        context: {
+          source: 'kan_1037_pr4_5_engine_proposal',
+          eventId,
+          dealId,
+          brainModelTier: brainDecision.modelTier,
+          brainConfidence: brainDecision.confidence,
+          brainSuggestedChannel: brainDecision.nextBestAction.suggestedChannel ?? null,
+          brainSuggestedTone: brainDecision.nextBestAction.suggestedTone ?? null,
+          llmInputTokens: brainDecision.llmInputTokens,
+          llmOutputTokens: brainDecision.llmOutputTokens,
+        } as unknown as object,
+      },
+      select: { id: true },
+    });
+    createdEscalationId = created.id;
+    console.log(
+      `[lead-received-push] kan-1037-pr4-5-escalate-created dealId=${dealId} eventId=${eventId} escalationId=${createdEscalationId} decisionId=${recentDecision?.id ?? 'null'} confidence=${brainDecision.confidence.toFixed(2)}`,
+    );
+  } catch (err) {
+    console.warn(
+      `[lead-received-push] kan-1037-pr4-5-escalate-create-failed dealId=${dealId} eventId=${eventId} err=${(err as Error)?.message ?? String(err)}`,
+    );
+    return;
+  }
+
+  // Audit row — operators tracing the engine-proposal → escalation →
+  // operator-handling flow query on this actionType.
+  void prisma.auditLog
+    .create({
+      data: {
+        tenantId: deal.tenantId,
+        actor: 'engine_proposed_escalation_consumer',
+        actionType: 'escalation_created_from_engine_proposal',
+        reasoning: 'brain_emitted_escalate_to_human',
+        payload: {
+          eventId,
+          dealId,
+          contactId: deal.contactId,
+          escalationId: createdEscalationId,
+          triggerDecisionId: recentDecision?.id ?? null,
+          brainConfidence: brainDecision.confidence,
+          brainReasoning: brainDecision.nextBestAction.reasoning,
+        },
+      },
+    })
+    .catch((err: unknown) => {
+      console.warn(
+        `[lead-received-push] kan-1037-pr4-5-escalate-audit-failed dealId=${dealId} eventId=${eventId} escalationId=${createdEscalationId} err=${(err as Error)?.message ?? String(err)}`,
+      );
+    });
 }
 
 async function dispatchPhase2Send(
