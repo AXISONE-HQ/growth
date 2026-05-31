@@ -170,14 +170,17 @@ contactRepliedPushApp.post('/contact-replied', async (c) => {
   }
 
   // ─── In-flight lock (concurrent delivery defense) ──────────────
-  // ioredis positional-arg signature: set(key, val, 'NX', 'EX', seconds).
-  // Returns 'OK' on success, null when NX fails (key already exists).
+  // ioredis positional-arg signature: set(key, val, 'EX', seconds, 'NX').
+  // EX-token + seconds MUST come before NX per
+  // node_modules/ioredis/built/utils/RedisCommander.d.ts:3755 (the only
+  // overload that combines TTL + NX-on-create). Returns 'OK' on success,
+  // null when NX fails (key already exists).
   const acquired = await redis.set(
     inFlightKey,
     event.eventId,
-    'NX',
     'EX',
     IN_FLIGHT_TTL_SECONDS,
+    'NX',
   );
   if (acquired !== 'OK') {
     void prisma.auditLog

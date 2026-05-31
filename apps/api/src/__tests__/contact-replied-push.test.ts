@@ -26,9 +26,28 @@ import { Hono } from "hono";
 // `vi.mock` factories are hoisted above local `const` declarations — using
 // `vi.hoisted` keeps the mock fns available inside the factory closures
 // while still letting tests inspect/reset them by reference below.
+//
+// Explicit signature on `auditLogCreateMock`: under tsconfig
+// `noUncheckedIndexedAccess` (apps/api), an untyped vi.fn would type
+// `mock.calls` as `never[][]` — `calls[0][0]` then fails TS2493/TS2532.
+// Annotating the input/output shape makes `calls[N]` a known tuple so
+// the dereferences below type-check cleanly (matches the test surface:
+// inputs are `{ data: { tenantId, actor, actionType, reasoning?, payload } }`
+// per the Prisma auditLog.create call shape in contact-replied-push.ts).
+interface AuditCreateArg {
+  data: {
+    tenantId: string;
+    actor: string;
+    actionType: string;
+    reasoning?: string;
+    payload: Record<string, unknown>;
+  };
+}
 const { verifyPubsubOidcMock, auditLogCreateMock } = vi.hoisted(() => ({
-  verifyPubsubOidcMock: vi.fn(),
-  auditLogCreateMock: vi.fn(async () => ({ id: "audit_x" })),
+  verifyPubsubOidcMock: vi.fn<(arg: unknown) => Promise<boolean>>(),
+  auditLogCreateMock: vi.fn<(arg: AuditCreateArg) => Promise<{ id: string }>>(
+    async () => ({ id: "audit_x" }),
+  ),
 }));
 
 vi.mock("../lib/oidc-pubsub-verify.js", () => ({
@@ -200,11 +219,11 @@ describe("KAN-1037-PR3 — contact.replied push subscriber (skeleton)", () => {
     expect(res.status).toBe(200);
     // Single skeleton audit row written (no cooldown/in-flight suppression).
     expect(auditLogCreateMock).toHaveBeenCalledTimes(1);
-    expect(auditLogCreateMock.mock.calls[0][0].data.actionType).toBe(
+    expect(auditLogCreateMock.mock.calls[0]![0].data.actionType).toBe(
       "decision_re_evaluated_skipped_pr3_skeleton",
     );
-    expect(auditLogCreateMock.mock.calls[0][0].data.tenantId).toBe(TENANT_A);
-    expect(auditLogCreateMock.mock.calls[0][0].data.payload.eventId).toBe(
+    expect(auditLogCreateMock.mock.calls[0]![0].data.tenantId).toBe(TENANT_A);
+    expect(auditLogCreateMock.mock.calls[0]![0].data.payload.eventId).toBe(
       "feedbeef-cafe-babe-dead-feedface0000",
     );
     // Cooldown key set with the delivery's decisionId + 300s TTL.
@@ -235,10 +254,10 @@ describe("KAN-1037-PR3 — contact.replied push subscriber (skeleton)", () => {
     });
     expect(res.status).toBe(200);
     expect(auditLogCreateMock).toHaveBeenCalledTimes(1);
-    expect(auditLogCreateMock.mock.calls[0][0].data.actionType).toBe(
+    expect(auditLogCreateMock.mock.calls[0]![0].data.actionType).toBe(
       "contact_replied_suppressed_cooldown",
     );
-    expect(auditLogCreateMock.mock.calls[0][0].data.payload.cooldownDecisionId).toBe(
+    expect(auditLogCreateMock.mock.calls[0]![0].data.payload.cooldownDecisionId).toBe(
       "cl_prior_decision_xyz",
     );
     // In-flight key never acquired — gate fired before lock attempt.
@@ -260,7 +279,7 @@ describe("KAN-1037-PR3 — contact.replied push subscriber (skeleton)", () => {
     });
     expect(res.status).toBe(200);
     expect(auditLogCreateMock).toHaveBeenCalledTimes(1);
-    expect(auditLogCreateMock.mock.calls[0][0].data.actionType).toBe(
+    expect(auditLogCreateMock.mock.calls[0]![0].data.actionType).toBe(
       "contact_replied_suppressed_in_flight",
     );
     // Cooldown key NOT written (the gate short-circuited).
@@ -310,10 +329,10 @@ describe("KAN-1037-PR3 — contact.replied push subscriber (skeleton)", () => {
     expect(res.status).toBe(200);
     // Tenant B got the skeleton happy path — NOT the cooldown-suppression audit.
     expect(auditLogCreateMock).toHaveBeenCalledTimes(1);
-    expect(auditLogCreateMock.mock.calls[0][0].data.actionType).toBe(
+    expect(auditLogCreateMock.mock.calls[0]![0].data.actionType).toBe(
       "decision_re_evaluated_skipped_pr3_skeleton",
     );
-    expect(auditLogCreateMock.mock.calls[0][0].data.tenantId).toBe(TENANT_B);
+    expect(auditLogCreateMock.mock.calls[0]![0].data.tenantId).toBe(TENANT_B);
     // Tenant A's cooldown still intact (independent key).
     expect(redis.store.get(`decision-run:cooldown:${TENANT_A}:${CONTACT_X}`)?.value).toBe(
       "cl_tenant_a_decision",
