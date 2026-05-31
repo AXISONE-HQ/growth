@@ -705,7 +705,10 @@ model LeadInboxEvent {
   attachmentCount  Int      @default(0) @map("attachment_count")
   spfPass          Boolean  @map("spf_pass")
   dkimPass         Boolean  @map("dkim_pass")
-  // 'received' | 'rejected_spam' | 'rejected_unverified' | 'accepted'
+  // 'received' | 'rejected_spam' | 'rejected_unverified' |
+  // 'rejected_unknown_slug' | 'rejected_autoresponder' | 'accepted'
+  // (TS union at apps/connectors/src/webhooks/resend-inbound.ts is the
+  // authoritative source; this column is plain TEXT with no DB enum)
   status           String
   rejectionReason  String?  @map("rejection_reason")
   createdContactId String?  @map("created_contact_id")
