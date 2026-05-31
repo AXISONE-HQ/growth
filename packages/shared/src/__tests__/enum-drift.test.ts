@@ -344,3 +344,147 @@ describe("LeadReceivedEvent schema regression (KAN-741)", () => {
     expect(re.metadata.replyToken).toBe(tok);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────
+// KAN-1037-PR3 hotfix — ContactRepliedEvent schema regression with
+// REAL PRISMA ID SHAPES. Mirrors the KAN-741 LeadReceivedEvent regression
+// block but uses cuid-shaped fixture IDs for Deal + Engagement IDs (which
+// are `String @id @default(cuid())` in `packages/db/prisma/schema.prisma`)
+// and uuid-shaped fixture IDs for Tenant + Contact (which are uuid). This
+// is the test that WOULD have caught the post-PR3-deploy publish-failed
+// crash where a real Engagement cuid failed the schema's `.uuid()` validator
+// — see `feedback_class_fix_not_instance_fix.md` for the discipline
+// correction.
+//
+// Empirical anchor: the publish at 2026-05-31 13:41:34 UTC threw on
+// `cmpttw3nu000f114x15xs082d` (a real Engagement cuid) against a schema
+// that declared `inboundEngagementId: z.string().uuid()`. The IIFE's
+// outer catch swallowed the throw + warn-logged but no `contact.replied`
+// event ever fired, blocking the downstream subscriber chain. Hotfix
+// flips both `inboundEngagementId` + `outboundEngagementId` + `dealId`
+// from `.uuid()` to `.min(1)` to match the Prisma cuid convention (same
+// shape as `decisionId` per KAN-657 doctrine).
+// ─────────────────────────────────────────────────────────────────────────
+import {
+  ContactRepliedEventSchema,
+  buildContactRepliedEvent,
+} from "../contact-replied.js";
+
+describe("ContactRepliedEvent schema regression (KAN-1037-PR3 hotfix)", () => {
+  /**
+   * Canonical sample mirroring REAL PROD shapes:
+   *   - tenantId / contactId / inboundEngagementId / outboundEngagementId
+   *     reflect the actual Prisma id types from
+   *     `packages/db/prisma/schema.prisma` (uuid vs cuid).
+   *   - Cuid samples are shaped like real Prisma cuids:
+   *     `cmpttw3nu000f114x15xs082d` is verbatim from the 2026-05-31 13:41
+   *     UTC failure log; we use it as the canonical "this MUST parse"
+   *     fixture so a future schema regression to `.uuid()` fails this
+   *     test before the change can ship.
+   */
+  const REAL_DEAL_CUID = "cmot2yl720002q1qyh63iy5rc";
+  const REAL_INBOUND_ENGAGEMENT_CUID = "cmpttw3nu000f114x15xs082d";
+  const REAL_OUTBOUND_ENGAGEMENT_CUID = "cmpttsj3e000c114x9l4r6m7n";
+  const REAL_DECISION_CUID = "10a15b5b-af88-4320-9797-27eee689c196";
+
+  const CANONICAL_SAMPLE = {
+    eventId: "feedbeef-cafe-babe-dead-feedface0000",
+    eventType: "contact.replied",
+    version: "1.0",
+    publishedAt: "2026-05-31T13:41:34.000Z",
+    tenantId: "9ca85088-f65b-4bac-b098-fff742281ede", // uuid (Tenant.id)
+    contactId: "a0b73f88-7a8f-4860-bb3e-46e089ff0268", // uuid (Contact.id)
+    dealId: REAL_DEAL_CUID, // cuid (Deal.id) — was .uuid() pre-hotfix
+    decisionId: REAL_DECISION_CUID, // cuid per KAN-657
+    inboundEngagementId: REAL_INBOUND_ENGAGEMENT_CUID, // cuid (Engagement.id)
+    outboundEngagementId: REAL_OUTBOUND_ENGAGEMENT_CUID, // cuid (Engagement.id)
+    replyText: "Yes — Tuesday afternoon works for the call.",
+    replyReceivedAt: "2026-05-31T13:41:12.000Z",
+    metadata: {
+      senderEmail: "fred@axisone.ca",
+      subjectLine: "Re: TestPayload - Next Steps Forward",
+      threadDepth: 1,
+    },
+  };
+
+  it("parses cleanly with REAL Prisma cuid shapes for Deal + Engagement IDs", () => {
+    // The load-bearing assertion. Pre-hotfix this throws on EVERY field
+    // declared `.uuid()` against a real cuid.
+    const parsed = ContactRepliedEventSchema.parse(CANONICAL_SAMPLE);
+    expect(parsed.eventType).toBe("contact.replied");
+    expect(parsed.version).toBe("1.0");
+    expect(parsed.dealId).toBe(REAL_DEAL_CUID);
+    expect(parsed.decisionId).toBe(REAL_DECISION_CUID);
+    expect(parsed.inboundEngagementId).toBe(REAL_INBOUND_ENGAGEMENT_CUID);
+    expect(parsed.outboundEngagementId).toBe(REAL_OUTBOUND_ENGAGEMENT_CUID);
+  });
+
+  it("buildContactRepliedEvent produces a parseable payload with real cuid IDs", () => {
+    // End-to-end: builder calls .parse() internally; this exercises the
+    // exact code path the publisher hits in lead-received-push.ts at
+    // emitContactRepliedIfCorrelated.
+    const event = buildContactRepliedEvent({
+      tenantId: CANONICAL_SAMPLE.tenantId,
+      contactId: CANONICAL_SAMPLE.contactId,
+      dealId: REAL_DEAL_CUID,
+      decisionId: REAL_DECISION_CUID,
+      inboundEngagementId: REAL_INBOUND_ENGAGEMENT_CUID,
+      outboundEngagementId: REAL_OUTBOUND_ENGAGEMENT_CUID,
+      replyText: CANONICAL_SAMPLE.replyText,
+      replyReceivedAt: CANONICAL_SAMPLE.replyReceivedAt,
+      metadata: CANONICAL_SAMPLE.metadata,
+    });
+    expect(event.eventType).toBe("contact.replied");
+    expect(event.dealId).toBe(REAL_DEAL_CUID);
+    expect(event.inboundEngagementId).toBe(REAL_INBOUND_ENGAGEMENT_CUID);
+    expect(event.outboundEngagementId).toBe(REAL_OUTBOUND_ENGAGEMENT_CUID);
+  });
+
+  it("nullable dealId + outboundEngagementId both accept null (pre-KAN-1044 publisher shape)", () => {
+    // PR3 publisher passes outboundEngagementId: null per the honest-
+    // nullable shape until KAN-1044 lands. dealId is also nullable when
+    // the originator has no open Deal.
+    const event = buildContactRepliedEvent({
+      tenantId: CANONICAL_SAMPLE.tenantId,
+      contactId: CANONICAL_SAMPLE.contactId,
+      dealId: null,
+      decisionId: REAL_DECISION_CUID,
+      inboundEngagementId: REAL_INBOUND_ENGAGEMENT_CUID,
+      outboundEngagementId: null,
+      replyText: CANONICAL_SAMPLE.replyText,
+      replyReceivedAt: CANONICAL_SAMPLE.replyReceivedAt,
+      metadata: CANONICAL_SAMPLE.metadata,
+    });
+    expect(event.dealId).toBeNull();
+    expect(event.outboundEngagementId).toBeNull();
+  });
+
+  it("still rejects empty-string IDs (the .min(1) floor catches accidental empties)", () => {
+    expect(() =>
+      ContactRepliedEventSchema.parse({
+        ...CANONICAL_SAMPLE,
+        inboundEngagementId: "",
+      }),
+    ).toThrow();
+    expect(() =>
+      ContactRepliedEventSchema.parse({ ...CANONICAL_SAMPLE, decisionId: "" }),
+    ).toThrow();
+  });
+
+  it("still rejects non-uuid tenantId / contactId (uuid-typed fields stay strict)", () => {
+    // Defense-in-depth: the hotfix loosens ONLY the cuid-typed fields.
+    // Tenant + Contact remain uuid-validated.
+    expect(() =>
+      ContactRepliedEventSchema.parse({
+        ...CANONICAL_SAMPLE,
+        tenantId: "not-a-uuid",
+      }),
+    ).toThrow();
+    expect(() =>
+      ContactRepliedEventSchema.parse({
+        ...CANONICAL_SAMPLE,
+        contactId: REAL_INBOUND_ENGAGEMENT_CUID, // a cuid in a uuid field
+      }),
+    ).toThrow();
+  });
+});

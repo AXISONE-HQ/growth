@@ -73,8 +73,18 @@ export const ContactRepliedEventSchema = z.object({
   tenantId: z.string().uuid(),
   /** Post-B-override matched contact (the originator, NOT the redirect target). */
   contactId: z.string().uuid(),
-  /** Post-B-override active Deal on the matched contact. Nullable per edge case above. */
-  dealId: z.string().uuid().nullable(),
+  /**
+   * Post-B-override active Deal on the matched contact. Nullable per edge
+   * case above.
+   *
+   * **Prisma cuid (NOT uuid)** per `packages/db/prisma/schema.prisma:Deal`:
+   * `id String @id @default(cuid())`. Same KAN-657 cuid convention as
+   * `decisionId` below; `.min(1)` rather than `.uuid()` because cuids fail
+   * Zod's uuid validator (caught post-PR3-deploy when a fresh dispatch
+   * landed at the publisher with a real Engagement cuid — see
+   * `feedback_class_fix_not_instance_fix.md` for the discipline correction).
+   */
+  dealId: z.string().min(1).nullable(),
   /**
    * Originating Decision id from the matched outbound's
    * `engagement.decisionId`. Prisma cuid (not uuid) — matches the
@@ -82,8 +92,17 @@ export const ContactRepliedEventSchema = z.object({
    * shape (cuid string, KAN-657 convention).
    */
   decisionId: z.string().min(1),
-  /** The inbound Engagement row just written by lead-received-push. */
-  inboundEngagementId: z.string().uuid(),
+  /**
+   * The inbound Engagement row just written by lead-received-push.
+   *
+   * **Prisma cuid (NOT uuid)** per `packages/db/prisma/schema.prisma:Engagement`:
+   * `id String @id @default(cuid())`. The pre-fix `.uuid()` validator failed
+   * every real publish at runtime (caught by the post-deploy verify chain
+   * 2026-05-31 13:41 UTC; the buildContactRepliedEvent throw inside the
+   * publisher's IIFE caught + warn-logged but no contact.replied event ever
+   * fired, blocking the full downstream subscriber chain).
+   */
+  inboundEngagementId: z.string().min(1),
   /**
    * Originating outbound Engagement row matched via reply_token.
    *
@@ -98,12 +117,16 @@ export const ContactRepliedEventSchema = z.object({
    * post-KAN-1044 when the field starts being populated.
    *
    * **Why nullable rather than placeholder:** an earlier draft passed
-   * `inboundEngagementId` as a UUID-valid placeholder, but that semantically
-   * lies — code that JOINs `outboundEngagementId` to `engagements` would
-   * read the inbound row's data. Nullable forces consumers to handle the
-   * "not yet available" case explicitly.
+   * `inboundEngagementId` as a placeholder, but that semantically lies —
+   * code that JOINs `outboundEngagementId` to `engagements` would read the
+   * inbound row's data. Nullable forces consumers to handle the "not yet
+   * available" case explicitly.
+   *
+   * **Prisma cuid (NOT uuid)** per the same `Engagement.id` convention as
+   * `inboundEngagementId` above. Hotfix landed alongside the
+   * `inboundEngagementId` correction to close the class-fix gap.
    */
-  outboundEngagementId: z.string().uuid().nullable(),
+  outboundEngagementId: z.string().min(1).nullable(),
   /**
    * Body of the reply, normalized + capped at 2000 chars upstream.
    * PR4 splices this into the engine prompt's `## Latest inbound`
