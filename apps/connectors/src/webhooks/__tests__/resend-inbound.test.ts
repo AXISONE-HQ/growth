@@ -638,6 +638,26 @@ describe("KAN-1036 — extractSlugAndToken", () => {
     expect(out).toEqual({ slug: "c03065f6", replyToken: null });
   });
 
+  it("explicit pin — double `+` in local-part splits on first `+` only; second part fails the regex (no leakage)", () => {
+    // Defensive: even though the regex catches it, document the split
+    // semantics explicitly. If the regex is ever relaxed (e.g., allow
+    // checksum chars), this test surfaces the still-load-bearing
+    // split-on-first behavior so a future maintainer doesn't accidentally
+    // open up a malformed-correlation hole via `+`-stuffed subaddresses.
+    const out = extractSlugAndToken("c03065f6+foo+abc123def4567890@leads.axisone.ca");
+    expect(out).toEqual({ slug: "c03065f6", replyToken: null });
+  });
+
+  it("explicit pin — empty subaddress (`slug+@domain`) returns replyToken: null (no empty-string leak through)", () => {
+    // Defensive: confirms the empty-string post-`+` value fails the
+    // /^[0-9a-f]{16}$/ regex and gets converted to null. Without this
+    // test, a future change that uses `replyToken ?? ''` or similar
+    // could let an empty string flow downstream silently. The
+    // documented contract is: malformed subaddress → null, never empty.
+    const out = extractSlugAndToken("c03065f6+@leads.axisone.ca");
+    expect(out).toEqual({ slug: "c03065f6", replyToken: null });
+  });
+
   it("returns null on null/undefined/non-string", () => {
     expect(extractSlugAndToken(undefined)).toBeNull();
     expect(extractSlugAndToken("")).toBeNull();
