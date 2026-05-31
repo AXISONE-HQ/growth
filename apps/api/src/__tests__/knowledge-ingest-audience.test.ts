@@ -37,6 +37,7 @@ const SUBSCRIBERS = [
   "knowledge-ingest-push.ts",
   "llm-call-push.ts",
   "lead-received-push.ts", // KAN-774 — Lead Inbox consumer subscriber
+  "contact-replied-push.ts", // KAN-1037-PR3 — M3-2.5c engine re-evaluation trigger
 ];
 
 function loadSrc(name: string): string {
@@ -77,6 +78,9 @@ describe("KAN-732 — retired audience env-var reads stay retired", () => {
     "process.env.LEAD_RECEIVED_AUDIENCE", // KAN-774 — never adopted; structurally
                                           // unneeded post-KAN-732 (verifyPubsubOidc
                                           // derives audience from request URL).
+    "process.env.CONTACT_REPLIED_AUDIENCE", // KAN-1037-PR3 — same posture as
+                                            // LEAD_RECEIVED_AUDIENCE; never adopted
+                                            // (URL-derived audience under KAN-732).
   ];
 
   for (const name of SUBSCRIBERS) {

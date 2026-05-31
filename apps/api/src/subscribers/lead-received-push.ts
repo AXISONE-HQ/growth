@@ -77,6 +77,10 @@ import {
   LeadReceivedEventSchema,
   stripMessageIdBrackets,
   parseReferencesHeader,
+  // KAN-1037-PR3 — M3-2.5c reply-loop-closure event contract.
+  CONTACT_REPLIED_TOPIC,
+  buildContactRepliedEvent,
+  type ContactRepliedEvent,
 } from '@growth/shared';
 import { prisma } from '../prisma.js';
 import { verifyPubsubOidc } from '../lib/oidc-pubsub-verify.js';
@@ -863,6 +867,145 @@ function emitCorrelationAudit(
     });
 }
 
+/**
+ * KAN-1037-PR3 — fire-and-forget `contact.replied` publish.
+ *
+ * Fires ONLY when `writeSidecarAndCorrelate` returned `inbound_correlated`
+ * — the only branch where we have a matched outbound + B-override target
+ * IDs (decisionId, contactId, dealId) that point at the originator's
+ * lineage rather than the redirect-shadowed inbound identity. PR2's
+ * autoresponder filter at `apps/connectors/src/webhooks/resend-inbound.ts`
+ * already cut machine-generated replies upstream, so anything reaching
+ * this point through `inbound_correlated` is a candidate for engine
+ * re-evaluation.
+ *
+ * Called from BOTH `writeInboundEngagementForExistingDeal` (multi-turn
+ * path) AND `writePhase1Deal` (first-turn path) per M3-2.5c Phase 1
+ * Finding #1 — first-turn correlation is rare but valid (new contact
+ * replies to discovery outbound on a different deal lineage; the B-
+ * override rescues correctly per M3-2.5b's redirect-shadowed-rescue
+ * pattern).
+ *
+ * Best-effort `.catch` so a failed publish cannot destabilize the
+ * inbound flow — the inbound Engagement row + correlation audit have
+ * already committed. Mirrors the `emitCorrelationAudit` posture above.
+ * The audit row at `contact_replied` actionType records the publish
+ * outcome (messageId on success, error on failure) for forensic grep.
+ *
+ * Topic + subscription provisioning at
+ * `infra/terraform/contact-replied.tf`. PR3 subscriber writes audit
+ * + Redis cooldown only (skeleton); PR4 wires `runDecisionForContact`.
+ */
+function emitContactRepliedIfCorrelated(
+  args: {
+    tenantId: string;
+    event: z.infer<typeof LeadReceivedEventSchema>;
+    inboundEngagementId: string;
+    outcome: CorrelationOutcome;
+  },
+): void {
+  // Only fire when correlation succeeded with a real Decision id. The
+  // partial-correlation case (`matched.engagement.decisionId === null`
+  // at writeSidecarAndCorrelate:782) returns reason `unmatched_reply_token`
+  // so this guard is structurally redundant with the `reason` check —
+  // belt-and-suspenders against future refactors.
+  if (
+    args.outcome.reason !== 'inbound_correlated' ||
+    !args.outcome.matchedDecisionId ||
+    !args.outcome.matchedContactId
+  ) {
+    return;
+  }
+
+  const matchedDecisionId = args.outcome.matchedDecisionId;
+  const matchedContactId = args.outcome.matchedContactId;
+
+  // KAN-1044 (follow-up filed during PR3 review) — extend
+  // `CorrelationOutcome` from `writeSidecarAndCorrelate` to carry the
+  // matched outbound's `engagement.id` alongside `matchedDecisionId /
+  // matchedContactId / matchedDealId`. Until that lands, the publisher
+  // passes `outboundEngagementId: null` — honest about the gap rather
+  // than emitting `inboundEngagementId` as a UUID-valid placeholder
+  // (the placeholder shape would semantically lie: code that JOINs
+  // `outboundEngagementId` to `engagements` would read the inbound
+  // row's data). PR4+ consumers re-derive the outbound row from
+  // `decisionId` (one indexed Prisma roundtrip) when they need it;
+  // an `if (outboundEngagementId)` guard skips that lookup cleanly
+  // post-KAN-1044.
+
+  const event = args.event;
+  void (async () => {
+    try {
+      const { getPubSubClient } = await loadPubSubClientModule();
+      const client = getPubSubClient() as {
+        publish: (
+          topic: string,
+          data: Buffer,
+          attributes?: Record<string, string>,
+        ) => Promise<string>;
+      };
+
+      const payload: ContactRepliedEvent = buildContactRepliedEvent({
+        tenantId: args.tenantId,
+        contactId: matchedContactId,
+        // outcome.matchedDealId can be null (originator has no open Deal —
+        // edge case in writeSidecarAndCorrelate at L791-796); schema permits.
+        dealId: args.outcome.matchedDealId ?? null,
+        decisionId: matchedDecisionId,
+        inboundEngagementId: args.inboundEngagementId,
+        // KAN-1044 to follow — extend CorrelationOutcome to carry
+        // outboundEngagementId; null is the honest placeholder until then
+        // (the schema is nullable + consumers re-derive from decisionId).
+        outboundEngagementId: null,
+        replyText: event.metadata.bodyPreview ?? '',
+        replyReceivedAt: event.receivedAt,
+        metadata: {
+          senderEmail: event.metadata.fromAddress ?? '',
+          subjectLine: event.metadata.subject ?? '',
+          // PR3 ships threadDepth=1 — true depth derivation lands in PR4
+          // when the engine prompt extension reads it.
+          threadDepth: 1,
+        },
+      });
+
+      const data = Buffer.from(JSON.stringify(payload));
+      const attributes: Record<string, string> = {
+        eventType: 'contact.replied',
+        tenantId: args.tenantId,
+        version: '1.0',
+      };
+      const messageId = await client.publish(CONTACT_REPLIED_TOPIC, data, attributes);
+
+      void prisma.auditLog
+        .create({
+          data: {
+            tenantId: args.tenantId,
+            actor: 'lead_inbox_correlation',
+            actionType: 'contact_replied',
+            reasoning: 'inbound_correlated',
+            payload: {
+              eventId: payload.eventId,
+              decisionId: matchedDecisionId,
+              contactId: matchedContactId,
+              dealId: args.outcome.matchedDealId ?? null,
+              inboundEngagementId: args.inboundEngagementId,
+              messageId,
+            },
+          },
+        })
+        .catch((err: unknown) => {
+          console.warn(
+            `[lead-received-push] contact-replied-audit-failed eventId=${payload.eventId} err=${(err as Error)?.message ?? String(err)}`,
+          );
+        });
+    } catch (err) {
+      console.warn(
+        `[lead-received-push] contact-replied-publish-failed inboundEngagementId=${args.inboundEngagementId} err=${(err as Error)?.message ?? String(err)}`,
+      );
+    }
+  })();
+}
+
 // ─────────────────────────────────────────────
 // KAN-819 — Multi-turn Engagement-only write (no Deal/DealStageHistory)
 // ─────────────────────────────────────────────
@@ -943,6 +1086,17 @@ async function writeInboundEngagementForExistingDeal(
     tenantId,
     engagementId,
     eventId: event.eventId,
+    outcome,
+  });
+
+  // KAN-1037-PR3 — M3-2.5c reply-loop-closure: fire `contact.replied`
+  // when correlation succeeded. Multi-turn path (this function) is
+  // expected to be the primary trigger source — a follow-up on an
+  // existing open Deal IS the reply-on-existing-thread case.
+  emitContactRepliedIfCorrelated({
+    tenantId,
+    event,
+    inboundEngagementId: engagementId,
     outcome,
   });
 }
@@ -1103,6 +1257,17 @@ async function writePhase1Deal(
     tenantId,
     engagementId,
     eventId: event.eventId,
+    outcome: correlationOutcome,
+  });
+
+  // KAN-1037-PR3 — M3-2.5c reply-loop-closure: fire `contact.replied`
+  // when correlation succeeded on the first-turn path. Rare but valid
+  // (new contact replies to a discovery outbound on a different deal
+  // lineage; the B-override rescues the matched contact+decision+deal).
+  emitContactRepliedIfCorrelated({
+    tenantId,
+    event,
+    inboundEngagementId: engagementId,
     outcome: correlationOutcome,
   });
 
