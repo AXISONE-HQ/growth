@@ -1272,20 +1272,28 @@ model Conversation {
 // preserves Escalation history if a future Decision purge job ever runs;
 // today Decisions are append-only so the behavior is academic but defensive.
 model Escalation {
-  id            String    @id @default(uuid())
-  tenantId      String    @map("tenant_id")
-  contactId     String    @map("contact_id")
-  decisionId    String?   @map("decision_id")
-  severity      String    @default("medium")
-  triggerType   String    @map("trigger_type")
-  triggerReason String?   @map("trigger_reason")
-  aiSuggestion  String?   @map("ai_suggestion")
-  status        String    @default("open")
-  context       Json?
-  resolvedBy    String?   @map("resolved_by")
-  resolvedAt    DateTime? @map("resolved_at")
-  createdAt     DateTime  @default(now()) @map("created_at")
-  updatedAt     DateTime  @updatedAt @map("updated_at")
+  id             String    @id @default(uuid())
+  tenantId       String    @map("tenant_id")
+  contactId      String    @map("contact_id")
+  decisionId     String?   @map("decision_id")
+  severity       String    @default("medium")
+  triggerType    String    @map("trigger_type")
+  triggerReason  String?   @map("trigger_reason")
+  aiSuggestion   String?   @map("ai_suggestion")
+  // KAN-1037 — engine-emitted SuggestedAction shape persisted at insert time
+  // on runAgentic + runFreeform ESCALATED paths. Consumer (acceptRecommendation)
+  // falls back to this when operator accepts without supplying modifiedAction:
+  // `input.modifiedAction ?? before.originalAction`. Zod-parsed on read
+  // (SuggestedActionSchema.safeParse) — malformed rows skip publish, never
+  // crash. NULL on legacy rows + guardrail_block + lead_assignment + SAMPLED
+  // inserts (those paths don't carry a clean dispatchable original action).
+  originalAction Json?     @map("original_action")
+  status         String    @default("open")
+  context        Json?
+  resolvedBy     String?   @map("resolved_by")
+  resolvedAt     DateTime? @map("resolved_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
 
   tenant   Tenant    @relation(fields: [tenantId], references: [id])
   contact  Contact   @relation(fields: [contactId], references: [id])

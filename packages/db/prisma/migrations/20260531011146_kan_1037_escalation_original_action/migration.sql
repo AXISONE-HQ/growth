@@ -1,0 +1,42 @@
+-- KAN-1037 — additive `original_action` JSONB column on Escalation.
+--
+-- Carries the engine-emitted SuggestedAction shape (actionType + channel +
+-- payload) at insert time on the two ESCALATED engine-emit paths:
+--   - runAgentic ESCALATED  (packages/api/src/services/run-decision-for-contact.ts:566)
+--   - runFreeform ESCALATED (packages/api/src/services/run-decision-for-contact.ts:1252)
+--
+-- Consumer (acceptRecommendation at recommendations.ts:347) falls back to this
+-- when the operator accepts without supplying a modifiedAction:
+--   const candidateAction = input.modifiedAction ?? before.originalAction;
+-- Zod-validated via SuggestedActionSchema.safeParse on read; malformed rows
+-- skip publish gracefully (operator's status transition still commits).
+--
+-- Pre-KAN-1037 behavior was a silent no-publish on accept-without-modify —
+-- the operator's click registered as ACCEPTED but the downstream action.decided
+-- never fired. This column closes that gap by carrying the structured action
+-- through the round-trip; legacy NULL rows preserve the existing no-publish
+-- fallback (back-compat in all four directions: NULL row + modify + dismiss +
+-- guardrail-block escalation type).
+--
+-- See KAN-1043 for the post-deploy discoveryTarget auto-carry refactor cleanup
+-- opportunity (recommendations.ts:359-379 reads from decision.metadata today,
+-- could read from before.originalAction.payload after this lands).
+--
+-- ─── Drift-strip discipline ───────────────────────────────────────────────
+-- `prisma migrate diff --from-migrations ./prisma/migrations --to-schema-
+-- datamodel ./prisma/schema.prisma --script` regenerated two known drift
+-- items along with the real change; stripped per KAN-786 / KAN-787 / KAN-1034
+-- history (see KAN-1036's 20260530133155 header for the same pattern):
+--
+--   1. DROP INDEX "knowledge_chunk_embedding_hnsw_idx" — KAN-786, KAN-787.
+--      The HNSW index is real and load-bearing; Prisma can't model it
+--      (custom pgvector index type). Auto-DROP would silently nuke PROD's
+--      vector search; STRIPPED.
+--
+--   2. RenameIndex tenant_objective_selection_tenant_id_objective_id_…
+--      → ALTER INDEX … RENAME TO …. KAN-1034 cosmetic rename; not load-
+--      bearing for any code path; STRIPPED to keep the migration purely
+--      additive to escalations.
+
+-- AlterTable
+ALTER TABLE "escalations" ADD COLUMN     "original_action" JSONB;

@@ -563,6 +563,20 @@ async function runAgentic(
 
   if (outcome === 'ESCALATED') {
     try {
+      // KAN-1037 — persist the engine's structured SuggestedAction so that
+      // operator-accept-without-modify can dispatch via the originalAction
+      // fallback in recommendations.acceptRecommendation. The agentic path
+      // exposes `agenticPayload.action` as `{type, channel, payload}` —
+      // mapped onto the canonical SuggestedAction shape here. Pre-KAN-1037,
+      // this structured action was in scope at the insert site but discarded
+      // (only stringified into aiSuggestion); accept-without-modify then
+      // silently no-published. NULL on legacy rows preserves the pre-fix
+      // behavior on the consumer side.
+      const originalAction = {
+        actionType: agenticPayload.action.type,
+        channel: agenticPayload.action.channel,
+        payload: (agenticPayload.action.payload ?? {}) as Record<string, unknown>,
+      };
       await prisma.escalation.create({
         data: {
           tenantId,
@@ -572,6 +586,7 @@ async function runAgentic(
           triggerReason: reasoning,
           severity: agenticPayload.confidence < 0.4 ? 'high' : 'medium',
           aiSuggestion: `${actionType}${channel ? ` via ${channel}` : ''}`,
+          originalAction: originalAction as unknown as Prisma.InputJsonValue,
           status: 'open',
           context: {
             confidence: agenticPayload.confidence,
@@ -1249,6 +1264,19 @@ async function runFreeform(
 
     if (outcome === 'ESCALATED') {
       try {
+        // KAN-1037 — persist the engine's structured SuggestedAction so that
+        // operator-accept-without-modify can dispatch via the originalAction
+        // fallback in recommendations.acceptRecommendation. The freeform path
+        // exposes `actionResult` as the Zod-validated ActionDeterminerResult
+        // (already parsed at L1155 as `action = actionResult`); direct 3-
+        // field copy onto the canonical SuggestedAction shape — including
+        // the M3-1a discoveryTarget which lives inside actionPayload, so
+        // discovery directives ride through the new column automatically.
+        const originalAction = {
+          actionType: actionResult.actionType,
+          channel: actionResult.channel,
+          payload: actionResult.actionPayload as Record<string, unknown>,
+        };
         await tx.escalation.create({
           data: {
             tenantId,
@@ -1258,6 +1286,7 @@ async function runFreeform(
             triggerReason: reasoning,
             severity: confidence < 0.4 ? 'high' : 'medium',
             aiSuggestion: actionType,
+            originalAction: originalAction as unknown as Prisma.InputJsonValue,
             status: 'open',
             context: {
               confidence,

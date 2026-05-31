@@ -35,6 +35,12 @@ const CANONICAL_ESCALATION_FIELDS = new Set([
   "triggerType",
   "triggerReason",
   "aiSuggestion",
+  // KAN-1037 — engine-emitted SuggestedAction persisted at insert time
+  // so operator-accept-without-modify can dispatch via the originalAction
+  // fallback. Populated by runAgentic + runFreeform ESCALATED paths;
+  // NULL on guardrail_block / lead_assignment paths (no clean structured
+  // action available).
+  "originalAction",
   "status",
   "context",
   "resolvedBy",
@@ -242,6 +248,82 @@ describe("KAN-750 — Escalation/Decision schema link", () => {
     );
     // The reverse relation Decision → Escalation[] required by Prisma.
     expect(schema).toMatch(/escalations\s+Escalation\[\]/);
+  });
+});
+
+describe("KAN-1037 — originalAction populated at engine-emit ESCALATED sites", () => {
+  // The two producer sites where the engine's structured SuggestedAction is
+  // already in scope (`agenticPayload.action.{type,channel,payload}` for the
+  // agentic path, `actionResult` for the freeform path). Pre-KAN-1037, both
+  // sites discarded the structured action before insert (only the stringified
+  // actionType made it to `aiSuggestion`) → operator-accept-without-modify
+  // silently no-published. Asserting `originalAction` is set on both keeps
+  // the producer from regressing back to the silent-discard shape.
+  //
+  // OTHER escalation.create call sites legitimately leave originalAction null:
+  //   - message-composer.ts (guardrail_block — engine's intent was the
+  //     BLOCKED send; persisting would dispatch the very thing the guardrail
+  //     prevented on accept)
+  //   - lead-assignment.ts (no Decision exists yet — no structured action)
+  //   - human-review-sampling.ts (SAMPLED post-hoc; accept is FORBIDDEN
+  //     anyway via assertNotSample)
+  // Those sites are intentionally NOT asserted here.
+  it("runAgentic + runFreeform escalation.create sites both populate originalAction", () => {
+    const sites = findEscalationCreateSites(
+      resolve(SVC, "run-decision-for-contact.ts"),
+    );
+    // Both ESCALATED branches in run-decision-for-contact.ts should write
+    // originalAction; if a future PR splits one of them or adds a third
+    // engine-emit ESCALATED path that forgets originalAction, this fails.
+    expect(sites.length).toBeGreaterThanOrEqual(2);
+    for (const site of sites) {
+      expect(
+        site.fields,
+        `run-decision-for-contact.ts:${site.line} engine-emit ESCALATED ` +
+          `escalation.create must populate originalAction so accept-without-` +
+          `modify can dispatch via the KAN-1037 fallback path.`,
+      ).toContain("originalAction");
+    }
+  });
+
+  it("non-engine-emit escalation.create sites do NOT populate originalAction (semantic guard)", () => {
+    // message-composer onBlock hook — persisting the blocked action would
+    // dispatch on accept the exact thing the guardrail prevented. Stays null.
+    const composerSites = findEscalationCreateSites(
+      resolve(SVC, "message-composer.ts"),
+    );
+    expect(composerSites.length).toBeGreaterThan(0);
+    for (const site of composerSites) {
+      expect(
+        site.fields,
+        `message-composer.ts:${site.line} guardrail_block escalation MUST ` +
+          `leave originalAction null — persisting the blocked action would ` +
+          `cause acceptance to dispatch the very thing the guardrail prevented.`,
+      ).not.toContain("originalAction");
+    }
+    // lead-assignment — no Decision yet, no structured action available.
+    const assignmentSites = findEscalationCreateSites(
+      resolve(SVC, "lead-assignment.ts"),
+    );
+    expect(assignmentSites.length).toBeGreaterThan(0);
+    for (const site of assignmentSites) {
+      expect(
+        site.fields,
+        `lead-assignment.ts:${site.line} lead_assignment_below_threshold ` +
+          `escalation MUST leave originalAction null — no structured action ` +
+          `is available at insert time (no Decision row exists yet).`,
+      ).not.toContain("originalAction");
+    }
+  });
+
+  it("schema.prisma declares originalAction Json? on Escalation", () => {
+    const schema = readFileSync(
+      resolve(REPO_ROOT, "packages", "db", "prisma", "schema.prisma"),
+      "utf8",
+    );
+    expect(schema).toMatch(
+      /originalAction\s+Json\?\s+@map\("original_action"\)/,
+    );
   });
 });
 

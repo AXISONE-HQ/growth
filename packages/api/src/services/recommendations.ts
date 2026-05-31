@@ -26,6 +26,7 @@
  */
 import { TRPCError } from '@trpc/server';
 import type { PrismaClient } from '@prisma/client';
+import { z } from 'zod';
 import {
   publishActionDecided,
   type PubSubClient,
@@ -65,11 +66,29 @@ export interface ListInput {
   kind?: 'pending' | 'sample' | 'all';
 }
 
-export interface SuggestedAction {
-  actionType: string;
-  channel: string | null;
-  payload: Record<string, unknown>;
-}
+/**
+ * KAN-1037 — Zod-validated SuggestedAction shape.
+ *
+ * The engine's structured action (actionType + channel + payload) is
+ * persisted on the Escalation row's `originalAction` column at insert time
+ * on engine-emit ESCALATED paths (runAgentic + runFreeform), then re-parsed
+ * on read in `acceptRecommendation` to drive the accept-without-modify
+ * dispatch fallback. SuggestedActionSchema.safeParse on read is the
+ * defense-in-depth guard against malformed rows (corrupted JSON, schema
+ * drift, pre-KAN-1037 NULL rows already short-circuit before parse).
+ *
+ * Shape is intentionally permissive on `payload` (Record<string, unknown>) —
+ * downstream `publishActionDecided` does its own validation. This schema
+ * just asserts the OUTER envelope so a wholly-malformed row never crashes
+ * the acceptance path.
+ */
+export const SuggestedActionSchema = z.object({
+  actionType: z.string(),
+  channel: z.string().nullable(),
+  payload: z.record(z.unknown()),
+});
+
+export type SuggestedAction = z.infer<typeof SuggestedActionSchema>;
 
 export interface AcceptInput {
   id: string;
@@ -237,6 +256,10 @@ async function loadEscalation(
   triggerType: string;
   aiSuggestion: string | null;
   context: unknown;
+  // KAN-1037 — engine-emitted SuggestedAction persisted at insert (runAgentic
+  // + runFreeform paths). Read by acceptRecommendation as the fallback when
+  // input.modifiedAction is null; safeParse'd via SuggestedActionSchema.
+  originalAction: unknown;
   // M3-1b follow-up — `metadata` exposed so the accept route can auto-carry
   // discoveryTarget from the original Decision when the operator's
   // modifiedAction.payload omits it (the route was silently stripping
@@ -328,23 +351,44 @@ export async function acceptRecommendation(
     });
   }
 
-  // Resolve action: prefer modifiedAction over the AI's original aiSuggestion.
-  // aiSuggestion is a free-form string; modifiedAction is the structured form
-  // operators provide via the detail drawer's Modify button.
-  const finalAction: SuggestedAction = input.modifiedAction ?? {
-    actionType: 'human_review',
-    channel: null,
-    payload: { aiSuggestion: before.aiSuggestion ?? '' },
-  };
-
-  // Emit action.decided via canonical publisher (when payload structure is
-  // sufficient — modifiedAction provides actionType+channel+payload). For the
-  // default human_review path (aiSuggestion is text only, no structured
-  // action), we skip emission — the operator's accept of a text suggestion
-  // is purely a status transition. Only structured modifiedAction triggers
-  // a real downstream emit.
+  // KAN-1037 — Resolve action with originalAction fallback.
+  //
+  // Three branches:
+  //   (1) input.modifiedAction present     → operator-curated structured action
+  //                                          (UI Modify flow). Publish.
+  //   (2) before.originalAction populated  → engine-emitted structured action
+  //                                          persisted at insert (runAgentic /
+  //                                          runFreeform ESCALATED paths).
+  //                                          Operator accepted without
+  //                                          modifying. Publish.
+  //   (3) neither                          → legacy text-only fallback
+  //                                          (guardrail_block, lead_assignment,
+  //                                          pre-KAN-1037 rows). Status transition
+  //                                          only; no publish. Preserves the pre-
+  //                                          KAN-1037 contract on those paths.
+  //
+  // The downstream publish path is unchanged — the only thing that varies is
+  // WHICH structured action drives it. safeParse on read is defense-in-depth
+  // for corrupted JSONB (schema drift, hand-edited rows, etc.) — failure
+  // degrades to branch 3 (status transition without publish) instead of
+  // crashing the mutation.
   let publishedEventId: string | null = null;
-  if (input.modifiedAction && ctx.pubsubClient) {
+  let auditActionType: string = 'recommendation.accept';
+  const candidateAction: unknown = input.modifiedAction ?? before.originalAction ?? null;
+  const parsedAction =
+    candidateAction !== null ? SuggestedActionSchema.safeParse(candidateAction) : null;
+
+  if (candidateAction !== null && parsedAction && !parsedAction.success) {
+    // Defensive: malformed originalAction (schema drift, corrupted row,
+    // pre-KAN-1037 garbage). Log + skip publish; status transition still
+    // commits below. Operator's click registers; the missing dispatch
+    // surfaces in audit log as the legacy `recommendation.accept` (no
+    // publishedActionDecidedId) so ops can spot the parse failure.
+    console.warn(
+      `[recommendations.accept] Escalation ${before.id} has malformed originalAction; skipping publish`,
+      parsedAction.error.flatten(),
+    );
+  } else if (parsedAction?.success && ctx.pubsubClient) {
     // KAN-1005 M2-6b — decisionId is now REQUIRED on PublishActionInput.
     // The originating Escalation MUST carry a real Decision row id for
     // the operator-accept dispatch to be FK-clean downstream. Skip
@@ -367,12 +411,15 @@ export async function acceptRecommendation(
       // Operator-override-wins: if operator explicitly provides
       // discoveryTarget (even pointing at a different sub-objective),
       // their value is preserved, the original is NOT shadowed.
+      // KAN-1043 tracks a follow-up cleanup that reads from
+      // before.originalAction.payload (the new column) instead of digging
+      // through decision.metadata — deferred to keep KAN-1037 surgical.
       const originalDiscoveryTarget = (
         before.decision?.metadata as
           | { action?: { actionPayload?: { discoveryTarget?: unknown } } }
           | undefined
       )?.action?.actionPayload?.discoveryTarget;
-      const operatorPayload = input.modifiedAction.payload;
+      const operatorPayload = parsedAction.data.payload;
       const mergedActionPayload =
         originalDiscoveryTarget !== undefined && operatorPayload.discoveryTarget === undefined
           ? { ...operatorPayload, discoveryTarget: originalDiscoveryTarget }
@@ -387,8 +434,8 @@ export async function acceptRecommendation(
         // KAN-1005 M2-6b — real Decision row id from the originating
         // escalation; downstream consumers FK-reference this.
         decisionId: before.decisionId,
-        actionType: input.modifiedAction.actionType,
-        channel: input.modifiedAction.channel,
+        actionType: parsedAction.data.actionType,
+        channel: parsedAction.data.channel,
         actionPayload: mergedActionPayload,
         selectedStrategy: before.decision?.strategySelected ?? 'human_override',
         confidenceScore: before.decision?.confidence ?? 1.0,
@@ -403,6 +450,13 @@ export async function acceptRecommendation(
       try {
         const result = await publishActionDecided(ctx.pubsubClient, publishInput);
         publishedEventId = result.messageId ?? null;
+        // KAN-1037 — discriminate audit by which branch fired the publish.
+        // accept_no_modification_published flags the new originalAction-
+        // backed dispatch; modify-and-accept retains the existing reason
+        // for back-compat with prior audit dashboards.
+        auditActionType = input.modifiedAction
+          ? 'recommendation.accept'
+          : 'accept_no_modification_published';
       } catch (err) {
         console.error(`[recommendations.accept] publishActionDecided failed escalationId=${before.id}:`, err);
         // Don't fail the mutation — operator already committed. The escalation
@@ -420,11 +474,19 @@ export async function acceptRecommendation(
     },
   });
 
-  await writeAuditBestEffort(ctx.prisma, ctx.tenantId, ctx.actor, 'recommendation.accept', {
+  await writeAuditBestEffort(ctx.prisma, ctx.tenantId, ctx.actor, auditActionType, {
     escalationId: before.id,
     beforeStatus: before.status,
     afterStatus: 'resolved',
     modifiedAction: input.modifiedAction ?? null,
+    // KAN-1037 — record whether the publish drew from operator modify, the
+    // engine-emitted originalAction fallback, or neither. Enables ops to
+    // trace the post-fix dispatch behavior across the queue.
+    publishSource: parsedAction?.success
+      ? input.modifiedAction
+        ? 'modified_action'
+        : 'original_action'
+      : 'none',
     publishedActionDecidedId: publishedEventId,
   });
 
