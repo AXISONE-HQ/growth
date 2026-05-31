@@ -201,6 +201,14 @@ actionSendPushApp.post('/action-send', async (c) => {
       attemptNumber: 1,
       ...(subjectField ? { subject: subjectField } : {}),
       ...(bodyPreviewField ? { bodyPreview: bodyPreviewField } : {}),
+      // KAN-1036 — thread the per-decision reply token from the rendered
+      // OutboundMessage into the action.executed wire so the apps/api
+      // action-executed-push consumer persists it at the M3-2.5a sidecar
+      // $transaction (engagement_email_metadata.reply_token). Recipient's
+      // reply preserves the subaddress (`<slug>+<token>@<domain>`),
+      // Resend Receiving forwards it, lead-received-push correlates via
+      // the token. Replaces the wire-Message-ID-based Plan A.
+      ...(event.message.replyToken ? { replyToken: event.message.replyToken } : {}),
     });
 
     logger.info(

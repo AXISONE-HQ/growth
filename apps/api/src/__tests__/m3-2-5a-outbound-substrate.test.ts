@@ -200,3 +200,70 @@ describe('M3-2.5a — outbound substrate: top-level decision_id + sidecar in $tr
     expect(txSidecarCreate).toHaveBeenCalled();
   });
 });
+
+// ─── KAN-1036 — replyToken persistence on outbound sidecar ──────────────
+describe('KAN-1036 — replyToken persisted to engagement_email_metadata at sidecar write', () => {
+  const REPLY_TOKEN_VALID = 'abcd1234ef567890';
+
+  it('event.replyToken populated → sidecar create data includes replyToken field', async () => {
+    const txEngagementCreate = vi.fn(async () => ({ id: 'eng-1' }));
+    const txSidecarCreate = vi.fn(async () => ({ engagementId: 'eng-1' }));
+    prismaMock.$transaction.mockImplementation(async (cb: (tx: FakeTx) => Promise<unknown>) => {
+      return cb({
+        engagement: { create: txEngagementCreate },
+        engagementEmailMetadata: { create: txSidecarCreate },
+      });
+    });
+
+    const event = buildEvent({});
+    (event as Record<string, unknown>).replyToken = REPLY_TOKEN_VALID;
+    const res = await postExecuted(event);
+    expect(res.status).toBe(200);
+
+    expect(txSidecarCreate).toHaveBeenCalledTimes(1);
+    const sidecarTuple = txSidecarCreate.mock.calls[0] as unknown as [
+      { data: { engagementId: string; provider: string; providerMessageId: string; replyToken?: string } },
+    ];
+    expect(sidecarTuple[0].data.replyToken).toBe(REPLY_TOKEN_VALID);
+  });
+
+  it('event.replyToken absent (pre-KAN-1036 / back-compat caller) → sidecar create omits replyToken field, write succeeds (column accepts NULL)', async () => {
+    const txEngagementCreate = vi.fn(async () => ({ id: 'eng-1' }));
+    const txSidecarCreate = vi.fn(async () => ({ engagementId: 'eng-1' }));
+    prismaMock.$transaction.mockImplementation(async (cb: (tx: FakeTx) => Promise<unknown>) => {
+      return cb({
+        engagement: { create: txEngagementCreate },
+        engagementEmailMetadata: { create: txSidecarCreate },
+      });
+    });
+
+    const res = await postExecuted(buildEvent({})); // no replyToken
+    expect(res.status).toBe(200);
+
+    expect(txSidecarCreate).toHaveBeenCalledTimes(1);
+    const sidecarTuple = txSidecarCreate.mock.calls[0] as unknown as [
+      { data: Record<string, unknown> },
+    ];
+    expect('replyToken' in sidecarTuple[0].data).toBe(false);
+  });
+
+  it('malformed replyToken (wrong length) → Zod parse rejects the event upstream; no sidecar write attempted', async () => {
+    // What this test pins: the inline Zod schema's strict
+    // `/^[0-9a-f]{16}$/` regex rejects a malformed token at the parse
+    // boundary. The DB write path is NEVER reached — no $transaction
+    // call, no engagement.create, no sidecar.create. This is the
+    // defense-in-depth guarantee: a producer that violates the wire
+    // contract can't poison the downstream consumer's reply_token
+    // column with garbage.
+    //
+    // The HTTP status is a side-quirk of Node's util.inspect crashing
+    // on the ZodError formatting in `console.error` (pre-existing
+    // behavior in this handler; same shape on every Zod failure here).
+    // The contractual assertion is the one we care about: no write
+    // happened.
+    const event = buildEvent({});
+    (event as Record<string, unknown>).replyToken = 'too-short';
+    await postExecuted(event);
+    expect(prismaMock.$transaction).not.toHaveBeenCalled();
+  });
+});

@@ -185,6 +185,7 @@ function buildLeadReceivedEvent(overrides: {
     references?: string;
   };
   contactId?: string;
+  replyToken?: string;
 }) {
   return {
     eventId: EVENT_ID,
@@ -200,6 +201,7 @@ function buildLeadReceivedEvent(overrides: {
       bodyPreview: 'Sure, happy to chat',
       attachmentCount: 0,
       ...(overrides.inboundHeaders ? { inboundHeaders: overrides.inboundHeaders } : {}),
+      ...(overrides.replyToken ? { replyToken: overrides.replyToken } : {}),
     },
     receivedAt: '2026-05-29T15:00:00.000Z',
   };
@@ -294,28 +296,38 @@ function installTransactionMock(opts: {
 // ─────────────────────────────────────────────────────────────────────────
 
 describe('M3-2.5b — MARQUEE redirect-shadowed rescue (B-override: both contactId AND dealId)', () => {
-  it('inbound from fred (redirect recipient) with In-Reply-To matching test-m3-1a outbound → Engagement.{contactId, dealId} BOTH flip to test-m3-1a', async () => {
+  // KAN-1036 — per-decision reply correlation token, parsed by the webhook
+  // from the inbound's subaddressed To: and propagated via
+  // event.metadata.replyToken. This is the canonical correlation anchor
+  // post-pivot; the bracket-stripped In-Reply-To lookup (Plan A) is
+  // empirically falsified and removed.
+  const REPLY_TOKEN = 'cafe1234deadbeef';
+
+  it('inbound from fred (redirect recipient) with replyToken matching test-m3-1a outbound → Engagement.{contactId, dealId} BOTH flip to test-m3-1a (KAN-1036 lookup keys on reply_token)', async () => {
     const { txEngagementUpdate, txSidecarCreate, txSidecarFindFirst } = installTransactionMock();
 
     const res = await postLeadReceived(
       buildLeadReceivedEvent({
+        // Headers preserved for forensic sidecar write — but NOT used for
+        // the lookup anymore. The reply_token (parsed from data.to
+        // subaddress) is the correlation anchor.
         inboundHeaders: {
           messageId: INBOUND_MSG_ID_RAW,
           inReplyTo: INBOUND_IN_REPLY_TO,
           references: INBOUND_IN_REPLY_TO,
         },
+        replyToken: REPLY_TOKEN,
       }),
     );
     expect(res.status).toBe(200);
 
-    // Lookup fired with stripped In-Reply-To
+    // KAN-1036 — lookup keys on reply_token (NOT provider_message_id).
     expect(txSidecarFindFirst).toHaveBeenCalledTimes(1);
     const lookupTuple = txSidecarFindFirst.mock.calls[0] as unknown as [
-      { where: { provider: string; providerMessageId: string; engagement: { tenantId: string } } },
+      { where: { replyToken: string; engagement: { tenantId: string } } },
     ];
     const lookupArgs = lookupTuple[0];
-    expect(lookupArgs.where.provider).toBe('resend');
-    expect(lookupArgs.where.providerMessageId).toBe(OUTBOUND_PROVIDER_MSG_ID); // stripped of <> and @domain
+    expect(lookupArgs.where.replyToken).toBe(REPLY_TOKEN);
     expect(lookupArgs.where.engagement.tenantId).toBe(TENANT); // defense-in-depth tenant scope
 
     // B-OVERRIDE: Engagement.update called with BOTH decisionId, contactId, dealId
@@ -362,7 +374,7 @@ describe('M3-2.5b — MARQUEE redirect-shadowed rescue (B-override: both contact
 // ─────────────────────────────────────────────────────────────────────────
 
 describe('M3-2.5b — first-turn substrate: sidecar + correlation inside Deal+History tx', () => {
-  it('no inboundHeaders on event → sidecar SKIPPED, correlation lookup SKIPPED, audit miss with reason=no_in_reply_to_header', async () => {
+  it('no replyToken on event (direct inbound, no subaddress) → sidecar SKIPPED (no headers), correlation lookup SKIPPED, audit miss with reason=no_reply_token', async () => {
     const { txEngagementUpdate, txSidecarCreate, txSidecarFindFirst } = installTransactionMock();
 
     const res = await postLeadReceived(buildLeadReceivedEvent({}));
@@ -372,16 +384,16 @@ describe('M3-2.5b — first-turn substrate: sidecar + correlation inside Deal+Hi
     expect(txSidecarFindFirst).not.toHaveBeenCalled();
     expect(txEngagementUpdate).not.toHaveBeenCalled();
 
-    // Audit miss with no_in_reply_to_header
+    // KAN-1036 — miss reason is now no_reply_token (replaces no_in_reply_to_header)
     expect(prismaMock.auditLog.create).toHaveBeenCalled();
     const auditArgs = prismaMock.auditLog.create.mock.calls[0]![0] as unknown as {
       data: { actionType: string; reasoning: string };
     };
     expect(auditArgs.data.actionType).toBe('lead_inbox.inbound_correlation_miss');
-    expect(auditArgs.data.reasoning).toBe('no_in_reply_to_header');
+    expect(auditArgs.data.reasoning).toBe('no_reply_token');
   });
 
-  it('inboundHeaders.inReplyTo present but no match → audit miss with reason=unmatched_in_reply_to + sidecar still written', async () => {
+  it('replyToken present but no match → audit miss with reason=unmatched_reply_token + sidecar still written (forensic headers preserved)', async () => {
     const { txEngagementUpdate, txSidecarCreate } = installTransactionMock({ matched: null });
 
     const res = await postLeadReceived(
@@ -391,6 +403,7 @@ describe('M3-2.5b — first-turn substrate: sidecar + correlation inside Deal+Hi
           inReplyTo: '<orphan@d>',
           references: '<orphan@d>',
         },
+        replyToken: 'aaaaaaaa11111111', // valid shape, no matching outbound row
       }),
     );
     expect(res.status).toBe(200);
@@ -404,7 +417,7 @@ describe('M3-2.5b — first-turn substrate: sidecar + correlation inside Deal+Hi
       data: { actionType: string; reasoning: string };
     };
     expect(auditArgs.data.actionType).toBe('lead_inbox.inbound_correlation_miss');
-    expect(auditArgs.data.reasoning).toBe('unmatched_in_reply_to');
+    expect(auditArgs.data.reasoning).toBe('unmatched_reply_token');
   });
 });
 
@@ -433,6 +446,8 @@ describe('M3-2.5b — multi-turn substrate: $transaction wrapping (was bare pris
           messageId: INBOUND_MSG_ID_RAW,
           inReplyTo: INBOUND_IN_REPLY_TO,
         },
+        // KAN-1036 — present + matching → triggers the override path
+        replyToken: 'cafe1234deadbeef',
       }),
     );
     expect(res.status).toBe(200);
@@ -464,6 +479,7 @@ describe('M3-2.5b — multi-turn substrate: $transaction wrapping (was bare pris
           messageId: INBOUND_MSG_ID_RAW,
           inReplyTo: INBOUND_IN_REPLY_TO,
         },
+        replyToken: 'cafe1234deadbeef',
       }),
     );
     // Handler's existing isUniqueConstraintViolation catch at L597 maps P2002
@@ -490,6 +506,7 @@ describe('M3-2.5b — cross-tenant rejection (defense-in-depth)', () => {
           messageId: INBOUND_MSG_ID_RAW,
           inReplyTo: INBOUND_IN_REPLY_TO,
         },
+        replyToken: 'cafe1234deadbeef',
       }),
     );
 
@@ -499,5 +516,43 @@ describe('M3-2.5b — cross-tenant rejection (defense-in-depth)', () => {
     ];
     const where = ctTuple[0].where;
     expect(where.engagement.tenantId).toBe(TENANT);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// KAN-1036 — additional pin: code-source grep proves the lookup swap.
+// ─────────────────────────────────────────────────────────────────────────
+
+describe('KAN-1036 — correlation lookup keys on reply_token (not provider_message_id)', () => {
+  // Grep-prove the structural swap: lead-received-push.ts's correlation
+  // lookup MUST query reply_token, not provider_message_id (Plan A). The
+  // bracket-stripped In-Reply-To match was empirically falsified — Resend
+  // has no API surface that exposes the SES wire Message-ID.
+  it('grep-pin: writeSidecarAndCorrelate lookup queries reply_token, never providerMessageId', () => {
+    const fs = require('fs') as typeof import('fs');
+    const path = require('path') as typeof import('path');
+    const src = fs.readFileSync(
+      path.resolve(__dirname, '../subscribers/lead-received-push.ts'),
+      'utf-8',
+    );
+    // The lookup is inside writeSidecarAndCorrelate, between the function
+    // header and the redirect-shadowed override. Extract that block.
+    const fnStart = src.indexOf('async function writeSidecarAndCorrelate');
+    const fnEnd = src.indexOf('function emitCorrelationAudit', fnStart);
+    expect(fnStart).toBeGreaterThan(0);
+    expect(fnEnd).toBeGreaterThan(fnStart);
+    const fnBody = src.slice(fnStart, fnEnd);
+
+    // Positive pin: the where clause MUST include replyToken
+    expect(fnBody).toMatch(/where:\s*\{[\s\S]*replyToken:\s*args\.replyToken/);
+    // Negative pin: providerMessageId MUST NOT appear as a where-clause key
+    // (it can still appear in the sidecar CREATE for the inbound's own
+    // Message-ID forensic write — so we narrow to the findFirst block).
+    const findFirstIdx = fnBody.indexOf('findFirst');
+    expect(findFirstIdx).toBeGreaterThan(0);
+    // 200 chars after `findFirst(` should be enough to capture the where
+    // clause — assert no providerMessageId in that range.
+    const findFirstBlock = fnBody.slice(findFirstIdx, findFirstIdx + 400);
+    expect(findFirstBlock).not.toMatch(/where:\s*\{[^}]*providerMessageId/);
   });
 });

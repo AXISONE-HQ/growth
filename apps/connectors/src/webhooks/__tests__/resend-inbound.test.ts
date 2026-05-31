@@ -29,6 +29,7 @@ import {
   resendInboundWebhookApp,
   __setInboundHooksForTest,
   extractSlugFromTo,
+  extractSlugAndToken,
   extractFromAddress,
   splitDisplayName,
   isAnonymousDomain,
@@ -596,5 +597,82 @@ describe("KAN-954 — non-Formspree regression (parser is a no-op)", () => {
     expect(event.metadata.customFields).toBeUndefined();
     // But bodyPreview IS populated from the fetched text — D5 win
     expect(event.metadata.bodyPreview).toContain("enterprise tier");
+  });
+});
+
+// ─── KAN-1036 — extractSlugAndToken ──────────────────────────────────────
+describe("KAN-1036 — extractSlugAndToken", () => {
+  const VALID_TOKEN = "a7b2c5f9d1e6k2m4".replace(/[gk-z]/g, "0"); // 16-hex
+
+  it("parses plain <slug@domain> with no subaddress (back-compat)", () => {
+    const out = extractSlugAndToken("c03065f6@leads.axisone.ca");
+    expect(out).toEqual({ slug: "c03065f6", replyToken: null });
+  });
+
+  it("parses display-name <slug+token@domain> form (the canonical reply shape)", () => {
+    const tok = "deadbeef12345678";
+    const out = extractSlugAndToken(`AxisOne <c03065f6+${tok}@leads.axisone.ca>`);
+    expect(out).toEqual({ slug: "c03065f6", replyToken: tok });
+  });
+
+  it("parses bare slug+token@domain (no display-name wrapping)", () => {
+    const tok = "1234567890abcdef";
+    const out = extractSlugAndToken(`c03065f6+${tok}@leads.axisone.ca`);
+    expect(out).toEqual({ slug: "c03065f6", replyToken: tok });
+  });
+
+  it("parses array form (Resend Receiving may send to[] for multiple recipients)", () => {
+    const tok = VALID_TOKEN;
+    const out = extractSlugAndToken([`c03065f6+${tok}@leads.axisone.ca`, "other@example.com"]);
+    expect(out).toEqual({ slug: "c03065f6", replyToken: tok });
+  });
+
+  it("rejects non-16-char token shape — slug returned, token NULL (user-typed +foo)", () => {
+    const out = extractSlugAndToken("c03065f6+kan1036test@leads.axisone.ca");
+    expect(out).toEqual({ slug: "c03065f6", replyToken: null });
+  });
+
+  it("rejects non-hex token (correct length, wrong charset)", () => {
+    // 16 chars of base32 — not hex
+    const out = extractSlugAndToken("c03065f6+ABCDEFGHIJKLMNOP@leads.axisone.ca");
+    expect(out).toEqual({ slug: "c03065f6", replyToken: null });
+  });
+
+  it("explicit pin — double `+` in local-part splits on first `+` only; second part fails the regex (no leakage)", () => {
+    // Defensive: even though the regex catches it, document the split
+    // semantics explicitly. If the regex is ever relaxed (e.g., allow
+    // checksum chars), this test surfaces the still-load-bearing
+    // split-on-first behavior so a future maintainer doesn't accidentally
+    // open up a malformed-correlation hole via `+`-stuffed subaddresses.
+    const out = extractSlugAndToken("c03065f6+foo+abc123def4567890@leads.axisone.ca");
+    expect(out).toEqual({ slug: "c03065f6", replyToken: null });
+  });
+
+  it("explicit pin — empty subaddress (`slug+@domain`) returns replyToken: null (no empty-string leak through)", () => {
+    // Defensive: confirms the empty-string post-`+` value fails the
+    // /^[0-9a-f]{16}$/ regex and gets converted to null. Without this
+    // test, a future change that uses `replyToken ?? ''` or similar
+    // could let an empty string flow downstream silently. The
+    // documented contract is: malformed subaddress → null, never empty.
+    const out = extractSlugAndToken("c03065f6+@leads.axisone.ca");
+    expect(out).toEqual({ slug: "c03065f6", replyToken: null });
+  });
+
+  it("returns null on null/undefined/non-string", () => {
+    expect(extractSlugAndToken(undefined)).toBeNull();
+    expect(extractSlugAndToken("")).toBeNull();
+    expect(extractSlugAndToken([])).toBeNull();
+  });
+
+  it("returns null when no @ separator (malformed address)", () => {
+    expect(extractSlugAndToken("not-an-address")).toBeNull();
+  });
+
+  it("extractSlugFromTo (deprecated) still returns slug-only for back-compat callers", () => {
+    const tok = "fedcba9876543210";
+    // KAN-1036 helper composes through extractSlugAndToken; slug-only return preserves
+    // pre-KAN-1036 behavior for any caller that still uses it.
+    expect(extractSlugFromTo(`c03065f6+${tok}@leads.axisone.ca`)).toBe("c03065f6");
+    expect(extractSlugFromTo("plain@leads.axisone.ca")).toBe("plain");
   });
 });

@@ -636,11 +636,22 @@ leadReceivedPushApp.post('/lead-received', async (c) => {
 type LeadReceivedEvent = z.infer<typeof LeadReceivedEventSchema>;
 
 interface CorrelationOutcome {
-  /** Reason string for audit + observability. */
+  /**
+   * Reason string for audit + observability.
+   *
+   * KAN-1036 — pre-pivot reasons (`no_in_reply_to_header`,
+   * `unmatched_in_reply_to`, `autoreply_race`) replaced by the
+   * subaddress-anchored equivalents (`no_reply_token`,
+   * `unmatched_reply_token`). The old strings are kept in the union for
+   * type-back-compat with any forensic queries of older audit rows;
+   * write-side only emits the new values.
+   */
   reason:
     | 'inbound_correlated'
-    | 'no_in_reply_to_header'
-    | 'unmatched_in_reply_to'
+    | 'no_reply_token'
+    | 'unmatched_reply_token'
+    | 'no_in_reply_to_header'   // pre-KAN-1036; back-compat
+    | 'unmatched_in_reply_to'   // pre-KAN-1036; back-compat
     | 'autoreply_race';
   /** Matched originating Decision id (only set when reason='inbound_correlated'). */
   matchedDecisionId: string | null;
@@ -652,13 +663,21 @@ interface CorrelationOutcome {
 
 /**
  * Inside the caller's transaction: write the inbound sidecar row from the
- * parsed headers, then look up the outbound sidecar (M3-2.5a) by stripped
- * In-Reply-To. On match: override Engagement.{decisionId, contactId, dealId}
- * per design call (B) — preserves the denormalization invariant so the
- * conversation thread is findable via BOTH Engagement.contactId queries
- * AND Deal.engagements queries. Override-dealId uses the SAME
- * resolveActiveDealForContact helper the engine sites use (single
- * source — three engine call sites + this one).
+ * parsed headers, then look up the outbound sidecar (M3-2.5a) by the
+ * KAN-1036 subaddress-anchored `reply_token`. On match: override
+ * Engagement.{decisionId, contactId, dealId} per M3-2.5b design call (B)
+ * — preserves the denormalization invariant so the conversation thread
+ * is findable via BOTH Engagement.contactId queries AND Deal.engagements
+ * queries. Override-dealId uses the SAME resolveActiveDealForContact
+ * helper the engine sites use (single source — three engine call sites
+ * + this one).
+ *
+ * KAN-1036 correlation anchor change: pre-KAN-1036 the lookup keyed on
+ * `provider_message_id = stripMessageIdBrackets(inReplyTo)` (Plan A —
+ * empirically falsified, Resend has no API surface that exposes the SES
+ * wire Message-ID). Post-KAN-1036 the lookup keys on `reply_token`, a
+ * value WE mint at outbound send time and that rides the Reply-To
+ * subaddress through the recipient's MUA → Resend Receiving → consumer.
  *
  * Returns the outcome for the caller to audit-log post-transaction
  * (audit is best-effort + fire-and-forget; the override is atomic).
@@ -669,6 +688,13 @@ async function writeSidecarAndCorrelate(
     tenantId: string;
     engagementId: string;
     headers: NonNullable<LeadReceivedEvent['metadata']['inboundHeaders']> | undefined;
+    /**
+     * KAN-1036 — per-decision reply correlation token, parsed by the
+     * webhook (extractSlugAndToken). 16-char hex per producer; null when
+     * the inbound's To: had no `+suffix` or the suffix didn't match the
+     * token shape regex.
+     */
+    replyToken: string | null;
   },
 ): Promise<CorrelationOutcome> {
   // Cast to the minimal Prisma surface we use; the apps/api TS6059 cohort
@@ -696,7 +722,8 @@ async function writeSidecarAndCorrelate(
   // (the inbound's own provider_message_id). Skipped when both are absent
   // (no usable correlation/forensic signal). raw inReplyTo is stored as-is
   // (wire form) for forensic value; references are stripped+filtered
-  // (queryable shape).
+  // (queryable shape). reply_token left NULL on the inbound row — that
+  // column is producer-side anchoring for the OUTBOUND row.
   if (ownMessageId) {
     await txAny.engagementEmailMetadata.create({
       data: {
@@ -709,12 +736,15 @@ async function writeSidecarAndCorrelate(
     });
   }
 
-  // Correlation lookup — only fires when In-Reply-To is present + non-empty
-  // after strip. Absent → audit miss with reason='no_in_reply_to_header'.
-  const strippedInReplyTo = stripMessageIdBrackets(rawInReplyTo);
-  if (!strippedInReplyTo) {
+  // KAN-1036 — correlation lookup keys on reply_token, parsed from the
+  // inbound's subaddressed To: at the webhook (extractSlugAndToken). When
+  // the token is absent (direct inbound to <slug>@<domain>, no plus-suffix)
+  // OR the inbound came from a path that doesn't carry our token
+  // (autoreply, manually-typed recipient), we miss with no_reply_token —
+  // gracefully degrades to today's orphan-engagement behavior.
+  if (!args.replyToken) {
     return {
-      reason: 'no_in_reply_to_header',
+      reason: 'no_reply_token',
       matchedDecisionId: null,
       matchedContactId: null,
       matchedDealId: null,
@@ -722,12 +752,11 @@ async function writeSidecarAndCorrelate(
   }
 
   // Tenant scope via relation filter — defense-in-depth on the global
-  // UNIQUE(provider, provider_message_id) which already makes cross-tenant
-  // collision impossible (Resend's id space is global).
+  // UNIQUE(reply_token) which already makes cross-tenant collision
+  // impossible (our token namespace is global per-mint via CSPRNG).
   const matched = await txAny.engagementEmailMetadata.findFirst({
     where: {
-      provider: 'resend',
-      providerMessageId: strippedInReplyTo,
+      replyToken: args.replyToken,
       engagement: { tenantId: args.tenantId },
     },
     select: {
@@ -736,13 +765,11 @@ async function writeSidecarAndCorrelate(
   });
 
   if (!matched?.engagement) {
-    // Could be: outbound never happened (truly orphan inbound) OR autoreply
-    // arrived before outbound sidecar landed (race). We can't distinguish
-    // post-hoc; pick the more informative reason based on header heuristic
-    // (autoreplies typically have Auto-Submitted or X-Autoreply headers,
-    // but we don't propagate those today — Phase 2 of M3-2.5b could add).
+    // Could be: outbound never happened (truly orphan inbound) OR the
+    // outbound rows for this tenant pre-date KAN-1036's column. We can't
+    // distinguish post-hoc.
     return {
-      reason: 'unmatched_in_reply_to',
+      reason: 'unmatched_reply_token',
       matchedDecisionId: null,
       matchedContactId: null,
       matchedDealId: null,
@@ -754,7 +781,7 @@ async function writeSidecarAndCorrelate(
   // but defend so we don't NULL-clobber and skip the override.
   if (!matched.engagement.decisionId) {
     return {
-      reason: 'unmatched_in_reply_to',
+      reason: 'unmatched_reply_token',
       matchedDecisionId: null,
       matchedContactId: matched.engagement.contactId,
       matchedDealId: null,
@@ -905,6 +932,8 @@ async function writeInboundEngagementForExistingDeal(
       tenantId,
       engagementId: engagement.id,
       headers: event.metadata.inboundHeaders,
+      // KAN-1036 — per-decision reply correlation token from data.to subaddress.
+      replyToken: event.metadata.replyToken ?? null,
     });
     return { engagementId: engagement.id, outcome: correlationOutcome };
   });
@@ -1056,6 +1085,8 @@ async function writePhase1Deal(
         tenantId,
         engagementId: engagement.id,
         headers: event.metadata.inboundHeaders,
+        // KAN-1036 — per-decision reply correlation token from data.to subaddress.
+        replyToken: event.metadata.replyToken ?? null,
       });
 
       // Return dealId so the caller can pass it to KAN-815 Phase 2 wiring.

@@ -43,6 +43,11 @@ const ActionExecutedEventSchema = z.object({
   // canonical schema's caps drift, this inline copy must drift with it.
   subject: z.string().max(200).optional(),
   bodyPreview: z.string().max(500).optional(),
+  // KAN-1036 — per-decision reply correlation token. Inline mirror of the
+  // canonical packages/connector-contracts/src/events.ts field; drifts
+  // together with that schema. Persisted to engagement_email_metadata.
+  // reply_token below inside the M3-2.5a sidecar $transaction.
+  replyToken: z.string().regex(/^[0-9a-f]{16}$/).optional(),
 });
 import { prisma } from '../prisma.js';
 
@@ -204,6 +209,13 @@ actionExecutedPushApp.post('/action-executed', async (c) => {
                 provider: event.provider,
                 providerMessageId: event.providerMessageId,
                 // inReplyTo + referencesArray are inbound-only; populated by M3-2.5b.
+                // KAN-1036 — per-decision reply correlation token. NULL
+                // when back-compat caller (cron-deferred-send, deferred-
+                // send-evaluator without decisionId in scope) sends; the
+                // inbound consumer's `if (replyToken)` guard misses the
+                // lookup gracefully and the inbound stays orphan
+                // (pre-KAN-1036 behavior preserved for those callers).
+                ...(event.replyToken ? { replyToken: event.replyToken } : {}),
               },
             });
           }

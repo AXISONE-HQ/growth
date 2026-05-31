@@ -286,4 +286,61 @@ describe("LeadReceivedEvent schema regression (KAN-741)", () => {
     expect(parsed.metadata.inboundHeaders?.messageId).toBeUndefined();
     expect(parsed.metadata.inboundHeaders?.references).toBeUndefined();
   });
+
+  // ── KAN-1036 — replyToken extension (additive + optional) ──
+  it("KAN-1036 — accepts payload WITHOUT replyToken (back-compat for pre-KAN-1036 producers)", () => {
+    const parsed = LeadReceivedEventSchema.parse(CANONICAL_SAMPLES[0].payload);
+    expect(parsed.metadata.replyToken).toBeUndefined();
+  });
+
+  it("KAN-1036 — accepts payload WITH valid 16-char hex replyToken (canonical shape)", () => {
+    const tok = "abcd1234ef567890";
+    const parsed = LeadReceivedEventSchema.parse({
+      ...CANONICAL_SAMPLES[0].payload,
+      metadata: { ...CANONICAL_SAMPLES[0].payload.metadata, replyToken: tok },
+    });
+    expect(parsed.metadata.replyToken).toBe(tok);
+  });
+
+  it("KAN-1036 — rejects malformed replyToken (wrong length)", () => {
+    expect(() =>
+      LeadReceivedEventSchema.parse({
+        ...CANONICAL_SAMPLES[0].payload,
+        metadata: { ...CANONICAL_SAMPLES[0].payload.metadata, replyToken: "tooshort" },
+      }),
+    ).toThrow();
+  });
+
+  it("KAN-1036 — rejects malformed replyToken (non-hex charset)", () => {
+    expect(() =>
+      LeadReceivedEventSchema.parse({
+        ...CANONICAL_SAMPLES[0].payload,
+        metadata: {
+          ...CANONICAL_SAMPLES[0].payload.metadata,
+          replyToken: "ABCDEFGHIJKLMNOP", // uppercase = non-hex per the regex
+        },
+      }),
+    ).toThrow();
+  });
+
+  // §0.2 — Pub/Sub serialize/deserialize round-trip.
+  it("KAN-1036 §0.2 — replyToken round-trips through Pub/Sub JSON serialization", () => {
+    const tok = "deadbeefcafe1234";
+    const payload = {
+      ...CANONICAL_SAMPLES[0].payload,
+      metadata: { ...CANONICAL_SAMPLES[0].payload.metadata, replyToken: tok },
+    };
+    // Simulate the Pub/Sub wire round-trip: producer JSON-stringify, base64-
+    // encode, base64-decode, JSON-parse, Zod-validate. The wire formats live
+    // in apps/api/src/subscribers/lead-received-push.ts:466 and
+    // apps/connectors/src/webhooks/resend-inbound.ts:548; this test confirms
+    // the replyToken survives both directions cleanly.
+    const wire = Buffer.from(JSON.stringify(payload), "utf8").toString("base64");
+    const decoded = JSON.parse(Buffer.from(wire, "base64").toString("utf8"));
+    const parsed = LeadReceivedEventSchema.parse(decoded);
+    expect(parsed.metadata.replyToken).toBe(tok);
+    // And re-stringifying the parsed Zod output preserves the field.
+    const re = JSON.parse(JSON.stringify(parsed));
+    expect(re.metadata.replyToken).toBe(tok);
+  });
 });

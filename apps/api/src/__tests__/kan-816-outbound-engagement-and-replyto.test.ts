@@ -351,7 +351,11 @@ describe('KAN-816 — resolveReplyToForTenant helper', () => {
   });
 
   // ── Test 11 — happy path: tenant.inboxSlug populated → returns <slug>@<LEAD_INBOX_DOMAIN>
-  it('valid tenant.inboxSlug → returns <slug>@leads.<LEAD_INBOX_DOMAIN>', async () => {
+  // KAN-1036 — resolver return type changed from `string | null` to
+  // `{ replyTo: string; replyToken: string | null } | null`. No
+  // decisionId passed → back-compat shape (bare `<slug>@<domain>`,
+  // replyToken null).
+  it('valid tenant.inboxSlug + no decisionId (back-compat) → returns { replyTo: <slug>@<domain>, replyToken: null }', async () => {
     const fakePrisma = {
       tenant: {
         findUnique: vi.fn(async () => ({ inboxSlug: 'c03065f6' })),
@@ -359,7 +363,7 @@ describe('KAN-816 — resolveReplyToForTenant helper', () => {
     };
     process.env.LEAD_INBOX_DOMAIN = 'leads.axisone.ca';
     const result = await resolveReplyToForTenant(fakePrisma as never, TENANT_ID);
-    expect(result).toBe('c03065f6@leads.axisone.ca');
+    expect(result).toEqual({ replyTo: 'c03065f6@leads.axisone.ca', replyToken: null });
   });
 
   // ── Test 12 — null inboxSlug → returns null + warn log
@@ -392,7 +396,7 @@ describe('KAN-816 — resolveReplyToForTenant helper', () => {
   });
 
   // ── Test 14 — LEAD_INBOX_DOMAIN env-var fallback
-  it('LEAD_INBOX_DOMAIN unset → falls back to leads.axisone.app default', async () => {
+  it('LEAD_INBOX_DOMAIN unset → falls back to leads.axisone.app default (replyTo carries the default domain)', async () => {
     delete process.env.LEAD_INBOX_DOMAIN;
     const fakePrisma = {
       tenant: {
@@ -400,6 +404,6 @@ describe('KAN-816 — resolveReplyToForTenant helper', () => {
       },
     };
     const result = await resolveReplyToForTenant(fakePrisma as never, TENANT_ID);
-    expect(result).toBe('c03065f6@leads.axisone.app');
+    expect(result).toEqual({ replyTo: 'c03065f6@leads.axisone.app', replyToken: null });
   });
 });
