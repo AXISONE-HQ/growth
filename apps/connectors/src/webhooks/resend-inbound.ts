@@ -51,6 +51,7 @@ import { env } from "../env.js";
 import { logger } from "../logger.js";
 import { buildSvixMiddleware, getSvixContext } from "../middleware/svix.js";
 import { fetchInboundEmailContent, type InboundEmailContent } from "../adapters/resend/inbound-fetch.js";
+import { detectAutoresponder } from "./autoresponder-filter.js";
 import { parseFormspreeEmail, isFormspreeSource } from "../parsers/formspree-email.js";
 
 export const resendInboundWebhookApp = new Hono();
@@ -143,7 +144,12 @@ export interface LeadInboxEventRow {
   attachmentCount: number;
   spfPass: boolean;
   dkimPass: boolean;
-  status: "received" | "rejected_spam" | "rejected_unverified" | "rejected_unknown_slug" | "accepted";
+  // KAN-1037-PR2 — `rejected_autoresponder` added: machine-generated reply
+  // detected by `detectAutoresponder` (RFC 3834 headers, sender local-part,
+  // subject/body patterns). The Contact upsert still runs; only the
+  // `lead.received` Pub/Sub publish is skipped. `rejectionReason` carries
+  // the signal-specific tag for forensic grep.
+  status: "received" | "rejected_spam" | "rejected_unverified" | "rejected_unknown_slug" | "rejected_autoresponder" | "accepted";
   rejectionReason: string | null;
   createdContactId: string | null;
 }
@@ -509,6 +515,66 @@ resendInboundWebhookApp.post(
     companyName: identity.companyName,
     source: identity.source,
   });
+
+  // ── KAN-1037-PR2 — autoresponder / OOO / mailer-daemon filter.
+  // Runs after Contact upsert (so the operator still sees the inbound
+  // identity in the audit trail) but BEFORE the `lead.received` publish.
+  // Detect-and-drop at the webhook layer keeps machine-generated replies
+  // out of the engine's view + structurally rules out engine ↔ responder
+  // ping-pong post-PR3 (`contact.replied` event). False-negative-tolerant
+  // posture: occasional dropped genuine reply degrades to today's pre-
+  // filter behavior; under-filtering would waste inference + risk loops.
+  //
+  // Skip entirely on Formspree-source inbound: form submissions are
+  // user-initiated form fills, NOT machine-generated email replies. The
+  // envelope From is `noreply@formspree.io` (vendor relay), which the
+  // sender-local-part denylist would false-positive on every single
+  // form submission. Even if a vendor relay carried autoresponder
+  // headers/body, the engine consumes form_fill source events differently
+  // (Formspree → web_form path, not the contact-replied loop), so the
+  // filter is structurally irrelevant. KAN-954 form-vendor extensions
+  // (Tally/Typeform per parsers/formspree-email.ts:52) get the same
+  // skip — gate on the existing `isFormspreeSource` predicate so future
+  // vendors join automatically when their detection lands.
+  //
+  // Audit row reuses the existing `safeWriteAuditRow` writer with new
+  // status `rejected_autoresponder` (status union extended at L146); the
+  // `rejectionReason` field carries the signal-specific tag for forensic
+  // grep (`header:auto-submitted=...`, `subject-pattern`, etc.).
+  const autoresponderCheck = isFormspreeSource(fromParsed.email)
+    ? ({ filtered: false } as const)
+    : detectAutoresponder({
+        headers: fetchedContent?.headers ?? {},
+        fromAddress: fromParsed.email,
+        subject: subject ?? "",
+        bodyText: fetchedContent?.text ?? "",
+      });
+
+  if (autoresponderCheck.filtered) {
+    await safeWriteAuditRow({
+      tenantId: tenant.id,
+      inboxAddress,
+      resendEmailId,
+      fromAddress,
+      subject,
+      bodyPreview,
+      attachmentCount,
+      spfPass,
+      dkimPass,
+      status: "rejected_autoresponder",
+      rejectionReason: autoresponderCheck.reason,
+      createdContactId: contact.id,
+    });
+    logger.info(
+      {
+        resendEmailId,
+        contactId: contact.id,
+        reason: autoresponderCheck.reason,
+      },
+      "[resend-inbound] inbound filtered as autoresponder — no lead.received publish",
+    );
+    return c.text("OK", 200);
+  }
 
   await safeWriteAuditRow({
     tenantId: tenant.id,

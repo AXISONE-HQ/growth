@@ -676,3 +676,100 @@ describe("KAN-1036 — extractSlugAndToken", () => {
     expect(extractSlugFromTo("plain@leads.axisone.ca")).toBe("plain");
   });
 });
+
+describe("KAN-1037-PR2 — autoresponder filter integration", () => {
+  // Webhook payload for an OOO autoresponder. Subject + body together fire
+  // the SUBJECT_REGEX path; the body fallback covers the case where the
+  // upstream MTA stripped Auto-Submitted (some autoresponders do this).
+  const autoresponderPayload = {
+    type: "email.received",
+    data: {
+      email_id: "re_bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+      from: { email: "alice@customer.example", name: "Alice Customer" },
+      to: ["abcd1234@leads.axisone.app"],
+      subject: "Out of Office: away until Monday",
+      attachments: [],
+      spf: { pass: true },
+      dkim: { pass: true },
+      // text/html intentionally absent — body comes from Receiving fetch
+    },
+  };
+
+  it("filters an OOO autoresponder: writes rejected_autoresponder audit row with reason, NO lead.received publish", async () => {
+    const ctx = makeHooks({ resolvedTenant: { id: TENANT_A, inboxDkimStrict: true } });
+    const hooks = {
+      ...ctx.hooks,
+      fetchEmailContent: vi.fn(async () => ({
+        text: "I am currently out of the office until Monday. I will respond upon my return.",
+        html: null,
+        replyTo: [],
+        headers: {
+          "auto-submitted": "auto-replied",
+          "message-id": "<auto-reply-xyz@customer.example>",
+        },
+        messageId: "<auto-reply-xyz@customer.example>",
+      })),
+    };
+    __setInboundHooksForTest(hooks);
+
+    const app = makeApp();
+    const res = await app.request("/webhooks/resend-inbound", {
+      method: "POST",
+      body: JSON.stringify(autoresponderPayload),
+    });
+
+    expect(res.status).toBe(200);
+    expect(ctx.auditRows).toHaveLength(1);
+    expect(ctx.auditRows[0].status).toBe("rejected_autoresponder");
+    expect(ctx.auditRows[0].rejectionReason).toBe("header:auto-submitted=auto-replied");
+    // Contact upsert still runs — operator sees the identity behind the
+    // autoresponder for forensic context (PR5 Last reply panel can render
+    // "contact's autoresponder fired" as part of contact context).
+    expect(ctx.auditRows[0].createdContactId).toBe("33333333-3333-3333-3333-333333333333");
+    // The load-bearing assertion: no `lead.received` publish for filtered
+    // inbounds. Downstream consumers (post-PR3: `contact.replied` →
+    // `decision.run`) never get triggered → engine ↔ responder ping-pong
+    // is structurally impossible.
+    expect(ctx.publishedEvents).toHaveLength(0);
+  });
+
+  it("passes a genuine reply: writes accepted audit row + publishes lead.received (filter doesn't break happy path)", async () => {
+    // Regression check: the same wire-shape as the autoresponder test
+    // (resolved tenant, SPF/DKIM pass, fetchEmailContent populated) but
+    // with a normal subject + body. The filter falls through cleanly.
+    const ctx = makeHooks({ resolvedTenant: { id: TENANT_A, inboxDkimStrict: true } });
+    const hooks = {
+      ...ctx.hooks,
+      fetchEmailContent: vi.fn(async () => ({
+        text: "Hi team — Thursday at 2pm ET works. Looking forward to the call. — Alice",
+        html: null,
+        replyTo: [],
+        headers: {
+          "message-id": "<reply-abc@customer.example>",
+          "in-reply-to": "<original-outbound@axisone.ca>",
+        },
+        messageId: "<reply-abc@customer.example>",
+      })),
+    };
+    __setInboundHooksForTest(hooks);
+
+    const app = makeApp();
+    const res = await app.request("/webhooks/resend-inbound", {
+      method: "POST",
+      body: JSON.stringify({
+        ...autoresponderPayload,
+        data: {
+          ...autoresponderPayload.data,
+          subject: "Re: Quick question about pricing",
+        },
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(ctx.auditRows).toHaveLength(1);
+    expect(ctx.auditRows[0].status).toBe("accepted");
+    expect(ctx.auditRows[0].rejectionReason).toBeNull();
+    expect(ctx.publishedEvents).toHaveLength(1);
+    expect(ctx.publishedEvents[0].source).toBe("email_inbox");
+  });
+});
