@@ -164,6 +164,64 @@ export interface EvaluateOptions {
    */
   redis?: KnowledgeRedis | null;
   openai?: KnowledgeOpenAI | null;
+  /**
+   * KAN-1037-PR4 — M3-2.5c reply-loop-closure: latest inbound that triggered
+   * this re-evaluation. Threaded by the `contact-replied-push.ts` subscriber
+   * (PR3 plumbing → PR4 cognition) so the engine prompt's new
+   * `## Latest inbound` section can render the contact's verbatim words.
+   *
+   * **First time the engine prompt sees inbound BODY text.** Pre-PR4 the
+   * `## Recent engagement` section rendered metadata only (timestamp /
+   * type / signalClass / channel) — never the message content. This field
+   * carries the body (already capped at 2000 chars by
+   * `ContactRepliedEventSchema.replyText` upstream of the publisher).
+   *
+   * Omitted (undefined) when the caller is the existing `lead-received-push.ts`
+   * Phase 2 wiring at L1338 — first-turn lead processing, no prior outbound
+   * to "reply to" — so the new prompt section gracefully omits and the
+   * legacy callers see no prompt diff. The load-bearing PRD §7 quality risk
+   * surface ("can the engine emit contextually-appropriate actions when it
+   * can see what the contact actually said?") is observable ONLY on the
+   * contact-replied path.
+   *
+   * Field shape mirrors `ContactRepliedEvent.{replyReceivedAt, replyText,
+   * metadata.*}` subset — only the fields the prompt actually renders.
+   * Internal IDs (inboundEngagementId / outboundEngagementId) stay on the
+   * wire event but don't flow into the engine context (the engine reasons
+   * about content, not row identities).
+   */
+  latestInbound?: BrainLatestInbound;
+}
+
+/**
+ * KAN-1037-PR4 — shape of the latest-inbound context block. Defined as a
+ * standalone interface so the subscriber's TypeScript can declare the
+ * field shape at the call site without importing the full EvaluateOptions
+ * (the subscriber lives in apps/api; brain-service lives in packages/api;
+ * the cross-package surface should be the minimal shape).
+ */
+export interface BrainLatestInbound {
+  /** ISO 8601 — when the reply actually arrived (Resend webhook occurredAt). */
+  receivedAt: string;
+  /** From-address on the inbound (the contact's email). */
+  senderEmail: string;
+  /** Body of the reply, ≤2000 chars per upstream normalization. */
+  bodyText: string;
+  /** Subject line on the inbound. Empty string when absent. */
+  subjectLine: string;
+  /**
+   * Originating Decision id from the matched outbound. Prisma cuid. Not
+   * rendered into the prompt directly — included for forensic anchoring
+   * if a future iteration wants to surface the originating-decision
+   * reasoning alongside the inbound.
+   */
+  inReplyToDecisionId: string;
+  /**
+   * Thread depth — PR3 publisher ships hardcoded `1`. PR4 renders the
+   * value verbatim; true depth derivation is deferred to a future
+   * iteration when the engine actually uses it for context-window sizing.
+   */
+  threadDepth: number;
 }
 
 /**
@@ -388,6 +446,11 @@ export async function evaluateDealState(
     triggerContext: options.triggerContext ?? 'inbound',
     postStageAdvance: options.postStageAdvance,
     knowledge,
+    // KAN-1037-PR4 — M3-2.5c reply-loop-closure. Undefined for every
+    // legacy caller (lead-received Phase 2 wiring, post-stage-advance
+    // chains, etc.); contact-replied-push passes the matched outbound's
+    // reply context so `## Latest inbound` renders the contact's body.
+    latestInbound: options.latestInbound,
   });
 
   // 5. Call LLM. tenantId derived from the loaded Deal (KAN-745 per-tenant
@@ -581,6 +644,16 @@ export function buildEvaluationPrompt(input: {
    * non-null, renders per architect spec §3.4.
    */
   knowledge?: KnowledgeRetrievalResult | null;
+  /**
+   * KAN-1037-PR4 — M3-2.5c reply-loop-closure: latest inbound that
+   * triggered this evaluation. When defined, renders a `## Latest inbound`
+   * section between `## Recent engagement` (metadata-only signal context)
+   * and `## Recent stage transitions` (pipeline state context). Section
+   * is OMITTED when undefined — every legacy caller (lead-received Phase 2
+   * wiring, post-stage-advance chains, sync trpc paths) flows through this
+   * branch unchanged.
+   */
+  latestInbound?: BrainLatestInbound;
 }): string {
   const {
     snapshot,
@@ -590,6 +663,7 @@ export function buildEvaluationPrompt(input: {
     triggerContext = 'inbound',
     postStageAdvance,
     knowledge,
+    latestInbound,
   } = input;
 
   const contactName =
@@ -693,6 +767,44 @@ Sub-objectives: ${formatSubObjectives(snapshot.boundObjective.subObjectives)}
 Use this objective intent to inform your next-action choice — but DO NOT override the bounded action vocabulary; reasoning continues to flow through send_follow_up / wait_for_response / advance_stage / escalate_to_human / close_deal_lost / no_action.`
       : '';
 
+  // KAN-1037-PR4 — M3-2.5c reply-loop-closure: `## Latest inbound` section.
+  //
+  // FIRST time this prompt template renders inbound BODY text. Pre-PR4 the
+  // `## Recent engagement` block above carries metadata only (timestamp /
+  // type / signalClass / channel) — never the content. This section gives
+  // the engine the contact's verbatim words so it can produce a follow-up
+  // action grounded in what was actually said.
+  //
+  // Slot position: BETWEEN `## Recent engagement` (metadata-signal context)
+  // and `## Recent stage transitions` (pipeline state context). The
+  // ordering invariant is "what just happened (signal + body) → where
+  // we are (stage state) → what we know (knowledge) → what to do." Putting
+  // the body BEFORE stage transitions ensures the engine reads the new
+  // information first, then reconciles against the existing pipeline
+  // state, rather than the inverse.
+  //
+  // Section is OMITTED when `latestInbound` is undefined — every legacy
+  // caller (lead-received Phase 2 wiring on first-turn inbound, post-stage-
+  // advance chains, sync trpc paths, etc.) flows through this branch
+  // unchanged. No empty `## Latest inbound` header renders.
+  //
+  // Body rendering: blockquote prefix `> ` with `\n> ` multi-line handling
+  // for RFC 5322-style quoted content. Stray `> ` chars in bodyText pass
+  // through verbatim (matches KAN-839's `## Recent inbound from contact`
+  // Shaper-side convention — empirically clean even with nested quoting).
+  const latestInboundBlock = latestInbound
+    ? `
+
+## Latest inbound
+
+The contact replied on ${latestInbound.receivedAt} (thread depth: ${latestInbound.threadDepth}).
+From: ${latestInbound.senderEmail}
+Subject: ${latestInbound.subjectLine}
+
+> ${latestInbound.bodyText.replace(/\n/g, '\n> ')}
+`
+    : '';
+
   return `${triggerBlock}## Deal context
 Pipeline: ${snapshot.pipelineName} (objective: ${snapshot.pipelineObjectiveType})
 Contact: ${contactName} @ ${company}
@@ -707,7 +819,7 @@ Micro-objective progress: ${snapshot.moProgressPercent ?? '(none tracked)'}${sna
 ${engagementsBlock}
 Last engagement signal: ${snapshot.lastEngagementClass ?? '(none)'}
 Days since last engagement: ${snapshot.daysSinceLastEngagement ?? '(no engagements)'}
-
+${latestInboundBlock}
 ## Recent stage transitions (last 3)
 ${transitionsBlock}
 ${knowledge ? `\n## Company knowledge (relevant to this conversation)\n${renderKnowledgeSectionInline(knowledge)}\n` : ''}

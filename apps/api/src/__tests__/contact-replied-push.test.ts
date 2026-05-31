@@ -1,24 +1,30 @@
 /**
- * KAN-1037-PR3 — contact.replied push subscriber unit tests.
+ * KAN-1037-PR3/PR4 — contact.replied push subscriber unit tests.
  *
- * **PR3 SKELETON SCOPE.** The subscriber writes audit rows + sets Redis
- * cooldown gate but does NOT invoke `runDecisionForContact` yet. Tests
- * cover the plumbing path end-to-end:
+ * **PR4 SCOPE — engine re-evaluation with body-aware prompt.** The
+ * subscriber calls `evaluateDealState(prisma, dealId, { redis, openai,
+ * latestInbound })` on the happy path and captures the Brain decision
+ * in a `decision_re_evaluated` audit row. The PR3 skeleton bookmark
+ * (`decision_re_evaluated_skipped_pr3_skeleton`) is retired in PR4.
+ *
+ * Coverage:
  *   - OIDC verify (success → 200, failure → 401)
  *   - Envelope + event parse (malformed → 200 ack-and-drop)
  *   - Cooldown gate (active → suppress audit + 200, expired → proceed)
  *   - In-flight gate (held → suppress audit + 200, free → acquire + proceed)
- *   - Happy path (skeleton audit row + cooldown set + in-flight released)
+ *   - PR4 happy path: evaluateDealState invoked with latestInbound shape,
+ *     decision_re_evaluated audit row written with Brain decision payload,
+ *     cooldown set, in-flight released
+ *   - PR4 null-dealId path: skip-with-audit (decision_re_evaluated_skipped_no_deal)
+ *     + cooldown set, evaluateDealState NOT called
+ *   - PR4 brain failure: 500 returned, in-flight released via finally,
+ *     no cooldown set (so Pub/Sub retry can re-acquire and re-attempt)
  *   - Lock release in `finally` block (success AND error paths)
  *   - Tenant isolation (same contactId in different tenants = independent keys)
  *
  * Mocks: Prisma auditLog.create, verifyPubsubOidc, ioredis client via
- * the redis-client.js test seam (`__setRedisClientForTest`).
- *
- * PR4 will extend this suite with the engine-invocation assertions
- * (runDecisionForContact called with the right RunForContactInput shape,
- * audit reason flips from `decision_re_evaluated_skipped_pr3_skeleton`
- * to canonical `decision_re_evaluated`).
+ * the redis-client.js test seam (`__setRedisClientForTest`), brain-service
+ * via vitest's vi.mock on the variable-specifier dynamic import path.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Hono } from "hono";
@@ -43,11 +49,17 @@ interface AuditCreateArg {
     payload: Record<string, unknown>;
   };
 }
-const { verifyPubsubOidcMock, auditLogCreateMock } = vi.hoisted(() => ({
+const { verifyPubsubOidcMock, auditLogCreateMock, evaluateDealStateMock } = vi.hoisted(() => ({
   verifyPubsubOidcMock: vi.fn<(arg: unknown) => Promise<boolean>>(),
   auditLogCreateMock: vi.fn<(arg: AuditCreateArg) => Promise<{ id: string }>>(
     async () => ({ id: "audit_x" }),
   ),
+  // KAN-1037-PR4 — Brain Service mock. evaluateDealState's real return
+  // shape is captured at the type level via Awaited<ReturnType<...>> on
+  // the BrainServiceModule interface; here the mock returns a
+  // realistic-shape fixture so assertions on brainActionType /
+  // brainConfidence / brainReasoning have non-undefined values.
+  evaluateDealStateMock: vi.fn(),
 }));
 
 vi.mock("../lib/oidc-pubsub-verify.js", () => ({
@@ -58,6 +70,12 @@ vi.mock("../prisma.js", () => ({
   prisma: {
     auditLog: { create: auditLogCreateMock },
   },
+}));
+
+// Brain Service variable-specifier dynamic import — vitest intercepts the
+// resolved path. Same path mocked in lead-received-push.test.ts:102.
+vi.mock("../../../../packages/api/src/services/brain-service.js", () => ({
+  evaluateDealState: evaluateDealStateMock,
 }));
 
 import { contactRepliedPushApp } from "../subscribers/contact-replied-push.js";
@@ -157,10 +175,57 @@ function makeEnvelope(event: Record<string, unknown>): { body: string } {
   };
 }
 
+/**
+ * KAN-1037-PR4 — realistic Brain Service decision fixture. Shape matches
+ * the canonical EvaluateDealStateResult per brain-service.ts:280. Tests
+ * use this as the default mock return; specific tests override fields
+ * (action type, confidence, reasoning) when asserting on payload contents.
+ */
+function buildBrainDecisionFixture(
+  overrides: {
+    type?: "send_follow_up" | "wait_for_response" | "advance_stage" | "escalate_to_human" | "close_deal_lost" | "no_action";
+    reasoning?: string;
+    confidence?: number;
+    suggestedChannel?: "email" | "sms" | "meta_messenger";
+    suggestedTone?: "curious" | "professional" | "urgent" | "closing";
+  } = {},
+): Record<string, unknown> {
+  return {
+    dealId: DEAL_X,
+    evaluatedAt: new Date("2026-05-31T13:38:50.000Z"),
+    currentStateSnapshot: {
+      dealStatus: "open",
+      currentStageName: "Qualified",
+      currentStageOutcomeType: "open",
+      daysInCurrentStage: 2,
+      engagementCount: 3,
+      lastEngagementType: "email_received",
+      lastEngagementClass: "positive",
+      daysSinceLastEngagement: 0,
+      moProgressPercent: 50,
+      pipelineName: "Default Pipeline",
+      pipelineObjectiveType: "qualify",
+    },
+    nextBestAction: {
+      type: overrides.type ?? "send_follow_up",
+      reasoning:
+        overrides.reasoning ??
+        "Contact responded affirmatively about Q3 timeline and proposed Tuesday afternoon for a 30-min call.",
+      suggestedChannel: overrides.suggestedChannel ?? "email",
+      suggestedTone: overrides.suggestedTone ?? "professional",
+    },
+    confidence: overrides.confidence ?? 0.78,
+    modelTier: "reasoning",
+    llmInputTokens: 1200,
+    llmOutputTokens: 180,
+  };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   verifyPubsubOidcMock.mockResolvedValue(true);
   auditLogCreateMock.mockImplementation(async () => ({ id: "audit_x" }));
+  evaluateDealStateMock.mockResolvedValue(buildBrainDecisionFixture());
   __setRedisClientForTest(null);
 });
 
@@ -208,7 +273,7 @@ describe("KAN-1037-PR3 — contact.replied push subscriber (skeleton)", () => {
     expect(auditLogCreateMock).not.toHaveBeenCalled();
   });
 
-  it("happy path: writes skeleton audit + sets 300s cooldown + releases in-flight lock", async () => {
+  it("PR4 happy path: evaluateDealState invoked with latestInbound shape, decision_re_evaluated audit, cooldown set, in-flight released", async () => {
     const redis = makeFakeRedis();
     __setRedisClientForTest(redis as never);
     const { body } = makeEnvelope(makeValidEvent());
@@ -217,15 +282,43 @@ describe("KAN-1037-PR3 — contact.replied push subscriber (skeleton)", () => {
       body,
     });
     expect(res.status).toBe(200);
-    // Single skeleton audit row written (no cooldown/in-flight suppression).
+
+    // Brain Service was called with (prisma, dealId, options) shape.
+    expect(evaluateDealStateMock).toHaveBeenCalledTimes(1);
+    const [, dealIdArg, optionsArg] = evaluateDealStateMock.mock.calls[0]!;
+    expect(dealIdArg).toBe(DEAL_X);
+    // Knowledge Layer (KAN-828) clients threaded.
+    expect(optionsArg).toMatchObject({
+      triggerContext: "inbound",
+    });
+    // The load-bearing assertion: latestInbound carries the engine the
+    // contact's verbatim words + thread metadata. Shape matches the
+    // BrainLatestInbound interface in brain-service.ts.
+    expect(optionsArg.latestInbound).toEqual({
+      receivedAt: "2026-05-31T11:55:00.000Z",
+      senderEmail: "alice@customer.example",
+      bodyText: "Sure, Thursday 2pm ET works. Let's chat.",
+      subjectLine: "Re: Quick question",
+      inReplyToDecisionId: DECISION_X,
+      threadDepth: 1,
+    });
+
+    // Single decision_re_evaluated audit row written — PR3 skeleton bookmark
+    // (decision_re_evaluated_skipped_pr3_skeleton) is RETIRED in PR4.
     expect(auditLogCreateMock).toHaveBeenCalledTimes(1);
     expect(auditLogCreateMock.mock.calls[0]![0].data.actionType).toBe(
-      "decision_re_evaluated_skipped_pr3_skeleton",
+      "decision_re_evaluated",
     );
     expect(auditLogCreateMock.mock.calls[0]![0].data.tenantId).toBe(TENANT_A);
-    expect(auditLogCreateMock.mock.calls[0]![0].data.payload.eventId).toBe(
-      "feedbeef-cafe-babe-dead-feedface0000",
-    );
+    const auditPayload = auditLogCreateMock.mock.calls[0]![0].data.payload;
+    expect(auditPayload.eventId).toBe("feedbeef-cafe-babe-dead-feedface0000");
+    expect(auditPayload.triggerDecisionId).toBe(DECISION_X);
+    expect(auditPayload.brainActionType).toBe("send_follow_up");
+    expect(auditPayload.brainConfidence).toBe(0.78);
+    expect(auditPayload.brainReasoning).toContain("Q3 timeline");
+    expect(auditPayload.llmInputTokens).toBe(1200);
+    expect(auditPayload.llmOutputTokens).toBe(180);
+
     // Cooldown key set with the delivery's decisionId + 300s TTL.
     const cooldown = redis.store.get(
       `decision-run:cooldown:${TENANT_A}:${CONTACT_X}`,
@@ -233,6 +326,73 @@ describe("KAN-1037-PR3 — contact.replied push subscriber (skeleton)", () => {
     expect(cooldown?.value).toBe(DECISION_X);
     expect(cooldown?.ttlSec).toBe(300);
     // In-flight lock acquired then released — store has cooldown only.
+    expect(redis.store.has(`decision-run:in-flight:${TENANT_A}:${CONTACT_X}`)).toBe(false);
+    expect(redis.del).toHaveBeenCalledWith(
+      `decision-run:in-flight:${TENANT_A}:${CONTACT_X}`,
+    );
+  });
+
+  it("PR4 null-dealId path: skip-with-audit (decision_re_evaluated_skipped_no_deal) + cooldown set, evaluateDealState NOT called", async () => {
+    const redis = makeFakeRedis();
+    __setRedisClientForTest(redis as never);
+    // Originator had no open Deal at the time of the inbound — publisher
+    // honestly emits dealId: null per the nullable schema.
+    const { body } = makeEnvelope(makeValidEvent({ dealId: null }));
+    const res = await makeApp().request("/pubsub/contact-replied", {
+      method: "POST",
+      body,
+    });
+    expect(res.status).toBe(200);
+
+    // Brain Service NOT called — Brain requires a Deal id and would throw
+    // BrainServiceNotFoundError. The subscriber short-circuits BEFORE the
+    // engine call so an audit row carries the operator-observable signal.
+    expect(evaluateDealStateMock).not.toHaveBeenCalled();
+
+    expect(auditLogCreateMock).toHaveBeenCalledTimes(1);
+    expect(auditLogCreateMock.mock.calls[0]![0].data.actionType).toBe(
+      "decision_re_evaluated_skipped_no_deal",
+    );
+    expect(auditLogCreateMock.mock.calls[0]![0].data.reasoning).toBe(
+      "no_open_deal_on_originator",
+    );
+
+    // Cooldown still set — prevents a no-deal contact replying multiple
+    // times rapidly from flooding the audit log.
+    const cooldown = redis.store.get(
+      `decision-run:cooldown:${TENANT_A}:${CONTACT_X}`,
+    );
+    expect(cooldown?.value).toBe(DECISION_X);
+    expect(cooldown?.ttlSec).toBe(300);
+    // In-flight released.
+    expect(redis.store.has(`decision-run:in-flight:${TENANT_A}:${CONTACT_X}`)).toBe(false);
+  });
+
+  it("PR4 brain failure: returns 500 + releases in-flight + does NOT set cooldown (so Pub/Sub retry can re-attempt)", async () => {
+    const redis = makeFakeRedis();
+    __setRedisClientForTest(redis as never);
+    evaluateDealStateMock.mockRejectedValueOnce(
+      new Error("openai-rate-limit: 429 too many requests"),
+    );
+    const { body } = makeEnvelope(makeValidEvent());
+    const res = await makeApp().request("/pubsub/contact-replied", {
+      method: "POST",
+      body,
+    });
+
+    // 500 → Pub/Sub retries per subscription retry policy (10s/600s
+    // exponential, 24h retention).
+    expect(res.status).toBe(500);
+    // Brain was attempted exactly once on this delivery.
+    expect(evaluateDealStateMock).toHaveBeenCalledTimes(1);
+    // No audit row written for the failed eval (the catch block doesn't
+    // write a partial-state audit — the retry will write the canonical
+    // decision_re_evaluated audit once Brain succeeds).
+    expect(auditLogCreateMock).not.toHaveBeenCalled();
+    // No cooldown set — if cooldown were set on failure, the retry would
+    // be suppressed by its own cooldown guard, eating the message silently.
+    expect(redis.store.has(`decision-run:cooldown:${TENANT_A}:${CONTACT_X}`)).toBe(false);
+    // In-flight RELEASED in finally — retry can re-acquire the lock.
     expect(redis.store.has(`decision-run:in-flight:${TENANT_A}:${CONTACT_X}`)).toBe(false);
     expect(redis.del).toHaveBeenCalledWith(
       `decision-run:in-flight:${TENANT_A}:${CONTACT_X}`,
@@ -289,10 +449,13 @@ describe("KAN-1037-PR3 — contact.replied push subscriber (skeleton)", () => {
     expect(redis.store.has(`decision-run:in-flight:${TENANT_A}:${CONTACT_X}`)).toBe(true);
   });
 
-  it("in-flight lock released on handler error (finally block — orphan lock guard)", async () => {
+  it("in-flight lock released on audit-write error (finally block — orphan lock guard)", async () => {
     const redis = makeFakeRedis();
     __setRedisClientForTest(redis as never);
-    // Force the skeleton audit write to throw — handler enters catch + finally.
+    // Force the PR4 decision_re_evaluated audit write to throw — handler
+    // enters catch + finally. evaluateDealState succeeds first (per the
+    // default mock); the throw is in the post-eval audit write site.
+    // Sibling test PR4-brain-failure covers the brain-throw path.
     auditLogCreateMock.mockRejectedValueOnce(new Error("audit-write-down"));
     const { body } = makeEnvelope(makeValidEvent());
     const res = await makeApp().request("/pubsub/contact-replied", {
@@ -327,10 +490,10 @@ describe("KAN-1037-PR3 — contact.replied push subscriber (skeleton)", () => {
       body,
     });
     expect(res.status).toBe(200);
-    // Tenant B got the skeleton happy path — NOT the cooldown-suppression audit.
+    // Tenant B got the PR4 happy path — NOT the cooldown-suppression audit.
     expect(auditLogCreateMock).toHaveBeenCalledTimes(1);
     expect(auditLogCreateMock.mock.calls[0]![0].data.actionType).toBe(
-      "decision_re_evaluated_skipped_pr3_skeleton",
+      "decision_re_evaluated",
     );
     expect(auditLogCreateMock.mock.calls[0]![0].data.tenantId).toBe(TENANT_B);
     // Tenant A's cooldown still intact (independent key).

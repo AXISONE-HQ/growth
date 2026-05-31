@@ -880,3 +880,146 @@ describe('extractQueryTextFromInbound — KAN-828 query text resolution', () => 
     expect(extractQueryTextFromInbound([])).toBeNull();
   });
 });
+
+// ─────────────────────────────────────────────
+// KAN-1037-PR4 — `## Latest inbound` section in Brain prompt
+//
+// M3-2.5c reply-loop-closure: FIRST time the prompt template renders
+// inbound BODY text. Sentinel-token pins on the section header +
+// metadata line + blockquote prefix + multi-line `\n> ` handling.
+// Same contract-pin discipline as the KAN-825 / KAN-828 blocks above.
+// ─────────────────────────────────────────────
+
+describe('buildEvaluationPrompt — KAN-1037-PR4 Latest inbound section', () => {
+  const baseInput = {
+    snapshot: {
+      dealStatus: 'open',
+      currentStageName: 'Qualified',
+      currentStageOutcomeType: 'open',
+      daysInCurrentStage: 1,
+      engagementCount: 2,
+      lastEngagementType: 'email_received',
+      lastEngagementClass: 'positive',
+      daysSinceLastEngagement: 0,
+      moProgressPercent: 40,
+      pipelineName: 'Default Pipeline',
+      pipelineObjectiveType: 'book_appointment',
+    },
+    contact: {
+      id: 'c',
+      tenantId: 't',
+      email: 'alice@customer.example',
+      firstName: 'Alice',
+      lastName: null,
+      companyName: 'Customer Co',
+      phone: null,
+      currentStageId: null,
+      microObjectiveProgress: {},
+      metadata: {},
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    } as never,
+    recentEngagements: [],
+    recentTransitions: [],
+  };
+
+  it('OMITTED when latestInbound undefined (legacy callers unchanged — lead-received Phase 2, post-stage-advance, sync trpc, etc.)', () => {
+    const prompt = buildEvaluationPrompt(baseInput);
+    expect(prompt).not.toContain('## Latest inbound');
+    expect(prompt).not.toContain('The contact replied on');
+    // Section ordering invariant preserved: Recent engagement →
+    // (no Latest inbound block) → Recent stage transitions.
+    expect(prompt.indexOf('## Recent engagement')).toBeLessThan(
+      prompt.indexOf('## Recent stage transitions'),
+    );
+  });
+
+  it('RENDERS when latestInbound defined — sentinel tokens for header, metadata line, blockquote body, threadDepth', () => {
+    const prompt = buildEvaluationPrompt({
+      ...baseInput,
+      latestInbound: {
+        receivedAt: '2026-05-31T13:41:12.489Z',
+        senderEmail: 'alice@customer.example',
+        bodyText:
+          "Yes, I'm looking to start in Q3. Can we set up a 30-minute call next Tuesday afternoon?",
+        subjectLine: 'Re: Quick question about pricing',
+        inReplyToDecisionId: 'cl_decision_pr4_render_test',
+        threadDepth: 1,
+      },
+    });
+    // Section header — sentinel token.
+    expect(prompt).toContain('## Latest inbound');
+    // Metadata line — `receivedAt` + `threadDepth` rendered.
+    expect(prompt).toContain('The contact replied on 2026-05-31T13:41:12.489Z');
+    expect(prompt).toContain('(thread depth: 1)');
+    // From + Subject lines.
+    expect(prompt).toContain('From: alice@customer.example');
+    expect(prompt).toContain('Subject: Re: Quick question about pricing');
+    // Blockquote prefix + body verbatim (load-bearing: engine sees the
+    // contact's words).
+    expect(prompt).toContain(
+      "> Yes, I'm looking to start in Q3. Can we set up a 30-minute call next Tuesday afternoon?",
+    );
+  });
+
+  it('multi-line bodyText: each newline gets prefixed with `> ` (RFC 5322-style blockquote)', () => {
+    const prompt = buildEvaluationPrompt({
+      ...baseInput,
+      latestInbound: {
+        receivedAt: '2026-05-31T13:41:12.489Z',
+        senderEmail: 'alice@customer.example',
+        bodyText: 'Line one of reply.\nLine two with details.\nLine three closing.',
+        subjectLine: 'Re: pricing',
+        inReplyToDecisionId: 'cl_decision_multiline',
+        threadDepth: 1,
+      },
+    });
+    // Three blockquoted lines — `\n> ` prefix on each continuation.
+    expect(prompt).toContain('> Line one of reply.');
+    expect(prompt).toContain('> Line two with details.');
+    expect(prompt).toContain('> Line three closing.');
+  });
+
+  it('section slots BETWEEN ## Recent engagement and ## Recent stage transitions (ordering invariant)', () => {
+    const prompt = buildEvaluationPrompt({
+      ...baseInput,
+      latestInbound: {
+        receivedAt: '2026-05-31T13:41:12.489Z',
+        senderEmail: 'alice@customer.example',
+        bodyText: 'short body',
+        subjectLine: 'subj',
+        inReplyToDecisionId: 'cl_decision_ordering',
+        threadDepth: 1,
+      },
+    });
+    const idxEngagement = prompt.indexOf('## Recent engagement');
+    const idxLatest = prompt.indexOf('## Latest inbound');
+    const idxTransitions = prompt.indexOf('## Recent stage transitions');
+    expect(idxEngagement).toBeGreaterThan(-1);
+    expect(idxLatest).toBeGreaterThan(idxEngagement);
+    expect(idxTransitions).toBeGreaterThan(idxLatest);
+  });
+
+  it('preserves verbatim body content (no sanitization of nested `> ` quotes per KAN-839 precedent)', () => {
+    // The contact may quote prior content in their reply. KAN-839's
+    // Shaper-side `## Recent inbound from contact` section passes
+    // verbatim and works empirically — same convention here.
+    const prompt = buildEvaluationPrompt({
+      ...baseInput,
+      latestInbound: {
+        receivedAt: '2026-05-31T13:41:12.489Z',
+        senderEmail: 'alice@customer.example',
+        bodyText:
+          'Great — yes to Tuesday.\n\n> On Tuesday, you wrote:\n> Sounds good.\n\nBest, Alice',
+        subjectLine: 'Re: pricing',
+        inReplyToDecisionId: 'cl_decision_nested_quote',
+        threadDepth: 1,
+      },
+    });
+    // The "> On Tuesday, you wrote:" line passes through verbatim with an
+    // ADDITIONAL `> ` prefix from the section's blockquote wrapper. Engine
+    // handles nested-quote ambiguity per KAN-839 empirical precedent.
+    expect(prompt).toContain('> > On Tuesday, you wrote:');
+    expect(prompt).toContain('> Best, Alice');
+  });
+});
