@@ -42,6 +42,9 @@ interface FakeRow {
   triggerType: string;
   triggerReason: string | null;
   aiSuggestion: string | null;
+  // KAN-1037 — engine-emitted SuggestedAction (nullable; legacy / non-engine
+  // paths stay NULL and preserve the pre-fix no-publish-on-accept behavior).
+  originalAction: unknown;
   context: unknown;
   resolvedBy: string | null;
   resolvedAt: Date | null;
@@ -60,6 +63,8 @@ function makeRow(overrides: Partial<FakeRow> = {}): FakeRow {
     triggerType: "AGENTIC_GATE_DECISION",
     triggerReason: "low confidence",
     aiSuggestion: "send_email via email",
+    // Default null preserves legacy test expectations; KAN-1037 tests opt in.
+    originalAction: null,
     context: { confidence: 0.3, strategy: "warm_up_lead" },
     resolvedBy: null,
     resolvedAt: null,
@@ -252,8 +257,13 @@ describe("KAN-754 — acceptRecommendation", () => {
     expect(auditPayload.publishedActionDecidedId).toBe("msg-test-1");
   });
 
-  it("without modifiedAction: does NOT emit, just transitions status (default human_review path)", async () => {
-    const rows = [makeRow({ id: ESC_OPEN, status: "open" })];
+  it("without modifiedAction AND null originalAction: does NOT emit, just transitions status (legacy text-only fallback)", async () => {
+    // KAN-1037 — legacy row (originalAction NULL: guardrail_block, lead_assignment,
+    // or pre-KAN-1037 rows). Accept without modify → no publish, status transitions.
+    // Audit reason stays `recommendation.accept` for back-compat with prior
+    // dashboards; payload.publishSource records 'none' to discriminate the
+    // path post-fix.
+    const rows = [makeRow({ id: ESC_OPEN, status: "open", originalAction: null })];
     const { prisma, auditCalls } = makePrisma(rows);
     const pubsub = makePubSubClient();
 
@@ -266,9 +276,109 @@ describe("KAN-754 — acceptRecommendation", () => {
     expect(result.publishedEventId).toBeNull();
     expect(pubsub.publish).not.toHaveBeenCalled();
     expect(auditCalls).toHaveLength(1);
+    expect(auditCalls[0].data.actionType).toBe("recommendation.accept");
     const auditPayload = auditCalls[0].data.payload as Record<string, unknown>;
     expect(auditPayload.modifiedAction).toBeNull();
     expect(auditPayload.publishedActionDecidedId).toBeNull();
+    expect(auditPayload.publishSource).toBe("none");
+  });
+
+  it("KAN-1037 — without modifiedAction AND populated originalAction: dispatches via fallback + writes accept_no_modification_published audit", async () => {
+    const originalAction = {
+      actionType: "send_follow_up",
+      channel: "email",
+      payload: { messageTemplate: "warm_followup_v2", subject: "Re: your inquiry" },
+    };
+    const rows = [makeRow({ id: ESC_OPEN, status: "open", originalAction })];
+    const { prisma, auditCalls, updates } = makePrisma(rows);
+    const pubsub = makePubSubClient();
+
+    const result = await acceptRecommendation(
+      { prisma, tenantId: TENANT_A, actor: ACTOR, pubsubClient: pubsub },
+      { id: ESC_OPEN },
+    );
+
+    expect(result.status).toBe("resolved");
+    expect(result.publishedEventId).toBe("msg-test-1");
+    expect(pubsub.publish).toHaveBeenCalledTimes(1);
+    // Verify the published payload drew from originalAction, not from the
+    // text-only fallback.
+    const publishedEnvelope = pubsub.publish.mock.calls[0]?.[1] as Record<string, unknown> | undefined;
+    expect(publishedEnvelope).toBeDefined();
+    expect(updates[0].data).toMatchObject({ status: "resolved", resolvedBy: ACTOR });
+    expect(auditCalls).toHaveLength(1);
+    expect(auditCalls[0].data.actionType).toBe("accept_no_modification_published");
+    const auditPayload = auditCalls[0].data.payload as Record<string, unknown>;
+    expect(auditPayload.modifiedAction).toBeNull();
+    expect(auditPayload.publishSource).toBe("original_action");
+    expect(auditPayload.publishedActionDecidedId).toBe("msg-test-1");
+  });
+
+  it("KAN-1037 — modifiedAction overrides originalAction (operator-curated wins)", async () => {
+    // Engine emitted send_follow_up; operator decided to send_sms instead.
+    // Verify modifiedAction takes precedence and audit reason stays the
+    // existing `recommendation.accept` (modify-and-accept path is unchanged).
+    const originalAction = {
+      actionType: "send_follow_up",
+      channel: "email",
+      payload: { messageTemplate: "warm_followup_v2" },
+    };
+    const modifiedAction = {
+      actionType: "send_sms",
+      channel: "sms",
+      payload: { body: "Op's manual SMS override" },
+    };
+    const rows = [makeRow({ id: ESC_OPEN, status: "open", originalAction })];
+    const { prisma, auditCalls } = makePrisma(rows);
+    const pubsub = makePubSubClient();
+
+    const result = await acceptRecommendation(
+      { prisma, tenantId: TENANT_A, actor: ACTOR, pubsubClient: pubsub },
+      { id: ESC_OPEN, modifiedAction },
+    );
+
+    expect(result.status).toBe("resolved");
+    expect(result.publishedEventId).toBe("msg-test-1");
+    expect(pubsub.publish).toHaveBeenCalledTimes(1);
+    expect(auditCalls).toHaveLength(1);
+    expect(auditCalls[0].data.actionType).toBe("recommendation.accept");
+    const auditPayload = auditCalls[0].data.payload as Record<string, unknown>;
+    expect(auditPayload.modifiedAction).toEqual(modifiedAction);
+    expect(auditPayload.publishSource).toBe("modified_action");
+  });
+
+  it("KAN-1037 — malformed originalAction: skips publish gracefully, status still transitions", async () => {
+    // Defense-in-depth: corrupted JSONB or schema drift. SuggestedActionSchema
+    // safeParse fails; warning logged; no publish but status transition
+    // still commits (operator's click registers).
+    const malformedOriginalAction = { not_a_valid_action: true, missing: "everything" };
+    const rows = [makeRow({ id: ESC_OPEN, status: "open", originalAction: malformedOriginalAction })];
+    const { prisma, auditCalls, updates } = makePrisma(rows);
+    const pubsub = makePubSubClient();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    try {
+      const result = await acceptRecommendation(
+        { prisma, tenantId: TENANT_A, actor: ACTOR, pubsubClient: pubsub },
+        { id: ESC_OPEN },
+      );
+
+      expect(result.status).toBe("resolved");
+      expect(result.publishedEventId).toBeNull();
+      expect(pubsub.publish).not.toHaveBeenCalled();
+      expect(updates).toHaveLength(1);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("malformed originalAction"),
+        expect.anything(),
+      );
+      expect(auditCalls).toHaveLength(1);
+      expect(auditCalls[0].data.actionType).toBe("recommendation.accept");
+      const auditPayload = auditCalls[0].data.payload as Record<string, unknown>;
+      expect(auditPayload.publishSource).toBe("none");
+      expect(auditPayload.publishedActionDecidedId).toBeNull();
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it("emit failure does NOT fail the mutation (operator already committed)", async () => {
@@ -379,5 +489,32 @@ describe("KAN-754 — dismissRecommendation", () => {
     await expect(
       dismissRecommendation({ prisma, tenantId: TENANT_A, actor: ACTOR }, { id: ESC_FOREIGN, reason: "x" }),
     ).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+
+  it("KAN-1037 — dismiss path unaffected by originalAction column (regression)", async () => {
+    // Populated originalAction must not trigger publishing on dismiss —
+    // dismiss is an acknowledgment-without-action. The fix is isolated to
+    // acceptRecommendation; this guards against accidental cross-wiring.
+    const originalAction = {
+      actionType: "send_follow_up",
+      channel: "email",
+      payload: { messageTemplate: "warm_followup_v2" },
+    };
+    const rows = [makeRow({ id: ESC_OPEN, status: "open", originalAction })];
+    const { prisma, auditCalls, updates } = makePrisma(rows);
+
+    const result = await dismissRecommendation(
+      { prisma, tenantId: TENANT_A, actor: ACTOR },
+      { id: ESC_OPEN, reason: "Operator deemed not actionable" },
+    );
+
+    expect(result.status).toBe("dismissed");
+    expect(updates[0].data).toMatchObject({ status: "dismissed" });
+    expect(auditCalls).toHaveLength(1);
+    expect(auditCalls[0].data.actionType).toBe("recommendation.dismiss");
+    // No publishSource discriminator on the dismiss audit payload — the
+    // KAN-1037 wiring is acceptRecommendation-only.
+    const dismissPayload = auditCalls[0].data.payload as Record<string, unknown>;
+    expect(dismissPayload.publishSource).toBeUndefined();
   });
 });
