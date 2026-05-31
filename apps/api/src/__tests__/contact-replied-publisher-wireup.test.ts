@@ -25,6 +25,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { describe, it, expect } from "vitest";
+import { buildContactRepliedEvent } from "@growth/shared";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SUBSCRIBER_PATH = resolve(
@@ -77,6 +78,47 @@ describe("KAN-1037-PR3 — contact.replied publisher wire-up", () => {
         "call site so a contact replying on either lineage triggers engine " +
         "re-evaluation per M3-2.5c Phase 1 Finding #1.",
     ).toBe(2);
+  });
+
+  it("PR3 publisher contract: buildContactRepliedEvent accepts outboundEngagementId: null (KAN-1044 honest-nullable shape)", () => {
+    // PR3 production path: the publisher in lead-received-push.ts passes
+    // `outboundEngagementId: null` until KAN-1044 extends CorrelationOutcome
+    // to carry the matched outbound's Engagement id cleanly. This test pins
+    // the contract surface end-to-end:
+    //   - Schema (z.string().uuid().nullable()) accepts null without
+    //     throwing on .parse(...) inside buildContactRepliedEvent
+    //   - Builder preserves the null value verbatim — no accidental
+    //     defaulting back to a placeholder
+    //   - The resulting payload that downstream consumers will see has
+    //     outboundEngagementId === null, NOT undefined and NOT inboundEng
+    //
+    // If a future change accidentally defaults this to inboundEngagementId
+    // (the placeholder shape the user caught + rejected pre-merge), this
+    // assertion fails loudly. Post-KAN-1044, when the publisher starts
+    // passing a real UUID, this test can be updated to also exercise the
+    // populated path.
+    const payload = buildContactRepliedEvent({
+      tenantId: "11111111-1111-1111-1111-111111111111",
+      contactId: "22222222-2222-2222-2222-222222222222",
+      dealId: "33333333-3333-3333-3333-333333333333",
+      decisionId: "cl_decision_pr3_null_check",
+      inboundEngagementId: "44444444-4444-4444-4444-444444444444",
+      outboundEngagementId: null,
+      replyText: "Sounds good — Thursday works.",
+      replyReceivedAt: "2026-05-31T12:00:00.000Z",
+      metadata: {
+        senderEmail: "alice@customer.example",
+        subjectLine: "Re: Quick question",
+        threadDepth: 1,
+      },
+    });
+    expect(payload.outboundEngagementId).toBeNull();
+    // Belt-and-suspenders: the inbound id MUST NOT have leaked into the
+    // outbound field (the rejected placeholder shape).
+    expect(payload.outboundEngagementId).not.toBe(payload.inboundEngagementId);
+    // Schema literals still correct post-builder.
+    expect(payload.eventType).toBe("contact.replied");
+    expect(payload.version).toBe("1.0");
   });
 
   it("invokes the helper AFTER emitCorrelationAudit (sequencing — audit chain before publish)", () => {
