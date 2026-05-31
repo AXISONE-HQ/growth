@@ -30,6 +30,11 @@ import { actionExecutedPushApp } from "./subscribers/action-executed-push.js";
 import { knowledgeIngestPushApp } from "./subscribers/knowledge-ingest-push.js";
 import { llmCallPushApp } from "./subscribers/llm-call-push.js";
 import { leadReceivedPushApp } from "./subscribers/lead-received-push.js";
+// KAN-1037-PR3 — M3-2.5c reply-loop-closure: skeleton subscriber for the
+// new contact.replied topic. PR3 writes audit + sets Redis cooldown; PR4
+// wires runDecisionForContact. Topic + subscription at
+// infra/terraform/contact-replied.tf (Path A -target apply).
+import { contactRepliedPushApp } from "./subscribers/contact-replied-push.js";
 import { knowledgeSourceIngestedPushApp } from "./subscribers/knowledge-source-ingested-push.js";
 // KAN-1007 SAE PR3 — Pub/Sub bringup. Both subscribers ship dormant in
 // the sense that nothing in app code publishes decision.run today
@@ -124,6 +129,8 @@ app.route("/pubsub", knowledgeIngestPushApp);
 app.route("/pubsub", llmCallPushApp);
 // KAN-774 — lead.received → assignLeadToPipeline (closes Lead Inbox consumer gap)
 app.route("/pubsub", leadReceivedPushApp);
+// KAN-1037-PR3 — contact.replied → Redis-gated skeleton (PR4 wires engine invocation)
+app.route("/pubsub", contactRepliedPushApp);
 app.route("/pubsub", knowledgeSourceIngestedPushApp);
 // KAN-1007 SAE PR3 — mount the two new push subscribers under /pubsub
 // (matches Terraform push_endpoint paths in infra/terraform/sae-pubsub.tf).

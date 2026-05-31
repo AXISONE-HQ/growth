@@ -22,6 +22,11 @@ export * from "./email-headers.js";
 export * from "./agentic-tool-schemas.js";
 export * from "./action-types.js";
 export * from "./lead-received.js";
+// KAN-1037-PR3 — M3-2.5c contact.replied event contract. Shared between
+// the publisher (lead-received-push.ts on inbound_correlated) and the
+// PR3-skeleton subscriber (contact-replied-push.ts Redis-gated audit).
+// PR4 wires real engine invocation; PR5 surfaces the reply panel UI.
+export * from "./contact-replied.js";
 export * from "./account-field-updated.js";
 export * from "./account-validation.js";
 // KAN-866 — canonical AuditLog payload contract for account.* events.
