@@ -442,13 +442,32 @@ interface MessageComposerModule {
       // KAN-816: optional per-message Reply-To override for customer-reply
       // routing (`<inboxSlug>@leads.<LEAD_INBOX_DOMAIN>`).
       replyTo?: string;
+      // KAN-1036: per-decision reply correlation token. Threaded through
+      // to outbound sidecar persistence so the recipient's reply can
+      // O(1)-correlate to the originating Decision row at the inbound
+      // consumer.
+      replyToken?: string;
     },
   ) => Promise<string>;
   resolveEmailConnectionId: (prisma: unknown, tenantId: string) => Promise<string | null>;
-  // KAN-816: lookup helper that constructs the tenant's customer-reply
-  // address from `Tenant.inboxSlug` + `LEAD_INBOX_DOMAIN`. Returns null
-  // when the tenant has no inboxSlug; caller should warn-log + omit Reply-To.
-  resolveReplyToForTenant: (prisma: unknown, tenantId: string) => Promise<string | null>;
+  // KAN-816 + KAN-1036: lookup helper that constructs the tenant's customer-
+  // reply address from `Tenant.inboxSlug` + `LEAD_INBOX_DOMAIN`. Pre-KAN-1036
+  // shape was `Promise<string | null>` (just the Reply-To address). Post-
+  // KAN-1036 the resolver also mints a per-decision token when a decisionId
+  // is in scope — returns `{ replyTo: string; replyToken: string | null }`
+  // or null (no inboxSlug → omit Reply-To).
+  //
+  // KAN-1051 fix-forward — pre-fix this interface still declared the
+  // pre-KAN-1036 `string | null` shape, masking the type mismatch at
+  // L2168 from tsc. The caller spread the object into `replyTo`, the
+  // connector rejected every dispatch with `Expected string, received
+  // object`. Aligning the loader signature with the real return type
+  // makes the class of bug structurally impossible going forward.
+  resolveReplyToForTenant: (
+    prisma: unknown,
+    tenantId: string,
+    decisionId?: string,
+  ) => Promise<{ replyTo: string; replyToken: string | null } | null>;
 }
 let _messageComposerModule: MessageComposerModule | null = null;
 async function loadMessageComposerModule(): Promise<MessageComposerModule> {
@@ -2148,13 +2167,32 @@ async function dispatchPhase2Send(
     unsubscribeUrl,
   };
 
-  // 8. KAN-816: resolve tenant Reply-To for customer-reply routing.
-  //    Recipient replies route to <inboxSlug>@leads.<LEAD_INBOX_DOMAIN>
-  //    which lands at the Track A inbound chain — enables multi-turn
-  //    AI conversation. Helper warn-logs + returns null when tenant has
-  //    no inboxSlug; we omit Reply-To rather than fail the dispatch.
+  // 8. KAN-816 + KAN-1036: resolve tenant Reply-To for customer-reply
+  //    routing. Recipient replies route to
+  //    <inboxSlug>+<replyToken>@leads.<LEAD_INBOX_DOMAIN> (subaddressed
+  //    per KAN-1036, when a decisionId is in scope) → lands at the
+  //    Track A inbound chain → correlated to the originating Decision
+  //    via the engagement_email_metadata.reply_token sidecar lookup.
+  //    Enables multi-turn AI conversation with O(1) per-decision reply
+  //    correlation. Helper warn-logs + returns null when tenant has no
+  //    inboxSlug; we omit Reply-To rather than fail the dispatch.
+  //
+  //    KAN-1051 fix-forward — pre-fix this site spread the
+  //    `ResolvedReplyTo = { replyTo, replyToken }` object directly into
+  //    publishActionSend's `replyTo` field, causing the connector to
+  //    reject every send_follow_up dispatch with `Expected string,
+  //    received object`. Pre-launch zero customers + send-redirect floor
+  //    masked the bug from PR4.5 verifies (escalate_to_human routes
+  //    through a different consumer). Pass decisionRow.id so the resolver
+  //    returns the subaddressed shape; destructure .replyTo for the
+  //    string field and thread .replyToken separately for the
+  //    correlation sidecar.
   const { resolveReplyToForTenant } = await loadMessageComposerModule();
-  const replyTo = await resolveReplyToForTenant(prisma, deal.tenantId);
+  const replyToResolved = await resolveReplyToForTenant(
+    prisma,
+    deal.tenantId,
+    decisionRow.id,
+  );
 
   // 9. Publish to action.send for Resend connector to actually send.
   const { getPubSubClient } = await loadPubSubClientModule();
@@ -2165,7 +2203,8 @@ async function dispatchPhase2Send(
     toEmail: deal.contact.email,
     composed,
     connectionId,
-    ...(replyTo ? { replyTo } : {}),
+    ...(replyToResolved ? { replyTo: replyToResolved.replyTo } : {}),
+    ...(replyToResolved?.replyToken ? { replyToken: replyToResolved.replyToken } : {}),
   });
 
   console.log(
