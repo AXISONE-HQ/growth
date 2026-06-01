@@ -204,6 +204,77 @@ export async function getRecommendationDetail(
     throw new TRPCError({ code: 'NOT_FOUND', message: 'Recommendation not found' });
   }
 
+  // KAN-1037-PR5 — Trigger inbound context for engine_proposed_action
+  // escalations (PR4.5 path). The escalation was created BECAUSE the
+  // engine evaluated a contact reply and emitted escalate_to_human —
+  // operators need to see what reply triggered the escalation, prominently,
+  // above the engine's suggested action.
+  //
+  // Conditional derivation per PR5 Phase 1 confirmation: skip the
+  // engagement query for non-engine-proposed escalations (the common
+  // case — CONFIDENCE_BELOW_THRESHOLD / AGENTIC_GATE_DECISION /
+  // guardrail_block / lead_assignment_below_threshold / SAMPLED_*).
+  //
+  // Source of truth for the trigger inbound: the contact's most recent
+  // `email_received` engagement. The PR4.5 escalation create site doesn't
+  // store an inboundEngagementId reference (KAN-1044 deferred); the
+  // chronological lookup is the cleanest proxy at fetch time.
+  let triggerInbound: TriggerInbound | null = null;
+  if (row.triggerType === 'engine_proposed_action') {
+    const inbound = await prisma.engagement.findFirst({
+      where: {
+        tenantId,
+        contactId: row.contactId,
+        engagementType: 'email_received',
+      },
+      orderBy: { occurredAt: 'desc' },
+      select: {
+        id: true,
+        occurredAt: true,
+        signalClass: true,
+        metadata: true,
+      },
+    });
+    if (inbound) {
+      const meta = (inbound.metadata ?? {}) as Record<string, unknown>;
+      triggerInbound = {
+        id: inbound.id,
+        bodyPreview: typeof meta.bodyPreview === 'string' ? meta.bodyPreview : '',
+        fromAddress: typeof meta.senderEmail === 'string' ? meta.senderEmail : '',
+        subject: typeof meta.subject === 'string' ? meta.subject : '',
+        occurredAt: inbound.occurredAt.toISOString(),
+        signalClass: inbound.signalClass,
+      };
+    }
+  }
+
+  // KAN-1037-PR5 — Per Phase 1 finding #1 (audit chain join):
+  // `triggerDecisionId` on the `decision_re_evaluated` audit row points
+  // at the ORIGINATING outbound's Decision (the outbound the contact
+  // replied to). The escalation row's `decisionId` field points at the
+  // most-recent Decision on the contact at create time (PR4.5's
+  // `recentDecision` lookup) — usually a DIFFERENT Decision than the
+  // trigger. Both are useful: the originator gives "what we said," the
+  // recent gives "where we are." UI surfaces both with navigation.
+  let triggerDecisionId: string | null = null;
+  if (row.triggerType === 'engine_proposed_action') {
+    const reEvalAudit = await prisma.auditLog.findFirst({
+      where: {
+        tenantId,
+        actionType: 'decision_re_evaluated',
+        payload: { path: ['contactId'], equals: row.contactId },
+      },
+      orderBy: { createdAt: 'desc' },
+      select: { payload: true },
+    });
+    if (reEvalAudit) {
+      const payload = (reEvalAudit.payload ?? {}) as Record<string, unknown>;
+      if (typeof payload.triggerDecisionId === 'string') {
+        triggerDecisionId = payload.triggerDecisionId;
+      }
+    }
+  }
+
   // Decision payload is null for non-agentic-decision-driven escalations
   // (guardrail-block, lead-assignment). UI hides the panel cleanly when null.
   return {
@@ -232,7 +303,26 @@ export async function getRecommendationDetail(
     updatedAt: row.updatedAt,
     resolvedBy: row.resolvedBy,
     resolvedAt: row.resolvedAt,
+    // KAN-1037-PR5 — additive fields for the new TriggerContextBlock
+    // rendering. Null/undefined on non-engine-proposed escalations so
+    // the UI conditional renders cleanly.
+    triggerInbound,
+    triggerDecisionId,
   };
+}
+
+/**
+ * KAN-1037-PR5 — Trigger inbound shape for engine_proposed_action
+ * escalations. Surfaces the contact's reply that triggered the engine's
+ * escalation decision so operators see the "why" above the "what."
+ */
+export interface TriggerInbound {
+  id: string;
+  bodyPreview: string;
+  fromAddress: string;
+  subject: string;
+  occurredAt: string;
+  signalClass: string;
 }
 
 interface MutationContext {

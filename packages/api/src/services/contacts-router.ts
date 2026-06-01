@@ -280,7 +280,160 @@ export async function getContactById(
     // Cross-tenant access lands here too — neutral NOT_FOUND, no leak.
     throw new TRPCError({ code: 'NOT_FOUND', message: 'Contact not found' });
   }
-  return row;
+
+  // ── KAN-1037-PR5 — Last reply derivation ───────────────────────
+  //
+  // M3-2.5c reply-loop-closure final PR. Surfaces the most recent inbound
+  // reply on the Contact detail page with engine-response context
+  // (escalated / no_action / filtered_autoresponder, plus an implicit
+  // "evaluating" fallback for the cooldown / in-flight window).
+  //
+  // Status enum is intentionally NARROW per the PR5 spec confirmation:
+  // 4 derivable statuses today, with `auto_replied` + `paused_contact`
+  // deferred to KAN-1049 until corresponding audit signals exist.
+  //
+  // Derivation steps (all single-roundtrip, indexed):
+  //   1. Pick the most recent `email_received` engagement from the already-
+  //      loaded `row.engagements` (no extra DB query — list is bounded to
+  //      20 + ordered DESC, so the first inbound match wins).
+  //   2. Parallel audit-log lookups for the most recent
+  //      `decision_re_evaluated` + `escalation_created_from_engine_proposal`
+  //      audit rows on this (tenant, contact). Both keyed on the
+  //      `@@index([tenantId, actionType])` index added in PR3.
+  //   3. Map to `engineResponseStatus` per the narrow enum.
+  //
+  // Adds 2 indexed queries to the getById roundtrip; bounded by
+  // single-contact view (no N+1 risk).
+  // KAN-1037-PR5 — defensive `?? []` guard: PROD rows always carry the
+  // engagements include (above), but unit-test fixtures (contacts-router.test.ts
+  // makePrisma) return bare rows without relation hydration. Treat absent
+  // as empty so the derivation cleanly returns `latestReply: null` in tests
+  // that don't exercise the panel.
+  const latestInboundEngagement = (row.engagements ?? []).find(
+    (e) => e.engagementType === 'email_received',
+  );
+
+  let latestReply: LatestReply | null = null;
+  if (latestInboundEngagement) {
+    const [reEvalAudit, escalationAudit, filteredAuditFromLeadInbox] = await Promise.all([
+      prisma.auditLog.findFirst({
+        where: {
+          tenantId,
+          actionType: 'decision_re_evaluated',
+          payload: { path: ['contactId'], equals: id },
+        },
+        orderBy: { createdAt: 'desc' },
+        select: { id: true, payload: true, createdAt: true },
+      }),
+      prisma.auditLog.findFirst({
+        where: {
+          tenantId,
+          actionType: 'escalation_created_from_engine_proposal',
+          payload: { path: ['contactId'], equals: id },
+        },
+        orderBy: { createdAt: 'desc' },
+        select: { id: true, payload: true, createdAt: true },
+      }),
+      // KAN-1037-PR2 filtered autoresponders write LeadInboxEvent rows
+      // (NOT AuditLog rows) — the connector-layer filter doesn't currently
+      // emit an AuditLog. Skip lookup for now; treat absence of a
+      // re-evaluated audit + presence of an inbound that didn't correlate
+      // as `filtered_autoresponder` is unreliable. PR5 ships the
+      // filtered_autoresponder status as a placeholder branch that today
+      // never fires. KAN-1049 widens this.
+      Promise.resolve(null),
+    ]);
+
+    const metadata = (latestInboundEngagement.metadata ?? {}) as Record<string, unknown>;
+    const reEvalPayload = (reEvalAudit?.payload ?? {}) as Record<string, unknown>;
+    const escalationPayload = (escalationAudit?.payload ?? {}) as Record<string, unknown>;
+
+    // Status derivation — narrow enum per PR5 spec confirmation.
+    let engineResponseStatus: LatestReplyEngineStatus;
+    if (escalationAudit && (!reEvalAudit || escalationAudit.createdAt >= reEvalAudit.createdAt)) {
+      engineResponseStatus = 'escalated';
+    } else if (reEvalAudit) {
+      // Brain evaluated but didn't escalate — assume no_action terminal
+      // state. PR4.5 only writes `decision_re_evaluated` then routes
+      // through wirePhase2Consumers; the absence of a downstream escalation
+      // OR send_follow_up dispatch (the latter not yet observable as
+      // audit; KAN-1049) defaults to no_action here.
+      engineResponseStatus = 'no_action';
+    } else if (filteredAuditFromLeadInbox) {
+      engineResponseStatus = 'filtered_autoresponder';
+    } else {
+      // Reply landed but engine hasn't evaluated yet (cooldown window or
+      // in-flight processing). Implicit fallback per PR5 spec.
+      engineResponseStatus = 'evaluating';
+    }
+
+    latestReply = {
+      id: latestInboundEngagement.id,
+      bodyPreview: typeof metadata.bodyPreview === 'string' ? metadata.bodyPreview : '',
+      fromAddress: typeof metadata.senderEmail === 'string' ? metadata.senderEmail : '',
+      subject: typeof metadata.subject === 'string' ? metadata.subject : '',
+      occurredAt: latestInboundEngagement.occurredAt.toISOString(),
+      signalClass: latestInboundEngagement.signalClass,
+      correlatedDecisionId:
+        typeof reEvalPayload.triggerDecisionId === 'string'
+          ? reEvalPayload.triggerDecisionId
+          : null,
+      engineResponseStatus,
+      engineResponseAt: reEvalAudit?.createdAt.toISOString() ?? null,
+      engineResponseEscalationId:
+        typeof escalationPayload.escalationId === 'string'
+          ? escalationPayload.escalationId
+          : null,
+      engineReasoning:
+        typeof escalationPayload.brainReasoning === 'string'
+          ? escalationPayload.brainReasoning
+          : null,
+    };
+  }
+
+  return { ...row, latestReply };
+}
+
+/**
+ * KAN-1037-PR5 — Last reply engine-response status. Narrow enum per the
+ * spec confirmation:
+ *   - `escalated`: engine emitted `escalate_to_human` → new Escalation
+ *     row created (PR4.5 path).
+ *   - `no_action`: engine evaluated but didn't escalate. Includes
+ *     `send_follow_up` / `advance_stage` / `wait_for_response` / etc.
+ *     pending KAN-1049 widening.
+ *   - `filtered_autoresponder`: KAN-1037-PR2 filter caught the inbound
+ *     at the webhook (placeholder; LeadInboxEvent → AuditLog wiring
+ *     deferred to KAN-1049).
+ *   - `evaluating`: reply landed but engine hasn't yet evaluated
+ *     (cooldown window / in-flight processing) — implicit fallback.
+ *
+ * `auto_replied` + `paused_contact` deferred to KAN-1049 until the
+ * corresponding audit-event surfaces are wired.
+ */
+export type LatestReplyEngineStatus =
+  | 'escalated'
+  | 'no_action'
+  | 'filtered_autoresponder'
+  | 'evaluating';
+
+/**
+ * KAN-1037-PR5 — Last reply shape returned on `contacts.getById`. Null
+ * when the contact has no inbound `email_received` engagement; absent
+ * audit-trail joins surface as null inner fields, not as a null wrapper.
+ */
+export interface LatestReply {
+  id: string;
+  bodyPreview: string;
+  fromAddress: string;
+  subject: string;
+  occurredAt: string;
+  signalClass: string;
+  correlatedDecisionId: string | null;
+  engineResponseStatus: LatestReplyEngineStatus;
+  engineResponseAt: string | null;
+  engineResponseEscalationId: string | null;
+  engineReasoning: string | null;
 }
 
 export async function createContact(

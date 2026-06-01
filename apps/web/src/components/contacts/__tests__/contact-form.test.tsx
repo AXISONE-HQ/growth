@@ -87,6 +87,10 @@ const SAMPLE_CONTACT: ContactDetail = {
   escalations: [],
   orders: [],
   _count: { orders: 0 },
+  // KAN-1037-PR5 — Last reply panel additive field; null on this fixture
+  // (the form-edit test doesn't exercise the reply panel; the dedicated
+  // last-reply-panel test file covers that surface).
+  latestReply: null,
   createdAt: '2026-05-19T00:00:00Z',
   updatedAt: '2026-05-19T00:00:00Z',
 };
