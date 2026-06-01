@@ -1,4 +1,36 @@
--- KAN-1042 PR A2 — extend SubObjectiveSource enum with 'engine'.
+-- KAN-1042 PR A2 — extend sub_objective_source enum with 'engine'.
+--
+-- # Fix-forward 2026-06-01 17:20 UTC
+--
+-- Original SQL used the wrong identifier "SubObjectiveSource" (PascalCase
+-- Prisma model name) instead of "sub_objective_source" (snake_case
+-- Postgres type name per the @@map directive). PROD migrate deploy failed
+-- with P3018 → DbError type "SubObjectiveSource" does not exist; deploy
+-- lane wedged with a failed _prisma_migrations row blocking subsequent
+-- deploys with P3009.
+--
+-- Recovery (authorized 2026-06-01 17:20 UTC):
+--   1. Read-only verify confirmed PROD enum name is sub_objective_source
+--      (4 values pre-fix) AND the failed migration row had finished_at
+--      NULL.
+--   2. `prisma migrate resolve --rolled-back
+--      20260601164727_kan_1042_pr_a2_engine_source_enum` marked the failed
+--      row as rolled-back (rolled_back_at populated). No DDL change —
+--      only mutated the _prisma_migrations metadata table.
+--   3. Fix-forward PR (this commit) keeps the SAME migration filename so
+--      the resolve marker matches; corrects the SQL identifier to
+--      "sub_objective_source"; next migrate deploy re-attempts and applies
+--      cleanly.
+--
+-- Discipline pin (banked for future migrations): when a Prisma enum/model
+-- has an @@map directive, the SQL identifier in raw migrations MUST use
+-- the @@map'd value, NOT the Prisma model name. Every existing enum
+-- migration in this repo (campaign_strategy, staging_status,
+-- stage_outcome_type, service_price_unit, ...) followed this pattern.
+-- Class-fix discipline miss — committed to feedback memo as
+-- `feedback_prisma_at_map_vs_model_name_in_migration_sql`.
+--
+-- # Original intent
 --
 -- Enables engine-driven sub-objective transitions to record source-of-truth
 -- at the column level, avoiding the "column lies" anti-pattern (per
@@ -34,7 +66,7 @@
 --   2. ALTER INDEX tenant_objective_selection_tenant_id_objective_id_…
 --      RENAME TO …. KAN-1034 cosmetic rename; not load-bearing for any
 --      code path. INTENTIONALLY OMITTED to keep this migration purely
---      additive to the SubObjectiveSource enum.
+--      additive to the sub_objective_source enum.
 
 -- AlterEnum
-ALTER TYPE "SubObjectiveSource" ADD VALUE 'engine';
+ALTER TYPE "sub_objective_source" ADD VALUE 'engine';
