@@ -550,6 +550,233 @@ describe('parseLlmResponse', () => {
 });
 
 // ─────────────────────────────────────────────
+// KAN-1042 PR A1 — transition_sub_objective action type + payload
+// validation. The new action vocabulary requires a structural payload
+// (subObjectiveTransition) carrying the BANT-5 subObjectiveKey + toState +
+// value. parseLlmResponse rejects the response on any structural break;
+// caller falls back to gracefulFallback (no_action with 0 confidence)
+// rather than letting the broken decision flow downstream.
+// ─────────────────────────────────────────────
+
+describe('parseLlmResponse — KAN-1042 transition_sub_objective payload', () => {
+  it('accepts valid transition_sub_objective with timeline+known+string value', () => {
+    const result = parseLlmResponse(
+      JSON.stringify({
+        nextBestAction: {
+          type: 'transition_sub_objective',
+          reasoning: 'Contact replied "looking to start in Q3" — timeline is now known.',
+          subObjectiveTransition: {
+            subObjectiveKey: 'timeline',
+            toState: 'known',
+            value: 'Q3 2026',
+          },
+        },
+        confidence: 0.85,
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.nextBestAction.type).toBe('transition_sub_objective');
+    expect(result.value.nextBestAction.subObjectiveTransition).toEqual({
+      subObjectiveKey: 'timeline',
+      toState: 'known',
+      value: 'Q3 2026',
+    });
+  });
+
+  it('accepts valid transition_sub_objective with budget+known+number value', () => {
+    const result = parseLlmResponse(
+      JSON.stringify({
+        nextBestAction: {
+          type: 'transition_sub_objective',
+          reasoning: 'Contact stated budget is $50K.',
+          subObjectiveTransition: {
+            subObjectiveKey: 'budget',
+            toState: 'known',
+            value: 50000,
+          },
+        },
+        confidence: 0.78,
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.nextBestAction.subObjectiveTransition?.value).toBe(50000);
+  });
+
+  it('accepts valid transition_sub_objective with toState=not_applicable + null value', () => {
+    const result = parseLlmResponse(
+      JSON.stringify({
+        nextBestAction: {
+          type: 'transition_sub_objective',
+          reasoning: 'Contact noted they have no budget constraint.',
+          subObjectiveTransition: {
+            subObjectiveKey: 'budget',
+            toState: 'not_applicable',
+            value: null,
+          },
+        },
+        confidence: 0.7,
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.nextBestAction.subObjectiveTransition?.toState).toBe('not_applicable');
+    expect(result.value.nextBestAction.subObjectiveTransition?.value).toBe(null);
+  });
+
+  it('rejects transition_sub_objective when subObjectiveTransition payload is missing', () => {
+    const result = parseLlmResponse(
+      JSON.stringify({
+        nextBestAction: {
+          type: 'transition_sub_objective',
+          reasoning: 'no payload',
+        },
+        confidence: 0.6,
+      }),
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toContain('subObjectiveTransition payload missing');
+  });
+
+  it('rejects transition_sub_objective with non-BANT-5 subObjectiveKey (vocab discipline)', () => {
+    // "crm_used" is OUTSIDE the BANT-5 vocab — the parser MUST reject
+    // even if the engine attempts it. Mirrors the router enum clamp at
+    // apps/api/src/router.ts:6617. Vocab extension is KAN-1050.
+    const result = parseLlmResponse(
+      JSON.stringify({
+        nextBestAction: {
+          type: 'transition_sub_objective',
+          reasoning: 'Contact uses HubSpot — should transition crm_used.',
+          subObjectiveTransition: {
+            subObjectiveKey: 'crm_used',
+            toState: 'known',
+            value: 'HubSpot',
+          },
+        },
+        confidence: 0.8,
+      }),
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toContain('invalid subObjectiveTransition.subObjectiveKey');
+    expect(result.error).toContain('BANT-5');
+  });
+
+  it('rejects transition_sub_objective with invalid toState', () => {
+    const result = parseLlmResponse(
+      JSON.stringify({
+        nextBestAction: {
+          type: 'transition_sub_objective',
+          reasoning: 'bad state',
+          subObjectiveTransition: {
+            subObjectiveKey: 'timeline',
+            toState: 'partial', // not in {known | not_applicable}
+            value: 'Q3 2026',
+          },
+        },
+        confidence: 0.7,
+      }),
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toContain('invalid subObjectiveTransition.toState');
+  });
+
+  it('rejects toState=known with null value (cross-rule consistency)', () => {
+    // Mirrors the service-level guard at sub-objective-gap-tracker.ts:334
+    // — toState='known' requires a non-null, non-empty value. Catching
+    // here means the dispatcher arm never sees a broken upsert input.
+    const result = parseLlmResponse(
+      JSON.stringify({
+        nextBestAction: {
+          type: 'transition_sub_objective',
+          reasoning: 'known with null value',
+          subObjectiveTransition: {
+            subObjectiveKey: 'timeline',
+            toState: 'known',
+            value: null,
+          },
+        },
+        confidence: 0.7,
+      }),
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toContain('value required');
+    expect(result.error).toContain('known');
+  });
+
+  it('rejects toState=known with empty-string value (cross-rule consistency)', () => {
+    const result = parseLlmResponse(
+      JSON.stringify({
+        nextBestAction: {
+          type: 'transition_sub_objective',
+          reasoning: 'known with empty string',
+          subObjectiveTransition: {
+            subObjectiveKey: 'authority',
+            toState: 'known',
+            value: '   ', // whitespace-only
+          },
+        },
+        confidence: 0.7,
+      }),
+    );
+    expect(result.ok).toBe(false);
+  });
+
+  it('rejects boolean value (router contract is string|number|null)', () => {
+    // Boolean is intentionally NOT supported (PRD lock decision #7 — match
+    // router enum at apps/api/src/router.ts:6619 exactly). Boolean signals
+    // must be cast to enum_value strings at the dispatcher layer.
+    const result = parseLlmResponse(
+      JSON.stringify({
+        nextBestAction: {
+          type: 'transition_sub_objective',
+          reasoning: 'authority is boolean',
+          subObjectiveTransition: {
+            subObjectiveKey: 'authority',
+            toState: 'known',
+            value: true,
+          },
+        },
+        confidence: 0.7,
+      }),
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toContain('string | number | null');
+  });
+
+  it('drops subObjectiveTransition payload on non-transition action types (defensive)', () => {
+    // The engine MAY emit a stray subObjectiveTransition payload on a
+    // wrong action type (e.g., send_follow_up with leftover transition
+    // payload from a prior decision template). The parser drops it
+    // silently — the action type is the source of truth.
+    const result = parseLlmResponse(
+      JSON.stringify({
+        nextBestAction: {
+          type: 'send_follow_up',
+          reasoning: 'follow up with leftover transition payload',
+          subObjectiveTransition: {
+            subObjectiveKey: 'timeline',
+            toState: 'known',
+            value: 'Q3 2026',
+          },
+        },
+        confidence: 0.75,
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.nextBestAction.type).toBe('send_follow_up');
+    // Payload is intentionally dropped — not load-bearing for send_follow_up.
+    expect(result.value.nextBestAction.subObjectiveTransition).toBeUndefined();
+  });
+});
+
+// ─────────────────────────────────────────────
 // KAN-825 — buildEvaluationPrompt directive Trigger block
 // Sentinel-token contract pin: any rename/removal/conditional drift on
 // the literal `## Trigger` block or the `post_stage_advance` enum value
