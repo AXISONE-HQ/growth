@@ -36,6 +36,11 @@ import { fmtDate, fmtDateTime } from '@/lib/fmt-date';
 import { CONTACT_SOURCE_LABELS, enumLabel } from '@/lib/enum-labels';
 // M3-1c — Discovery state panel (engine-view chrome between Address and Customer status).
 import { DiscoveryStatePanel } from '@/components/contacts/discovery-state-panel';
+// KAN-1037-PR5 — M3-2.5c Last reply panel. Renders when the contact has
+// a recent inbound reply with engine-response context (escalated / no_action
+// / filtered_autoresponder / evaluating). Slots above Recent engagements
+// so the highlighted reply context precedes the engagement history table.
+import { LastReplyPanel } from '@/components/contacts/last-reply-panel';
 
 function displayName(c: ContactDetail): string {
   const name = [c.firstName, c.lastName].filter(Boolean).join(' ').trim();
@@ -236,6 +241,10 @@ export default function ContactDetailPage() {
               <FieldRow label="Plan" value={contact.customer.plan ?? '—'} />
               <FieldRow label="Customer since" value={fmtDate(contact.customer.since)} />
             </SectionCard>
+          ) : null}
+
+          {contact.latestReply ? (
+            <LastReplyPanel latestReply={contact.latestReply} />
           ) : null}
 
           <SectionCard title="Recent engagements" count={contact.engagements.length}>

@@ -815,6 +815,25 @@ export interface RecommendationDetail {
   updatedAt: string;
   resolvedBy: string | null;
   resolvedAt: string | null;
+  // KAN-1037-PR5 — M3-2.5c Trigger context for engine_proposed_action
+  // escalations. Server-side derived in `getRecommendationDetail` from
+  // the contact's most recent `email_received` engagement. Null for
+  // non-engine-proposed escalation types (most queue rows pre-PR4.5).
+  triggerInbound: TriggerInbound | null;
+  // KAN-1037-PR5 — Originating Decision the engine evaluated, per
+  // PR4.5 Phase 1 finding #1. Distinct from `decisionId` above (which
+  // is PR4.5's `recentDecision` lookup at create time). Both rendered
+  // in the UI for full audit-chain navigation.
+  triggerDecisionId: string | null;
+}
+
+export interface TriggerInbound {
+  id: string;
+  bodyPreview: string;
+  fromAddress: string;
+  subject: string;
+  occurredAt: string;
+  signalClass: string;
 }
 
 export interface SuggestedAction {
@@ -995,6 +1014,43 @@ export interface ContactDetail extends ContactListItem {
   // KAN-cohort-3.5 — truthful count of orders for the section header,
   // even when `orders` is truncated to the cap.
   _count: { orders: number };
+  // KAN-1037-PR5 — M3-2.5c Last reply panel. Server-side derived in
+  // `getContactById` from the most recent `email_received` engagement +
+  // parallel audit-log lookups for engine response context. Null when
+  // the contact has no inbound reply on file.
+  latestReply: LatestReply | null;
+}
+
+/**
+ * KAN-1037-PR5 — Last reply derivation status. Narrow enum per the
+ * spec confirmation:
+ *   - `escalated`: engine emitted `escalate_to_human` (PR4.5 path).
+ *   - `no_action`: engine evaluated, didn't escalate (placeholder for
+ *     `send_follow_up` / `advance_stage` / `wait_for_response` /
+ *     `close_deal_lost` / `no_action` — KAN-1049 widens).
+ *   - `filtered_autoresponder`: PR2 filter caught at webhook
+ *     (placeholder — KAN-1049 wires LeadInboxEvent → AuditLog).
+ *   - `evaluating`: reply landed but engine hasn't evaluated yet
+ *     (cooldown / in-flight window) — implicit fallback.
+ */
+export type LatestReplyEngineStatus =
+  | 'escalated'
+  | 'no_action'
+  | 'filtered_autoresponder'
+  | 'evaluating';
+
+export interface LatestReply {
+  id: string;
+  bodyPreview: string;
+  fromAddress: string;
+  subject: string;
+  occurredAt: string;
+  signalClass: string;
+  correlatedDecisionId: string | null;
+  engineResponseStatus: LatestReplyEngineStatus;
+  engineResponseAt: string | null;
+  engineResponseEscalationId: string | null;
+  engineReasoning: string | null;
 }
 
 // KAN-934 — Cohort 3.1 Contact CRUD form payload. Mirrors the extended

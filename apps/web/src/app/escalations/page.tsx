@@ -34,6 +34,7 @@
  */
 
 import { useEffect, useState, useCallback, useRef } from 'react';
+import Link from 'next/link';
 import {
   AlertTriangle,
   Sparkles,
@@ -45,6 +46,7 @@ import {
   Mail,
   ChevronDown,
   ChevronRight,
+  Reply,
 } from 'lucide-react';
 import {
   recommendationsApi,
@@ -619,6 +621,63 @@ function DetailPanel({
             </Button>
           </div>
         </div>
+
+        {/* KAN-1037-PR5 — Trigger context for engine_proposed_action
+            escalations. Surfaces the contact's reply that triggered the
+            engine's escalation decision PROMINENTLY, above the suggested
+            action card. For non-engine-proposed types
+            (CONFIDENCE_BELOW_THRESHOLD / AGENTIC_GATE_DECISION /
+            guardrail_block / lead_assignment_below_threshold), this block
+            is omitted entirely and the legacy layout is unchanged. */}
+        {detail.triggerType === 'engine_proposed_action' && detail.triggerInbound ? (
+          <div className="mb-4 rounded-[var(--ds-radius-input)] border border-[var(--ds-amber-100)] bg-[var(--ds-amber-100)]/40 p-4">
+            <div className="mb-1.5 flex items-center gap-2 text-label text-[var(--ds-amber-700)]">
+              <Reply className="h-4 w-4" />
+              Triggered by reply from {detail.triggerInbound.fromAddress || '(unknown sender)'}
+              <span className="ml-auto text-caption opacity-75">
+                {new Date(detail.triggerInbound.occurredAt).toLocaleString()}
+              </span>
+            </div>
+            {detail.triggerInbound.subject ? (
+              <p className="mb-2 text-body font-medium text-foreground">
+                {detail.triggerInbound.subject}
+              </p>
+            ) : null}
+            {detail.triggerInbound.bodyPreview ? (
+              <blockquote className="mb-3 border-l-2 border-[var(--ds-amber-700)] pl-3 text-body italic text-foreground/90 whitespace-pre-wrap">
+                {detail.triggerInbound.bodyPreview}
+              </blockquote>
+            ) : (
+              <p className="mb-3 text-caption text-muted-foreground">
+                (no body captured on the originating inbound)
+              </p>
+            )}
+            <div className="flex flex-wrap gap-3 text-caption">
+              {detail.triggerDecisionId ? (
+                <span className="text-muted-foreground">
+                  Originating Decision:{' '}
+                  <code className="rounded bg-[var(--ds-surface-sunken)] px-1 py-0.5 font-mono text-foreground">
+                    {detail.triggerDecisionId.slice(0, 8)}
+                  </code>
+                </span>
+              ) : null}
+              {detail.decisionId ? (
+                <span className="text-muted-foreground">
+                  Recent Decision:{' '}
+                  <code className="rounded bg-[var(--ds-surface-sunken)] px-1 py-0.5 font-mono text-foreground">
+                    {detail.decisionId.slice(0, 8)}
+                  </code>
+                </span>
+              ) : null}
+              <Link
+                href={`/customers/${detail.contactId}`}
+                className="font-medium text-[var(--ds-amber-700)] underline-offset-2 hover:underline"
+              >
+                View contact →
+              </Link>
+            </div>
+          </div>
+        ) : null}
 
         {/* AI Suggestion (KAN-972 violet) */}
         <div className="rounded-[var(--ds-radius-input)] border border-[var(--ds-violet-100)] bg-[var(--ds-violet-100)]/40 p-4">
