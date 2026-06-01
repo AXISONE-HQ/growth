@@ -97,15 +97,24 @@ export interface ProcessOptions {
     },
   ) => Promise<string>;
   /**
-   * KAN-1005 M2-2 — publishActionDecided from action-decided-publisher.ts.
-   * Used for replayVia='action_decided' (engine path): cron re-publishes
-   * the verbatim ActionDecidedEvent so the full chain reruns. Optional
-   * for back-compat with callers that only handle Lead Inbox rows.
+   * KAN-1005 M2-2 — engine-path replay publisher. Used for
+   * replayVia='action_decided' (engine path): cron re-publishes the
+   * verbatim ActionDecidedEvent so the full chain reruns. Optional for
+   * back-compat with callers that only handle Lead Inbox rows.
+   *
+   * KAN-1046 — production wires this to `republishActionDecidedEvent`
+   * (re-validator), not `publishActionDecided` (builder). The builder
+   * expects flat `PublishActionInput` and threw `ZodError` on every
+   * replay because the stashed payload is the already-built nested
+   * envelope. Re-validator `safeParse`s the envelope and publishes it
+   * verbatim. Return shape widened to include `published` so the
+   * dispatcher can keep rows in `pending` on publish failure rather
+   * than silently marking them `dispatched`.
    */
   publishActionDecided?: (
     pubsubClient: unknown,
     event: Record<string, unknown>,
-  ) => Promise<{ messageId: string }>;
+  ) => Promise<{ published: boolean; messageId: string | null }>;
   /** resolveEmailConnectionId from message-composer.ts. */
   resolveEmailConnectionId: (prisma: PrismaClient, tenantId: string) => Promise<string | null>;
   /** resolveReplyToForTenant from message-composer.ts. */
@@ -236,6 +245,31 @@ export async function processPendingDeferredSends(
         outcome: 'error',
         error: errMsg,
       });
+      // KAN-1046 — surface the failure via AuditLog so silent
+      // catch+retry loops are queryable post-hoc. Greppable via
+      // actionType='deferred_send_replay_failed'. Best-effort —
+      // a failed audit write must not destabilize the catch path.
+      void prisma.auditLog
+        .create({
+          data: {
+            tenantId: row.tenant_id,
+            actor: 'cron_deferred_send_evaluator',
+            actionType: 'deferred_send_replay_failed',
+            reasoning: errMsg,
+            payload: {
+              rowId: row.id,
+              replayVia: row.replay_via,
+              contactId: row.contact_id,
+              dealId: row.deal_id,
+              attempts: row.attempts,
+            },
+          },
+        })
+        .catch((auditErr: unknown) => {
+          console.warn(
+            `[deferred-send-evaluator] audit-emit-replay-failed-failed id=${row.id} err=${(auditErr as Error)?.message ?? String(auditErr)}`,
+          );
+        });
       // Don't re-throw — process the rest of the batch. Failed rows stay
       // pending and will be retried on the next cron tick.
     }
@@ -349,6 +383,24 @@ async function dispatchActionDecidedReplay(
   const pubsubClient = opts.getPubSubClient();
   const result = await opts.publishActionDecided(pubsubClient, enginePayload.actionDecidedEvent);
 
+  // KAN-1046 — honor the publisher's `published` flag. Pre-fix this
+  // dispatcher always called markDispatched, so corrupted-envelope
+  // re-validation failures and Pub/Sub publish errors silently
+  // transitioned rows to `dispatched`. Now: failed publish leaves the
+  // row in `pending` for next-tick retry; the audit row written by the
+  // caller (processPendingDeferredSends catch path) surfaces drift via
+  // actionType='deferred_send_replay_failed'.
+  if (!result.published) {
+    console.error(
+      `[deferred-send-evaluator] engine-row-publish-failed id=${row.id} replayVia=action_decided attempts=${row.attempts + 1} — row stays pending`,
+    );
+    return {
+      id: row.id,
+      outcome: 'error',
+      error: 'engine_replay_publish_failed',
+    };
+  }
+
   await markDispatched(prisma, row.id, row.attempts + 1);
 
   console.log(
@@ -358,7 +410,7 @@ async function dispatchActionDecidedReplay(
   return {
     id: row.id,
     outcome: 'dispatched',
-    pubsubMessageId: result.messageId,
+    pubsubMessageId: result.messageId ?? undefined,
   };
 }
 
