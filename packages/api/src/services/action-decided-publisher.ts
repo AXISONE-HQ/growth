@@ -452,6 +452,54 @@ export async function publishActionDecided(
   }
 }
 
+/**
+ * KAN-1046 — Replay path for previously-built ActionDecidedEvent envelopes.
+ *
+ * `publishActionDecided` is a *builder*: it takes flat `PublishActionInput`
+ * and assembles a fresh, schema-validated nested envelope before publishing.
+ * The deferred-send cron evaluator (KAN-1005 M2-2) was previously wired to
+ * call `publishActionDecided` for replay, but the stashed payload is the
+ * already-built nested envelope (per action-decided-push.ts:222-227 stash
+ * site) — not a flat input. The builder read flat-named fields as
+ * `undefined` and the strict `.parse(...)` at L231 threw on every replay,
+ * leaving rows in `pending` forever.
+ *
+ * This function re-validates the stashed nested envelope (defense-in-depth
+ * against corrupted JSON rows) and re-publishes it verbatim. `safeParse`
+ * rather than `.parse` so corruption surfaces via the caller's audit row
+ * rather than throwing through the cron's outer catch.
+ */
+export async function republishActionDecidedEvent(
+  client: PubSubClient,
+  event: Record<string, unknown>,
+): Promise<{ published: boolean; messageId: string | null }> {
+  const parsed = ActionDecidedEventSchema.safeParse(event);
+  if (!parsed.success) {
+    console.warn(
+      '[republishActionDecidedEvent] stashed envelope failed re-validation',
+      parsed.error.flatten(),
+    );
+    return { published: false, messageId: null };
+  }
+
+  try {
+    const data = Buffer.from(JSON.stringify(parsed.data));
+    const attributes: Record<string, string> = {
+      eventType: 'action.decided',
+      tenantId: parsed.data.tenantId,
+      version: '1.0',
+    };
+    const messageId = await client.publish(ACTION_DECIDED_TOPIC, data, attributes);
+    return { published: true, messageId };
+  } catch (err: any) {
+    console.error(
+      `[republishActionDecidedEvent] Failed to publish to ${ACTION_DECIDED_TOPIC}:`,
+      err,
+    );
+    return { published: false, messageId: null };
+  }
+}
+
 export async function publishEscalationTriggered(
   client: PubSubClient,
   input: PublishEscalationInput,

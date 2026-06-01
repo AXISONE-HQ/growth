@@ -89,11 +89,16 @@ function makePrismaMock(claimedRows: RowFixture[]): { prisma: PrismaClient; stat
     id: `decision_${data.tenantId}`,
   }));
   const deferredSendUpdateMock = vi.fn(async () => ({}));
+  // KAN-1046 — audit log mock so the new catch-path audit emission
+  // (deferred-send-evaluator.ts:228 catch block) doesn't crash on
+  // undefined.create when error tests run.
+  const auditLogCreateMock = vi.fn(async () => ({}));
 
   const prisma = {
     $queryRaw: $queryRawMock,
     decision: { create: decisionCreateMock },
     deferredSend: { update: deferredSendUpdateMock },
+    auditLog: { create: auditLogCreateMock },
   } as unknown as PrismaClient;
 
   return {

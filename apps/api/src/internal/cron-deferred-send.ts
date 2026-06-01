@@ -77,15 +77,22 @@ async function loadMessageComposerModule(): Promise<MessageComposerModule> {
 }
 
 /**
- * KAN-1005 M2-2 — engine-path replay publisher. Loaded separately from
- * message-composer because publishActionDecided lives in
- * action-decided-publisher.ts (different module).
+ * KAN-1005 M2-2 + KAN-1046 — engine-path replay publisher. Loaded
+ * separately from message-composer because the replay publisher lives
+ * in action-decided-publisher.ts (different module).
+ *
+ * Wires `republishActionDecidedEvent` (re-validator), NOT
+ * `publishActionDecided` (flat-input builder). The stashed payload is
+ * the previously-validated nested envelope; the builder would attempt
+ * a flat-to-nested rebuild on an already-nested input, find every flat
+ * field `undefined`, and `ZodError` at schema parse. See KAN-1046 for
+ * the root-cause trace.
  */
 interface ActionDecidedPublisherModule {
-  publishActionDecided: (
+  republishActionDecidedEvent: (
     pubsubClient: unknown,
-    event: unknown,
-  ) => Promise<{ messageId: string }>;
+    event: Record<string, unknown>,
+  ) => Promise<{ published: boolean; messageId: string | null }>;
 }
 let _actionDecidedPublisherModule: ActionDecidedPublisherModule | null = null;
 async function loadActionDecidedPublisherModule(): Promise<ActionDecidedPublisherModule> {
@@ -118,15 +125,17 @@ cronDeferredSendApp.post('/cron/deferred-send-evaluator', async (c) => {
     const { evaluateSendPolicy } = await loadSendPolicyModule();
     const { publishActionSend, resolveEmailConnectionId, resolveReplyToForTenant } =
       await loadMessageComposerModule();
-    // KAN-1005 M2-2 — engine-path replay needs publishActionDecided
-    // alongside publishActionSend. Cron evaluator switches on row.replay_via.
-    const { publishActionDecided } = await loadActionDecidedPublisherModule();
+    // KAN-1005 M2-2 + KAN-1046 — engine-path replay uses
+    // `republishActionDecidedEvent` (re-validator), not the builder.
+    // Cron evaluator switches on row.replay_via and calls this for
+    // replayVia='action_decided' rows.
+    const { republishActionDecidedEvent } = await loadActionDecidedPublisherModule();
     const { getPubSubClient } = await loadPubSubClientModule();
 
     const result = await processPendingDeferredSends(prisma, {
       evaluateSendPolicy,
       publishActionSend,
-      publishActionDecided,
+      publishActionDecided: republishActionDecidedEvent,
       resolveEmailConnectionId,
       resolveReplyToForTenant,
       getPubSubClient,
