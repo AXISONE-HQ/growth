@@ -1250,3 +1250,308 @@ describe('buildEvaluationPrompt — KAN-1037-PR4 Latest inbound section', () => 
     expect(prompt).toContain('> Best, Alice');
   });
 });
+
+// ─────────────────────────────────────────────
+// KAN-1042 PR B — prompt extensions
+//
+// Two new conditional surfaces in `buildEvaluationPrompt`:
+//   1. `### Stop-condition guidance` appended INSIDE the `## Latest
+//      inbound` block (renders when latestInbound !== undefined).
+//   2. `## Sub-objective gap state for this contact` slotted BETWEEN
+//      `## Latest inbound` and `## Recent stage transitions` (renders
+//      when subObjectiveGapState has non-empty prioritizedGaps OR
+//      resolvedGaps).
+//
+// New helper: formatGapStateForContact — walks
+// DEFAULT_SUB_OBJECTIVES_GENERIC_B2B in canonical BANT-5 order; merges
+// resolvedGaps + prioritizedGaps + defensive 'unknown' fallback.
+//
+// Sentinel-token pins on literal phrasing (mirrors KAN-825's `##
+// Trigger` block pattern at L786+) so prompt-phrasing drift breaks
+// tests loudly. Phase 2.5 A/B iteration may refine; any rename of the
+// section headers or load-bearing instruction phrases must update these
+// tests in the same PR.
+// ─────────────────────────────────────────────
+
+describe('buildEvaluationPrompt — KAN-1042 PR B prompt extensions', () => {
+  const baseInput = {
+    snapshot: {
+      dealStatus: 'open',
+      currentStageName: 'Qualified',
+      currentStageOutcomeType: 'open',
+      daysInCurrentStage: 0,
+      engagementCount: 2,
+      lastEngagementType: 'email_received',
+      lastEngagementClass: 'positive',
+      daysSinceLastEngagement: 0,
+      moProgressPercent: null,
+      pipelineName: 'Default Sales Pipeline',
+      pipelineObjectiveType: 'book_appointment',
+    },
+    contact: {
+      id: 'c',
+      tenantId: 't',
+      email: 'fred@example.com',
+      firstName: 'Fred',
+      lastName: null,
+      companyName: null,
+      phone: null,
+      currentStageId: null,
+      microObjectiveProgress: {},
+      metadata: {},
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    } as never,
+    recentEngagements: [],
+    recentTransitions: [],
+  };
+
+  const inboundFixture = {
+    receivedAt: '2026-06-01T18:00:00.000Z',
+    senderEmail: 'alice@acme.com',
+    bodyText: 'Yes, looking to start in Q3. Set up a 30-min call next Tuesday?',
+    subjectLine: 'Re: Pricing inquiry',
+    inReplyToDecisionId: 'cl_dec_anchor',
+    threadDepth: 1,
+  };
+
+  // Mixed-state gap state for the canonical-order test: 2 known
+  // (timeline + authority), 1 not_applicable (budget), 2 unknown
+  // (need + motivation).
+  const mixedGapState = {
+    prioritizedGaps: [
+      {
+        key: 'need',
+        label: 'What problem are they solving?',
+        valueType: 'text' as const,
+        state: 'unknown' as const,
+        priorityWeight: 0.75,
+        requiredAtStage: 'qualified',
+        recencyDaysSinceLastEval: 0,
+        score: 0.75,
+        hardTrigger: true,
+      },
+      {
+        key: 'motivation',
+        label: "Why now? What's driving this?",
+        valueType: 'text' as const,
+        state: 'unknown' as const,
+        priorityWeight: 0.7,
+        requiredAtStage: 'qualified',
+        recencyDaysSinceLastEval: 0,
+        score: 0.7,
+        hardTrigger: true,
+      },
+    ],
+    topCandidate: {
+      key: 'need',
+      label: 'What problem are they solving?',
+      score: 0.75,
+      hardTrigger: true,
+    },
+    resolvedGaps: [
+      {
+        key: 'timeline',
+        label: 'When are they looking to start?',
+        valueType: 'text' as const,
+        state: 'known' as const,
+        value: 'Q3 2026',
+        source: 'manual' as const,
+        setBy: 'fred@axisone.ca',
+        setAt: '2026-06-01T15:00:00.000Z',
+      },
+      {
+        key: 'authority',
+        label: 'Are they the decision maker?',
+        valueType: 'enum' as const,
+        state: 'known' as const,
+        value: 'VP of Sales',
+        source: 'engine' as const,
+        setBy: 'engine_agentic_live',
+        setAt: '2026-06-01T16:00:00.000Z',
+      },
+      {
+        key: 'budget',
+        label: "What's their budget range?",
+        valueType: 'enum' as const,
+        state: 'not_applicable' as const,
+        value: null,
+        source: 'manual' as const,
+        setBy: 'fred@axisone.ca',
+        setAt: '2026-06-01T15:00:00.000Z',
+      },
+    ],
+  };
+
+  // ── (1/8) gap-state mixed-states render with all 5 BANT keys in canonical order
+  it('gap-state mixed states: all 5 BANT keys render in canonical priority order with value annotations on known rows', () => {
+    const prompt = buildEvaluationPrompt({
+      ...baseInput,
+      subObjectiveGapState: mixedGapState,
+    });
+
+    // Section header rendered.
+    expect(prompt).toContain('## Sub-objective gap state for this contact');
+    // Instruction phrasing sentinel (load-bearing — Phase 2.5 A/B iteration
+    // may refine; rename breaks this test).
+    expect(prompt).toContain('emit a `transition_sub_objective` action');
+    expect(prompt).toContain('Cite the specific reply text in your reasoning');
+
+    // Canonical-order assertion: timeline → budget → authority → need → motivation.
+    const timelineIdx = prompt.indexOf('- timeline:');
+    const budgetIdx = prompt.indexOf('- budget:');
+    const authorityIdx = prompt.indexOf('- authority:');
+    const needIdx = prompt.indexOf('- need:');
+    const motivationIdx = prompt.indexOf('- motivation:');
+    expect(timelineIdx).toBeGreaterThan(0);
+    expect(budgetIdx).toBeGreaterThan(timelineIdx);
+    expect(authorityIdx).toBeGreaterThan(budgetIdx);
+    expect(needIdx).toBeGreaterThan(authorityIdx);
+    expect(motivationIdx).toBeGreaterThan(needIdx);
+
+    // Per-state rendering.
+    expect(prompt).toContain('- timeline: known (value: "Q3 2026")');
+    expect(prompt).toContain('- budget: not_applicable');
+    expect(prompt).toContain('- authority: known (value: "VP of Sales")');
+    expect(prompt).toContain('- need: unknown');
+    expect(prompt).toContain('- motivation: unknown');
+  });
+
+  // ── (2/8) gap-state defensive-fallback: missing key from BOTH arrays → renders as 'unknown'
+  it("gap-state defensive fallback: when a BANT key is absent from both prioritizedGaps AND resolvedGaps, renders as 'unknown'", () => {
+    // Only resolvedGaps contains `timeline` — the other 4 BANT keys are
+    // absent from both arrays. The helper must defensively render each as
+    // 'unknown' so the engine treats them as fillable.
+    const partialGapState = {
+      prioritizedGaps: [],
+      topCandidate: undefined,
+      resolvedGaps: [
+        {
+          key: 'timeline',
+          label: 'When are they looking to start?',
+          valueType: 'text' as const,
+          state: 'known' as const,
+          value: 'Q3 2026',
+          source: 'manual' as const,
+          setBy: 'fred@axisone.ca',
+          setAt: '2026-06-01T15:00:00.000Z',
+        },
+      ],
+    };
+    const prompt = buildEvaluationPrompt({
+      ...baseInput,
+      subObjectiveGapState: partialGapState,
+    });
+    expect(prompt).toContain('## Sub-objective gap state for this contact');
+    expect(prompt).toContain('- timeline: known (value: "Q3 2026")');
+    expect(prompt).toContain('- budget: unknown');
+    expect(prompt).toContain('- authority: unknown');
+    expect(prompt).toContain('- need: unknown');
+    expect(prompt).toContain('- motivation: unknown');
+  });
+
+  // ── (3/8) gap-state renders when prioritizedGaps is non-empty (resolvedGaps empty)
+  it('gap-state section renders when prioritizedGaps has entries (resolvedGaps empty)', () => {
+    const onlyPrioritized = {
+      prioritizedGaps: [
+        {
+          key: 'timeline',
+          label: 'When are they looking to start?',
+          valueType: 'text' as const,
+          state: 'unknown' as const,
+          priorityWeight: 0.9,
+          requiredAtStage: 'qualified',
+          recencyDaysSinceLastEval: 0,
+          score: 0.9,
+          hardTrigger: true,
+        },
+      ],
+      topCandidate: {
+        key: 'timeline',
+        label: 'When are they looking to start?',
+        score: 0.9,
+        hardTrigger: true,
+      },
+      resolvedGaps: [],
+    };
+    const prompt = buildEvaluationPrompt({
+      ...baseInput,
+      subObjectiveGapState: onlyPrioritized,
+    });
+    expect(prompt).toContain('## Sub-objective gap state for this contact');
+    expect(prompt).toContain('- timeline: unknown');
+  });
+
+  // ── (4/8) gap-state OMITTED when subObjectiveGapState undefined (legacy callers)
+  it('gap-state section OMITTED when subObjectiveGapState undefined (legacy caller back-compat)', () => {
+    const prompt = buildEvaluationPrompt(baseInput);
+    expect(prompt).not.toContain('## Sub-objective gap state for this contact');
+    expect(prompt).not.toContain('transition_sub_objective');
+  });
+
+  // ── (5/8) gap-state OMITTED when BOTH arrays empty (transient compute failure fail-safe)
+  it("gap-state section OMITTED when both prioritizedGaps AND resolvedGaps are empty (transient computeGapState failure fail-safe)", () => {
+    const emptyGapState = {
+      prioritizedGaps: [],
+      topCandidate: undefined,
+      resolvedGaps: [],
+    };
+    const prompt = buildEvaluationPrompt({
+      ...baseInput,
+      subObjectiveGapState: emptyGapState,
+    });
+    expect(prompt).not.toContain('## Sub-objective gap state for this contact');
+  });
+
+  // ── (6/8) Stop-condition sub-section renders inside Latest inbound block when latestInbound provided
+  it('Stop-condition sub-section renders inside `## Latest inbound` block when latestInbound provided', () => {
+    const prompt = buildEvaluationPrompt({
+      ...baseInput,
+      latestInbound: inboundFixture,
+    });
+    // Sub-header renders.
+    expect(prompt).toContain('### Stop-condition guidance');
+    // Load-bearing instruction phrases (sentinel pins).
+    expect(prompt).toContain('prefer `close_deal_lost` over `send_follow_up`');
+    expect(prompt).toContain('emit `escalate_to_human`');
+    expect(prompt).toContain('Cite the specific opt-out phrasing');
+    // Slot check: sub-section appears INSIDE the Latest inbound block —
+    // after the body blockquote, before `## Recent stage transitions`.
+    const inboundIdx = prompt.indexOf('## Latest inbound');
+    const stopCondIdx = prompt.indexOf('### Stop-condition guidance');
+    const stageHistoryIdx = prompt.indexOf('## Recent stage transitions');
+    expect(inboundIdx).toBeGreaterThan(0);
+    expect(stopCondIdx).toBeGreaterThan(inboundIdx);
+    expect(stageHistoryIdx).toBeGreaterThan(stopCondIdx);
+  });
+
+  // ── (7/8) Stop-condition sub-section OMITTED when latestInbound undefined
+  it('Stop-condition sub-section OMITTED when latestInbound undefined (no inbound to interpret)', () => {
+    const prompt = buildEvaluationPrompt(baseInput);
+    expect(prompt).not.toContain('### Stop-condition guidance');
+    expect(prompt).not.toContain('## Latest inbound');
+  });
+
+  // ── (8/8) Both new sections render together when latestInbound + gap-state both provided
+  it('Both sections render in correct order when latestInbound AND non-empty subObjectiveGapState are both provided', () => {
+    const prompt = buildEvaluationPrompt({
+      ...baseInput,
+      latestInbound: inboundFixture,
+      subObjectiveGapState: mixedGapState,
+    });
+    // Both sections present.
+    expect(prompt).toContain('## Latest inbound');
+    expect(prompt).toContain('### Stop-condition guidance');
+    expect(prompt).toContain('## Sub-objective gap state for this contact');
+    expect(prompt).toContain('## Recent stage transitions');
+    // Slot ordering: Latest inbound (with stop-condition inside) → gap-state
+    // → Recent stage transitions. Per Phase 1 Q2 + Q3 architecture.
+    const inboundIdx = prompt.indexOf('## Latest inbound');
+    const stopCondIdx = prompt.indexOf('### Stop-condition guidance');
+    const gapStateIdx = prompt.indexOf('## Sub-objective gap state for this contact');
+    const stageHistoryIdx = prompt.indexOf('## Recent stage transitions');
+    expect(stopCondIdx).toBeGreaterThan(inboundIdx);
+    expect(gapStateIdx).toBeGreaterThan(stopCondIdx);
+    expect(stageHistoryIdx).toBeGreaterThan(gapStateIdx);
+  });
+});

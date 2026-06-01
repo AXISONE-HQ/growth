@@ -34,6 +34,16 @@ import type {
   DealStageHistory,
 } from '@prisma/client';
 import { complete } from './llm-client.js';
+// KAN-1042 PR B — gap-state self-fetch from inside evaluateDealState. Same-
+// rootDir static import; no cross-rootDir TS6059 concerns. computeGapState
+// is fail-safe (returns empty prioritizedGaps/resolvedGaps on any DB error)
+// per its own contract, so a transient failure here gracefully omits the
+// new prompt section rather than blocking the engine call.
+import { computeGapState } from './sub-objective-gap-tracker.js';
+import {
+  DEFAULT_SUB_OBJECTIVES_GENERIC_B2B,
+  type SubObjectiveGapState,
+} from '@growth/shared';
 
 // ─────────────────────────────────────────────
 // Types
@@ -238,6 +248,21 @@ export interface EvaluateOptions {
    * about content, not row identities).
    */
   latestInbound?: BrainLatestInbound;
+  /**
+   * KAN-1042 PR B — pre-computed sub-objective gap state. When provided,
+   * `evaluateDealState` SKIPS its internal `computeGapState` call and uses
+   * this value verbatim. When undefined (default), the engine fetches it
+   * internally so legacy callers see no behavioral diff beyond the new
+   * prompt section.
+   *
+   * Use-case: callers (e.g., runDecisionForContact at L1117) that already
+   * loaded gap state for their own logic can pass it through to avoid a
+   * duplicate DB round-trip. Best-effort fail-safe — a transient compute
+   * failure inside evaluateDealState produces an empty gap-state structure
+   * (per computeGapState's own contract) and the prompt's gap-state
+   * section is omitted rather than rendering an empty header.
+   */
+  subObjectiveGapState?: SubObjectiveGapState;
 }
 
 /**
@@ -480,11 +505,25 @@ export async function evaluateDealState(
     }
   }
 
+  // 4a-bis. KAN-1042 PR B — sub-objective gap-state fetch. When caller
+  // provided a pre-computed value via options.subObjectiveGapState (per
+  // EvaluateOptions docstring), use it verbatim. Otherwise compute it
+  // here. computeGapState is fail-safe (returns empty
+  // prioritizedGaps/resolvedGaps + writes audit on DB error) — the new
+  // `## Sub-objective gap state for this contact` prompt section omits
+  // gracefully when both arrays are empty.
+  const gapState: SubObjectiveGapState =
+    options.subObjectiveGapState ??
+    (await computeGapState(prisma, deal.tenantId, deal.contactId, {
+      currentStageName: snapshot.currentStageName,
+    }));
+
   // 4b. Build prompt. KAN-825 threads the triggerContext through so chained
   // post-stage-advance calls render a directive prompt block that biases
   // Brain toward send_follow_up (default 'inbound' renders the legacy
   // prompt unchanged). KAN-828 threads the retrieval result into the new
-  // `## Company knowledge` section.
+  // `## Company knowledge` section. KAN-1042 PR B threads the gap state
+  // into the new `## Sub-objective gap state for this contact` section.
   const userPrompt = buildEvaluationPrompt({
     snapshot,
     contact: deal.contact,
@@ -498,6 +537,11 @@ export async function evaluateDealState(
     // chains, etc.); contact-replied-push passes the matched outbound's
     // reply context so `## Latest inbound` renders the contact's body.
     latestInbound: options.latestInbound,
+    // KAN-1042 PR B — BANT-5 gap state for the new prompt section.
+    // Conditional render gated on prioritizedGaps.length > 0 ||
+    // resolvedGaps.length > 0; legacy callers with no gap data see the
+    // section omitted.
+    subObjectiveGapState: gapState,
   });
 
   // 5. Call LLM. tenantId derived from the loaded Deal (KAN-745 per-tenant
@@ -707,8 +751,25 @@ export function buildEvaluationPrompt(input: {
    * is OMITTED when undefined — every legacy caller (lead-received Phase 2
    * wiring, post-stage-advance chains, sync trpc paths) flows through this
    * branch unchanged.
+   *
+   * KAN-1042 PR B (Half B) extends the rendering: when `latestInbound !==
+   * undefined`, the block also appends a `### Stop-condition guidance`
+   * sub-section that instructs the engine to prefer `close_deal_lost` on
+   * clear rejection signals and `escalate_to_human` on opt-out signals.
    */
   latestInbound?: BrainLatestInbound;
+  /**
+   * KAN-1042 PR B (Half A) — BANT-5 sub-objective gap state for this
+   * contact. When provided AND either `prioritizedGaps` or `resolvedGaps`
+   * is non-empty, renders a `## Sub-objective gap state for this contact`
+   * section between `## Latest inbound` and `## Recent stage transitions`.
+   * Each of the 5 BANT keys renders one line in canonical priority order
+   * (timeline → budget → authority → need → motivation per
+   * DEFAULT_SUB_OBJECTIVES_GENERIC_B2B). Section is OMITTED when undefined
+   * OR when both arrays are empty (e.g., transient compute failure;
+   * sub-objective-gap-tracker fail-safes to empty per its own contract).
+   */
+  subObjectiveGapState?: SubObjectiveGapState;
 }): string {
   const {
     snapshot,
@@ -719,6 +780,7 @@ export function buildEvaluationPrompt(input: {
     postStageAdvance,
     knowledge,
     latestInbound,
+    subObjectiveGapState,
   } = input;
 
   const contactName =
@@ -847,6 +909,12 @@ Use this objective intent to inform your next-action choice — but DO NOT overr
   // for RFC 5322-style quoted content. Stray `> ` chars in bodyText pass
   // through verbatim (matches KAN-839's `## Recent inbound from contact`
   // Shaper-side convention — empirically clean even with nested quoting).
+  // KAN-1042 PR B (Half B) — `### Stop-condition guidance` sub-section
+  // appended to the `## Latest inbound` block. Conditional on `latestInbound
+  // !== undefined` via the parent ternary; the sub-section renders only
+  // when there's an actual inbound to interpret. Backtick-escaped
+  // action-type identifiers prevent template-literal interpolation in JS.
+  // Phase 2.5 A/B iteration may refine phrasing.
   const latestInboundBlock = latestInbound
     ? `
 
@@ -857,6 +925,42 @@ From: ${latestInbound.senderEmail}
 Subject: ${latestInbound.subjectLine}
 
 > ${latestInbound.bodyText.replace(/\n/g, '\n> ')}
+
+### Stop-condition guidance
+
+If the contact's reply expresses CLEAR disinterest, explicit rejection, or stated decision to go elsewhere ("we've decided to go with another vendor", "not a fit for us", "not interested"), prefer \`close_deal_lost\` over \`send_follow_up\`. Do NOT attempt to overcome stated objections via follow-up messaging — it erodes trust. \`send_follow_up\` is reserved for engaged contacts where the conversation needs continuation.
+
+If the contact's reply expresses opt-out intent ("please stop emailing me", "remove me from your list", "unsubscribe"), emit \`escalate_to_human\` so an operator can apply suppression. Cite the specific opt-out phrasing in your reasoning.
+`
+    : '';
+
+  // KAN-1042 PR B (Half A) — `## Sub-objective gap state for this contact`
+  // section. Renders ONLY when subObjectiveGapState is provided AND has
+  // non-empty arrays (prioritizedGaps OR resolvedGaps). Legacy callers
+  // without gap data + transient compute failures (empty fail-safe) BOTH
+  // route through omit so the prompt stays clean.
+  //
+  // Slot per Phase 1 Q3: BETWEEN `## Latest inbound` and `## Recent stage
+  // transitions`. Ordering invariant: "what just happened (signal + body)
+  // → what we know about this contact (gap state) → where we are (stage
+  // state)".
+  //
+  // Instruction phrasing teaches the engine WHEN to emit
+  // `transition_sub_objective`: clear factual signal in reply matching an
+  // unfilled key → emit transition; ambiguous → prefer send_follow_up to
+  // clarify. Backtick-escaped action-type identifiers.
+  const hasGapData =
+    subObjectiveGapState !== undefined &&
+    (subObjectiveGapState.prioritizedGaps.length > 0 ||
+      subObjectiveGapState.resolvedGaps.length > 0);
+  const gapStateBlock = hasGapData
+    ? `
+
+## Sub-objective gap state for this contact
+
+The following BANT-style sub-objectives track what we've learned about this contact. When the contact's reply provides CLEAR, FACTUAL information that fills an unknown row, emit a \`transition_sub_objective\` action with the matching \`subObjectiveKey\`, \`toState: "known"\`, and the relevant value. Cite the specific reply text in your reasoning. If the reply is ambiguous, prefer \`send_follow_up\` to clarify rather than guess.
+
+${formatGapStateForContact(subObjectiveGapState!)}
 `
     : '';
 
@@ -874,7 +978,7 @@ Micro-objective progress: ${snapshot.moProgressPercent ?? '(none tracked)'}${sna
 ${engagementsBlock}
 Last engagement signal: ${snapshot.lastEngagementClass ?? '(none)'}
 Days since last engagement: ${snapshot.daysSinceLastEngagement ?? '(no engagements)'}
-${latestInboundBlock}
+${latestInboundBlock}${gapStateBlock}
 ## Recent stage transitions (last 3)
 ${transitionsBlock}
 ${knowledge ? `\n## Company knowledge (relevant to this conversation)\n${renderKnowledgeSectionInline(knowledge)}\n` : ''}
@@ -914,6 +1018,57 @@ function formatSubObjectives(subObjs: unknown): string {
       return `${i + 1}. ${JSON.stringify(s)}`;
     })
     .join('\n');
+}
+
+/**
+ * KAN-1042 PR B — renderer for the CONTACT-LEVEL gap state (sibling to
+ * formatSubObjectives above, NOT an extension: different data source —
+ * ContactSubObjectiveGapState rather than Objective.subObjectives JSON).
+ *
+ * Walks DEFAULT_SUB_OBJECTIVES_GENERIC_B2B in canonical priority order
+ * (timeline → budget → authority → need → motivation) for stable output
+ * regardless of how prioritizedGaps/resolvedGaps were ordered upstream.
+ * Per-key state lookup: resolvedGaps wins for known/not_applicable;
+ * prioritizedGaps for unknown/partial; absent → 'unknown' (engine sees
+ * the gap as fillable).
+ *
+ * Value annotation `(value: "<value>")` only on known rows from
+ * resolvedGaps. Partial rows from prioritizedGaps render their
+ * valueIfPartial when present. not_applicable renders bare.
+ *
+ * Caller already gates rendering on
+ * `prioritizedGaps.length > 0 || resolvedGaps.length > 0` so this helper
+ * is only invoked when at least one row exists; defensive fallback for
+ * "all 5 keys missing across both arrays" returns each as `unknown` for
+ * graceful degradation.
+ */
+function formatGapStateForContact(gapState: SubObjectiveGapState): string {
+  // Build a key → resolved-gap map for O(1) lookup.
+  const resolvedByKey = new Map<string, (typeof gapState.resolvedGaps)[number]>();
+  for (const r of gapState.resolvedGaps) resolvedByKey.set(r.key, r);
+  const prioritizedByKey = new Map<string, (typeof gapState.prioritizedGaps)[number]>();
+  for (const p of gapState.prioritizedGaps) prioritizedByKey.set(p.key, p);
+
+  return DEFAULT_SUB_OBJECTIVES_GENERIC_B2B.map((def) => {
+    const resolved = resolvedByKey.get(def.key);
+    if (resolved) {
+      // 'known' → render value annotation; 'not_applicable' → bare.
+      if (resolved.state === 'known' && resolved.value !== null) {
+        return `- ${def.key}: known (value: "${resolved.value}")`;
+      }
+      return `- ${def.key}: ${resolved.state}`;
+    }
+    const prioritized = prioritizedByKey.get(def.key);
+    if (prioritized) {
+      if (prioritized.state === 'partial' && prioritized.valueIfPartial) {
+        return `- ${def.key}: partial (value: "${prioritized.valueIfPartial}")`;
+      }
+      return `- ${def.key}: ${prioritized.state}`;
+    }
+    // Defensive fallback — neither array carried this key. Render as
+    // unknown so the engine treats it as fillable.
+    return `- ${def.key}: unknown`;
+  }).join('\n');
 }
 
 // ─────────────────────────────────────────────
