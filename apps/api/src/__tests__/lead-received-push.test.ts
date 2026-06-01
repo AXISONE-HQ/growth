@@ -60,19 +60,32 @@ vi.mock("../lib/oidc-pubsub-verify.js", () => ({
   verifyPubsubOidc: verifyPubsubOidcMock,
 }));
 
+// KAN-1037-PR4.5 — escalation create + recent-Decision lookup for the
+// new engine_proposed_action escalation consumer. Exported below for
+// per-test stubbing.
+const escalationCreateMock = vi.fn(async ({ select }: { select?: { id?: boolean } } = {}) =>
+  select?.id ? { id: "esc_engine_proposed_a" } : { id: "esc_engine_proposed_a" },
+);
+const decisionFindFirstMock = vi.fn();
+const auditLogCreateLeadReceivedMock = vi.fn().mockResolvedValue({ id: "audit_a" });
+
 vi.mock("../prisma.js", () => ({
   prisma: {
     contact: { findUnique: contactFindUniqueMock },
     stage: { findFirst: stageFindFirstMock },
     deal: { findUnique: dealFindUniqueMock, findMany: dealFindManyMock },
-    decision: { create: decisionCreateMock },
+    decision: { create: decisionCreateMock, findFirst: decisionFindFirstMock },
     engagement: { findUnique: vi.fn(), create: vi.fn() }, // KAN-819 — only invoked indirectly via mocked logEngagement
     deferredSend: {
       updateMany: deferredSendUpdateManyMock,
       create: deferredSendCreateMock,
     },
     // M3-2.5b — audit-log create is fire-and-forget after correlation tx commits.
-    auditLog: { create: vi.fn().mockResolvedValue({ id: "audit_a" }) },
+    auditLog: { create: auditLogCreateLeadReceivedMock },
+    // KAN-1037-PR4.5 — escalation create wired for the engine_proposed_action
+    // consumer; mocked to return a stable id so tests can assert on its
+    // presence in audit + observability assertions.
+    escalation: { create: escalationCreateMock },
     $transaction: transactionMock,
   },
 }));
@@ -1997,5 +2010,240 @@ describe("KAN-828 fix-forward — caller-side wire-up", () => {
     expect(shapeOpts).toHaveProperty("brainDecision");
     expect(shapeOpts).toHaveProperty("redis");
     expect(shapeOpts).toHaveProperty("openai");
+  });
+});
+
+// ─────────────────────────────────────────────
+// KAN-1037-PR4.5 — direct wirePhase2Consumers tests
+//
+// New tests for the precomputed-decision pass-through (load-bearing
+// defense against cognitive-blind double-eval that would discard PR4's
+// latestInbound-aware reasoning) AND the new engine_proposed_action
+// escalation consumer (closes the dispatch loop on escalate_to_human).
+//
+// Dynamic import inside each `it` block: a top-level static import of
+// `../subscribers/lead-received-push.js` would get hoisted above the
+// const mock declarations at lines 31-65, causing a TDZ violation
+// (vi.mock factories evaluate at module-load time; they reference
+// `contactFindUniqueMock` etc. which aren't initialized yet). Dynamic
+// import defers the module load to test-run time, well after all const
+// initializations have completed.
+// ─────────────────────────────────────────────
+
+// Lazy-loaded reference to the exported orchestrator. Dynamic-imported
+// once on first use; subsequent calls reuse the cached module. Avoids the
+// top-level static-import TDZ issue described above.
+let cachedWireFn:
+  | ((
+      dealId: string,
+      eventId: string,
+      isChainedInvocation?: boolean,
+      precomputedDecision?: unknown,
+    ) => Promise<void>)
+  | null = null;
+async function getWirePhase2Consumers() {
+  if (cachedWireFn) return cachedWireFn;
+  const mod = (await import("../subscribers/lead-received-push.js")) as {
+    wirePhase2Consumers: (
+      dealId: string,
+      eventId: string,
+      isChainedInvocation?: boolean,
+      precomputedDecision?: unknown,
+    ) => Promise<void>;
+  };
+  cachedWireFn = mod.wirePhase2Consumers;
+  return cachedWireFn;
+}
+
+describe("KAN-1037-PR4.5 — wirePhase2Consumers precomputed-decision skip", () => {
+  beforeEach(() => {
+    setupHappyPathMocks();
+    // Reset specific PR4.5 mocks.
+    escalationCreateMock.mockClear();
+    escalationCreateMock.mockResolvedValue({ id: "esc_engine_proposed_a" });
+    decisionFindFirstMock.mockClear();
+    decisionFindFirstMock.mockResolvedValue({ id: "decision_trigger_a" });
+    auditLogCreateLeadReceivedMock.mockClear();
+    auditLogCreateLeadReceivedMock.mockResolvedValue({ id: "audit_a" });
+    dealFindUniqueMock.mockResolvedValue({
+      id: DEAL_A,
+      tenantId: TENANT_A,
+      contactId: CONTACT_A,
+    });
+  });
+
+  it("CRITICAL DEFENSE: precomputed decision SKIPS the internal evaluateDealState call", async () => {
+    // The load-bearing test. If wirePhase2Consumers re-evaluates Brain
+    // when a precomputed decision is provided, PR4's latestInbound-aware
+    // reasoning gets discarded (the second eval has no latestInbound
+    // option). This is exactly what KAN-1037-PR4.5 prevents.
+    evaluateDealStateMock.mockClear();
+    const precomputed = buildBrainDecisionFixture({ type: "no_action", confidence: 0.55 });
+
+    await (await getWirePhase2Consumers())(DEAL_A, "evt_pr4_5_defense", false, precomputed as never);
+
+    // Brain MUST NOT have been called — the precomputed decision flows
+    // straight through to the consumer routing.
+    expect(evaluateDealStateMock).not.toHaveBeenCalled();
+  });
+
+  it("back-compat: 3-arg legacy call (no precomputed) still triggers internal eval", async () => {
+    evaluateDealStateMock.mockClear();
+    // Default mock returns wait_for_response — KAN-835 chain may fire,
+    // but the FIRST eval at L1338 is what we're pinning here.
+    await (await getWirePhase2Consumers())(DEAL_A, "evt_pr4_5_legacy");
+
+    // At least one eval — the L1338 initial call. KAN-835 chain may
+    // produce additional calls; we assert ≥1 to keep this test focused
+    // on the back-compat path.
+    expect(evaluateDealStateMock).toHaveBeenCalled();
+  });
+
+  it("precomputed advance_stage decision routes to stage-transition (consumer dispatch preserved)", async () => {
+    evaluateStageTransitionMock.mockClear();
+    evaluateStageTransitionMock.mockResolvedValueOnce({
+      type: "skipped",
+      dealId: DEAL_A,
+      reason: "test_stub",
+    });
+    const precomputed = buildBrainDecisionFixture({ type: "advance_stage", confidence: 0.8 });
+
+    await (await getWirePhase2Consumers())(DEAL_A, "evt_advance", false, precomputed as never);
+
+    // Consumer routing still works post-refactor.
+    expect(evaluateStageTransitionMock).toHaveBeenCalledTimes(1);
+    // The precomputed decision is threaded into the consumer arg.
+    const stageOpts = evaluateStageTransitionMock.mock.calls[0]![2] as {
+      brainDecision?: { nextBestAction?: { type?: string } };
+    };
+    expect(stageOpts.brainDecision?.nextBestAction?.type).toBe("advance_stage");
+  });
+});
+
+describe("KAN-1037-PR4.5 — engine_proposed_action escalation consumer", () => {
+  beforeEach(() => {
+    setupHappyPathMocks();
+    escalationCreateMock.mockClear();
+    escalationCreateMock.mockResolvedValue({ id: "esc_engine_proposed_a" });
+    decisionFindFirstMock.mockClear();
+    decisionFindFirstMock.mockResolvedValue({ id: "decision_trigger_a" });
+    auditLogCreateLeadReceivedMock.mockClear();
+    auditLogCreateLeadReceivedMock.mockResolvedValue({ id: "audit_a" });
+    dealFindUniqueMock.mockResolvedValue({
+      id: DEAL_A,
+      tenantId: TENANT_A,
+      contactId: CONTACT_A,
+    });
+  });
+
+  it("precomputed escalate_to_human → creates Escalation row with engine_proposed_action triggerType + originalAction + decisionId", async () => {
+    const precomputed = buildBrainDecisionFixture({
+      type: "escalate_to_human",
+      confidence: 0.85,
+      reasoning:
+        "Contact requested 30-min call Tuesday afternoon; test-redirect tag requires human review.",
+      suggestedChannel: "email",
+      suggestedTone: "professional",
+    });
+
+    await (await getWirePhase2Consumers())(DEAL_A, "evt_escalate", false, precomputed as never);
+
+    // The load-bearing PR4.5 assertion: the engine's escalate_to_human
+    // decision produces an Escalation row.
+    expect(escalationCreateMock).toHaveBeenCalledTimes(1);
+    const createArgs = escalationCreateMock.mock.calls[0]![0] as {
+      data: {
+        tenantId: string;
+        contactId: string;
+        decisionId: string | null;
+        triggerType: string;
+        aiSuggestion: string;
+        originalAction: { actionType: string; channel: string | null; payload: Record<string, unknown> };
+        status: string;
+        context: { source: string };
+      };
+    };
+
+    expect(createArgs.data.tenantId).toBe(TENANT_A);
+    expect(createArgs.data.contactId).toBe(CONTACT_A);
+    // KAN-657 cuid — populated from the recent Decision lookup (PR4.5 finding #3).
+    expect(createArgs.data.decisionId).toBe("decision_trigger_a");
+    // New discriminator value.
+    expect(createArgs.data.triggerType).toBe("engine_proposed_action");
+    // Brain's reasoning text surfaces in aiSuggestion for the queue UI.
+    expect(createArgs.data.aiSuggestion).toContain("30-min call");
+    expect(createArgs.data.status).toBe("open");
+    // KAN-1037 PR1's originalAction column populated — operator's
+    // accept-without-modify dispatches via this (status-transition only
+    // for escalate_to_human; operator should modify to compose).
+    expect(createArgs.data.originalAction).toEqual({
+      actionType: "escalate_to_human",
+      channel: "email",
+      payload: expect.objectContaining({
+        reasoning: expect.stringContaining("30-min call"),
+        suggestedTone: "professional",
+        brainConfidence: 0.85,
+        brainModelTier: "reasoning",
+      }),
+    });
+    // Forensic context for operator inspection.
+    expect(createArgs.data.context.source).toBe("kan_1037_pr4_5_engine_proposal");
+  });
+
+  it("escalate_to_human + chained invocation context: NO escalation (chain-depth guard prevents double-escalation)", async () => {
+    const precomputed = buildBrainDecisionFixture({
+      type: "escalate_to_human",
+      confidence: 0.85,
+    });
+
+    // 3rd arg = true (chained) per the KAN-825/835 chained-call posture.
+    await (await getWirePhase2Consumers())(DEAL_A, "evt_chained_escalate", true, precomputed as never);
+
+    expect(escalationCreateMock).not.toHaveBeenCalled();
+  });
+
+  it("escalate_to_human + Deal lookup miss: log + skip, no escalation, no throw", async () => {
+    dealFindUniqueMock.mockReset();
+    dealFindUniqueMock.mockResolvedValue(null); // Deal lookup miss
+    const precomputed = buildBrainDecisionFixture({
+      type: "escalate_to_human",
+      confidence: 0.85,
+    });
+
+    await expect(
+      (await getWirePhase2Consumers())(DEAL_A, "evt_no_deal", false, precomputed as never),
+    ).resolves.not.toThrow();
+    expect(escalationCreateMock).not.toHaveBeenCalled();
+  });
+
+  it("escalate_to_human + null recent Decision: escalation created with decisionId: null (back-compat with KAN-1005 M2-6b null-safe pattern)", async () => {
+    decisionFindFirstMock.mockReset();
+    decisionFindFirstMock.mockResolvedValue(null); // No prior Decision
+    const precomputed = buildBrainDecisionFixture({
+      type: "escalate_to_human",
+      confidence: 0.85,
+    });
+
+    await (await getWirePhase2Consumers())(DEAL_A, "evt_null_decision", false, precomputed as never);
+
+    expect(escalationCreateMock).toHaveBeenCalledTimes(1);
+    const createArgs = escalationCreateMock.mock.calls[0]![0] as {
+      data: { decisionId: string | null };
+    };
+    expect(createArgs.data.decisionId).toBeNull();
+  });
+
+  it("escalate_to_human consumer error is logged + swallowed (best-effort posture)", async () => {
+    escalationCreateMock.mockRejectedValueOnce(new Error("prisma-down: connection lost"));
+    const precomputed = buildBrainDecisionFixture({
+      type: "escalate_to_human",
+      confidence: 0.85,
+    });
+
+    // No throw — consumer is best-effort per the fire-and-forget boundary
+    // at the contact-replied-push.ts caller.
+    await expect(
+      (await getWirePhase2Consumers())(DEAL_A, "evt_create_fail", false, precomputed as never),
+    ).resolves.not.toThrow();
   });
 });

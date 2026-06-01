@@ -49,7 +49,7 @@ interface AuditCreateArg {
     payload: Record<string, unknown>;
   };
 }
-const { verifyPubsubOidcMock, auditLogCreateMock, evaluateDealStateMock } = vi.hoisted(() => ({
+const { verifyPubsubOidcMock, auditLogCreateMock, evaluateDealStateMock, wirePhase2ConsumersMock } = vi.hoisted(() => ({
   verifyPubsubOidcMock: vi.fn<(arg: unknown) => Promise<boolean>>(),
   auditLogCreateMock: vi.fn<(arg: AuditCreateArg) => Promise<{ id: string }>>(
     async () => ({ id: "audit_x" }),
@@ -60,6 +60,26 @@ const { verifyPubsubOidcMock, auditLogCreateMock, evaluateDealStateMock } = vi.h
   // realistic-shape fixture so assertions on brainActionType /
   // brainConfidence / brainReasoning have non-undefined values.
   evaluateDealStateMock: vi.fn(),
+  // KAN-1037-PR4.5 — wirePhase2Consumers mock. The subscriber now passes
+  // the precomputed brainDecision as the 4th arg per the KAN-834
+  // precomputed-decision pattern (avoids double-eval inside
+  // wirePhase2Consumers). Tests assert on the call args + that
+  // wirePhase2Consumers is NOT called on the null-dealId or
+  // brain-failure paths.
+  //
+  // Explicit signature so `mock.calls[0]` is a known 4-tuple under
+  // noUncheckedIndexedAccess (apps/api strict mode). Same pattern as
+  // auditLogCreateMock above. Per the PR3 lesson + KAN-689 cohort
+  // discipline: untyped vi.fn → mock.calls typed as never[][] → access
+  // fails at strict tsc.
+  wirePhase2ConsumersMock: vi.fn<
+    (
+      dealId: string,
+      eventId: string,
+      isChainedInvocation: boolean,
+      precomputedDecision: unknown,
+    ) => Promise<void>
+  >(async () => undefined),
 }));
 
 vi.mock("../lib/oidc-pubsub-verify.js", () => ({
@@ -70,6 +90,15 @@ vi.mock("../prisma.js", () => ({
   prisma: {
     auditLog: { create: auditLogCreateMock },
   },
+}));
+
+// KAN-1037-PR4.5 — mock the sibling subscriber's exported orchestrator.
+// Direct ESM mock: contact-replied-push imports from
+// `./lead-received-push.js`; vitest intercepts here so the subscriber's
+// `void wirePhase2Consumers(...)` lands on the spy instead of the real
+// orchestrator (which would re-evaluate Brain + touch downstream tables).
+vi.mock("../subscribers/lead-received-push.js", () => ({
+  wirePhase2Consumers: wirePhase2ConsumersMock,
 }));
 
 // Brain Service variable-specifier dynamic import — vitest intercepts the
@@ -226,6 +255,9 @@ beforeEach(() => {
   verifyPubsubOidcMock.mockResolvedValue(true);
   auditLogCreateMock.mockImplementation(async () => ({ id: "audit_x" }));
   evaluateDealStateMock.mockResolvedValue(buildBrainDecisionFixture());
+  // KAN-1037-PR4.5 — default wirePhase2Consumers to a successful no-op.
+  // Specific tests override to assert call args or to simulate failure.
+  wirePhase2ConsumersMock.mockResolvedValue(undefined);
   __setRedisClientForTest(null);
 });
 
@@ -330,6 +362,24 @@ describe("KAN-1037-PR3 — contact.replied push subscriber (skeleton)", () => {
     expect(redis.del).toHaveBeenCalledWith(
       `decision-run:in-flight:${TENANT_A}:${CONTACT_X}`,
     );
+
+    // ── KAN-1037-PR4.5 — dispatch chain wired with precomputed decision ──
+    // The load-bearing assertion: wirePhase2Consumers MUST be called with
+    // the precomputed brainDecision as the 4th arg so its internal
+    // evaluateDealState call SKIPS (avoids cognitive-blind double-eval
+    // that would discard PR4's latestInbound-aware reasoning).
+    expect(wirePhase2ConsumersMock).toHaveBeenCalledTimes(1);
+    const wireCall = wirePhase2ConsumersMock.mock.calls[0];
+    expect(wireCall[0]).toBe(DEAL_X); // dealId
+    expect(wireCall[1]).toBe("feedbeef-cafe-babe-dead-feedface0000"); // eventId
+    expect(wireCall[2]).toBe(false); // isChainedInvocation
+    // 4th arg is the precomputed brainDecision — same shape as evaluateDealState returned.
+    expect(wireCall[3]).toMatchObject({
+      nextBestAction: { type: "send_follow_up" },
+      confidence: 0.78,
+    });
+    // Audit row carries dispatchConsumersFired marker.
+    expect(auditPayload.dispatchConsumersFired).toBe(true);
   });
 
   it("PR4 null-dealId path: skip-with-audit (decision_re_evaluated_skipped_no_deal) + cooldown set, evaluateDealState NOT called", async () => {
@@ -366,6 +416,8 @@ describe("KAN-1037-PR3 — contact.replied push subscriber (skeleton)", () => {
     expect(cooldown?.ttlSec).toBe(300);
     // In-flight released.
     expect(redis.store.has(`decision-run:in-flight:${TENANT_A}:${CONTACT_X}`)).toBe(false);
+    // KAN-1037-PR4.5 — wirePhase2Consumers NOT called when there's no Deal.
+    expect(wirePhase2ConsumersMock).not.toHaveBeenCalled();
   });
 
   it("PR4 brain failure: returns 500 + releases in-flight + does NOT set cooldown (so Pub/Sub retry can re-attempt)", async () => {
@@ -397,6 +449,44 @@ describe("KAN-1037-PR3 — contact.replied push subscriber (skeleton)", () => {
     expect(redis.del).toHaveBeenCalledWith(
       `decision-run:in-flight:${TENANT_A}:${CONTACT_X}`,
     );
+    // KAN-1037-PR4.5 — wirePhase2Consumers NOT called when Brain failed.
+    // No cognitive decision to route through the dispatch chain.
+    expect(wirePhase2ConsumersMock).not.toHaveBeenCalled();
+  });
+
+  it("PR4.5 wirePhase2Consumers failure is SWALLOWED (fire-and-forget): cooldown still set, 200 returned, audit row intact", async () => {
+    // Downstream consumer failure (stage-transition error, send-policy
+    // defer-write failure, escalation create reject, etc.) MUST NOT block
+    // the cooldown set or trigger a Pub/Sub retry. The cognitive audit
+    // row is already committed; per-consumer observability comes from
+    // each consumer's own audit writes.
+    const redis = makeFakeRedis();
+    __setRedisClientForTest(redis as never);
+    wirePhase2ConsumersMock.mockRejectedValueOnce(
+      new Error("kan-815b-stage-transition-down: prisma connection lost"),
+    );
+    const { body } = makeEnvelope(makeValidEvent());
+    const res = await makeApp().request("/pubsub/contact-replied", {
+      method: "POST",
+      body,
+    });
+    expect(res.status).toBe(200);
+    // Cognitive eval succeeded; decision_re_evaluated audit row written.
+    expect(evaluateDealStateMock).toHaveBeenCalledTimes(1);
+    expect(auditLogCreateMock).toHaveBeenCalledTimes(1);
+    expect(auditLogCreateMock.mock.calls[0]![0].data.actionType).toBe(
+      "decision_re_evaluated",
+    );
+    // wirePhase2Consumers WAS invoked (with the precomputed decision)
+    // — the throw happened inside the orchestrator.
+    expect(wirePhase2ConsumersMock).toHaveBeenCalledTimes(1);
+    // Cooldown STILL set despite the dispatch failure — operator-visible
+    // suppression of duplicate evaluations stays correct.
+    expect(redis.store.get(`decision-run:cooldown:${TENANT_A}:${CONTACT_X}`)?.value).toBe(
+      DECISION_X,
+    );
+    // In-flight released.
+    expect(redis.store.has(`decision-run:in-flight:${TENANT_A}:${CONTACT_X}`)).toBe(false);
   });
 
   it("cooldown gate: suppresses processing + writes contact_replied_suppressed_cooldown audit", async () => {
