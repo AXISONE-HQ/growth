@@ -45,10 +45,51 @@ export type BrainActionType =
   | 'advance_stage'
   | 'escalate_to_human'
   | 'close_deal_lost'
-  | 'no_action';
+  | 'no_action'
+  // KAN-1042 PR A1 — engine-driven sub-objective transition. Emitted
+  // when a contact's reply provides clear factual information that
+  // matches an unfilled BANT-5 sub-objective key (timeline / budget /
+  // authority / need / motivation). Payload sits on
+  // `BrainNextBestAction.subObjectiveTransition`.
+  //
+  // Governance: DISPATCHER-LEVEL gating, NOT a HIGH_STAKES_ACTION_TYPES
+  // clamp. Per Phase 1 Q6 finding (threshold-gate.ts clamp is binary
+  // — tenant cannot opt-in once an action is in the high-stakes set;
+  // the M2-3 safety invariant always wins). PR A2's wirePhase2Consumers
+  // arm reads `Tenant.autoTransitionSubObjectives` (default false →
+  // escalate to Recommendations queue via originalAction; true →
+  // dispatch via `transitionSubObjectiveState` with source='engine').
+  | 'transition_sub_objective';
 
 export type BrainSuggestedChannel = 'email' | 'sms' | 'meta_messenger';
 export type BrainSuggestedTone = 'curious' | 'professional' | 'urgent' | 'closing';
+
+/**
+ * KAN-1042 PR A1 — `transition_sub_objective` payload shape. Carried on
+ * `BrainNextBestAction.subObjectiveTransition` when (and only when)
+ * `type === 'transition_sub_objective'`.
+ *
+ * `subObjectiveKey` clamps to BANT-5 to match the router enum at
+ * `apps/api/src/router.ts:6617`. Vocab extension beyond BANT-5 is
+ * tracked separately (KAN-1050); Phase A respects the existing
+ * contract.
+ *
+ * `value` type matches the router contract exactly: `string | number |
+ * null` (no `boolean` — booleans cast to enum_value strings at
+ * dispatcher level if a future BANT row needs them).
+ */
+export type SubObjectiveTransitionKey =
+  | 'timeline'
+  | 'budget'
+  | 'authority'
+  | 'need'
+  | 'motivation';
+
+export interface SubObjectiveTransitionPayload {
+  subObjectiveKey: SubObjectiveTransitionKey;
+  toState: 'known' | 'not_applicable';
+  value: string | number | null;
+}
 
 export interface BrainNextBestAction {
   type: BrainActionType;
@@ -56,6 +97,12 @@ export interface BrainNextBestAction {
   suggestedChannel?: BrainSuggestedChannel;
   suggestedTone?: BrainSuggestedTone;
   reasoning: string;
+  /**
+   * KAN-1042 PR A1 — populated when `type === 'transition_sub_objective'`.
+   * Omitted on all other action types (parseLlmResponse drops the field
+   * unless the action type matches).
+   */
+  subObjectiveTransition?: SubObjectiveTransitionPayload;
 }
 
 export interface BrainStateSnapshot {
@@ -607,6 +654,7 @@ Given the current state of a Deal — its Stage, recent engagement history, Pipe
 - escalate_to_human: confidence too low or situation requires human judgment
 - close_deal_lost: stalled too long; give up
 - no_action: explicit no-op
+- transition_sub_objective: the contact's reply provides factual information matching an unfilled BANT sub-objective (timeline / budget / authority / need / motivation) — set the value (specify subObjectiveKey, toState, value via the subObjectiveTransition payload)
 
 Respond ONLY with valid JSON in this exact shape:
 {
@@ -615,10 +663,17 @@ Respond ONLY with valid JSON in this exact shape:
     "reasoning": "<1-2 sentence explanation>",
     "suggestedChannel": "<email|sms|meta_messenger or null>",
     "suggestedTone": "<curious|professional|urgent|closing or null>",
-    "targetStageId": "<stage id or null>"
+    "targetStageId": "<stage id or null>",
+    "subObjectiveTransition": {
+      "subObjectiveKey": "<one of: timeline|budget|authority|need|motivation>",
+      "toState": "<known|not_applicable>",
+      "value": "<string|number or null>"
+    }
   },
   "confidence": <0.0-1.0>
 }
+
+\`subObjectiveTransition\` is required ONLY when \`type === "transition_sub_objective"\`; omit or set null on all other action types.
 
 Be conservative: if unsure, recommend escalate_to_human or wait_for_response with low confidence.`;
 
@@ -872,6 +927,8 @@ const VALID_ACTION_TYPES: ReadonlySet<BrainActionType> = new Set<BrainActionType
   'escalate_to_human',
   'close_deal_lost',
   'no_action',
+  // KAN-1042 PR A1
+  'transition_sub_objective',
 ]);
 const VALID_CHANNELS: ReadonlySet<BrainSuggestedChannel> = new Set<BrainSuggestedChannel>([
   'email',
@@ -884,6 +941,21 @@ const VALID_TONES: ReadonlySet<BrainSuggestedTone> = new Set<BrainSuggestedTone>
   'urgent',
   'closing',
 ]);
+// KAN-1042 PR A1 — sub-objective transition payload validation sets.
+// `VALID_SUB_OBJECTIVE_KEYS` mirrors the BANT-5 router enum at
+// `apps/api/src/router.ts:6617`. Vocab extension is tracked separately
+// (KAN-1050) and intentionally NOT in scope here.
+const VALID_SUB_OBJECTIVE_KEYS: ReadonlySet<SubObjectiveTransitionKey> =
+  new Set<SubObjectiveTransitionKey>([
+    'timeline',
+    'budget',
+    'authority',
+    'need',
+    'motivation',
+  ]);
+const VALID_SUB_OBJECTIVE_TO_STATES: ReadonlySet<'known' | 'not_applicable'> = new Set<
+  'known' | 'not_applicable'
+>(['known', 'not_applicable']);
 
 type ParsedLlmResponse =
   | { ok: true; value: { nextBestAction: BrainNextBestAction; confidence: number } }
@@ -942,6 +1014,67 @@ export function parseLlmResponse(text: string): ParsedLlmResponse {
   }
   if (typeof a.targetStageId === 'string' && a.targetStageId.trim().length > 0) {
     nextBestAction.targetStageId = a.targetStageId;
+  }
+
+  // KAN-1042 PR A1 — subObjectiveTransition payload validation.
+  // The field is REQUIRED when type === 'transition_sub_objective' and
+  // dropped otherwise. Validation is structural (key + state are
+  // narrow enums; value passes through as string|number|null with
+  // no business-logic check). Malformed payload on a
+  // transition_sub_objective emission → reject the whole response;
+  // caller falls back to graceful escalation.
+  if (a.type === 'transition_sub_objective') {
+    const t = a.subObjectiveTransition;
+    if (!t || typeof t !== 'object') {
+      return { ok: false, error: 'subObjectiveTransition payload missing for transition_sub_objective action' };
+    }
+    const payload = t as Record<string, unknown>;
+    if (
+      typeof payload.subObjectiveKey !== 'string' ||
+      !VALID_SUB_OBJECTIVE_KEYS.has(payload.subObjectiveKey as SubObjectiveTransitionKey)
+    ) {
+      return {
+        ok: false,
+        error: `invalid subObjectiveTransition.subObjectiveKey: ${String(payload.subObjectiveKey)} (must be one of timeline|budget|authority|need|motivation per BANT-5 router contract)`,
+      };
+    }
+    if (
+      typeof payload.toState !== 'string' ||
+      !VALID_SUB_OBJECTIVE_TO_STATES.has(payload.toState as 'known' | 'not_applicable')
+    ) {
+      return {
+        ok: false,
+        error: `invalid subObjectiveTransition.toState: ${String(payload.toState)} (must be "known" or "not_applicable")`,
+      };
+    }
+    // value type: string | number | null (matches router contract at
+    // apps/api/src/router.ts:6619 exactly). Boolean intentionally NOT
+    // supported — boolean signals must be cast to enum_value at the
+    // dispatcher layer if a future BANT row needs them.
+    const value = payload.value;
+    if (value !== null && typeof value !== 'string' && typeof value !== 'number') {
+      return {
+        ok: false,
+        error: `invalid subObjectiveTransition.value: must be string | number | null (got ${typeof value})`,
+      };
+    }
+    // Cross-rule consistency: toState='known' requires non-null,
+    // non-empty value. Mirrors the service-level guard at
+    // sub-objective-gap-tracker.ts:334.
+    if (
+      payload.toState === 'known' &&
+      (value === null || (typeof value === 'string' && value.trim().length === 0))
+    ) {
+      return {
+        ok: false,
+        error: 'subObjectiveTransition.value required (non-null, non-empty) when toState="known"',
+      };
+    }
+    nextBestAction.subObjectiveTransition = {
+      subObjectiveKey: payload.subObjectiveKey as SubObjectiveTransitionKey,
+      toState: payload.toState as 'known' | 'not_applicable',
+      value: value as string | number | null,
+    };
   }
 
   return { ok: true, value: { nextBestAction, confidence } };

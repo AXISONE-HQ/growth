@@ -30,6 +30,16 @@ model Tenant {
   // KAN-450 — AI Configuration: typed columns for the Settings → AI tab.
   // confidenceThreshold + aiPermissions stay as-is (Decision Engine consumers).
   autoApproveEnabled              Boolean               @default(false) @map("auto_approve_enabled")
+  // KAN-1042 PR A1 (Phase A foundation) — engine-driven sub-objective
+  // transition gate. Mirrors M2-6b autoApproveEnabled pattern: default
+  // false → engine emissions of `transition_sub_objective` escalate to
+  // Recommendations queue (via KAN-1037 PR1 originalAction); true →
+  // dispatcher-arm auto-executes via transitionSubObjectiveState with
+  // source='engine'. DISPATCHER-LEVEL gating (consumer reads this flag),
+  // NOT a HIGH_STAKES_ACTION_TYPES clamp — per Phase 1 Q6 finding the
+  // threshold-gate clamp is binary (tenant cannot opt-in once an action
+  // is in the high-stakes set; M2-3 safety invariant always wins).
+  autoTransitionSubObjectives     Boolean               @default(false) @map("auto_transition_sub_objectives")
   dailyActionLimit                Int                   @default(100) @map("daily_action_limit")
   // KAN-1009 SAE PR4 — per-tenant daily LLM cost cap (USD). NULL = use
   // the env-default (DECISION_RUN_DAILY_COST_CAP_USD_DEFAULT, conservative

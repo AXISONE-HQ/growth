@@ -1,0 +1,39 @@
+-- KAN-1042 PR A1 (Phase A foundation) — additive `auto_transition_sub_objectives`
+-- Boolean column on Tenant.
+--
+-- Engine-driven sub-objective transition gate. Mirrors M2-6b
+-- autoApproveEnabled pattern: default false → engine emissions of
+-- `transition_sub_objective` escalate to Recommendations queue (via
+-- KAN-1037 PR1 originalAction); true → PR A2's wirePhase2Consumers arm
+-- auto-executes via `transitionSubObjectiveState` with source='engine'.
+--
+-- DISPATCHER-LEVEL gating (consumer reads this flag), NOT a
+-- HIGH_STAKES_ACTION_TYPES clamp — per Phase 1 Q6 finding the
+-- threshold-gate clamp is binary (tenant cannot opt-in once an action is
+-- in the high-stakes set; M2-3 safety invariant always wins). The PRD
+-- architectural distinction is now load-bearing for any future action-
+-- class addition that should support tenant opt-in.
+--
+-- Additive Boolean with default false: no backfill required; existing
+-- rows default to escalate-only behavior. Sibling migration shape to
+-- KAN-1037 PR1's escalations.original_action additive JSONB.
+--
+-- # Drift-strip discipline (KAN-786 / KAN-787 / KAN-1034 history)
+--
+-- `prisma migrate diff` would emit spurious schema drift items along
+-- with the real change. None applied here — this migration was authored
+-- by hand to be PURELY additive against `tenants`. Confirming the items
+-- typically stripped:
+--
+--   1. DROP INDEX "knowledge_chunk_embedding_hnsw_idx" — KAN-786,
+--      KAN-787. The HNSW index is real and load-bearing; Prisma can't
+--      model it (custom pgvector index type). Auto-DROP would silently
+--      nuke PROD's vector search; INTENTIONALLY OMITTED.
+--
+--   2. ALTER INDEX tenant_objective_selection_tenant_id_objective_id_…
+--      RENAME TO …. KAN-1034 cosmetic rename; not load-bearing for any
+--      code path; INTENTIONALLY OMITTED to keep this migration purely
+--      additive to tenants.
+
+-- AlterTable
+ALTER TABLE "tenants" ADD COLUMN     "auto_transition_sub_objectives" BOOLEAN NOT NULL DEFAULT false;
