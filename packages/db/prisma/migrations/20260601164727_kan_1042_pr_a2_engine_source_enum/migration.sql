@@ -1,0 +1,40 @@
+-- KAN-1042 PR A2 — extend SubObjectiveSource enum with 'engine'.
+--
+-- Enables engine-driven sub-objective transitions to record source-of-truth
+-- at the column level, avoiding the "column lies" anti-pattern (per
+-- `feedback_cast_loose_prisma_runtime_trap` + sibling memos). The
+-- alternative — keeping the column hardcoded `'manual'` and threading the
+-- engine discriminator only into the audit JSONB — would have the column
+-- silently misrepresent state, creating cognitive overhead every time the
+-- operator UI's "set by ..." render had to reconcile a column-says-manual
+-- value against an actor field that says `engine_agentic_live`.
+--
+-- # Deploy semantics
+--
+-- `ALTER TYPE ... ADD VALUE` is non-transactional in Postgres — commits
+-- independently of any surrounding transaction. The Prisma migrate engine
+-- handles this correctly for additive enum extensions; no special wrapping
+-- needed. New value is available immediately post-migration. No backfill
+-- (no existing rows mutated). Old client code that doesn't know about
+-- 'engine' continues to deserialize correctly on reads — it just sees an
+-- unfamiliar string. Writes from old code paths continue to write 'manual'
+-- (existing operator path) or 'decision_initialize' (existing seed path);
+-- only the new PR A2 engine-driven dispatcher arm writes 'engine'.
+--
+-- # Drift-strip discipline (KAN-786 / KAN-787 / KAN-1034 / PR A1 history)
+--
+-- Hand-authored offline (no `prisma migrate dev` interactive path) to
+-- avoid the standard spurious-DROP items. Same posture as PR A1's
+-- additive Boolean migration at 20260601154508. Items typically stripped:
+--
+--   1. DROP INDEX "knowledge_chunk_embedding_hnsw_idx" — KAN-786 / KAN-787.
+--      HNSW index is real + load-bearing; Prisma can't model it; auto-DROP
+--      would silently nuke PROD's vector search. INTENTIONALLY OMITTED.
+--
+--   2. ALTER INDEX tenant_objective_selection_tenant_id_objective_id_…
+--      RENAME TO …. KAN-1034 cosmetic rename; not load-bearing for any
+--      code path. INTENTIONALLY OMITTED to keep this migration purely
+--      additive to the SubObjectiveSource enum.
+
+-- AlterEnum
+ALTER TYPE "SubObjectiveSource" ADD VALUE 'engine';

@@ -65,7 +65,12 @@ export type SubObjectiveSource =
   | 'decision_initialize'
   | 'manual'
   | 'extraction'
-  | 'enrichment';
+  | 'enrichment'
+  // KAN-1042 PR A2 — engine-driven transitions via wirePhase2Consumers'
+  // transition_sub_objective dispatcher arm. Dispatcher gates on
+  // Tenant.autoTransitionSubObjectives (Phase 1 Q6 finding — dispatcher-
+  // level governance, NOT a HIGH_STAKES_ACTION_TYPES clamp).
+  | 'engine';
 
 /**
  * One prioritized gap entry — head of the list is the highest-priority

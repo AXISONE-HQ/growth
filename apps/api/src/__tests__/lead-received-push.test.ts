@@ -69,6 +69,20 @@ const escalationCreateMock = vi.fn(async ({ select }: { select?: { id?: boolean 
 const decisionFindFirstMock = vi.fn();
 const auditLogCreateLeadReceivedMock = vi.fn().mockResolvedValue({ id: "audit_a" });
 
+// KAN-1042 PR A2 — Tenant.findUnique for autoTransitionSubObjectives
+// dispatcher-level governance read. Per-test default unset (resolves
+// undefined → fail-safe escalate branch); explicit per-test mocks for
+// the opt-in dispatch branch.
+const tenantFindUniqueMock = vi.fn();
+// KAN-1042 PR A2 — transitionSubObjectiveState mock for the dispatcher
+// arm's auto-dispatch path. Resolves the canonical { ok, previousState,
+// wasNoOp } shape; per-test overrides for assertion paths.
+const transitionSubObjectiveStateMock = vi.fn(async () => ({
+  ok: true as const,
+  previousState: "unknown" as const,
+  wasNoOp: false,
+}));
+
 vi.mock("../prisma.js", () => ({
   prisma: {
     contact: { findUnique: contactFindUniqueMock },
@@ -86,6 +100,9 @@ vi.mock("../prisma.js", () => ({
     // consumer; mocked to return a stable id so tests can assert on its
     // presence in audit + observability assertions.
     escalation: { create: escalationCreateMock },
+    // KAN-1042 PR A2 — tenant.findUnique for dispatcher-arm governance
+    // read of Tenant.autoTransitionSubObjectives.
+    tenant: { findUnique: tenantFindUniqueMock },
     $transaction: transactionMock,
   },
 }));
@@ -139,6 +156,14 @@ vi.mock("../../../../packages/api/src/services/message-composer.js", () => ({
 
 vi.mock("../../../../packages/api/src/lib/pubsub-client.js", () => ({
   getPubSubClient: getPubSubClientMock,
+}));
+
+// KAN-1042 PR A2 — sub-objective-gap-tracker module mock for the
+// dispatcher-arm's auto-dispatch path (Tenant.autoTransitionSubObjectives
+// === true branch). Default returns the canonical extended return shape
+// { ok, previousState, wasNoOp }; per-test overrides for arm assertions.
+vi.mock("../../../../packages/api/src/services/sub-objective-gap-tracker.js", () => ({
+  transitionSubObjectiveState: transitionSubObjectiveStateMock,
 }));
 
 const { leadReceivedPushApp } = await import("../subscribers/lead-received-push.js");
@@ -2245,5 +2270,228 @@ describe("KAN-1037-PR4.5 — engine_proposed_action escalation consumer", () => 
     await expect(
       (await getWirePhase2Consumers())(DEAL_A, "evt_create_fail", false, precomputed as never),
     ).resolves.not.toThrow();
+  });
+});
+
+// ─────────────────────────────────────────────
+// KAN-1042 PR A2 — engine-proposed sub-objective transition consumer
+//
+// New dispatcher arm in wirePhase2Consumers — fires on
+// `brainDecision.nextBestAction.type === 'transition_sub_objective'`.
+// Phase 1 Q6 dispatcher-level governance (NOT a high-stakes clamp):
+//
+//   - Tenant.autoTransitionSubObjectives === false (default + missing-
+//     row fail-safe) → escalate to Recommendations queue with
+//     triggerType='engine_proposed_action' + originalAction populated
+//     (KAN-1037 PR1 operator-accept fallback path).
+//   - Tenant.autoTransitionSubObjectives === true (opt-in) → call
+//     transitionSubObjectiveState with source='engine' + engineContext.
+//
+// Chain-depth guard mirrors PR4.5's escalate_to_human consumer.
+// Defensive payload-missing guard since parseLlmResponse already enforces
+// presence at PR A1 — guard logs + returns without throwing.
+// ─────────────────────────────────────────────
+
+// Helper to construct a transition_sub_objective BrainDecision fixture.
+// Separate from buildBrainDecisionFixture because the type union there
+// doesn't include the PR A1 vocab extension (preserves existing tests
+// untouched).
+function buildTransitionBrainDecision(overrides: {
+  subObjectiveKey?: "timeline" | "budget" | "authority" | "need" | "motivation";
+  toState?: "known" | "not_applicable";
+  value?: string | number | null;
+  confidence?: number;
+  reasoning?: string;
+} = {}) {
+  return {
+    dealId: DEAL_A,
+    evaluatedAt: new Date(),
+    currentStateSnapshot: {
+      dealStatus: "open",
+      currentStageName: "Qualified",
+      currentStageOutcomeType: "open",
+      daysInCurrentStage: 0,
+      engagementCount: 1,
+      lastEngagementType: "email_received",
+      lastEngagementClass: "positive",
+      daysSinceLastEngagement: 0,
+      moProgressPercent: null,
+      pipelineName: "KAN-1042 Verify Pipeline",
+      pipelineObjectiveType: "book_appointment",
+    },
+    nextBestAction: {
+      type: "transition_sub_objective" as const,
+      reasoning:
+        overrides.reasoning ??
+        'Contact replied "looking to start in Q3" — timeline now known.',
+      subObjectiveTransition: {
+        subObjectiveKey: overrides.subObjectiveKey ?? "timeline",
+        toState: overrides.toState ?? "known",
+        value: overrides.value ?? "Q3 2026",
+      },
+    },
+    confidence: overrides.confidence ?? 0.82,
+    modelTier: "reasoning" as const,
+    llmInputTokens: 520,
+    llmOutputTokens: 95,
+  };
+}
+
+describe("KAN-1042 PR A2 — transition_sub_objective dispatcher arm", () => {
+  beforeEach(() => {
+    setupHappyPathMocks();
+    escalationCreateMock.mockClear();
+    escalationCreateMock.mockResolvedValue({ id: "esc_transition_proposed_a" });
+    decisionFindFirstMock.mockClear();
+    decisionFindFirstMock.mockResolvedValue({ id: "decision_trigger_a" });
+    tenantFindUniqueMock.mockReset();
+    transitionSubObjectiveStateMock.mockClear();
+    transitionSubObjectiveStateMock.mockResolvedValue({
+      ok: true as const,
+      previousState: "unknown" as const,
+      wasNoOp: false,
+    });
+    dealFindUniqueMock.mockResolvedValue({
+      id: DEAL_A,
+      tenantId: TENANT_A,
+      contactId: CONTACT_A,
+    });
+  });
+
+  it("ESCALATE path: autoTransitionSubObjectives=false → Escalation row created with engine_proposed_action triggerType + originalAction payload", async () => {
+    // Phase 1 Q6 default: tenant opt-out → escalate via PR4.5's pattern.
+    tenantFindUniqueMock.mockResolvedValue({ autoTransitionSubObjectives: false });
+    const precomputed = buildTransitionBrainDecision({
+      subObjectiveKey: "timeline",
+      toState: "known",
+      value: "Q3 2026",
+      confidence: 0.82,
+      reasoning: 'Contact replied "looking to start in Q3" — timeline now known.',
+    });
+
+    await (await getWirePhase2Consumers())(DEAL_A, "evt_transition_escalate", false, precomputed as never);
+
+    // Auto-dispatch path NOT taken — tenant opted out.
+    expect(transitionSubObjectiveStateMock).not.toHaveBeenCalled();
+    // Escalate path taken — Escalation row created.
+    expect(escalationCreateMock).toHaveBeenCalledTimes(1);
+    const createArgs = escalationCreateMock.mock.calls[0]![0] as {
+      data: {
+        tenantId: string;
+        contactId: string;
+        decisionId: string | null;
+        triggerType: string;
+        originalAction: { actionType: string; channel: string | null; payload: Record<string, unknown> };
+        context: Record<string, unknown>;
+      };
+    };
+    expect(createArgs.data.tenantId).toBe(TENANT_A);
+    expect(createArgs.data.contactId).toBe(CONTACT_A);
+    expect(createArgs.data.decisionId).toBe("decision_trigger_a");
+    expect(createArgs.data.triggerType).toBe("engine_proposed_action");
+    // originalAction carries the transition payload for operator-accept
+    // fallback (KAN-1037 PR1 path).
+    expect(createArgs.data.originalAction.actionType).toBe("transition_sub_objective");
+    expect(createArgs.data.originalAction.channel).toBeNull();
+    expect(createArgs.data.originalAction.payload).toMatchObject({
+      subObjectiveKey: "timeline",
+      toState: "known",
+      value: "Q3 2026",
+      brainConfidence: 0.82,
+    });
+    // Context source discriminator for KAN-1042 telemetry.
+    expect(createArgs.data.context.source).toBe("kan_1042_engine_transition_proposal");
+    expect(createArgs.data.context.tenantOptIn).toBe(false);
+  });
+
+  it("DISPATCH path: autoTransitionSubObjectives=true → transitionSubObjectiveState called with source='engine' + engineContext", async () => {
+    // Phase 1 Q6 opt-in: tenant flipped → auto-dispatch via the
+    // sub-objective-gap-tracker.
+    tenantFindUniqueMock.mockResolvedValue({ autoTransitionSubObjectives: true });
+    transitionSubObjectiveStateMock.mockResolvedValueOnce({
+      ok: true as const,
+      previousState: "unknown" as const,
+      wasNoOp: false,
+    });
+    const precomputed = buildTransitionBrainDecision({
+      subObjectiveKey: "authority",
+      toState: "known",
+      value: "VP of Sales",
+      confidence: 0.78,
+      reasoning: 'Contact stated they are "VP of Sales".',
+    });
+
+    await (await getWirePhase2Consumers())(DEAL_A, "evt_transition_dispatch", false, precomputed as never);
+
+    // Escalation NOT created — tenant opted in.
+    expect(escalationCreateMock).not.toHaveBeenCalled();
+    // Auto-dispatch fired — assert the extended signature contract.
+    expect(transitionSubObjectiveStateMock).toHaveBeenCalledTimes(1);
+    // Cast for tuple narrowing — vitest infers mock.calls[i] as tuple
+    // from the inline factory's signature (zero-arg here), which loses
+    // positional indexing.
+    const args = transitionSubObjectiveStateMock.mock.calls[0] as unknown as [
+      unknown,
+      string,
+      string,
+      { contactId: string; subObjectiveKey: string; toState: string; value: string | number | null },
+      'manual' | 'engine',
+      { reasoning: string; confidence: number; decisionId: string | null; eventId: string },
+    ];
+    // arg[0] is prisma (mock proxy). args[1] tenantId, args[2] actor,
+    // args[3] input, args[4] source, args[5] engineContext.
+    expect(args[1]).toBe(TENANT_A);
+    expect(args[2]).toBe("engine_agentic_live");
+    expect(args[3]).toEqual({
+      contactId: CONTACT_A,
+      subObjectiveKey: "authority",
+      toState: "known",
+      value: "VP of Sales",
+    });
+    expect(args[4]).toBe("engine");
+    expect(args[5]).toEqual({
+      reasoning: 'Contact stated they are "VP of Sales".',
+      confidence: 0.78,
+      decisionId: "decision_trigger_a",
+      eventId: "evt_transition_dispatch",
+    });
+  });
+
+  it("CHAIN-DEPTH GUARD: isChainedInvocation=true → NO escalation, NO dispatch (mirrors PR4.5 posture)", async () => {
+    tenantFindUniqueMock.mockResolvedValue({ autoTransitionSubObjectives: true });
+    const precomputed = buildTransitionBrainDecision();
+
+    // 3rd arg = true (chained). Both arms must skip to prevent
+    // double-transition / double-escalation on the same inbound.
+    await (await getWirePhase2Consumers())(DEAL_A, "evt_chained", true, precomputed as never);
+
+    expect(escalationCreateMock).not.toHaveBeenCalled();
+    expect(transitionSubObjectiveStateMock).not.toHaveBeenCalled();
+  });
+
+  it("DEFENSIVE GUARD: type=transition_sub_objective but subObjectiveTransition payload missing → log + skip (no escalation, no dispatch, no throw)", async () => {
+    // Parser at brain-service.ts:892+ enforces payload presence; this
+    // guard is defense-in-depth against any future parser bypass.
+    tenantFindUniqueMock.mockResolvedValue({ autoTransitionSubObjectives: true });
+    const precomputed = {
+      dealId: DEAL_A,
+      evaluatedAt: new Date(),
+      currentStateSnapshot: buildTransitionBrainDecision().currentStateSnapshot,
+      nextBestAction: {
+        type: "transition_sub_objective" as const,
+        reasoning: "stray emission with no payload",
+        // subObjectiveTransition INTENTIONALLY OMITTED
+      },
+      confidence: 0.7,
+      modelTier: "reasoning" as const,
+      llmInputTokens: 100,
+      llmOutputTokens: 50,
+    };
+
+    await expect(
+      (await getWirePhase2Consumers())(DEAL_A, "evt_no_payload", false, precomputed as never),
+    ).resolves.not.toThrow();
+    expect(escalationCreateMock).not.toHaveBeenCalled();
+    expect(transitionSubObjectiveStateMock).not.toHaveBeenCalled();
   });
 });
