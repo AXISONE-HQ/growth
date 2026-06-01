@@ -296,10 +296,21 @@ beforeEach(() => {
   publishActionSendMock.mockReset();
   resolveEmailConnectionIdMock.mockReset();
   resolveReplyToForTenantMock.mockReset();
-  // KAN-816: default Reply-To resolution returns the canonical tenant
-  // Reply-To. Tests that need to exercise the null/missing-slug case
-  // override per-case.
-  resolveReplyToForTenantMock.mockResolvedValue("c03065f6@leads.axisone.ca");
+  // KAN-816 + KAN-1036: default Reply-To resolution returns the canonical
+  // tenant Reply-To in the post-KAN-1036 `{ replyTo, replyToken }` object
+  // shape (NOT bare string — see KAN-1051 fix-forward).
+  //
+  // KAN-1051 test-gap pin: pre-fix this mock returned a bare string,
+  // which structurally matched the buggy caller's `replyTo` spread (both
+  // were string-shaped at the mock-boundary) but DID NOT match the real
+  // function's runtime object return. The test was green for the wrong
+  // reason. Aligning the mock with reality means any future regression
+  // to the spread-the-whole-object anti-pattern breaks tests loudly.
+  // Tests that need the null/missing-slug case override per-case.
+  resolveReplyToForTenantMock.mockResolvedValue({
+    replyTo: "c03065f6+aabbccddeeff0011@leads.axisone.ca",
+    replyToken: "aabbccddeeff0011",
+  });
   getPubSubClientMock.mockReset();
   dealFindUniqueMock.mockReset();
   decisionCreateMock.mockReset();
@@ -846,7 +857,7 @@ describe("KAN-815 — Phase 2 wiring (Brain trigger framework + consumer dispatc
   //    resolved Reply-To address through to publishActionSend. Confirms the
   //    customer-reply loop is architecturally wired (recipient replies route
   //    to <inboxSlug>@leads.<LEAD_INBOX_DOMAIN> instead of the From address).
-  it("KAN-816: send_follow_up dispatch resolves tenant Reply-To + passes through to publishActionSend", async () => {
+  it("KAN-816 + KAN-1036 + KAN-1051: send_follow_up dispatch destructures the resolver's object return into publishActionSend.replyTo (string) AND replyToken (separate field)", async () => {
     setupHappyPathMocks();
     evaluateDealStateMock.mockReset();
     setupPhase2DispatchMocks();
@@ -855,13 +866,52 @@ describe("KAN-815 — Phase 2 wiring (Brain trigger framework + consumer dispatc
 
     expect(resolveReplyToForTenantMock).toHaveBeenCalledOnce();
     expect(resolveReplyToForTenantMock.mock.calls[0]![1]).toBe(TENANT_A);
+    // KAN-1051 — pass decisionId as 3rd arg so resolver returns the
+    // subaddressed KAN-1036 shape.
+    expect(resolveReplyToForTenantMock.mock.calls[0]![2]).toEqual(expect.any(String));
 
-    const publishInput = publishActionSendMock.mock.calls[0]![1] as { replyTo?: string };
-    expect(publishInput.replyTo).toBe("c03065f6@leads.axisone.ca");
+    const publishInput = publishActionSendMock.mock.calls[0]![1] as {
+      replyTo?: unknown;
+      replyToken?: unknown;
+    };
+    // The load-bearing assertion: publishActionSend.replyTo MUST be the
+    // string `replyTo` field destructured from the resolver's return —
+    // NOT the whole ResolvedReplyTo object. Pre-KAN-1051 this assertion
+    // would have caught the bug.
+    expect(typeof publishInput.replyTo).toBe("string");
+    expect(publishInput.replyTo).toBe("c03065f6+aabbccddeeff0011@leads.axisone.ca");
+    // KAN-1036 — replyToken threaded as separate field on publishActionSend
+    // for outbound sidecar persistence.
+    expect(publishInput.replyToken).toBe("aabbccddeeff0011");
   });
 
-  // ── KAN-816: Reply-To omitted when tenant has no inboxSlug (graceful)
-  it("KAN-816: send_follow_up dispatch omits Reply-To when tenant has no inboxSlug (warn-and-continue)", async () => {
+  // ── KAN-1051: full ResolvedReplyTo object MUST NOT leak into publishActionSend.replyTo
+  it("KAN-1051 sentinel: publishActionSend.replyTo is never the object literal { replyTo, replyToken } — destructure discipline pin", async () => {
+    setupHappyPathMocks();
+    evaluateDealStateMock.mockReset();
+    setupPhase2DispatchMocks();
+
+    await postEnvelope(buildPushEnvelope());
+
+    const publishInput = publishActionSendMock.mock.calls[0]![1] as { replyTo?: unknown };
+    // Structural assertion: replyTo MUST be a primitive (string), not an
+    // object. The pre-fix bug had `replyTo` as `{ replyTo, replyToken }`,
+    // which connector-side Zod parser rejected with `Expected string,
+    // received object`. This test pins the contract against any future
+    // regression to the spread-the-whole-object pattern (whether at this
+    // call site, a future caller, or any equivalent dispatcher arm).
+    expect(publishInput.replyTo).not.toBeNull();
+    expect(typeof publishInput.replyTo).not.toBe("object");
+    // And neither field name on the object literal should appear as a
+    // structural shape on the publishInput.replyTo value (i.e., it must
+    // not be `{ replyTo: '...', replyToken: '...' }`).
+    if (typeof publishInput.replyTo === "string") {
+      expect(publishInput.replyTo).toMatch(/^[^{]/); // can't start with `{`
+    }
+  });
+
+  // ── KAN-816 + KAN-1036: Reply-To omitted when resolver returns null (no inboxSlug)
+  it("KAN-816 + KAN-1051: send_follow_up dispatch omits Reply-To AND replyToken when resolver returns null (no inboxSlug)", async () => {
     setupHappyPathMocks();
     evaluateDealStateMock.mockReset();
     setupPhase2DispatchMocks();
@@ -870,10 +920,36 @@ describe("KAN-815 — Phase 2 wiring (Brain trigger framework + consumer dispatc
 
     await postEnvelope(buildPushEnvelope());
 
-    const publishInput = publishActionSendMock.mock.calls[0]![1] as { replyTo?: string };
+    const publishInput = publishActionSendMock.mock.calls[0]![1] as {
+      replyTo?: string;
+      replyToken?: string;
+    };
     expect(publishInput.replyTo).toBeUndefined();
+    expect(publishInput.replyToken).toBeUndefined();
     // dispatch still proceeds — Reply-To omission is graceful
     expect(publishActionSendMock).toHaveBeenCalledOnce();
+  });
+
+  // ── KAN-1051 + KAN-1036: replyToken handling when resolver returns no token (back-compat caller)
+  it("KAN-1051: send_follow_up dispatch omits replyToken when resolver returns { replyTo, replyToken: null } (back-compat path)", async () => {
+    setupHappyPathMocks();
+    evaluateDealStateMock.mockReset();
+    setupPhase2DispatchMocks();
+    resolveReplyToForTenantMock.mockReset();
+    resolveReplyToForTenantMock.mockResolvedValueOnce({
+      replyTo: "c03065f6@leads.axisone.ca",
+      replyToken: null,
+    });
+
+    await postEnvelope(buildPushEnvelope());
+
+    const publishInput = publishActionSendMock.mock.calls[0]![1] as {
+      replyTo?: string;
+      replyToken?: string;
+    };
+    expect(publishInput.replyTo).toBe("c03065f6@leads.axisone.ca");
+    // No token → field omitted (no `replyToken: null` written to the wire).
+    expect(publishInput.replyToken).toBeUndefined();
   });
 
   // ── Test 5 — send_follow_up + shape returns no_shape → publishActionSend NOT called
