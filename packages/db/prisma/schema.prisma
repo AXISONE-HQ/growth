@@ -3069,6 +3069,11 @@ enum SubObjectiveSource {
   manual
   extraction
   enrichment
+  // KAN-1042 PR A2 — engine-driven sub-objective transitions emitted by
+  // the Brain Service's `transition_sub_objective` action. Dispatcher arm
+  // at apps/api/src/subscribers/lead-received-push.ts gates on
+  // Tenant.autoTransitionSubObjectives before writing this source.
+  engine
 
   @@map("sub_objective_source")
 }

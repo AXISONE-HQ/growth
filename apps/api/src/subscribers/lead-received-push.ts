@@ -235,6 +235,41 @@ async function loadResolveActiveDealModule(): Promise<ResolveActiveDealModule> {
   return _resolveActiveDealModule;
 }
 
+// KAN-1042 PR A2 — sub-objectives loader for the engine-driven
+// transition_sub_objective dispatcher arm. Variable-specifier dynamic
+// import (KAN-689 cohort) — sibling to loadResolveActiveDealModule above.
+// Inline interface mirrors the EXTENDED signature shipped by PR A2:
+// source + optional engineContext + wasNoOp return. Operator-path caller
+// at router.ts:6630 uses the same module via router's own loader and
+// flows through default source='manual' (back-compat).
+interface SubObjectivesModule {
+  transitionSubObjectiveState: (
+    prisma: unknown,
+    tenantId: string,
+    actor: string,
+    input: {
+      contactId: string;
+      subObjectiveKey: string;
+      toState: 'known' | 'not_applicable';
+      value?: string | number | null;
+    },
+    source?: 'manual' | 'engine',
+    engineContext?: {
+      reasoning: string;
+      confidence: number;
+      decisionId: string | null;
+      eventId: string;
+    },
+  ) => Promise<{ ok: true; previousState: string; wasNoOp: boolean }>;
+}
+let _subObjectivesModule: SubObjectivesModule | null = null;
+async function loadSubObjectivesModule(): Promise<SubObjectivesModule> {
+  if (_subObjectivesModule) return _subObjectivesModule;
+  const spec = '../../../../packages/api/src/services/sub-objective-gap-tracker.js';
+  _subObjectivesModule = (await import(spec)) as SubObjectivesModule;
+  return _subObjectivesModule;
+}
+
 // ─────────────────────────────────────────────
 // KAN-815 Phase 2 wiring — module loaders for the substrate the trigger
 // invokes after the engagement-write transaction commits. Brain Service
@@ -284,11 +319,23 @@ interface BrainServiceModule {
         | 'advance_stage'
         | 'escalate_to_human'
         | 'close_deal_lost'
-        | 'no_action';
+        | 'no_action'
+        // KAN-1042 PR A1 — engine-driven sub-objective transition.
+        // Dispatcher-level governance (PR A2's new arm reads
+        // Tenant.autoTransitionSubObjectives).
+        | 'transition_sub_objective';
       targetStageId?: string;
       suggestedChannel?: 'email' | 'sms' | 'meta_messenger';
       suggestedTone?: 'curious' | 'professional' | 'urgent' | 'closing';
       reasoning: string;
+      // KAN-1042 PR A1 — payload carried when type === 'transition_sub_objective'.
+      // BANT-5 key contract matches the router enum at
+      // apps/api/src/router.ts:6617.
+      subObjectiveTransition?: {
+        subObjectiveKey: 'timeline' | 'budget' | 'authority' | 'need' | 'motivation';
+        toState: 'known' | 'not_applicable';
+        value: string | number | null;
+      };
     };
     confidence: number;
     modelTier: 'cheap' | 'reasoning';
@@ -1569,6 +1616,31 @@ export async function wirePhase2Consumers(
   ) {
     await createEngineProposedEscalation(dealId, eventId, brainDecision);
   }
+
+  // KAN-1042 PR A2 — engine-proposed sub-objective transition consumer.
+  //
+  // When Brain emits `transition_sub_objective`, the engine has parsed a
+  // factual signal from the contact's reply matching an unfilled BANT-5
+  // sub-objective key. Per Phase 1 Q6 architectural distinction, this
+  // action is DISPATCHER-LEVEL gated (NOT a HIGH_STAKES_ACTION_TYPES
+  // clamp — the threshold-gate clamp is binary, tenant cannot opt-in
+  // once an action is in the high-stakes set per M2-3 safety invariant):
+  //
+  //   - Tenant.autoTransitionSubObjectives === false (default) → escalate
+  //     to Recommendations queue (KAN-1037 PR1 originalAction path).
+  //   - Tenant.autoTransitionSubObjectives === true (opt-in) → dispatch
+  //     via transitionSubObjectiveState with source='engine' (PR A2
+  //     signature extension).
+  //
+  // Chain-depth guard mirrors the escalate_to_human consumer above —
+  // a chained call returning transition_sub_objective would create two
+  // transitions/escalations for the same inbound.
+  if (
+    brainDecision.nextBestAction.type === 'transition_sub_objective' &&
+    !isChainedInvocation
+  ) {
+    await handleEngineTransitionSubObjective(dealId, eventId, brainDecision);
+  }
 }
 
 /**
@@ -1701,6 +1773,160 @@ async function createEngineProposedEscalation(
         `[lead-received-push] kan-1037-pr4-5-escalate-audit-failed dealId=${dealId} eventId=${eventId} escalationId=${createdEscalationId} err=${(err as Error)?.message ?? String(err)}`,
       );
     });
+}
+
+/**
+ * KAN-1042 PR A2 — engine-proposed sub-objective transition handler.
+ *
+ * Dispatcher-level governance: reads `Tenant.autoTransitionSubObjectives`
+ * (default false → escalate; true → auto-dispatch). Sibling to
+ * `createEngineProposedEscalation` (PR4.5) in posture: best-effort
+ * (warn-log on failure, don't throw), one Deal lookup + one Tenant
+ * lookup + one Decision lookup, originalAction populated for the
+ * operator-accept fallback path (KAN-1037 PR1).
+ *
+ * Phase 1 architectural decisions baked in:
+ *   - Q1: fresh Tenant.findUnique at the arm (no caching infra; ~1ms
+ *     PROD; missing/null row treated as opt-out per fail-safe).
+ *   - Q2: wasNoOp threading into the audit payload happens inside
+ *     transitionSubObjectiveState — this handler doesn't pre-check.
+ *   - Q3: Deal.findUnique mirrors createEngineProposedEscalation pattern.
+ */
+async function handleEngineTransitionSubObjective(
+  dealId: string,
+  eventId: string,
+  brainDecision: Phase2BrainDecision,
+): Promise<void> {
+  // Defensive: parser at brain-service.ts:892+ enforces payload presence
+  // when type === 'transition_sub_objective'. Empty payload here would
+  // indicate a parser bypass; warn + return.
+  const payload = brainDecision.nextBestAction.subObjectiveTransition;
+  if (!payload) {
+    console.warn(
+      `[lead-received-push] kan-1042-transition-no-payload dealId=${dealId} eventId=${eventId} — type=transition_sub_objective without subObjectiveTransition payload`,
+    );
+    return;
+  }
+
+  // Load Deal for tenantId + contactId. Mirrors createEngineProposedEscalation
+  // pattern at L1593-1596.
+  const deal = await prisma.deal.findUnique({
+    where: { id: dealId },
+    select: { id: true, tenantId: true, contactId: true },
+  });
+  if (!deal) {
+    console.warn(
+      `[lead-received-push] kan-1042-transition-no-deal dealId=${dealId} eventId=${eventId} — Deal lookup miss; arm skipped`,
+    );
+    return;
+  }
+
+  // Phase 1 Q6 dispatcher-level gating — read Tenant.autoTransitionSubObjectives.
+  // Default false / null → escalate. true → dispatch. Missing-row =
+  // opt-out (fail-safe direction).
+  const tenant = await prisma.tenant.findUnique({
+    where: { id: deal.tenantId },
+    select: { autoTransitionSubObjectives: true },
+  });
+  const optedIn = tenant?.autoTransitionSubObjectives === true;
+
+  // Find originating Decision for audit linkage. Same pattern as
+  // createEngineProposedEscalation at L1635-1639.
+  const recentDecision = await prisma.decision.findFirst({
+    where: { tenantId: deal.tenantId, contactId: deal.contactId },
+    orderBy: { createdAt: 'desc' },
+    select: { id: true },
+  });
+
+  if (!optedIn) {
+    // ESCALATE path — tenant opt-out (default). Write an Escalation row
+    // with originalAction carrying the subObjectiveTransition payload.
+    // Operator accept-without-modify dispatches via the KAN-1037 PR1
+    // fallback path (escalations.originalAction column).
+    const originalAction = {
+      actionType: 'transition_sub_objective',
+      channel: null,
+      payload: {
+        reasoning: brainDecision.nextBestAction.reasoning,
+        subObjectiveKey: payload.subObjectiveKey,
+        toState: payload.toState,
+        value: payload.value,
+        brainConfidence: brainDecision.confidence,
+        brainModelTier: brainDecision.modelTier,
+      },
+    };
+    try {
+      const created = await prisma.escalation.create({
+        data: {
+          tenantId: deal.tenantId,
+          contactId: deal.contactId,
+          decisionId: recentDecision?.id ?? null,
+          triggerType: 'engine_proposed_action',
+          triggerReason: brainDecision.nextBestAction.reasoning,
+          severity: brainDecision.confidence < 0.4 ? 'high' : 'medium',
+          aiSuggestion: brainDecision.nextBestAction.reasoning,
+          originalAction: originalAction as unknown as object,
+          status: 'open',
+          context: {
+            source: 'kan_1042_engine_transition_proposal',
+            eventId,
+            dealId,
+            subObjectiveKey: payload.subObjectiveKey,
+            toState: payload.toState,
+            value: payload.value,
+            brainConfidence: brainDecision.confidence,
+            brainModelTier: brainDecision.modelTier,
+            llmInputTokens: brainDecision.llmInputTokens,
+            llmOutputTokens: brainDecision.llmOutputTokens,
+            tenantOptIn: false,
+          } as unknown as object,
+        },
+        select: { id: true },
+      });
+      console.log(
+        `[lead-received-push] kan-1042-transition-escalated dealId=${dealId} eventId=${eventId} escalationId=${created.id} subObjectiveKey=${payload.subObjectiveKey} toState=${payload.toState} reason=tenant_opt_out confidence=${brainDecision.confidence.toFixed(2)}`,
+      );
+    } catch (err) {
+      console.warn(
+        `[lead-received-push] kan-1042-transition-escalate-failed dealId=${dealId} eventId=${eventId} subObjectiveKey=${payload.subObjectiveKey} err=${(err as Error)?.message ?? String(err)}`,
+      );
+    }
+    return;
+  }
+
+  // DISPATCH path — tenant opt-in. Call transitionSubObjectiveState with
+  // source='engine' + engineContext (reasoning + confidence + decisionId
+  // + eventId). Phase 1 locked decision #3 — PR A2 signature extension.
+  // wasNoOp is computed inside the function + threaded into the audit
+  // payload (Q2 finding — operator-path semantics preserved).
+  try {
+    const { transitionSubObjectiveState } = await loadSubObjectivesModule();
+    const result = await transitionSubObjectiveState(
+      prisma,
+      deal.tenantId,
+      'engine_agentic_live',
+      {
+        contactId: deal.contactId,
+        subObjectiveKey: payload.subObjectiveKey,
+        toState: payload.toState,
+        value: payload.value,
+      },
+      'engine',
+      {
+        reasoning: brainDecision.nextBestAction.reasoning,
+        confidence: brainDecision.confidence,
+        decisionId: recentDecision?.id ?? null,
+        eventId,
+      },
+    );
+    console.log(
+      `[lead-received-push] kan-1042-transition-auto-dispatched dealId=${dealId} eventId=${eventId} subObjectiveKey=${payload.subObjectiveKey} toState=${payload.toState} previousState=${result.previousState} wasNoOp=${result.wasNoOp} confidence=${brainDecision.confidence.toFixed(2)}`,
+    );
+  } catch (err) {
+    console.warn(
+      `[lead-received-push] kan-1042-transition-dispatch-failed dealId=${dealId} eventId=${eventId} subObjectiveKey=${payload.subObjectiveKey} err=${(err as Error)?.message ?? String(err)}`,
+    );
+  }
 }
 
 async function dispatchPhase2Send(

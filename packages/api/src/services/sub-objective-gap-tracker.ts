@@ -303,10 +303,27 @@ export function shouldEmitDiscovery(state: SubObjectiveGapState): boolean {
  *   - For 'known': value present and matches the per-valueType shape
  *
  * Writes:
- *   - UPSERT the gap-state row with source='manual'; setBy=actor
- *   - Best-effort audit-log row capturing prev → new transition
+ *   - UPSERT the gap-state row with `source` (caller-threaded); setBy=actor
+ *   - Best-effort audit-log row capturing prev → new transition + `wasNoOp`
+ *     discriminator + (when `source==='engine'`) the engineContext fields
+ *     (reasoning + confidence + decisionId + eventId)
  *
- * Returns the updated PrioritizedGap shape for the caller to refresh UI.
+ * Returns `{ ok, previousState, wasNoOp }`.
+ *
+ * KAN-1042 PR A2 — engine-driven path. Locked decisions:
+ *   - source: 'manual' | 'engine' threaded into the upsert + audit (replaces
+ *     the pre-PR-A2 hardcoded `'manual'`). Default 'manual' preserves
+ *     operator-path back-compat (single existing caller at router.ts:6630).
+ *   - engineContext optional; only relevant when source==='engine'. Threads
+ *     forensic context into the audit payload so the engine-driven row is
+ *     queryable + walkable from `triggerDecisionId` back to the originating
+ *     Decision.
+ *   - wasNoOp uses STRICT-EQUAL value compare (per Phase 1 lock — coerced-
+ *     equal opens edge cases on cognitive normalization that belong upstream
+ *     in the engine prompt, not at the dispatcher). Audit row is written
+ *     unconditionally; wasNoOp lives in the payload so duplicates are
+ *     queryable (`payload->>'wasNoOp' = 'true' AND payload->>'source' =
+ *     'engine'`).
  */
 export async function transitionSubObjectiveState(
   prisma: PrismaClient,
@@ -318,7 +335,14 @@ export async function transitionSubObjectiveState(
     toState: 'known' | 'not_applicable';
     value?: string | number | null;
   },
-): Promise<{ ok: true; previousState: SubObjectiveState }> {
+  source: 'manual' | 'engine' = 'manual',
+  engineContext?: {
+    reasoning: string;
+    confidence: number;
+    decisionId: string | null;
+    eventId: string;
+  },
+): Promise<{ ok: true; previousState: SubObjectiveState; wasNoOp: boolean }> {
   // Cross-tenant guard — contact MUST belong to tenant.
   const contact = await prisma.contact.findFirst({
     where: { id: input.contactId, tenantId },
@@ -344,12 +368,53 @@ export async function transitionSubObjectiveState(
   const valueTypeForDb = (def.valueType === 'enum' ? 'enum_value' : def.valueType) as
     | 'text' | 'date' | 'numeric' | 'enum_value';
 
-  // Read previous state for audit + return.
+  // Read previous state + value columns for audit, return, AND wasNoOp
+  // compute. PR A2 widens the select beyond `state` so we can do typed
+  // strict-equal comparison without a second read.
   const existing = await prisma.contactSubObjectiveGapState.findUnique({
     where: { tenantId_contactId_subObjectiveKey: { tenantId, contactId: input.contactId, subObjectiveKey: input.subObjectiveKey } },
-    select: { state: true },
+    select: {
+      state: true,
+      valueText: true,
+      valueDate: true,
+      valueNumeric: true,
+      valueEnum: true,
+    },
   });
   const previousState: SubObjectiveState = existing?.state ?? 'unknown';
+
+  // KAN-1042 PR A2 — wasNoOp strict-equal compute. State match alone is
+  // sufficient for not_applicable (no value field). For known, compare the
+  // freshly-computed typed column against existing per def.valueType.
+  // Null on either side → wasNoOp=false (treats null→value transition as
+  // meaningful). Date compared via getTime() for numeric strict-equal.
+  let wasNoOp = false;
+  if (previousState === input.toState) {
+    if (input.toState === 'not_applicable') {
+      wasNoOp = true;
+    } else if (existing) {
+      switch (def.valueType) {
+        case 'text':
+          wasNoOp = existing.valueText !== null && valueText !== null && existing.valueText === valueText;
+          break;
+        case 'date':
+          wasNoOp =
+            existing.valueDate !== null &&
+            valueDate !== null &&
+            existing.valueDate.getTime() === valueDate.getTime();
+          break;
+        case 'numeric':
+          wasNoOp =
+            existing.valueNumeric !== null &&
+            valueNumeric !== null &&
+            existing.valueNumeric === valueNumeric;
+          break;
+        case 'enum':
+          wasNoOp = existing.valueEnum !== null && valueEnum !== null && existing.valueEnum === valueEnum;
+          break;
+      }
+    }
+  }
 
   await prisma.contactSubObjectiveGapState.upsert({
     where: { tenantId_contactId_subObjectiveKey: { tenantId, contactId: input.contactId, subObjectiveKey: input.subObjectiveKey } },
@@ -363,7 +428,7 @@ export async function transitionSubObjectiveState(
       valueDate,
       valueNumeric,
       valueEnum,
-      source: 'manual',
+      source,
       setBy: actor,
     },
     update: {
@@ -372,22 +437,35 @@ export async function transitionSubObjectiveState(
       valueDate,
       valueNumeric,
       valueEnum,
-      source: 'manual',
+      source,
       setBy: actor,
       setAt: new Date(),
     },
   });
 
+  // KAN-1042 PR A2 — audit payload extended with `wasNoOp` discriminator
+  // and (when source==='engine') the engineContext forensic fields. Single
+  // row per transition, source-discriminated, query-friendly via
+  // `payload->>'source' = 'engine'` + `payload->>'wasNoOp' = 'true'`.
   await writeAuditBestEffort(prisma, tenantId, 'sub_objective_gap_state.transitioned', {
     contactId: input.contactId,
     subObjectiveKey: input.subObjectiveKey,
     previousState,
     newState: input.toState,
     actor,
-    source: 'manual',
+    source,
+    wasNoOp,
+    ...(source === 'engine' && engineContext
+      ? {
+          brainReasoning: engineContext.reasoning,
+          brainConfidence: engineContext.confidence,
+          triggerDecisionId: engineContext.decisionId,
+          eventId: engineContext.eventId,
+        }
+      : {}),
   });
 
-  return { ok: true, previousState };
+  return { ok: true, previousState, wasNoOp };
 }
 
 // ─────────────────────────────────────────────

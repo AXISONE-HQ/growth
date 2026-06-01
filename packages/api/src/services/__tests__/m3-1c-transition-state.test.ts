@@ -23,12 +23,28 @@ const ACTOR = 'uid-fred';
 function makePrisma(opts: {
   contactInTenant?: boolean;
   existingState?: 'unknown' | 'partial' | 'known' | 'not_applicable';
+  // KAN-1042 PR A2 — existing typed value columns the function now reads
+  // (alongside state) for the wasNoOp strict-equal compute path.
+  existingValueText?: string | null;
+  existingValueDate?: Date | null;
+  existingValueNumeric?: number | null;
+  existingValueEnum?: string | null;
   upsertImpl?: () => Promise<unknown>;
   auditImpl?: () => Promise<unknown>;
 } = {}) {
   const contactInTenant = opts.contactInTenant !== false;
   const findFirst = vi.fn(async () => (contactInTenant ? { id: CONTACT } : null));
-  const findUnique = vi.fn(async () => opts.existingState ? { state: opts.existingState } : null);
+  const findUnique = vi.fn(async () =>
+    opts.existingState
+      ? {
+          state: opts.existingState,
+          valueText: opts.existingValueText ?? null,
+          valueDate: opts.existingValueDate ?? null,
+          valueNumeric: opts.existingValueNumeric ?? null,
+          valueEnum: opts.existingValueEnum ?? null,
+        }
+      : null,
+  );
   const upsert = vi.fn(opts.upsertImpl ?? (async (args: { create: { state: string } }) => ({ id: 'r1', state: args.create.state })));
   const auditCreate = vi.fn(opts.auditImpl ?? (async () => ({ id: 'a1' })));
   return {
@@ -199,5 +215,133 @@ describe('M3-1c — not_applicable path', () => {
     expect(callArg.create.state).toBe('not_applicable');
     expect(callArg.create.valueText).toBeNull();
     expect(callArg.create.valueEnum).toBeNull();
+  });
+});
+
+// ─────────────────────────────────────────────
+// KAN-1042 PR A2 — signature extension (source + engineContext + wasNoOp)
+//
+// New args: `source: 'manual' | 'engine' = 'manual'` and optional
+// `engineContext: { reasoning, confidence, decisionId, eventId }`. New
+// return field: `wasNoOp: boolean` (strict-equal value compare per
+// Phase 1 lock). Audit payload extended with `wasNoOp` discriminator
+// and (when source='engine') the engineContext forensic fields.
+//
+// Coverage:
+//   - wasNoOp=true when state + value strict-equal match (text/numeric)
+//   - wasNoOp=false when state matches but value differs (strict-equal lock)
+//   - wasNoOp=true for not_applicable when state matches (no value field)
+//   - source='engine' audit payload includes brain* + triggerDecisionId + eventId
+//   - source='manual' (default) audit payload omits engineContext fields
+//     (back-compat with router.ts:6630 operator caller)
+// ─────────────────────────────────────────────
+
+describe('KAN-1042 PR A2 — wasNoOp + source + engineContext', () => {
+  const ENGINE_CTX = {
+    reasoning: 'Contact replied "looking to start in Q3" — timeline now known.',
+    confidence: 0.85,
+    decisionId: 'decision-uuid-1',
+    eventId: 'event-uuid-1',
+  };
+
+  it('wasNoOp=true when state + text value strict-equal match', async () => {
+    const { prisma, auditCreate } = makePrisma({
+      existingState: 'known',
+      existingValueText: 'Q3 2026',
+    });
+    const result = await transitionSubObjectiveState(
+      prisma,
+      TENANT,
+      ACTOR,
+      { contactId: CONTACT, subObjectiveKey: 'timeline', toState: 'known', value: 'Q3 2026' },
+      'engine',
+      ENGINE_CTX,
+    );
+    expect(result.wasNoOp).toBe(true);
+    expect(result.previousState).toBe('known');
+    // Audit row STILL written (unconditional) — wasNoOp surfaces in payload.
+    const auditArg = auditCreate.mock.calls[0]![0] as { data: { payload: Record<string, unknown> } };
+    expect(auditArg.data.payload.wasNoOp).toBe(true);
+  });
+
+  it('wasNoOp=false when state matches but text value differs (strict-equal lock)', async () => {
+    // Engine refines "Q3" to "Q3 2026" — strict-equal-non-match → wasNoOp=false.
+    // Per Phase 1 lock: "if a useful duplicate (engine refines value) lands
+    // with wasNoOp=false, that's correct — the new value is meaningful."
+    const { prisma, auditCreate } = makePrisma({
+      existingState: 'known',
+      existingValueText: 'Q3',
+    });
+    const result = await transitionSubObjectiveState(
+      prisma,
+      TENANT,
+      ACTOR,
+      { contactId: CONTACT, subObjectiveKey: 'timeline', toState: 'known', value: 'Q3 2026' },
+      'engine',
+      ENGINE_CTX,
+    );
+    expect(result.wasNoOp).toBe(false);
+    const auditArg = auditCreate.mock.calls[0]![0] as { data: { payload: Record<string, unknown> } };
+    expect(auditArg.data.payload.wasNoOp).toBe(false);
+  });
+
+  it('wasNoOp=true when toState=not_applicable and previousState=not_applicable (no value field)', async () => {
+    const { prisma } = makePrisma({ existingState: 'not_applicable' });
+    const result = await transitionSubObjectiveState(
+      prisma,
+      TENANT,
+      ACTOR,
+      { contactId: CONTACT, subObjectiveKey: 'authority', toState: 'not_applicable' },
+      'engine',
+      ENGINE_CTX,
+    );
+    expect(result.wasNoOp).toBe(true);
+  });
+
+  it("source='engine' audit payload includes brainReasoning + brainConfidence + triggerDecisionId + eventId", async () => {
+    const { prisma, auditCreate, upsert } = makePrisma({
+      existingState: 'unknown',
+    });
+    await transitionSubObjectiveState(
+      prisma,
+      TENANT,
+      ACTOR,
+      { contactId: CONTACT, subObjectiveKey: 'timeline', toState: 'known', value: 'Q3 2026' },
+      'engine',
+      ENGINE_CTX,
+    );
+    // Upsert carries source='engine' (replaces hardcoded 'manual')
+    const upsertArg = upsert.mock.calls[0]![0] as { create: Record<string, unknown> };
+    expect(upsertArg.create.source).toBe('engine');
+    // Audit payload threads forensic context for engine-driven rows.
+    const auditArg = auditCreate.mock.calls[0]![0] as { data: { payload: Record<string, unknown> } };
+    expect(auditArg.data.payload).toMatchObject({
+      source: 'engine',
+      brainReasoning: ENGINE_CTX.reasoning,
+      brainConfidence: ENGINE_CTX.confidence,
+      triggerDecisionId: ENGINE_CTX.decisionId,
+      eventId: ENGINE_CTX.eventId,
+    });
+  });
+
+  it("source='manual' (default, no engineContext) preserves operator-path back-compat — no engine fields in audit payload", async () => {
+    const { prisma, auditCreate, upsert } = makePrisma({ existingState: 'unknown' });
+    await transitionSubObjectiveState(prisma, TENANT, ACTOR, {
+      contactId: CONTACT,
+      subObjectiveKey: 'timeline',
+      toState: 'known',
+      value: 'Q3 2026',
+    });
+    // No source/context args → default source='manual'.
+    const upsertArg = upsert.mock.calls[0]![0] as { create: Record<string, unknown> };
+    expect(upsertArg.create.source).toBe('manual');
+    // Audit payload has source='manual' + wasNoOp but NO engineContext fields.
+    const auditArg = auditCreate.mock.calls[0]![0] as { data: { payload: Record<string, unknown> } };
+    expect(auditArg.data.payload.source).toBe('manual');
+    expect(auditArg.data.payload.wasNoOp).toBe(false); // unknown → known is a real change
+    expect(auditArg.data.payload.brainReasoning).toBeUndefined();
+    expect(auditArg.data.payload.brainConfidence).toBeUndefined();
+    expect(auditArg.data.payload.triggerDecisionId).toBeUndefined();
+    expect(auditArg.data.payload.eventId).toBeUndefined();
   });
 });
