@@ -487,4 +487,61 @@ describe("ContactRepliedEvent schema regression (KAN-1037-PR3 hotfix)", () => {
       }),
     ).toThrow();
   });
+
+  // ─── KAN-1056 — threadDepth schema relax (.min(1) → .min(0)) ────────────
+  // Phase B PR I un-puts the PR3-era hardcode at the publisher; the schema
+  // must now accept depth=0 so a publish with zero prior outbounds doesn't
+  // throw inside buildContactRepliedEvent.parse(...) at publisher emit time.
+  //
+  // In practice the reply path always sees ≥1 (correlation reached the
+  // publisher by reply_token, so a prior outbound exists), but the schema
+  // relax forward-compats with Phase B+ correlation paths that may not
+  // require a prior-outbound row to exist.
+
+  it("KAN-1056 — accepts threadDepth=0 (schema relax for forward-compat with non-reply correlation paths)", () => {
+    const parsed = ContactRepliedEventSchema.parse({
+      ...CANONICAL_SAMPLE,
+      metadata: { ...CANONICAL_SAMPLE.metadata, threadDepth: 0 },
+    });
+    expect(parsed.metadata.threadDepth).toBe(0);
+  });
+
+  it("KAN-1056 — buildContactRepliedEvent round-trips threadDepth=0 without throwing at .parse()", () => {
+    // The publisher's emit path calls buildContactRepliedEvent which
+    // invokes ContactRepliedEventSchema.parse internally — if the schema
+    // floor reverts to .min(1), this test fires loudly because the
+    // publisher's IIFE catch-and-warn would silently drop every
+    // matchedDealId-zero-prior-outbound publish in production.
+    const event = buildContactRepliedEvent({
+      tenantId: CANONICAL_SAMPLE.tenantId,
+      contactId: CANONICAL_SAMPLE.contactId,
+      dealId: REAL_DEAL_CUID,
+      decisionId: REAL_DECISION_CUID,
+      inboundEngagementId: REAL_INBOUND_ENGAGEMENT_CUID,
+      outboundEngagementId: REAL_OUTBOUND_ENGAGEMENT_CUID,
+      replyText: CANONICAL_SAMPLE.replyText,
+      replyReceivedAt: CANONICAL_SAMPLE.replyReceivedAt,
+      metadata: { ...CANONICAL_SAMPLE.metadata, threadDepth: 0 },
+    });
+    expect(event.metadata.threadDepth).toBe(0);
+  });
+
+  it("KAN-1056 — still rejects negative threadDepth (the .min(0) floor catches sign errors)", () => {
+    // Defense-in-depth: relaxing from 1 to 0 should NOT open the gate to
+    // -1, -42, etc. The schema's `.int().min(0)` keeps the floor.
+    expect(() =>
+      ContactRepliedEventSchema.parse({
+        ...CANONICAL_SAMPLE,
+        metadata: { ...CANONICAL_SAMPLE.metadata, threadDepth: -1 },
+      }),
+    ).toThrow();
+  });
+
+  it("KAN-1056 — back-compat: threadDepth=1 still parses unchanged", () => {
+    // Schema relax MUST be a pure expansion — existing depth=1 payloads
+    // (PR3-era publishers + all current contact-replied-push test fixtures
+    // at L190/338 + enum-drift CANONICAL_SAMPLE) keep parsing.
+    const parsed = ContactRepliedEventSchema.parse(CANONICAL_SAMPLE);
+    expect(parsed.metadata.threadDepth).toBe(1);
+  });
 });

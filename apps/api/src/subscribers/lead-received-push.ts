@@ -1067,6 +1067,38 @@ function emitContactRepliedIfCorrelated(
         ) => Promise<string>;
       };
 
+      // KAN-1056 — derive threadDepth from prior outbounds on the matched
+      // Deal. Replaces the PR3-era `threadDepth: 1` hardcode now that Phase B
+      // engine prompt rendering will read the value verbatim.
+      //
+      // Q1 fallback: when matchedDealId is null (originator's Deal closed
+      // between dispatch and reply — edge case at writeSidecarAndCorrelate
+      // L791-796), fall back to 1. Correlation reaching this code path
+      // means writeSidecarAndCorrelate already matched a prior outbound by
+      // reply_token, so at least one prior outbound exists by definition.
+      // Phrasing stays truthful as "replied" rather than the misleading
+      // "reached out for the first time" the threadDepth=0 ternary at
+      // brain-service.ts:962 would emit.
+      //
+      // Q2 cutoff: temporal cutoff via event.receivedAt is defensive against
+      // concurrent send races (engine fires + dispatches an outbound while a
+      // contact's reply is in flight). Indexed on [tenantId, dealId, occurredAt]
+      // per schema.prisma:1980; single-digit ms cost.
+      //
+      // engagementType string literal `'email_send'` matches the canonical
+      // outbound write at action-executed-push.ts:152 — derived from
+      // `${event.channel.toLowerCase()}_send`.
+      const threadDepth = args.outcome.matchedDealId
+        ? await prisma.engagement.count({
+            where: {
+              tenantId: args.tenantId,
+              dealId: args.outcome.matchedDealId,
+              engagementType: 'email_send',
+              occurredAt: { lt: new Date(event.receivedAt) },
+            },
+          })
+        : 1;
+
       const payload: ContactRepliedEvent = buildContactRepliedEvent({
         tenantId: args.tenantId,
         contactId: matchedContactId,
@@ -1084,9 +1116,7 @@ function emitContactRepliedIfCorrelated(
         metadata: {
           senderEmail: event.metadata.fromAddress ?? '',
           subjectLine: event.metadata.subject ?? '',
-          // PR3 ships threadDepth=1 — true depth derivation lands in PR4
-          // when the engine prompt extension reads it.
-          threadDepth: 1,
+          threadDepth,
         },
       });
 
