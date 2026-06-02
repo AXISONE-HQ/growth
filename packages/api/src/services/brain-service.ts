@@ -381,6 +381,32 @@ export interface EvaluateOptions {
    * section is omitted rather than rendering an empty header.
    */
   subObjectiveGapState?: SubObjectiveGapState;
+  /**
+   * KAN-1065 (Cluster II PR III) — current EnginePhase focus computed by
+   * the caller (lead-received-push initial-lead path OR contact-replied-push
+   * reply chain) via `resolveEnginePhases` + `computeCurrentEnginePhase`
+   * (PR II). When defined, PR IV's prompt-rendering extension splices the
+   * `## Engine phase focus` section between the `## Latest inbound` block
+   * and the `## Sub-objective gap state for this contact` section. PR V
+   * threads `payload->>'currentEnginePhase'` + `payload->>'currentEnginePhaseReason'`
+   * into the `decision_re_evaluated` audit row for Tier 1 telemetry.
+   *
+   * PR III (this PR) ships the THREADING ONLY — engine prompt + parser
+   * extension for `advance_engine_phase` are deferred to PR IV
+   * ([KAN-1066](https://axisone-team.atlassian.net/browse/KAN-1066)).
+   * Until PR IV lands, this field is consumed only for audit-payload
+   * forwarding; the engine prompt template doesn't yet render the new
+   * sub-section.
+   *
+   * Omitted (undefined) by legacy callers (pre-KAN-1065 sites + any future
+   * caller that doesn't compute focus) → the prompt + audit payload omit
+   * the EnginePhase surface gracefully. Cluster II Phase 1 Lock 2
+   * derived-with-fallback discipline means a transient compute failure
+   * upstream produces a defensible default (DEFAULT_ENGINE_PHASES_GENERIC_B2B
+   * + qualify-derived) rather than throwing — the caller's fail-safe is
+   * the safety net.
+   */
+  currentEnginePhase?: CurrentEnginePhase;
 }
 
 /**

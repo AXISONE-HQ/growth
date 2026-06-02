@@ -162,6 +162,30 @@ interface BrainLatestInboundLocal {
   priorTurns: ThreadTurnLocal[];
 }
 
+/**
+ * KAN-1065 (Cluster II PR III) — local mirror of @growth/shared's
+ * `BlueprintEnginePhase` shape. Per the established Local-suffix convention
+ * documented in feedback_subscriber_local_type_mirror_naming_asymmetry —
+ * matches the BrainLatestInboundLocal / ThreadTurnLocal naming on this side.
+ */
+interface BlueprintEnginePhaseLocal {
+  key: 'qualify' | 'problem' | 'proof' | 'closing';
+  label: string;
+  subObjectives: string[];
+  priority: number;
+}
+
+/**
+ * KAN-1065 (Cluster II PR III) — local mirror of brain-service.ts's
+ * `CurrentEnginePhase` return shape. Used by the BrainServiceModule loader
+ * typedef + the reply-chain call site that threads it into evaluateDealState.
+ */
+interface CurrentEnginePhaseSnapshotLocal {
+  currentPhase: BlueprintEnginePhaseLocal;
+  reason: 'operator_override' | 'derived';
+  operatorOverrideRecencyDays?: number;
+}
+
 interface BrainServiceModule {
   evaluateDealState: (
     prisma: unknown,
@@ -177,6 +201,12 @@ interface BrainServiceModule {
       // `## Latest inbound` section of buildEvaluationPrompt so the engine
       // can reason about the contact's verbatim words.
       latestInbound?: BrainLatestInboundLocal;
+      // KAN-1065 (Cluster II PR III) — current EnginePhase focus snapshot
+      // computed by the subscriber via resolveEnginePhases +
+      // computeCurrentEnginePhase. PR IV wires the `## Engine phase focus`
+      // prompt section; PR V emits currentEnginePhase + currentEnginePhaseReason
+      // on the decision_re_evaluated audit payload.
+      currentEnginePhase?: CurrentEnginePhaseSnapshotLocal;
     },
   ) => Promise<{
     dealId: string;
@@ -223,6 +253,26 @@ interface BrainServiceModule {
       excludeEngagementId: string;
     },
   ) => Promise<ThreadTurnLocal[]>;
+  // KAN-1065 (Cluster II PR III) — EnginePhase config resolver. Loads
+  // Tenant.enginePhasesOverride → Tenant.blueprint?.enginePhases → DEFAULT
+  // per Cluster II Phase 1 Lock 3. Fail-safes to DEFAULT on any prisma throw.
+  resolveEnginePhases: (
+    prisma: unknown,
+    tenantId: string,
+  ) => Promise<BlueprintEnginePhaseLocal[]>;
+  // KAN-1065 (Cluster II PR III) — pure-builder current EnginePhase
+  // derivation. Q2 lock: operator detection via source === 'manual' (KAN-1042
+  // PR A2 structured enum), NOT pattern-matching setBy strings.
+  computeCurrentEnginePhase: (input: {
+    gapState: unknown[];
+    enginePhases: BlueprintEnginePhaseLocal[];
+    contactRecentSetBy?: {
+      setBy: string;
+      setAt: Date;
+      subObjectiveKey: string;
+      source: string;
+    };
+  }) => CurrentEnginePhaseSnapshotLocal;
 }
 
 let _brainServiceModule: BrainServiceModule | null = null;
@@ -437,8 +487,15 @@ contactRepliedPushApp.post('/contact-replied', async (c) => {
     //
     // KAN-828 — inject redis + openai so the Knowledge Layer retrieval
     // fires. Same pattern as lead-received-push.ts:1335-1341.
-    const { evaluateDealState, buildLatestInboundContext, buildThreadContext } =
-      await loadBrainServiceModule();
+    const {
+      evaluateDealState,
+      buildLatestInboundContext,
+      buildThreadContext,
+      // KAN-1065 (Cluster II PR III) — load EnginePhase resolver + focus
+      // derivator from the canonical brain-service module.
+      resolveEnginePhases,
+      computeCurrentEnginePhase,
+    } = await loadBrainServiceModule();
     const openai = getOpenAIClient();
     // KAN-1058 (Phase B PR III) — fetch prior conversation turns BEFORE the
     // evaluateDealState call so the result threads into the
@@ -452,6 +509,36 @@ contactRepliedPushApp.post('/contact-replied', async (c) => {
       tenantId: event.tenantId,
       dealId: event.dealId,
       excludeEngagementId: event.inboundEngagementId,
+    });
+    // KAN-1065 (Cluster II PR III) — compute EnginePhase focus per Phase 1
+    // Q1+Q2 locks. Two queries (Q2 lock — engine LLM cost dominates the two
+    // single-digit-ms indexed queries). Q1 lock — inline contactRecentSetBy
+    // findFirst preserves Cluster I PR III symmetric-inline discipline.
+    const enginePhases = await resolveEnginePhases(prisma, event.tenantId);
+    const gapStateRows = await prisma.contactSubObjectiveGapState.findMany({
+      where: { tenantId: event.tenantId, contactId: event.contactId },
+    });
+    const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+    const recentManualRow = await prisma.contactSubObjectiveGapState.findFirst({
+      where: {
+        tenantId: event.tenantId,
+        contactId: event.contactId,
+        source: 'manual',
+        setAt: { gt: new Date(Date.now() - SEVEN_DAYS_MS) },
+      },
+      orderBy: { setAt: 'desc' },
+    });
+    const currentEnginePhase = computeCurrentEnginePhase({
+      gapState: gapStateRows,
+      enginePhases,
+      contactRecentSetBy: recentManualRow
+        ? {
+            setBy: recentManualRow.setBy ?? '',
+            setAt: recentManualRow.setAt,
+            subObjectiveKey: recentManualRow.subObjectiveKey,
+            source: recentManualRow.source,
+          }
+        : undefined,
     });
     const brainDecision: BrainDecision = await evaluateDealState(prisma, event.dealId, {
       redis,
@@ -476,6 +563,10 @@ contactRepliedPushApp.post('/contact-replied', async (c) => {
         // KAN-1058 — multi-turn rendering surface.
         priorTurns,
       }),
+      // KAN-1065 — thread EnginePhase focus snapshot. PR IV renders the
+      // `## Engine phase focus` prompt section; PR V emits the
+      // currentEnginePhase + currentEnginePhaseReason audit payload fields.
+      currentEnginePhase,
     });
 
     await prisma.auditLog.create({

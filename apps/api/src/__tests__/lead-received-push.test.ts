@@ -46,6 +46,23 @@ const deferredSendCreateMock = vi.fn();
 
 // KAN-815 — Phase 2 substrate mocks
 const evaluateDealStateMock = vi.fn();
+// KAN-1065 (Cluster II PR III) — engine input wiring mocks. Default
+// resolveEnginePhases returns the canonical 4-phase config; default
+// computeCurrentEnginePhase returns derived qualify. gapState queries
+// default to empty (fresh contact / first eval — Phase 1 documented
+// first-eval state by design).
+const resolveEnginePhasesMock = vi.fn(async () => [
+  { key: 'qualify', label: 'Qualify', subObjectives: ['authority'], priority: 1 },
+  { key: 'problem', label: 'Problem', subObjectives: ['need', 'motivation', 'budget', 'cost_of_problem'], priority: 2 },
+  { key: 'proof', label: 'Proof', subObjectives: ['roi_metrics'], priority: 3 },
+  { key: 'closing', label: 'Closing', subObjectives: ['timeline', 'committed_amount'], priority: 4 },
+]);
+const computeCurrentEnginePhaseMock = vi.fn(() => ({
+  currentPhase: { key: 'qualify' as const, label: 'Qualify', subObjectives: ['authority'], priority: 1 },
+  reason: 'derived' as const,
+}));
+const gapStateFindManyMock = vi.fn(async () => []);
+const gapStateFindFirstMock = vi.fn(async () => null);
 const evaluateStageTransitionMock = vi.fn();
 const shapeMessageMock = vi.fn();
 const evaluateSendPolicyMock = vi.fn();
@@ -103,6 +120,13 @@ vi.mock("../prisma.js", () => ({
     // KAN-1042 PR A2 — tenant.findUnique for dispatcher-arm governance
     // read of Tenant.autoTransitionSubObjectives.
     tenant: { findUnique: tenantFindUniqueMock },
+    // KAN-1065 (Cluster II PR III) — contactSubObjectiveGapState queries
+    // for engine-phase wiring at the initial-lead path (gapState findMany +
+    // recent-manual findFirst).
+    contactSubObjectiveGapState: {
+      findMany: gapStateFindManyMock,
+      findFirst: gapStateFindFirstMock,
+    },
     $transaction: transactionMock,
   },
 }));
@@ -134,6 +158,11 @@ vi.mock("../../../../packages/api/src/services/engagement-service.js", () => ({
 vi.mock("../../../../packages/api/src/services/brain-service.js", () => ({
   evaluateDealState: evaluateDealStateMock,
   buildLatestInboundContext: (input: unknown) => input,
+  // KAN-1065 (Cluster II PR III) — engine input wiring helpers exposed
+  // through the brain-service module loader. Mocks return default
+  // canonical-4-phase config + derived qualify snapshot.
+  resolveEnginePhases: resolveEnginePhasesMock,
+  computeCurrentEnginePhase: computeCurrentEnginePhaseMock,
 }));
 
 vi.mock("../../../../packages/api/src/services/stage-transition-engine.js", () => ({
@@ -2143,6 +2172,9 @@ let cachedWireFn:
       eventId: string,
       isChainedInvocation?: boolean,
       precomputedDecision?: unknown,
+      latestInbound?: unknown,
+      // KAN-1065 (Cluster II PR III) — 6th positional param.
+      currentEnginePhase?: unknown,
     ) => Promise<void>)
   | null = null;
 async function getWirePhase2Consumers() {
@@ -2153,6 +2185,9 @@ async function getWirePhase2Consumers() {
       eventId: string,
       isChainedInvocation?: boolean,
       precomputedDecision?: unknown,
+      latestInbound?: unknown,
+      // KAN-1065 (Cluster II PR III) — 6th positional param.
+      currentEnginePhase?: unknown,
     ) => Promise<void>;
   };
   cachedWireFn = mod.wirePhase2Consumers;
@@ -2572,5 +2607,143 @@ describe("KAN-1042 PR A2 — transition_sub_objective dispatcher arm", () => {
     ).resolves.not.toThrow();
     expect(escalationCreateMock).not.toHaveBeenCalled();
     expect(transitionSubObjectiveStateMock).not.toHaveBeenCalled();
+  });
+});
+
+// ─────────────────────────────────────────────
+// KAN-1065 (Cluster II PR III) — engine input wiring (initial-lead path)
+// ─────────────────────────────────────────────
+
+describe("KAN-1065 (Cluster II PR III) — engine input wiring (initial-lead path)", () => {
+  beforeEach(() => {
+    // Reset KAN-1065 wiring mocks; per-test overrides as needed.
+    resolveEnginePhasesMock.mockClear();
+    computeCurrentEnginePhaseMock.mockClear();
+    gapStateFindManyMock.mockClear();
+    gapStateFindFirstMock.mockClear();
+  });
+
+  it("wirePhase2Consumers signature accepts 6th positional param `currentEnginePhase` (Q3 lock — NOT options-object refactor)", async () => {
+    // Structural pin: importing the function + verifying the 6-arg call
+    // shape compiles + executes without throwing. KAN-1073 (Phase 2.5)
+    // tracks the options-object refactor when arg count reaches 7+.
+    evaluateDealStateMock.mockResolvedValueOnce({
+      dealId: DEAL_A,
+      evaluatedAt: new Date(),
+      currentStateSnapshot: {} as never,
+      nextBestAction: { type: 'no_action', reasoning: 'six-args-test' },
+      confidence: 0.5,
+      modelTier: 'cheap',
+      llmInputTokens: 100,
+      llmOutputTokens: 50,
+    });
+    const wirePhase2Consumers = await getWirePhase2Consumers();
+    const focusSnapshot = {
+      currentPhase: { key: 'qualify' as const, label: 'Qualify', subObjectives: ['authority'], priority: 1 },
+      reason: 'derived' as const,
+    };
+    await expect(
+      wirePhase2Consumers(
+        DEAL_A,
+        "evt_kan_1065_six_args",
+        false, // isChainedInvocation
+        undefined, // precomputedDecision
+        undefined, // latestInbound
+        focusSnapshot, // KAN-1065 6th positional param
+      ),
+    ).resolves.not.toThrow();
+  });
+
+  it("currentEnginePhase threads through wirePhase2Consumers into evaluateDealState options", async () => {
+    evaluateDealStateMock.mockResolvedValueOnce({
+      dealId: DEAL_A,
+      evaluatedAt: new Date(),
+      currentStateSnapshot: {} as never,
+      nextBestAction: { type: 'no_action', reasoning: 'wiring-test' },
+      confidence: 0.5,
+      modelTier: 'cheap',
+      llmInputTokens: 100,
+      llmOutputTokens: 50,
+    });
+    const wirePhase2Consumers = await getWirePhase2Consumers();
+    const focusSnapshot = {
+      currentPhase: { key: 'problem' as const, label: 'Problem', subObjectives: ['need'], priority: 2 },
+      reason: 'derived' as const,
+    };
+    await wirePhase2Consumers(
+      DEAL_A,
+      "evt_kan_1065_thread_test",
+      false,
+      undefined,
+      undefined,
+      focusSnapshot,
+    );
+    // KAN-1065 wiring sentinel: focus snapshot lands on the EvaluateOptions.
+    expect(evaluateDealStateMock).toHaveBeenCalled();
+    const evaluateOptions = evaluateDealStateMock.mock.calls[0]![2] as {
+      currentEnginePhase?: unknown;
+    };
+    expect(evaluateOptions.currentEnginePhase).toEqual(focusSnapshot);
+  });
+
+  it("precomputedDecision path SKIPS evaluateDealState (currentEnginePhase ignored — captured at upstream eval)", async () => {
+    // KAN-1037-PR4.5 precedent: precomputedDecision short-circuits the
+    // internal eval. KAN-1065's currentEnginePhase param is ignored on
+    // this path — the precomputed decision already captured focus state
+    // at the contact-replied upstream eval site.
+    const wirePhase2Consumers = await getWirePhase2Consumers();
+    const precomputed = {
+      dealId: DEAL_A,
+      evaluatedAt: new Date(),
+      currentStateSnapshot: {} as never,
+      nextBestAction: { type: 'no_action', reasoning: 'precomputed-test' },
+      confidence: 0.5,
+      modelTier: 'cheap',
+      llmInputTokens: 100,
+      llmOutputTokens: 50,
+    };
+    const focusSnapshot = {
+      currentPhase: { key: 'closing' as const, label: 'Closing', subObjectives: ['timeline'], priority: 4 },
+      reason: 'derived' as const,
+    };
+    await wirePhase2Consumers(
+      DEAL_A,
+      "evt_kan_1065_precomputed",
+      false,
+      precomputed as never,
+      undefined,
+      focusSnapshot,
+    );
+    // Precomputed → no internal eval fires.
+    expect(evaluateDealStateMock).not.toHaveBeenCalled();
+  });
+
+  it("back-compat: legacy 5-arg call shape (no currentEnginePhase) still works (undefined defaulted)", async () => {
+    evaluateDealStateMock.mockResolvedValueOnce({
+      dealId: DEAL_A,
+      evaluatedAt: new Date(),
+      currentStateSnapshot: {} as never,
+      nextBestAction: { type: 'no_action', reasoning: 'back-compat-test' },
+      confidence: 0.5,
+      modelTier: 'cheap',
+      llmInputTokens: 100,
+      llmOutputTokens: 50,
+    });
+    const wirePhase2Consumers = await getWirePhase2Consumers();
+    // 5-arg call form (Cluster I PR III shape) — pass nothing for 6th
+    // positional. currentEnginePhase stays undefined → EvaluateOptions
+    // omits the field → existing behavior preserved.
+    await wirePhase2Consumers(
+      DEAL_A,
+      "evt_kan_1065_back_compat",
+      false,
+      undefined,
+      undefined,
+    );
+    expect(evaluateDealStateMock).toHaveBeenCalled();
+    const evaluateOptions = evaluateDealStateMock.mock.calls[0]![2] as {
+      currentEnginePhase?: unknown;
+    };
+    expect(evaluateOptions.currentEnginePhase).toBeUndefined();
   });
 });
