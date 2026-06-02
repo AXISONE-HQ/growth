@@ -307,6 +307,27 @@ interface BrainLatestInbound {
   priorTurns: ThreadTurn[];
 }
 
+// KAN-1065 (Cluster II PR III) — local mirror of @growth/shared's
+// `BlueprintEnginePhase` shape. Used by the BrainServiceModule loader
+// interface's resolveEnginePhases + computeCurrentEnginePhase typedefs.
+// Bare-name convention (no Local suffix) per established
+// feedback_subscriber_local_type_mirror_naming_asymmetry — preserve.
+interface BlueprintEnginePhase {
+  key: 'qualify' | 'problem' | 'proof' | 'closing';
+  label: string;
+  subObjectives: string[];
+  priority: number;
+}
+
+// KAN-1065 (Cluster II PR III) — local mirror of brain-service.ts's
+// `CurrentEnginePhase` return shape. Mirrors the canonical shape exported
+// from PR II (computeCurrentEnginePhase return type).
+interface CurrentEnginePhaseSnapshot {
+  currentPhase: BlueprintEnginePhase;
+  reason: 'operator_override' | 'derived';
+  operatorOverrideRecencyDays?: number;
+}
+
 interface BrainServiceModule {
   evaluateDealState: (
     prisma: unknown,
@@ -328,6 +349,12 @@ interface BrainServiceModule {
       // surface. KAN-1052 extends use to the initial-lead path so the
       // engine reads first-inquiry body text on the FIRST evaluation.
       latestInbound?: BrainLatestInbound;
+      // KAN-1065 (Cluster II PR III) — current EnginePhase focus computed
+      // by the subscriber via resolveEnginePhases + computeCurrentEnginePhase
+      // (PR II helpers). Threaded through wirePhase2Consumers' new 6th
+      // param into this internal evaluateDealState call. PR IV ([KAN-1066])
+      // wires the prompt rendering; PR III ships the threading only.
+      currentEnginePhase?: CurrentEnginePhaseSnapshot;
     },
   ) => Promise<{
     dealId: string;
@@ -390,6 +417,30 @@ interface BrainServiceModule {
   // this loader would be dead surface that misleads readers into
   // thinking the initial-lead path queries history. See
   // contact-replied-push.ts loader for the reply-chain typedef.
+  // KAN-1065 (Cluster II PR III) — EnginePhase config resolver. Loads
+  // Tenant.enginePhasesOverride → Tenant.blueprint?.enginePhases →
+  // DEFAULT_ENGINE_PHASES_GENERIC_B2B per Cluster II Phase 1 Lock 3
+  // precedence. Fail-safes to DEFAULT on any prisma throw per Q4 lock.
+  resolveEnginePhases: (
+    prisma: unknown,
+    tenantId: string,
+  ) => Promise<BlueprintEnginePhase[]>;
+  // KAN-1065 (Cluster II PR III) — pure-builder for the EnginePhase focus
+  // snapshot. Q2 lock: operator detection via source === 'manual'
+  // (KAN-1042 PR A2 structured discriminator), NOT pattern-matching setBy
+  // strings. Initial-lead path always passes contactRecentSetBy undefined
+  // because fresh contacts have no manual rows (Phase 1 Q5 symmetric
+  // invocation lock — derives to qualify-derived for the first eval).
+  computeCurrentEnginePhase: (input: {
+    gapState: unknown[];
+    enginePhases: BlueprintEnginePhase[];
+    contactRecentSetBy?: {
+      setBy: string;
+      setAt: Date;
+      subObjectiveKey: string;
+      source: string;
+    };
+  }) => CurrentEnginePhaseSnapshot;
 }
 let _brainServiceModule: BrainServiceModule | null = null;
 async function loadBrainServiceModule(): Promise<BrainServiceModule> {
@@ -729,7 +780,15 @@ leadReceivedPushApp.post('/lead-received', async (c) => {
       // evaluation (not just on reply chains). `event.metadata.bodyPreview`
       // carries the full normalized body (≤2000 chars per the normalizer
       // convention; misleading field name — see KAN-1052 Phase 1 trace).
-      const { buildLatestInboundContext } = await loadBrainServiceModule();
+      //
+      // KAN-1065 (Cluster II PR III) — also load resolveEnginePhases +
+      // computeCurrentEnginePhase per Phase 1 Q5 lock (symmetric invocation
+      // with the reply chain; no special-case for fresh contacts).
+      const {
+        buildLatestInboundContext,
+        resolveEnginePhases,
+        computeCurrentEnginePhase,
+      } = await loadBrainServiceModule();
       const initialLeadInbound = buildLatestInboundContext({
         receivedAt: event.receivedAt,
         senderEmail: event.metadata.fromAddress ?? '',
@@ -750,12 +809,55 @@ leadReceivedPushApp.post('/lead-received', async (c) => {
         // (Q4 gating lock on priorTurns.length === 0).
         priorTurns: [],
       });
+      // KAN-1065 (Cluster II PR III) — compute EnginePhase focus per Phase 1
+      // Q1+Q2 locks. Two queries (Q2 lock — gap state for compute focus,
+      // evaluateDealState runs its own computeGapState internally; engine
+      // LLM cost dominates the two single-digit-ms queries). Q1 lock —
+      // inline contactRecentSetBy findFirst here (preserves Cluster I PR III
+      // symmetry; ~5 lines per call site).
+      //
+      // First-eval state by design (PR III docstring pin per Fred lock):
+      // computeGapState.seedDefaultsIfMissing runs INSIDE evaluateDealState
+      // (sub-objective-gap-tracker.ts:60); the rows query below runs BEFORE
+      // it. For a brand-new contact the findMany returns []; computeCurrentEnginePhase
+      // receives empty gapState; derives to qualify (first phase by priority).
+      // Not a race — the documented expected behavior for fresh-contact
+      // first evaluation.
+      const enginePhases = await resolveEnginePhases(prisma, event.tenantId);
+      const gapStateRows = await prisma.contactSubObjectiveGapState.findMany({
+        where: { tenantId: event.tenantId, contactId: event.contactId },
+      });
+      const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+      const recentManualRow = await prisma.contactSubObjectiveGapState.findFirst({
+        where: {
+          tenantId: event.tenantId,
+          contactId: event.contactId,
+          source: 'manual',
+          setAt: { gt: new Date(Date.now() - SEVEN_DAYS_MS) },
+        },
+        orderBy: { setAt: 'desc' },
+      });
+      const initialLeadEnginePhase = computeCurrentEnginePhase({
+        gapState: gapStateRows,
+        enginePhases,
+        contactRecentSetBy: recentManualRow
+          ? {
+              setBy: recentManualRow.setBy ?? '',
+              setAt: recentManualRow.setAt,
+              subObjectiveKey: recentManualRow.subObjectiveKey,
+              source: recentManualRow.source,
+            }
+          : undefined,
+      });
       await wirePhase2Consumers(
         dealId,
         event.eventId,
         false,
         undefined,
         initialLeadInbound,
+        // KAN-1065 — 6th positional param. Phase 2.5 KAN-1073 tracks the
+        // options-object refactor when arg count reaches 7+.
+        initialLeadEnginePhase,
       ).catch((err) => {
         console.warn(
           `[lead-received-push] phase-2-wiring-error dealId=${dealId} eventId=${event.eventId} err=${(err as Error)?.message ?? String(err)}`,
@@ -1512,6 +1614,16 @@ export async function wirePhase2Consumers(
   // `precomputedDecision` is provided (PR4.5 path — the precomputed
   // decision already captures the latestInbound-aware reasoning).
   latestInbound?: BrainLatestInbound,
+  // KAN-1065 (Cluster II PR III) — initial-lead path threads the computed
+  // EnginePhase focus snapshot into the internal evaluateDealState call.
+  // Q3 lock decision: 6th positional param (not options-object refactor).
+  // KAN-1073 (Phase 2.5) tracks the options-object refactor when arg count
+  // pushes 7+. Optional; legacy callers (chained Brain calls at L1388/L1432,
+  // pre-KAN-1065 sites) pass nothing → currentEnginePhase stays undefined →
+  // existing behavior preserved. Ignored when precomputedDecision is set
+  // (the precomputed decision already captured the focus state at its
+  // upstream eval site).
+  currentEnginePhase?: CurrentEnginePhaseSnapshot,
 ): Promise<void> {
   // KAN-814 — supersession path. A fresh inbound on this (dealId, contactId)
   // means any prior pending deferred_send for the same conversation is now
@@ -1573,6 +1685,12 @@ export async function wirePhase2Consumers(
       // / pre-KAN-1052 callers) → section omits gracefully via the
       // existing conditional render at brain-service.ts:918.
       latestInbound,
+      // KAN-1065 (Cluster II PR III) — thread EnginePhase focus snapshot.
+      // PR IV will render the `## Engine phase focus` prompt section from
+      // this field. PR V will emit currentEnginePhase + currentEnginePhaseReason
+      // on the `decision_re_evaluated` audit payload. Undefined for legacy
+      // callers → no audit-payload addition, no prompt section.
+      currentEnginePhase,
     }));
 
   console.log(

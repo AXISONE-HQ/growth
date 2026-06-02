@@ -49,7 +49,17 @@ interface AuditCreateArg {
     payload: Record<string, unknown>;
   };
 }
-const { verifyPubsubOidcMock, auditLogCreateMock, evaluateDealStateMock, wirePhase2ConsumersMock, buildThreadContextMock } = vi.hoisted(() => ({
+const {
+  verifyPubsubOidcMock,
+  auditLogCreateMock,
+  evaluateDealStateMock,
+  wirePhase2ConsumersMock,
+  buildThreadContextMock,
+  resolveEnginePhasesMock,
+  computeCurrentEnginePhaseMock,
+  gapStateFindManyMock,
+  gapStateFindFirstMock,
+} = vi.hoisted(() => ({
   verifyPubsubOidcMock: vi.fn<(arg: unknown) => Promise<boolean>>(),
   auditLogCreateMock: vi.fn<(arg: AuditCreateArg) => Promise<{ id: string }>>(
     async () => ({ id: "audit_x" }),
@@ -78,6 +88,38 @@ const { verifyPubsubOidcMock, auditLogCreateMock, evaluateDealStateMock, wirePha
       }>
     >
   >(),
+  // KAN-1065 (Cluster II PR III) — Cluster II PR III engine input wiring
+  // mocks. resolveEnginePhases fail-safes to DEFAULT (PR II Q4 contract);
+  // computeCurrentEnginePhase returns a derived qualify snapshot by default.
+  // Specific tests override via mockResolvedValueOnce / mockReturnValueOnce
+  // to assert engine-phase threading.
+  resolveEnginePhasesMock: vi.fn<
+    (prisma: unknown, tenantId: string) => Promise<
+      Array<{
+        key: 'qualify' | 'problem' | 'proof' | 'closing';
+        label: string;
+        subObjectives: string[];
+        priority: number;
+      }>
+    >
+  >(),
+  computeCurrentEnginePhaseMock: vi.fn<
+    (input: unknown) => {
+      currentPhase: {
+        key: 'qualify' | 'problem' | 'proof' | 'closing';
+        label: string;
+        subObjectives: string[];
+        priority: number;
+      };
+      reason: 'operator_override' | 'derived';
+      operatorOverrideRecencyDays?: number;
+    }
+  >(),
+  // KAN-1065 — Prisma contactSubObjectiveGapState.findMany / findFirst
+  // mocks. PR III subscribers query both methods inline (Phase 1 Q1 lock —
+  // inline in both subscribers).
+  gapStateFindManyMock: vi.fn<(args: unknown) => Promise<unknown[]>>(),
+  gapStateFindFirstMock: vi.fn<(args: unknown) => Promise<unknown | null>>(),
   // KAN-1037-PR4.5 — wirePhase2Consumers mock. The subscriber now passes
   // the precomputed brainDecision as the 4th arg per the KAN-834
   // precomputed-decision pattern (avoids double-eval inside
@@ -107,6 +149,12 @@ vi.mock("../lib/oidc-pubsub-verify.js", () => ({
 vi.mock("../prisma.js", () => ({
   prisma: {
     auditLog: { create: auditLogCreateMock },
+    // KAN-1065 (Cluster II PR III) — contactSubObjectiveGapState queries
+    // for the engine-phase wiring (gapState findMany + recent-manual findFirst).
+    contactSubObjectiveGapState: {
+      findMany: gapStateFindManyMock,
+      findFirst: gapStateFindFirstMock,
+    },
   },
 }));
 
@@ -130,6 +178,11 @@ vi.mock("../../../../packages/api/src/services/brain-service.js", () => ({
   // loader surface for the reply chain. Mock returns whatever
   // buildThreadContextMock yields per-test (default `[]` set in beforeEach).
   buildThreadContext: buildThreadContextMock,
+  // KAN-1065 (Cluster II PR III) — engine-phase wiring helpers. Mocks
+  // return whatever resolveEnginePhasesMock / computeCurrentEnginePhaseMock
+  // yield per-test (defaults set in beforeEach).
+  resolveEnginePhases: resolveEnginePhasesMock,
+  computeCurrentEnginePhase: computeCurrentEnginePhaseMock,
 }));
 
 import { contactRepliedPushApp } from "../subscribers/contact-replied-push.js";
@@ -289,6 +342,23 @@ beforeEach(() => {
   // (matches pre-PR-III rendering). Specific multi-turn tests override
   // via `mockResolvedValueOnce([...])`.
   buildThreadContextMock.mockResolvedValue([]);
+  // KAN-1065 (Cluster II PR III) — default engine-phase wiring mocks.
+  // resolveEnginePhasesMock returns the canonical 4-phase default;
+  // computeCurrentEnginePhaseMock returns derived qualify (the first phase)
+  // matching the empty-gap-state result. gapState queries return empty by
+  // default (fresh contact / first eval). Specific tests override.
+  resolveEnginePhasesMock.mockResolvedValue([
+    { key: 'qualify', label: 'Qualify', subObjectives: ['authority'], priority: 1 },
+    { key: 'problem', label: 'Problem', subObjectives: ['need', 'motivation', 'budget', 'cost_of_problem'], priority: 2 },
+    { key: 'proof', label: 'Proof', subObjectives: ['roi_metrics'], priority: 3 },
+    { key: 'closing', label: 'Closing', subObjectives: ['timeline', 'committed_amount'], priority: 4 },
+  ]);
+  computeCurrentEnginePhaseMock.mockReturnValue({
+    currentPhase: { key: 'qualify', label: 'Qualify', subObjectives: ['authority'], priority: 1 },
+    reason: 'derived',
+  });
+  gapStateFindManyMock.mockResolvedValue([]);
+  gapStateFindFirstMock.mockResolvedValue(null);
   __setRedisClientForTest(null);
 });
 
@@ -724,5 +794,108 @@ describe("KAN-1058 (Phase B PR III) — buildThreadContext wiring", () => {
     expect(auditLogCreateMock.mock.calls[0]![0].data.actionType).toBe(
       "decision_re_evaluated_skipped_no_deal",
     );
+  });
+});
+
+// ─────────────────────────────────────────────
+// KAN-1065 (Cluster II PR III) — engine input wiring
+// ─────────────────────────────────────────────
+
+describe("KAN-1065 (Cluster II PR III) — engine input wiring (reply chain)", () => {
+  it("resolveEnginePhases + computeCurrentEnginePhase invoked before evaluateDealState", async () => {
+    const redis = makeFakeRedis();
+    __setRedisClientForTest(redis as never);
+    const { body } = makeEnvelope(makeValidEvent());
+    const res = await makeApp().request("/pubsub/contact-replied", {
+      method: "POST",
+      body,
+    });
+    expect(res.status).toBe(200);
+    // KAN-1065 wiring sentinel: both helpers fire before the brain eval.
+    expect(resolveEnginePhasesMock).toHaveBeenCalledTimes(1);
+    expect(computeCurrentEnginePhaseMock).toHaveBeenCalledTimes(1);
+    expect(evaluateDealStateMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("computeCurrentEnginePhase invoked with correct shape (gapState + enginePhases + contactRecentSetBy)", async () => {
+    const redis = makeFakeRedis();
+    __setRedisClientForTest(redis as never);
+    const { body } = makeEnvelope(makeValidEvent());
+    await makeApp().request("/pubsub/contact-replied", { method: "POST", body });
+    const callArg = computeCurrentEnginePhaseMock.mock.calls[0]![0] as {
+      gapState: unknown[];
+      enginePhases: unknown[];
+      contactRecentSetBy?: unknown;
+    };
+    // Phase 1 Q1 lock — inline findFirst result threads through as
+    // contactRecentSetBy. Default mock returns null → undefined here.
+    expect(Array.isArray(callArg.gapState)).toBe(true);
+    expect(Array.isArray(callArg.enginePhases)).toBe(true);
+    expect(callArg.enginePhases).toHaveLength(4);
+    expect(callArg.contactRecentSetBy).toBeUndefined();
+  });
+
+  it("contactRecentSetBy populated when findFirst returns a recent manual row (Q2 source-discriminator lock)", async () => {
+    const recentRow = {
+      setBy: "fred@axisone.ca",
+      setAt: new Date("2026-06-01T12:00:00.000Z"),
+      subObjectiveKey: "authority",
+      source: "manual" as const,
+    };
+    gapStateFindFirstMock.mockResolvedValueOnce(recentRow);
+    const redis = makeFakeRedis();
+    __setRedisClientForTest(redis as never);
+    const { body } = makeEnvelope(makeValidEvent());
+    await makeApp().request("/pubsub/contact-replied", { method: "POST", body });
+    const callArg = computeCurrentEnginePhaseMock.mock.calls[0]![0] as {
+      contactRecentSetBy?: {
+        setBy: string;
+        setAt: Date;
+        subObjectiveKey: string;
+        source: string;
+      };
+    };
+    expect(callArg.contactRecentSetBy).toEqual({
+      setBy: "fred@axisone.ca",
+      setAt: recentRow.setAt,
+      subObjectiveKey: "authority",
+      source: "manual",
+    });
+  });
+
+  it("computeCurrentEnginePhase result threads into evaluateDealState.options.currentEnginePhase", async () => {
+    const customSnapshot = {
+      currentPhase: {
+        key: "problem" as const,
+        label: "Problem",
+        subObjectives: ["need", "motivation", "budget", "cost_of_problem"],
+        priority: 2,
+      },
+      reason: "derived" as const,
+    };
+    computeCurrentEnginePhaseMock.mockReturnValueOnce(customSnapshot);
+    const redis = makeFakeRedis();
+    __setRedisClientForTest(redis as never);
+    const { body } = makeEnvelope(makeValidEvent());
+    await makeApp().request("/pubsub/contact-replied", { method: "POST", body });
+    expect(evaluateDealStateMock).toHaveBeenCalledTimes(1);
+    const evaluateOptions = evaluateDealStateMock.mock.calls[0]![2] as {
+      currentEnginePhase?: unknown;
+    };
+    expect(evaluateOptions.currentEnginePhase).toEqual(customSnapshot);
+  });
+
+  it("null-dealId short-circuit does NOT fire resolveEnginePhases or computeCurrentEnginePhase (preserves L360-378 guard)", async () => {
+    const redis = makeFakeRedis();
+    __setRedisClientForTest(redis as never);
+    const { body } = makeEnvelope(makeValidEvent({ dealId: null }));
+    const res = await makeApp().request("/pubsub/contact-replied", {
+      method: "POST",
+      body,
+    });
+    expect(res.status).toBe(200);
+    expect(resolveEnginePhasesMock).not.toHaveBeenCalled();
+    expect(computeCurrentEnginePhaseMock).not.toHaveBeenCalled();
+    expect(evaluateDealStateMock).not.toHaveBeenCalled();
   });
 });

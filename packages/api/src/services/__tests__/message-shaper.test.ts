@@ -16,6 +16,14 @@ const evaluateDealStateMock = vi.fn();
 const llmCompleteMock = vi.fn();
 vi.mock('../brain-service.js', () => ({
   evaluateDealState: (...args: unknown[]) => evaluateDealStateMock(...args),
+  // KAN-1065 (Cluster II PR III) — message-shaper tests do not exercise
+  // these but the subscriber code paths import them; no-op stubs preempt
+  // sibling-mock drift if the consumer surface widens.
+  resolveEnginePhases: vi.fn(async () => []),
+  computeCurrentEnginePhase: vi.fn(() => ({
+    currentPhase: { key: 'qualify' as const, label: 'Qualify', subObjectives: [], priority: 1 },
+    reason: 'derived' as const,
+  })),
 }));
 vi.mock('../llm-client.js', () => ({
   complete: (...args: unknown[]) => llmCompleteMock(...args),
