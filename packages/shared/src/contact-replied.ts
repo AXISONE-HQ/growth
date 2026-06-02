@@ -56,11 +56,13 @@ export const CONTACT_REPLIED_TOPIC = "contact.replied";
  *     Engagement to avoid an extra DB roundtrip in the publish-
  *     hot-path. PR4 splices this into the engine prompt as the
  *     new `## Latest inbound` section.
- *   - `metadata.threadDepth` ships as `1` in PR3. True depth
- *     derivation (counting prior outbound/inbound pairs on this
- *     thread via Engagement.references or per-Deal engagement
- *     history) lands in PR4 when the engine prompt actually reads
- *     it. PR3's skeleton subscriber doesn't consume threadDepth.
+ *   - `metadata.threadDepth` derived via KAN-1056 as a live
+ *     `prisma.engagement.count` of prior `email_send` engagements on
+ *     `args.outcome.matchedDealId`, cutoff at `event.receivedAt`. When
+ *     matchedDealId is null (originator's Deal closed between dispatch
+ *     and reply), the publisher falls back to `1` because correlation
+ *     succeeded by reply_token so at least one prior outbound exists by
+ *     definition. Phase B prompt rendering reads this verbatim.
  *
  * **Versioned** via the `version` literal — bump on incompatible
  * changes; the schema then accepts a discriminated union of versions.
@@ -145,11 +147,23 @@ export const ContactRepliedEventSchema = z.object({
     /** Subject line on the inbound. Empty string when absent. */
     subjectLine: z.string(),
     /**
-     * Thread depth — PR3 ships hardcoded `1`. PR4 derives true depth
-     * from Engagement.references or per-Deal engagement history when
-     * the engine prompt extension needs it for context windowing.
+     * Thread depth — KAN-1056 derives this at publish time as a live
+     * `prisma.engagement.count` of prior outbounds on the matched Deal
+     * (matchedDealId-null fallback to 1; see publisher in
+     * lead-received-push.ts at emitContactRepliedIfCorrelated).
+     *
+     * `.min(0)` per KAN-1056 because the count CAN be zero in a narrow
+     * race window — the inbound Engagement row is written before the
+     * publish IIFE runs, but the matched outbound's row write is a
+     * separate $transaction. In practice (correlation reached here via
+     * reply_token match), the matched outbound row already committed so
+     * the count is ≥1, but the schema accepts 0 for forward-compat with
+     * any future correlation paths that don't require a prior-outbound
+     * row to exist (Phase B+ extensions, KAN-1052 initial-lead path which
+     * uses its own threadDepth=0 codepath without going through this
+     * publisher).
      */
-    threadDepth: z.number().int().min(1),
+    threadDepth: z.number().int().min(0),
   }),
 });
 

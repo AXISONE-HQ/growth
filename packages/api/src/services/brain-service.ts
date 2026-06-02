@@ -289,13 +289,20 @@ export interface BrainLatestInbound {
    */
   inReplyToDecisionId: string;
   /**
-   * Thread depth — PR3 publisher ships hardcoded `1`. PR4 renders the
-   * value verbatim; true depth derivation is deferred to a future
-   * iteration when the engine actually uses it for context-window sizing.
+   * Thread depth — count of prior outbounds the inbound is replying to,
+   * derived at the publisher (KAN-1056 for the reply path; KAN-1052 for
+   * the initial-lead path).
    *
-   * KAN-1052 — initial-lead path passes `0` (the inbound is a fresh
-   * inquiry, not a reply to anything). Reply path continues to pass `1`
-   * pending PR3's threadDepth derivation work.
+   *   - Reply path (lead-received-push.ts:emitContactRepliedIfCorrelated)
+   *     — live `prisma.engagement.count` of prior `email_send` engagements
+   *     on the matched Deal; matchedDealId-null fallback to 1.
+   *   - Initial-lead path (lead-received-push.ts:723) — hardcoded 0
+   *     because the inbound is a fresh inquiry, not a reply.
+   *
+   * The brain-service.ts:962 prompt ternary keys off `0` to emit
+   * "reached out for the first time" phrasing; any ≥1 value renders
+   * as "replied" (Phase B will extend with depth-aware phrasing per
+   * KAN-1060).
    */
   threadDepth: number;
 }

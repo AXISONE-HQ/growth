@@ -153,3 +153,89 @@ describe("KAN-1037-PR3 — contact.replied publisher wire-up", () => {
     }
   });
 });
+
+/**
+ * KAN-1056 — Phase B PR I structural pins for threadDepth derivation.
+ *
+ * PR3 shipped `threadDepth: 1` as a hardcode in emitContactRepliedIfCorrelated
+ * (lead-received-push.ts:1089 pre-PR I). Phase B's engine prompt rendering
+ * needs the true value to drive the depth-keyed sub-section gating + the
+ * brain-service.ts:962 ternary. PR I replaces the hardcode with a live
+ * `prisma.engagement.count` of prior `email_send` engagements on the matched
+ * Deal, falling back to `1` when matchedDealId is null (correlation succeeded
+ * by reply_token so ≥1 prior outbound exists).
+ *
+ * These are SOURCE-shape structural pins (same readFileSync pattern as the
+ * existing wire-up block above) — the publisher IIFE isn't directly callable
+ * without a major refactor to extract emitContactRepliedIfCorrelated, so we
+ * pin the load-bearing query shape against source.
+ */
+describe("KAN-1056 — threadDepth derivation publisher pins", () => {
+  it("emitContactRepliedIfCorrelated calls prisma.engagement.count for threadDepth derivation", () => {
+    const src = loadSrc();
+    // The publisher must perform a live count against engagements. A revert
+    // to the PR3 hardcode (or any future refactor that drops the count)
+    // fails this pin loudly.
+    expect(
+      src,
+      "emitContactRepliedIfCorrelated must call prisma.engagement.count to " +
+        "derive threadDepth — see KAN-1056 + Phase B Phase 1 trace Q1+Q2.",
+    ).toMatch(/prisma\.engagement\.count\(\s*\{/);
+  });
+
+  it("count query filters on engagementType: 'email_send' (matches outbound write at action-executed-push.ts)", () => {
+    const src = loadSrc();
+    // Outbound engagements get engagementType derived from channel:
+    // `${event.channel.toLowerCase()}_send`. Email outbounds → 'email_send'.
+    // The count must filter on this literal so it doesn't double-count
+    // the just-written 'email_received' inbound row.
+    expect(src).toMatch(/engagementType:\s*['"]email_send['"]/);
+  });
+
+  it("count query uses temporal cutoff occurredAt: { lt: ... event.receivedAt ... } (Q2 lock)", () => {
+    const src = loadSrc();
+    // Q2 lock: defensive against concurrent send races (engine fires +
+    // dispatches an outbound while a contact's reply is in flight). The
+    // cutoff anchors at event.receivedAt — already in scope at L1083.
+    expect(src).toMatch(/occurredAt:\s*\{\s*lt:[\s\S]{0,80}event\.receivedAt/);
+  });
+
+  it("publisher derives threadDepth conditionally on matchedDealId (Q1 null-fallback lock)", () => {
+    const src = loadSrc();
+    // Q1 lock: matchedDealId is nullable per writeSidecarAndCorrelate
+    // L791-796. When null, threadDepth falls back to 1 (correlation
+    // succeeded by reply_token → ≥1 prior outbound exists). The pin
+    // looks for the ternary shape `args.outcome.matchedDealId ?` before
+    // the await prisma.engagement.count call inside the IIFE.
+    expect(
+      src,
+      "Publisher must conditionally derive threadDepth from matchedDealId " +
+        "with a fallback to 1 when null — Q1 Phase B Phase 1 trace lock.",
+    ).toMatch(
+      /args\.outcome\.matchedDealId\s*\?[\s\S]{0,400}prisma\.engagement\.count/,
+    );
+  });
+
+  it("publisher no longer hardcodes threadDepth: 1 (the PR3-era pre-PR-I shape is gone)", () => {
+    const src = loadSrc();
+    // Regression sentinel. The literal `threadDepth: 1,` only appears in
+    // the file as a comment if at all — never as an object property value
+    // on the metadata literal passed to buildContactRepliedEvent. A revert
+    // to the hardcode would re-introduce the assignment shape.
+    //
+    // We narrow to "inside the buildContactRepliedEvent metadata block"
+    // by looking for the literal in the same line shape as the pre-PR I
+    // hardcode would emit: `\n          threadDepth: 1,` (12-space indent
+    // matching the IIFE's metadata literal at L1086-1090 pre-PR I).
+    expect(src).not.toMatch(/\n {10}threadDepth:\s*1,/);
+  });
+
+  it("threadDepth lives on the metadata literal as a bare property (shorthand binding to derived value)", () => {
+    const src = loadSrc();
+    // Post-PR-I shape: the metadata block reads `threadDepth,` (shorthand
+    // binding to the const declared above the buildContactRepliedEvent
+    // call). Pin this so a future refactor that re-introduces an inline
+    // expression or hardcode fails the test.
+    expect(src).toMatch(/\n {10}threadDepth,/);
+  });
+});
