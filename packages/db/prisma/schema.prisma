@@ -40,6 +40,24 @@ model Tenant {
   // threshold-gate clamp is binary (tenant cannot opt-in once an action
   // is in the high-stakes set; M2-3 safety invariant always wins).
   autoTransitionSubObjectives     Boolean               @default(false) @map("auto_transition_sub_objectives")
+  // KAN-1063 (Cluster II PR I, Phase 1 design trace Lock 5) — engine-driven
+  // EnginePhase advancement gate. Sibling to autoTransitionSubObjectives
+  // above (KAN-1042 PR A1) + autoApproveEnabled (M2-6b) + sendRedirectEnabled
+  // (M2-6a). Default false → engine emissions of `advance_engine_phase`
+  // escalate to Recommendations queue via KAN-1037 PR1 originalAction;
+  // true → Cluster II PR V's wirePhase2Consumers arm auto-executes via
+  // `handleEngineAdvancePhase`. DISPATCHER-LEVEL gating (consumer reads
+  // this flag), NOT a HIGH_STAKES_ACTION_TYPES clamp — same architectural
+  // distinction as KAN-1042 PR A1.
+  autoAdvanceEnginePhase          Boolean               @default(false) @map("auto_advance_engine_phase")
+  // KAN-1063 (Cluster II PR I, Phase 1 design trace Lock 3 + Q4) — per-tenant
+  // override of Blueprint.enginePhases. Direct on Tenant per engine-config
+  // family discipline (sibling to engine-config flags above), NOT on
+  // accountProfile sub-model (which is the content-override family,
+  // e.g., legalDefaults). When null, engine falls back to
+  // `blueprint?.enginePhases` then DEFAULT_ENGINE_PHASES_GENERIC_B2B.
+  // Resolution lives in `blueprint-engine-phases-resolver.ts` (Cluster II PR II).
+  enginePhasesOverride            Json?                 @map("engine_phases_override")
   dailyActionLimit                Int                   @default(100) @map("daily_action_limit")
   // KAN-1009 SAE PR4 — per-tenant daily LLM cost cap (USD). NULL = use
   // the env-default (DECISION_RUN_DAILY_COST_CAP_USD_DEFAULT, conservative
@@ -202,6 +220,17 @@ model Blueprint {
   // Backfilled for existing rows with both languages in the same
   // migration. Future verticals populate their own keyed bundles.
   legalDefaults     Json?    @map("legal_defaults")
+  // KAN-1063 (Cluster II PR I, Phase 1 design trace Lock 3) — per-vertical
+  // 4-phase EnginePhase definitions. Shape (Json):
+  // `{ phases: [{ key: 'qualify'|'problem'|'proof'|'closing', label, subObjectives: [...], priority }] }`.
+  // Sibling slot positioning to `legalDefaults` above (KAN-852) — both
+  // nullable Json with per-tenant override semantics. Per-tenant override
+  // lives at `tenants.enginePhasesOverride` (direct on Tenant, engine-config
+  // family; see Cluster II Phase 1 Q4 lock for the sub-model placement
+  // rationale). Resolution lives in `blueprint-engine-phases-resolver.ts`
+  // (Cluster II PR II). When null on Blueprint AND null on Tenant override,
+  // engine falls back to DEFAULT_ENGINE_PHASES_GENERIC_B2B.
+  enginePhases      Json?    @map("engine_phases")
   isActive          Boolean  @default(true) @map("is_active")
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")

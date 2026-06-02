@@ -18,6 +18,17 @@
  * Doctrine: configuration is a failure mode — hardcoded for MVP; future
  * Blueprint loader (M3 slice #5) ships per-vertical sets without
  * schema migration (sub_objective_key is free-form TEXT in the DB).
+ *
+ * KAN-1063 (Cluster II PR I, folds in KAN-1050) — extended with 3 keys
+ * for the EnginePhase Workflow Architecture (KAN-1062):
+ *   - `cost_of_problem` — Problem phase (joins need + motivation + budget)
+ *   - `roi_metrics`     — Proof phase
+ *   - `committed_amount` — Closing phase
+ * Slot positioning + priorityWeight values locked at Phase 1 trace.
+ * EnginePhase grouping lives in `Blueprint.enginePhases` (per-vertical
+ * config) + `Tenant.enginePhasesOverride` (per-tenant override). The
+ * sub-objective keys themselves stay framework-agnostic; the phase
+ * grouping is a config concern, not a key concern.
  */
 export const SUB_OBJECTIVE_KEYS = [
   'timeline',
@@ -25,6 +36,10 @@ export const SUB_OBJECTIVE_KEYS = [
   'authority',
   'need',
   'motivation',
+  // KAN-1063 (Cluster II PR I) — vocab extension folding in KAN-1050.
+  'cost_of_problem',
+  'roi_metrics',
+  'committed_amount',
 ] as const;
 
 export type SubObjectiveKey = (typeof SUB_OBJECTIVE_KEYS)[number];
@@ -44,15 +59,39 @@ export interface SubObjectiveDefault {
   label: string;
   valueType: 'text' | 'date' | 'numeric' | 'enum';
   priorityWeight: number;          // 0..1, PRD-pinned
+  /**
+   * @deprecated since 2026-06-02 (Cluster II Phase 1 trace, KAN-1063) —
+   * the 2-bucket stage grouping (`'qualified' | 'proposal-ready'`) doesn't
+   * align with the 4-phase EnginePhase model introduced by KAN-1062
+   * (Qualify / Problem / Proof / Closing). Disposition + repurpose tracked
+   * at KAN-1068; do NOT drop unilaterally pending consumer migration plan.
+   *
+   * Verified consumers at Phase 1 trace (2026-06-02):
+   *   - `apps/web/src/components/contacts/discovery-state-panel.tsx:172` (UI surface)
+   *   - `packages/api/src/services/sub-objective-gap-tracker.ts:162, 214, 219, 242` (composite scoring + hard-trigger logic)
+   *   - `packages/api/src/services/action-determiner.ts:349, 353` (engine prompt context render)
+   *   - `apps/api/src/subscribers/decision-run-push.ts:672` (next-stage matching)
+   *   - `apps/web/src/lib/api.ts:2167` (frontend type surface)
+   *   - 4 test files (brain-service.test.ts + m3-1a + m3-1b + others)
+   */
   requiredAtStage?: string;        // stage name OR undefined (soft-only)
 }
 
 export const DEFAULT_SUB_OBJECTIVES_GENERIC_B2B: ReadonlyArray<SubObjectiveDefault> = [
-  { key: 'timeline',   label: 'When are they looking to start?',        valueType: 'text',    priorityWeight: 0.90, requiredAtStage: 'qualified'      },
-  { key: 'budget',     label: "What's their budget range?",              valueType: 'enum',    priorityWeight: 0.85, requiredAtStage: 'proposal-ready' },
-  { key: 'authority',  label: 'Are they the decision maker?',            valueType: 'enum',    priorityWeight: 0.80, requiredAtStage: 'proposal-ready' },
-  { key: 'need',       label: 'What problem are they solving?',          valueType: 'text',    priorityWeight: 0.75, requiredAtStage: 'qualified'      },
-  { key: 'motivation', label: "Why now? What's driving this?",           valueType: 'text',    priorityWeight: 0.70, requiredAtStage: 'qualified'      },
+  { key: 'timeline',         label: 'When are they looking to start?',        valueType: 'text',    priorityWeight: 0.90, requiredAtStage: 'qualified'      },
+  { key: 'budget',           label: "What's their budget range?",              valueType: 'enum',    priorityWeight: 0.85, requiredAtStage: 'proposal-ready' },
+  { key: 'authority',        label: 'Are they the decision maker?',            valueType: 'enum',    priorityWeight: 0.80, requiredAtStage: 'proposal-ready' },
+  { key: 'need',              label: 'What problem are they solving?',          valueType: 'text',    priorityWeight: 0.75, requiredAtStage: 'qualified'      },
+  { key: 'motivation',       label: "Why now? What's driving this?",           valueType: 'text',    priorityWeight: 0.70, requiredAtStage: 'qualified'      },
+  // KAN-1063 (Cluster II PR I, folds in KAN-1050) — vocab extension. New
+  // entries omit `requiredAtStage` (the @deprecated field above) — the
+  // 4-phase EnginePhase grouping in Blueprint.enginePhases is the canonical
+  // ordering for these. priorityWeight values per Phase 1 trace lock:
+  // cost_of_problem (0.65) > roi_metrics (0.60) > committed_amount (0.55),
+  // matching their typical conversational order (problem → proof → close).
+  { key: 'cost_of_problem',  label: "What's the cost of not solving this?",    valueType: 'text',    priorityWeight: 0.65 },
+  { key: 'roi_metrics',      label: 'What return are they expecting?',         valueType: 'text',    priorityWeight: 0.60 },
+  { key: 'committed_amount', label: 'What amount are they committing?',        valueType: 'numeric', priorityWeight: 0.55 },
 ];
 
 // ─────────────────────────────────────────────
