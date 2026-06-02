@@ -342,6 +342,157 @@ export function buildLatestInboundContext(input: {
   };
 }
 
+// ─────────────────────────────────────────────
+// KAN-1057 (Phase B PR II) — Multi-turn thread context
+// ─────────────────────────────────────────────
+
+/**
+ * KAN-1057 — depth cap for prior-turn rendering. Locked at 5 turn-pairs
+ * per Phase B Phase 1 design trace (2026-06-02):
+ *   - PROD thread-depth distribution (11 Deals): p50=1, p90=4, max=5
+ *   - Token budget at full-stack ship: ~3500-4500 input tokens (0.45% of
+ *     Claude Sonnet 4.6's 1M context window)
+ *
+ * Hardcoded constant rather than tenant-config because no empirical signal
+ * yet that tenants need different depths. Revisit if cohort latency or
+ * cognitive-degradation signal warrants per-tenant tuning.
+ *
+ * The findMany take limit is `THREAD_DEPTH_CAP * 2` (10 engagements) to
+ * capture a fully-paired 5-turn conversation. In a pathological all-outbound
+ * stretch the helper still returns up to 10 ThreadTurns; the engine prompt
+ * gracefully handles any non-empty array.
+ */
+export const THREAD_DEPTH_CAP = 5;
+
+/**
+ * KAN-1057 — single rendered turn in a thread. Direction signals whether the
+ * line came from us or the contact; (subjectLine, bodyText) carry the
+ * verbatim content the engine prompt will splice into the `### Prior
+ * conversation context` sub-section in PR III.
+ *
+ * Both subjectLine and bodyText default to empty string when the source
+ * Engagement row has missing/malformed metadata (Q1 lock: empty string
+ * preserves accurate turn-count correspondence with PR I's threadDepth
+ * derivation; omitting the turn would silently desync them).
+ */
+export interface ThreadTurn {
+  direction: 'outbound' | 'inbound';
+  /** ISO 8601 of the source Engagement.occurredAt. */
+  occurredAt: string;
+  /** Subject line from Engagement.metadata.subject; '' when missing/malformed. */
+  subjectLine: string;
+  /** Body from Engagement.metadata.bodyPreview, ≤2000 chars; '' when missing/malformed. */
+  bodyText: string;
+}
+
+/**
+ * KAN-1057 — chronological-by-deal walk of prior email engagements on a Deal.
+ *
+ * Returns up to `THREAD_DEPTH_CAP * 2` (10) most-recent prior-turn
+ * Engagements ordered **oldest-first** (chronological), excluding the
+ * just-received row. PR III splices the result into the engine prompt's
+ * `### Prior conversation context` sub-section between the latest body
+ * blockquote and the `### Stop-condition guidance` block.
+ *
+ * Phase B Phase 1 design-trace locks (2026-06-02):
+ *   - Q1 (empty-string defensive default): missing metadata.subject /
+ *     bodyPreview → empty string, NOT row omission. Preserves
+ *     priorTurns.length = threadDepth - 1 correspondence with PR I.
+ *   - Q2 (runtime type guard): `metadata` is Prisma Json → JsonValue at
+ *     runtime; bare casts silently propagate malformed shapes. Inline
+ *     `typeof === 'string'` guards extract safely.
+ *   - Q3 (oldest-first internal): caller (PR III) iterates forward for
+ *     render; helper returns render-ready shape. Internal `.reverse()`
+ *     converts the findMany DESC sort.
+ *   - Q4 (email-only scope): filter `engagementType: { in: ['email_send',
+ *     'email_received'] }` — opens/clicks/bounces/replies are passive
+ *     interaction signals without renderable subject/body content;
+ *     including them would pollute the prompt.
+ *
+ * **Fail-safe contract**: any throw from `prisma.engagement.findMany` is
+ * caught + warn-logged + returns `[]`. The PR III prompt section is then
+ * omitted via the existing `priorTurns.length === 0` gating rule rather
+ * than blocking the engine call.
+ *
+ * **Query shape**: single indexed roundtrip on
+ * `@@index([tenantId, dealId, occurredAt])` (schema.prisma:1978). DESC
+ * orderBy + take 10 + post-reverse → expected single-digit-ms cost.
+ *
+ * @param prisma  PrismaClient instance (caller-injected; brain-service.ts
+ *                imports PrismaClient directly from @prisma/client per the
+ *                same-rootDir packages/api convention).
+ * @param input.tenantId            Deal's tenantId — index leading edge.
+ * @param input.dealId              Deal to walk. Required (no contact-level
+ *                                  fallback in PR II; multi-deal-per-contact
+ *                                  is a Phase B+ extension).
+ * @param input.excludeEngagementId The just-received inbound row's id; the
+ *                                  publish IIFE commits it before this
+ *                                  helper fires, so it would otherwise
+ *                                  appear in the walk.
+ */
+export async function buildThreadContext(
+  prisma: PrismaClient,
+  input: {
+    tenantId: string;
+    dealId: string;
+    excludeEngagementId: string;
+  },
+): Promise<ThreadTurn[]> {
+  try {
+    const rows = await prisma.engagement.findMany({
+      where: {
+        tenantId: input.tenantId,
+        dealId: input.dealId,
+        engagementType: { in: ['email_send', 'email_received'] },
+        id: { not: input.excludeEngagementId },
+      },
+      orderBy: { occurredAt: 'desc' },
+      take: THREAD_DEPTH_CAP * 2,
+      select: {
+        engagementType: true,
+        occurredAt: true,
+        metadata: true,
+      },
+    });
+
+    const turns: ThreadTurn[] = rows.map((row) => {
+      // Q2 lock: runtime type guards. `metadata` is Prisma Json → JsonValue
+      // at runtime; the Engagement.metadata column has `@default("{}")` but
+      // historical rows pre-KAN-839 may have missing subject/bodyPreview.
+      // Inline `typeof === 'string'` is the cheapest safe extraction; no
+      // zod dependency needed for two fields.
+      const metadata = (row.metadata ?? {}) as Record<string, unknown>;
+      const subjectRaw = metadata['subject'];
+      const bodyRaw = metadata['bodyPreview'];
+      const subjectLine = typeof subjectRaw === 'string' ? subjectRaw : '';
+      // Belt-and-suspenders 2000-char cap. Inbound writes already slice
+      // upstream (lead-received-push.ts:1218 — KAN-839); outbound writes
+      // pass through whatever the send-side publisher provided. Defensive
+      // re-slice catches any pre-KAN-839 outbound rows that may exceed
+      // the cap without re-deploy migration.
+      const bodyText = typeof bodyRaw === 'string' ? bodyRaw.slice(0, 2000) : '';
+      return {
+        direction: row.engagementType === 'email_send' ? 'outbound' : 'inbound',
+        occurredAt: row.occurredAt.toISOString(),
+        subjectLine,
+        bodyText,
+      };
+    });
+
+    // Q3 lock: helper returns oldest-first so PR III's render loop iterates
+    // forward without remembering to reverse. findMany returned DESC; flip.
+    return turns.reverse();
+  } catch (err) {
+    // Fail-safe: any prisma throw → empty array. The PR III prompt section
+    // is then gated off via `priorTurns.length === 0` rather than blocking
+    // the engine call. Same posture as computeGapState's contract (L37-42).
+    console.warn(
+      `[brain-service] buildThreadContext error tenantId=${input.tenantId} dealId=${input.dealId} err=${(err as Error)?.message ?? String(err)}`,
+    );
+    return [];
+  }
+}
+
 /**
  * KAN-828 — minimal duck-typed client interfaces. We don't import ioredis /
  * openai directly here because (a) Brain Service is a pure module with
