@@ -69,7 +69,27 @@ export type BrainActionType =
   // arm reads `Tenant.autoTransitionSubObjectives` (default false →
   // escalate to Recommendations queue via originalAction; true →
   // dispatch via `transitionSubObjectiveState` with source='engine').
-  | 'transition_sub_objective';
+  | 'transition_sub_objective'
+  // KAN-1063 (Cluster II PR I, foundation for KAN-1062) — engine-driven
+  // EnginePhase advancement. Emitted when the contact's accumulated
+  // sub-objective signal indicates the current phase is sufficiently
+  // resolved AND the reply shows signal aligned with the next phase.
+  // Payload sits on `BrainNextBestAction.enginePhaseAdvance`.
+  //
+  // Strict sequential v1 (Cluster II Phase 1 Lock 1) — only the canonical
+  // adjacent-phase transitions are valid: qualify→problem, problem→proof,
+  // proof→closing. Lock 4 invariant: engine cannot emit `advance_engine_phase`
+  // FROM `closing` — exit paths are `advance_stage` (Cluster III handoff),
+  // `close_deal_lost`, `wait_for_response`, `escalate_to_human`.
+  // `isValidPhaseAdvance(from, to)` enforces both rules.
+  //
+  // Governance: same dispatcher-level gating shape as `transition_sub_objective`.
+  // Cluster II PR V's wirePhase2Consumers arm reads `Tenant.autoAdvanceEnginePhase`
+  // (default false → escalate via originalAction; true → dispatch via
+  // `handleEngineAdvancePhase`). PR I (this PR) ships the action vocabulary
+  // + validation infrastructure; PR IV ships the parser payload extraction
+  // + engine prompt rendering; PR V wires the dispatcher arm.
+  | 'advance_engine_phase';
 
 export type BrainSuggestedChannel = 'email' | 'sms' | 'meta_messenger';
 export type BrainSuggestedTone = 'curious' | 'professional' | 'urgent' | 'closing';
@@ -79,10 +99,12 @@ export type BrainSuggestedTone = 'curious' | 'professional' | 'urgent' | 'closin
  * `BrainNextBestAction.subObjectiveTransition` when (and only when)
  * `type === 'transition_sub_objective'`.
  *
- * `subObjectiveKey` clamps to BANT-5 to match the router enum at
- * `apps/api/src/router.ts:6617`. Vocab extension beyond BANT-5 is
- * tracked separately (KAN-1050); Phase A respects the existing
- * contract.
+ * `subObjectiveKey` originally clamped to BANT-5 to match the router enum
+ * at `apps/api/src/router.ts:6617`. KAN-1063 (Cluster II PR I) folds in
+ * KAN-1050 vocab extension — adds 3 keys (`cost_of_problem`, `roi_metrics`,
+ * `committed_amount`) for the 4-phase EnginePhase model (Problem / Proof /
+ * Closing). Sub-objective keys stay framework-agnostic; the phase grouping
+ * lives in `Blueprint.enginePhases` (per-vertical config).
  *
  * `value` type matches the router contract exactly: `string | number |
  * null` (no `boolean` — booleans cast to enum_value strings at
@@ -93,12 +115,94 @@ export type SubObjectiveTransitionKey =
   | 'budget'
   | 'authority'
   | 'need'
-  | 'motivation';
+  | 'motivation'
+  // KAN-1063 (Cluster II PR I) — vocab extension folding in KAN-1050.
+  | 'cost_of_problem'
+  | 'roi_metrics'
+  | 'committed_amount';
 
 export interface SubObjectiveTransitionPayload {
   subObjectiveKey: SubObjectiveTransitionKey;
   toState: 'known' | 'not_applicable';
   value: string | number | null;
+}
+
+// ─────────────────────────────────────────────
+// KAN-1063 (Cluster II PR I) — EnginePhase canonical types + validators
+// ─────────────────────────────────────────────
+
+/**
+ * KAN-1063 (Cluster II PR I) — canonical EnginePhase keys. The 4-phase
+ * engine workflow model introduced by Cluster II (KAN-1062). Strict
+ * sequential ordering: qualify → problem → proof → closing.
+ *
+ * Naming: `EnginePhase` (NOT `MicroObjective`) per Phase 1 Lock 1 —
+ * existing `MicroObjective` Prisma model at schema.prisma:1061
+ * (KAN-700/701 platform-default completion-gate tracking) is a
+ * fundamentally different concept; see memo
+ * `feedback_cluster_ii_engine_phase_vs_micro_objective_disambiguation.md`.
+ */
+export type EnginePhaseKey = 'qualify' | 'problem' | 'proof' | 'closing';
+
+/**
+ * Canonical phase order — load-bearing for `isValidPhaseAdvance` boundary
+ * checks. Lock 4 invariant: `closing` is terminal; engine cannot emit
+ * `advance_engine_phase` from this phase.
+ */
+export const ENGINE_PHASE_ORDER: readonly EnginePhaseKey[] = [
+  'qualify',
+  'problem',
+  'proof',
+  'closing',
+] as const;
+
+export const VALID_ENGINE_PHASES: ReadonlySet<EnginePhaseKey> = new Set<EnginePhaseKey>([
+  'qualify',
+  'problem',
+  'proof',
+  'closing',
+]);
+
+/**
+ * KAN-1063 (Cluster II PR I) — `advance_engine_phase` payload shape.
+ * Carried on `BrainNextBestAction.enginePhaseAdvance` when (and only
+ * when) `type === 'advance_engine_phase'`. PR IV wires the parser
+ * payload extraction; PR I (this PR) ships the type contract only.
+ */
+export interface AdvanceEnginePhasePayload {
+  fromPhase: EnginePhaseKey;
+  toPhase: EnginePhaseKey;
+}
+
+/**
+ * KAN-1063 (Cluster II PR I) — strict-sequential phase-advance validator.
+ *
+ * Returns true ONLY when `to` is exactly one position after `from` in
+ * the canonical `ENGINE_PHASE_ORDER`. All other transitions are invalid:
+ *   - skip transitions (qualify → proof, qualify → closing, problem → closing) → false
+ *   - reverse transitions (problem → qualify, closing → proof) → false
+ *   - same-phase (qualify → qualify) → false
+ *   - Lock 4 invariant: closing has no exit — closing → ??? returns false
+ *     for ALL `to` values. Engine must use `advance_stage` (Cluster III
+ *     handoff), `close_deal_lost`, `wait_for_response`, or
+ *     `escalate_to_human` at the closing boundary.
+ *
+ * Used at:
+ *   - Cluster II PR IV: parser validation in parseLlmResponse (reject
+ *     LLM responses that violate the strict-sequential contract)
+ *   - Cluster II PR V: dispatcher-arm defense-in-depth before
+ *     handleEngineAdvancePhase fires
+ */
+export function isValidPhaseAdvance(from: EnginePhaseKey, to: EnginePhaseKey): boolean {
+  const fromIdx = ENGINE_PHASE_ORDER.indexOf(from);
+  // Defensive: invalid `from` value (not in canonical order) → reject.
+  // Lock 4: closing has no exit — fromIdx === length-1 returns false because
+  // `fromIdx < ENGINE_PHASE_ORDER.length - 1` fails.
+  return (
+    fromIdx >= 0 &&
+    fromIdx < ENGINE_PHASE_ORDER.length - 1 &&
+    ENGINE_PHASE_ORDER[fromIdx + 1] === to
+  );
 }
 
 export interface BrainNextBestAction {
@@ -113,6 +217,13 @@ export interface BrainNextBestAction {
    * unless the action type matches).
    */
   subObjectiveTransition?: SubObjectiveTransitionPayload;
+  /**
+   * KAN-1063 (Cluster II PR I) — populated when
+   * `type === 'advance_engine_phase'`. Omitted on all other action types.
+   * PR IV wires the parser payload extraction; PR I (this PR) ships the
+   * type contract + validation infrastructure (isValidPhaseAdvance) only.
+   */
+  enginePhaseAdvance?: AdvanceEnginePhasePayload;
 }
 
 export interface BrainStateSnapshot {
@@ -1353,6 +1464,9 @@ const VALID_ACTION_TYPES: ReadonlySet<BrainActionType> = new Set<BrainActionType
   'no_action',
   // KAN-1042 PR A1
   'transition_sub_objective',
+  // KAN-1063 (Cluster II PR I) — parser accepts the action type; PR IV
+  // wires the `enginePhaseAdvance` payload extraction.
+  'advance_engine_phase',
 ]);
 const VALID_CHANNELS: ReadonlySet<BrainSuggestedChannel> = new Set<BrainSuggestedChannel>([
   'email',
@@ -1367,8 +1481,11 @@ const VALID_TONES: ReadonlySet<BrainSuggestedTone> = new Set<BrainSuggestedTone>
 ]);
 // KAN-1042 PR A1 — sub-objective transition payload validation sets.
 // `VALID_SUB_OBJECTIVE_KEYS` mirrors the BANT-5 router enum at
-// `apps/api/src/router.ts:6617`. Vocab extension is tracked separately
-// (KAN-1050) and intentionally NOT in scope here.
+// `apps/api/src/router.ts:6617`. KAN-1063 (Cluster II PR I) folds in
+// KAN-1050 vocab extension — adds `cost_of_problem`, `roi_metrics`,
+// `committed_amount` for the 4-phase EnginePhase model (Problem / Proof /
+// Closing). Sub-objective KEYS stay framework-agnostic; the phase
+// grouping lives in `Blueprint.enginePhases` (per-vertical config).
 const VALID_SUB_OBJECTIVE_KEYS: ReadonlySet<SubObjectiveTransitionKey> =
   new Set<SubObjectiveTransitionKey>([
     'timeline',
@@ -1376,6 +1493,10 @@ const VALID_SUB_OBJECTIVE_KEYS: ReadonlySet<SubObjectiveTransitionKey> =
     'authority',
     'need',
     'motivation',
+    // KAN-1063 (Cluster II PR I) — vocab extension folding in KAN-1050.
+    'cost_of_problem',
+    'roi_metrics',
+    'committed_amount',
   ]);
 const VALID_SUB_OBJECTIVE_TO_STATES: ReadonlySet<'known' | 'not_applicable'> = new Set<
   'known' | 'not_applicable'

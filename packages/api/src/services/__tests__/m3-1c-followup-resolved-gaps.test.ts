@@ -91,14 +91,18 @@ describe('M3-1c-followup — resolvedGaps surface', () => {
   // m3-1c-transition-state.test.ts (exercises the upsert path, which is what
   // the Blueprint-loader-driven values will hit).
 
-  it('mixed states — 1 known, 4 unknown → resolved has 1, prioritized has 4 (engine path preserved)', () => {
+  it('mixed states — 1 known, N-1 unknown → resolved has 1, prioritized has N-1 (engine path preserved across vocab extensions)', () => {
+    // KAN-1063 (Cluster II PR I) — assertion made vocab-extension-resilient.
+    // Pre-KAN-1063: 5 BANT keys → 1 known + 4 unknown. Post-KAN-1063: 8 keys
+    // (5 BANT + 3 KAN-1050) → 1 known + 7 unknown. Future Blueprint-loader
+    // vocab extensions stay green without test edits.
     const rows = DEFAULT_SUB_OBJECTIVES_GENERIC_B2B.map((d) =>
       d.key === 'timeline' ? row(d.key, 'known', { valueText: 'Q3 2026' }) : row(d.key, 'unknown'),
     );
     const state = prioritize(rows, {});
     expect(state.resolvedGaps).toHaveLength(1);
     expect(state.resolvedGaps[0].key).toBe('timeline');
-    expect(state.prioritizedGaps).toHaveLength(4);
+    expect(state.prioritizedGaps).toHaveLength(DEFAULT_SUB_OBJECTIVES_GENERIC_B2B.length - 1);
     expect(state.prioritizedGaps.find((g) => g.key === 'timeline')).toBeUndefined();
   });
 
@@ -114,7 +118,10 @@ describe('M3-1c-followup — resolvedGaps surface', () => {
     // Pre-followup behavior unchanged.
     expect(state.topCandidate?.hardTrigger).toBe(true);
     expect(state.prioritizedGaps[0].hardTrigger).toBe(true);
-    expect(state.prioritizedGaps).toHaveLength(5);
+    // KAN-1063 (Cluster II PR I) — assertion made vocab-extension-resilient.
+    // All N entries unknown → all N appear in prioritizedGaps. Future
+    // Blueprint-loader vocab extensions stay green without test edits.
+    expect(state.prioritizedGaps).toHaveLength(DEFAULT_SUB_OBJECTIVES_GENERIC_B2B.length);
   });
 
   it('source defaults to decision_initialize when row.source is null (legacy rows before this slice)', () => {

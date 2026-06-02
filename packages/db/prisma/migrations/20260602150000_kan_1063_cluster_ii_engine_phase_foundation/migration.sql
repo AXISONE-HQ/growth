@@ -1,0 +1,67 @@
+-- KAN-1063 (Cluster II PR I — foundation) — additive schema changes for
+-- the EnginePhase Workflow Architecture epic (KAN-1062).
+--
+-- Three additive columns across Tenant + Blueprint. ALL purely additive
+-- (nullable JSON, nullable JSON, Boolean default-false). Zero data
+-- migration; existing rows backfill cleanly via column defaults.
+--
+-- # Lock 1 (Cluster II Phase 1 design trace, 2026-06-02): naming
+--
+-- `EnginePhase` (NOT MicroObjective). The existing `MicroObjective`
+-- Prisma model at schema.prisma:1061 (KAN-700/701 platform-default
+-- completion-gate tracking) is a fundamentally different concept from
+-- Cluster II's engine workflow phases. Cluster II introduces ZERO new
+-- `MicroObjective*` symbols. See
+-- `feedback_cluster_ii_engine_phase_vs_micro_objective_disambiguation.md`.
+--
+-- # Lock 3 (Cluster II Phase 1 design trace, 2026-06-02): Blueprint-level config
+--
+-- `blueprints.engine_phases` (JSONB nullable) carries per-vertical
+-- 4-phase definitions: { phases: [{ key, label, subObjectives: [...],
+-- priority }] }. Slot positioning is sibling to `blueprints.legal_defaults`
+-- (KAN-852 Account Page Cohort 1) — both nullable JSON with per-tenant
+-- override semantics.
+--
+-- `tenants.engine_phases_override` (JSONB nullable) — per-tenant override
+-- of Blueprint defaults. Direct on Tenant per Cluster II Phase 1 Q4 lock
+-- — engine-config family (sibling to autoTransitionSubObjectives,
+-- sendRedirectEnabled, autoApproveEnabled), NOT content-override family
+-- (which lives on accountProfile sub-model).
+--
+-- # Lock 5 (Cluster II Phase 1 design trace, 2026-06-02): governance gate
+--
+-- `tenants.auto_advance_engine_phase` (Boolean default-false) — sibling
+-- to KAN-1042 PR A1's `auto_transition_sub_objectives` pattern. Default
+-- false → engine emissions of `advance_engine_phase` escalate to
+-- Recommendations queue via KAN-1037 PR1 originalAction; true → PR V's
+-- wirePhase2Consumers arm auto-executes via `handleEngineAdvancePhase`.
+--
+-- DISPATCHER-LEVEL gating (consumer reads this flag), NOT a
+-- HIGH_STAKES_ACTION_TYPES clamp — same architectural distinction as
+-- KAN-1042. Sibling slot positioning at Tenant L42-43 group with
+-- autoApproveEnabled / autoTransitionSubObjectives / agenticModeEnabled /
+-- sendRedirectEnabled.
+--
+-- # Drift-strip discipline (KAN-786 / KAN-787 / KAN-1034 history)
+--
+-- `prisma migrate diff` would emit spurious schema drift items along
+-- with the real changes. None applied here — this migration was authored
+-- by hand to be PURELY additive against `tenants` and `blueprints`.
+-- Confirming the items typically stripped:
+--
+--   1. DROP INDEX "knowledge_chunk_embedding_hnsw_idx" — KAN-786,
+--      KAN-787. The HNSW index is real and load-bearing; Prisma can't
+--      model it (custom pgvector index type). Auto-DROP would silently
+--      nuke PROD's vector search; INTENTIONALLY OMITTED.
+--
+--   2. ALTER INDEX tenant_objective_selection_tenant_id_objective_id_…
+--      RENAME TO …. KAN-1034 cosmetic rename; not load-bearing for any
+--      code path; INTENTIONALLY OMITTED to keep this migration purely
+--      additive.
+
+-- AlterTable: Blueprint
+ALTER TABLE "blueprints" ADD COLUMN     "engine_phases" JSONB;
+
+-- AlterTable: Tenant
+ALTER TABLE "tenants" ADD COLUMN     "engine_phases_override" JSONB;
+ALTER TABLE "tenants" ADD COLUMN     "auto_advance_engine_phase" BOOLEAN NOT NULL DEFAULT false;
