@@ -299,12 +299,34 @@ export interface BrainLatestInbound {
    *   - Initial-lead path (lead-received-push.ts:723) — hardcoded 0
    *     because the inbound is a fresh inquiry, not a reply.
    *
-   * The brain-service.ts:962 prompt ternary keys off `0` to emit
-   * "reached out for the first time" phrasing; any ≥1 value renders
-   * as "replied" (Phase B will extend with depth-aware phrasing per
-   * KAN-1060).
+   * The latestInboundBlock prompt ternary keys off `0` to emit "reached
+   * out for the first time" phrasing; any ≥1 value renders as "replied"
+   * (Phase B will extend with depth-aware phrasing per KAN-1060).
    */
   threadDepth: number;
+  /**
+   * KAN-1058 (Phase B PR III) — prior conversation turn-pairs on the Deal,
+   * ordered oldest-first. Renders into the engine prompt's
+   * `### Prior conversation context` sub-section between the latest body
+   * blockquote and `### Stop-condition guidance`.
+   *
+   *   - Reply path (contact-replied-push.ts L398+) — fetched via
+   *     `buildThreadContext(prisma, {tenantId, dealId, excludeEngagementId})`
+   *     before the `evaluateDealState` call; up to `THREAD_DEPTH_CAP * 2`
+   *     prior `email_send` + `email_received` engagements.
+   *   - Initial-lead path (lead-received-push.ts L708+) — always `[]`
+   *     because a fresh inquiry has no prior turns to render.
+   *   - Test fixtures hand-constructing this interface — defaulted to
+   *     `[]` by the `buildLatestInboundContext` helper at L334 (optional
+   *     input, required-with-default resolved-shape per Phase B Phase 1
+   *     trace Q1+Q2 locks).
+   *
+   * Required (not optional) on the resolved object so the prompt template
+   * at `latestInboundBlock` (L1115+) can read `priorTurns.length === 0`
+   * directly without `priorTurns?.length` or `(priorTurns ?? []).length`
+   * gymnastics. Gating: omit the sub-section entirely when length === 0.
+   */
+  priorTurns: ThreadTurn[];
 }
 
 /**
@@ -331,6 +353,13 @@ export function buildLatestInboundContext(input: {
   subjectLine: string;
   inReplyToDecisionId: string;
   threadDepth: number;
+  /**
+   * KAN-1058 — optional input per Phase B Phase 1 Q1 lock. Test fixtures
+   * that hand-construct without priorTurns + legacy callers stay
+   * back-compat; the helper defaults to `[]` and the resolved shape
+   * carries the required field with safe-empty value.
+   */
+  priorTurns?: ThreadTurn[];
 }): BrainLatestInbound {
   return {
     receivedAt: input.receivedAt,
@@ -339,6 +368,7 @@ export function buildLatestInboundContext(input: {
     subjectLine: input.subjectLine,
     inReplyToDecisionId: input.inReplyToDecisionId,
     threadDepth: input.threadDepth,
+    priorTurns: input.priorTurns ?? [],
   };
 }
 
@@ -1122,7 +1152,7 @@ From: ${latestInbound.senderEmail}
 Subject: ${latestInbound.subjectLine}
 
 > ${latestInbound.bodyText.replace(/\n/g, '\n> ')}
-
+${renderPriorTurnsSection(latestInbound.priorTurns)}
 ### Stop-condition guidance
 
 If the contact's reply expresses CLEAR disinterest, explicit rejection, or stated decision to go elsewhere ("we've decided to go with another vendor", "not a fit for us", "not interested"), prefer \`close_deal_lost\` over \`send_follow_up\`. Do NOT attempt to overcome stated objections via follow-up messaging — it erodes trust. \`send_follow_up\` is reserved for engaged contacts where the conversation needs continuation.
@@ -1266,6 +1296,48 @@ function formatGapStateForContact(gapState: SubObjectiveGapState): string {
     // unknown so the engine treats it as fillable.
     return `- ${def.key}: unknown`;
   }).join('\n');
+}
+
+/**
+ * KAN-1058 (Phase B PR III) — render the `### Prior conversation context`
+ * sub-section that slots between the `## Latest inbound` body blockquote
+ * and `### Stop-condition guidance`. Q4 gating lock: empty turns array
+ * → empty string return so the parent template literal omits the whole
+ * sub-section. Q3 ordering lock: turns array arrives oldest-first from
+ * `buildThreadContext` (PR II); render iterates forward without
+ * re-reversing.
+ *
+ * Direction labels per ticket body: `outbound` → "We sent"; `inbound`
+ * → "Contact replied". Body uses the same blockquote-prefix pattern as
+ * the latest-inbound body (L1124 — `> ` + `\n> ` multi-line handling)
+ * so the engine sees a structurally consistent rendering across both
+ * sections.
+ *
+ * Pure-function module-private helper — sibling to
+ * `formatGapStateForContact` above. No persistence, no LLM, no DB; the
+ * caller (`buildEvaluationPrompt`) supplies validated input shape.
+ */
+function renderPriorTurnsSection(turns: ThreadTurn[]): string {
+  if (turns.length === 0) return '';
+  const turnsRendered = turns
+    .map((turn) => {
+      const header =
+        turn.direction === 'outbound'
+          ? `**We sent** on ${turn.occurredAt}`
+          : `**Contact replied** on ${turn.occurredAt}`;
+      return `${header}
+Subject: ${turn.subjectLine}
+
+> ${turn.bodyText.replace(/\n/g, '\n> ')}`;
+    })
+    .join('\n\n---\n\n');
+  return `
+### Prior conversation context
+
+The following prior outbound + reply pairs led to this latest inbound, ordered oldest-first. Use them to understand the contact's evolving state across the thread.
+
+${turnsRendered}
+`;
 }
 
 // ─────────────────────────────────────────────

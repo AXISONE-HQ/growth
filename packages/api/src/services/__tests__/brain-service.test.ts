@@ -1172,6 +1172,7 @@ describe('buildEvaluationPrompt — KAN-1037-PR4 Latest inbound section', () => 
         subjectLine: 'Re: Quick question about pricing',
         inReplyToDecisionId: 'cl_decision_pr4_render_test',
         threadDepth: 1,
+        priorTurns: [],
       },
     });
     // Section header — sentinel token.
@@ -1199,6 +1200,7 @@ describe('buildEvaluationPrompt — KAN-1037-PR4 Latest inbound section', () => 
         subjectLine: 'Re: pricing',
         inReplyToDecisionId: 'cl_decision_multiline',
         threadDepth: 1,
+        priorTurns: [],
       },
     });
     // Three blockquoted lines — `\n> ` prefix on each continuation.
@@ -1217,6 +1219,7 @@ describe('buildEvaluationPrompt — KAN-1037-PR4 Latest inbound section', () => 
         subjectLine: 'subj',
         inReplyToDecisionId: 'cl_decision_ordering',
         threadDepth: 1,
+        priorTurns: [],
       },
     });
     const idxEngagement = prompt.indexOf('## Recent engagement');
@@ -1241,6 +1244,7 @@ describe('buildEvaluationPrompt — KAN-1037-PR4 Latest inbound section', () => 
         subjectLine: 'Re: pricing',
         inReplyToDecisionId: 'cl_decision_nested_quote',
         threadDepth: 1,
+        priorTurns: [],
       },
     });
     // The "> On Tuesday, you wrote:" line passes through verbatim with an
@@ -1248,6 +1252,252 @@ describe('buildEvaluationPrompt — KAN-1037-PR4 Latest inbound section', () => 
     // handles nested-quote ambiguity per KAN-839 empirical precedent.
     expect(prompt).toContain('> > On Tuesday, you wrote:');
     expect(prompt).toContain('> Best, Alice');
+  });
+});
+
+// ─────────────────────────────────────────────
+// KAN-1058 (Phase B PR III) — Prior conversation context sub-section
+//
+// `### Prior conversation context` slots BETWEEN the `## Latest inbound`
+// body blockquote and `### Stop-condition guidance` (Phase B Phase 1
+// design trace Slot #9 lock). Renders the array of prior turn-pairs
+// from `BrainLatestInbound.priorTurns` (PR II's `buildThreadContext`
+// result) verbatim — outbound turns prefixed `**We sent**`, inbound
+// turns prefixed `**Contact replied**`, oldest-first chronological
+// order per PR II's internal `.reverse()`.
+//
+// Q4 gating lock: sub-section is OMITTED when priorTurns is empty.
+// Empty-fixture back-compat preserves the pre-PR-III rendering exactly
+// (`## Latest inbound` block immediately followed by
+// `### Stop-condition guidance` with the original blank-line spacing).
+//
+// Sentinel-token pins on the literal header + body shape per the
+// established KAN-1037-PR4 + KAN-1042 PR B convention; phrasing drift
+// breaks tests loudly.
+// ─────────────────────────────────────────────
+
+describe('buildEvaluationPrompt — KAN-1058 Prior conversation context sub-section', () => {
+  // Local baseInput — each describe in this file holds its own copy
+  // (sibling pattern at L787, 903, 1121, 1492, 1789). Same shape as the
+  // KAN-1037-PR4 latestInbound describe's baseInput at L1121-1151.
+  const baseInput = {
+    snapshot: {
+      dealStatus: 'open',
+      currentStageName: 'Qualified',
+      currentStageOutcomeType: 'open',
+      daysInCurrentStage: 1,
+      engagementCount: 2,
+      lastEngagementType: 'email_received',
+      lastEngagementClass: 'positive',
+      daysSinceLastEngagement: 0,
+      moProgressPercent: 40,
+      pipelineName: 'Default Pipeline',
+      pipelineObjectiveType: 'book_appointment',
+    },
+    contact: {
+      id: 'c',
+      tenantId: 't',
+      email: 'alice@customer.example',
+      firstName: 'Alice',
+      lastName: null,
+      companyName: 'Customer Co',
+      phone: null,
+      currentStageId: null,
+      microObjectiveProgress: {},
+      metadata: {},
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    } as never,
+    recentEngagements: [],
+    recentTransitions: [],
+  };
+
+  const baseLatestInbound = {
+    receivedAt: '2026-06-02T13:00:00.000Z',
+    senderEmail: 'alice@customer.example',
+    bodyText: 'Latest reply body content.',
+    subjectLine: 'Re: Quick question',
+    inReplyToDecisionId: 'cl_decision_pr_iii_anchor',
+    threadDepth: 3,
+  };
+
+  // ── (1/6) RENDERS when priorTurns non-empty — header + per-turn blockquotes
+  it('RENDERS with non-empty priorTurns — header sentinel + per-turn body blockquotes (3-turn fixture)', () => {
+    const prompt = buildEvaluationPrompt({
+      ...baseInput,
+      latestInbound: {
+        ...baseLatestInbound,
+        priorTurns: [
+          {
+            direction: 'outbound' as const,
+            occurredAt: '2026-06-01T10:00:00.000Z',
+            subjectLine: 'Quick question',
+            bodyText: 'Hi Alice, wanted to check on your timeline.',
+          },
+          {
+            direction: 'inbound' as const,
+            occurredAt: '2026-06-01T14:00:00.000Z',
+            subjectLine: 'Re: Quick question',
+            bodyText: 'Looking at Q3, will confirm Friday.',
+          },
+          {
+            direction: 'outbound' as const,
+            occurredAt: '2026-06-02T09:00:00.000Z',
+            subjectLine: 'Re: Quick question',
+            bodyText: 'Great — any specific week works best?',
+          },
+        ],
+      },
+    });
+    // Section header sentinel.
+    expect(prompt).toContain('### Prior conversation context');
+    // Intro instruction text — load-bearing for engine cognitive framing
+    // ("ordered oldest-first" cues the engine to read forward).
+    expect(prompt).toContain('ordered oldest-first');
+    // Per-turn body blockquotes — three distinct contents.
+    expect(prompt).toContain('> Hi Alice, wanted to check on your timeline.');
+    expect(prompt).toContain('> Looking at Q3, will confirm Friday.');
+    expect(prompt).toContain('> Great — any specific week works best?');
+  });
+
+  // ── (2/6) OMITTED when priorTurns empty — Q4 gating lock
+  it('OMITTED when priorTurns: [] — gating rule (sentinel-absence pin)', () => {
+    const prompt = buildEvaluationPrompt({
+      ...baseInput,
+      latestInbound: {
+        ...baseLatestInbound,
+        priorTurns: [],
+      },
+    });
+    // The sub-section MUST be completely absent — no header, no intro,
+    // no separator. Empty header would add tokens for zero cognitive
+    // value and signal "this exists but is empty" confusingly.
+    expect(prompt).not.toContain('### Prior conversation context');
+    expect(prompt).not.toContain('ordered oldest-first');
+    // ## Latest inbound block + Stop-condition guidance still render
+    // (parent ternary is on `latestInbound !== undefined`, not on
+    // priorTurns shape).
+    expect(prompt).toContain('## Latest inbound');
+    expect(prompt).toContain('### Stop-condition guidance');
+  });
+
+  // ── (3/6) Slot ordering — between body blockquote and Stop-condition
+  it('slots BETWEEN body blockquote and ### Stop-condition guidance (Slot #9 lock)', () => {
+    const prompt = buildEvaluationPrompt({
+      ...baseInput,
+      latestInbound: {
+        ...baseLatestInbound,
+        bodyText: 'UNIQUE_LATEST_BODY_TOKEN',
+        priorTurns: [
+          {
+            direction: 'outbound' as const,
+            occurredAt: '2026-06-01T10:00:00.000Z',
+            subjectLine: 'Earlier subj',
+            bodyText: 'UNIQUE_PRIOR_BODY_TOKEN',
+          },
+        ],
+      },
+    });
+    const idxLatestBody = prompt.indexOf('> UNIQUE_LATEST_BODY_TOKEN');
+    const idxPriorHeader = prompt.indexOf('### Prior conversation context');
+    const idxPriorBody = prompt.indexOf('> UNIQUE_PRIOR_BODY_TOKEN');
+    const idxStopCond = prompt.indexOf('### Stop-condition guidance');
+    // Slot #9 lock: latest body → Prior conversation context → Stop-condition.
+    expect(idxLatestBody).toBeGreaterThan(-1);
+    expect(idxPriorHeader).toBeGreaterThan(idxLatestBody);
+    expect(idxPriorBody).toBeGreaterThan(idxPriorHeader);
+    expect(idxStopCond).toBeGreaterThan(idxPriorBody);
+  });
+
+  // ── (4/6) Direction labeling — outbound vs inbound headers
+  it('direction labels: outbound → "We sent"; inbound → "Contact replied"', () => {
+    const prompt = buildEvaluationPrompt({
+      ...baseInput,
+      latestInbound: {
+        ...baseLatestInbound,
+        priorTurns: [
+          {
+            direction: 'outbound' as const,
+            occurredAt: '2026-06-01T10:00:00.000Z',
+            subjectLine: 'Out subj',
+            bodyText: 'Out body',
+          },
+          {
+            direction: 'inbound' as const,
+            occurredAt: '2026-06-01T14:00:00.000Z',
+            subjectLine: 'In subj',
+            bodyText: 'In body',
+          },
+        ],
+      },
+    });
+    // Direction header literal pins — phrasing changes must update tests.
+    expect(prompt).toContain('**We sent** on 2026-06-01T10:00:00.000Z');
+    expect(prompt).toContain('**Contact replied** on 2026-06-01T14:00:00.000Z');
+    // Cross-direction guards: outbound MUST NOT render as "Contact replied"
+    // and vice versa.
+    expect(prompt).not.toContain('**We sent** on 2026-06-01T14:00:00.000Z');
+    expect(prompt).not.toContain('**Contact replied** on 2026-06-01T10:00:00.000Z');
+  });
+
+  // ── (5/6) Oldest-first ordering — chronological render order
+  it('oldest-first ordering: turns array renders in chronological order (T0 → T1 → T2)', () => {
+    const prompt = buildEvaluationPrompt({
+      ...baseInput,
+      latestInbound: {
+        ...baseLatestInbound,
+        priorTurns: [
+          {
+            direction: 'outbound' as const,
+            occurredAt: '2026-06-01T10:00:00.000Z',
+            subjectLine: 'subj T0',
+            bodyText: 'TURN_T0_OUTBOUND_BODY',
+          },
+          {
+            direction: 'inbound' as const,
+            occurredAt: '2026-06-01T14:00:00.000Z',
+            subjectLine: 'subj T1',
+            bodyText: 'TURN_T1_INBOUND_BODY',
+          },
+          {
+            direction: 'outbound' as const,
+            occurredAt: '2026-06-02T09:00:00.000Z',
+            subjectLine: 'subj T2',
+            bodyText: 'TURN_T2_OUTBOUND_BODY',
+          },
+        ],
+      },
+    });
+    const idxT0 = prompt.indexOf('TURN_T0_OUTBOUND_BODY');
+    const idxT1 = prompt.indexOf('TURN_T1_INBOUND_BODY');
+    const idxT2 = prompt.indexOf('TURN_T2_OUTBOUND_BODY');
+    expect(idxT0).toBeGreaterThan(-1);
+    expect(idxT1).toBeGreaterThan(idxT0);
+    expect(idxT2).toBeGreaterThan(idxT1);
+  });
+
+  // ── (6/6) Back-compat — buildLatestInboundContext defaults to []
+  it('back-compat: buildLatestInboundContext defaults priorTurns to [] when omitted from input', async () => {
+    // Q1 lock: optional input + required-defaulted resolved-shape.
+    // Pre-PR-III callers (test fixtures, legacy code) that call the
+    // helper without priorTurns still produce a valid BrainLatestInbound
+    // with priorTurns: []. Sub-section is omitted at render time.
+    const { buildLatestInboundContext } = await import('../brain-service.js');
+    const resolved = buildLatestInboundContext({
+      receivedAt: '2026-06-02T13:00:00.000Z',
+      senderEmail: 'alice@customer.example',
+      bodyText: 'No prior turns supplied at call site.',
+      subjectLine: 'Re: Quick question',
+      inReplyToDecisionId: 'cl_decision_back_compat',
+      threadDepth: 1,
+      // priorTurns omitted intentionally.
+    });
+    expect(resolved.priorTurns).toEqual([]);
+    const prompt = buildEvaluationPrompt({
+      ...baseInput,
+      latestInbound: resolved,
+    });
+    expect(prompt).not.toContain('### Prior conversation context');
   });
 });
 
@@ -1313,6 +1563,7 @@ describe('buildEvaluationPrompt — KAN-1042 PR B prompt extensions', () => {
     subjectLine: 'Re: Pricing inquiry',
     inReplyToDecisionId: 'cl_dec_anchor',
     threadDepth: 1,
+    priorTurns: [],
   };
 
   // Mixed-state gap state for the canonical-order test: 2 known
@@ -1611,6 +1862,7 @@ describe('buildEvaluationPrompt — KAN-1052 initial lead body reading', () => {
       subjectLine: 'Pricing inquiry',
       inReplyToDecisionId: 'evt_initial_lead_anchor',
       threadDepth: 0,
+      priorTurns: [],
     };
     const prompt = buildEvaluationPrompt({
       ...baseInput,
@@ -1634,6 +1886,7 @@ describe('buildEvaluationPrompt — KAN-1052 initial lead body reading', () => {
       subjectLine: 'Re: Pricing inquiry',
       inReplyToDecisionId: 'cl_decision_real_anchor',
       threadDepth: 1,
+      priorTurns: [],
     };
     const prompt = buildEvaluationPrompt({
       ...baseInput,
@@ -1652,6 +1905,7 @@ describe('buildEvaluationPrompt — KAN-1052 initial lead body reading', () => {
       subjectLine: 'Empty body case',
       inReplyToDecisionId: 'evt_anchor',
       threadDepth: 0,
+      priorTurns: [],
     };
     const prompt = buildEvaluationPrompt({
       ...baseInput,
@@ -1672,6 +1926,7 @@ describe('buildEvaluationPrompt — KAN-1052 initial lead body reading', () => {
       subjectLine: 'subject text',
       inReplyToDecisionId: 'anchor_id',
       threadDepth: 5,
+      priorTurns: [],
     };
     const out = buildLatestInboundContext(input);
     expect(out).toEqual(input);
