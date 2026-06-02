@@ -21,6 +21,14 @@ import type { PrismaClient } from '@prisma/client';
 const evaluateDealStateMock = vi.fn();
 vi.mock('../brain-service.js', () => ({
   evaluateDealState: (...args: unknown[]) => evaluateDealStateMock(...args),
+  // KAN-1065 (Cluster II PR III) — preempt sibling-mock drift; stage
+  // transition tests don't exercise engine-phase paths but the consumer
+  // surface imports both exports.
+  resolveEnginePhases: vi.fn(async () => []),
+  computeCurrentEnginePhase: vi.fn(() => ({
+    currentPhase: { key: 'qualify' as const, label: 'Qualify', subObjectives: [], priority: 1 },
+    reason: 'derived' as const,
+  })),
 }));
 
 import {

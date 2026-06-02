@@ -67,6 +67,10 @@ interface FakePrisma {
   engagement: { findUnique: ReturnType<typeof vi.fn>; create: ReturnType<typeof vi.fn>; update: ReturnType<typeof vi.fn> };
   engagementEmailMetadata: { findFirst: ReturnType<typeof vi.fn>; create: ReturnType<typeof vi.fn> };
   auditLog: { create: ReturnType<typeof vi.fn> };
+  // KAN-1065 (Cluster II PR III) — initial-lead site reads gap-state for
+  // computeCurrentEnginePhase. Default returns are empty (no prior gap rows)
+  // since M3-2.5b correlation tests don't exercise engine-phase logic.
+  contactSubObjectiveGapState: { findMany: ReturnType<typeof vi.fn>; findFirst: ReturnType<typeof vi.fn> };
 }
 
 const TENANT = '11111111-1111-1111-1111-111111111111';
@@ -97,6 +101,10 @@ const prismaMock: FakePrisma = {
   engagement: { findUnique: vi.fn(), create: vi.fn(), update: vi.fn() },
   engagementEmailMetadata: { findFirst: vi.fn(), create: vi.fn() },
   auditLog: { create: vi.fn() },
+  contactSubObjectiveGapState: {
+    findMany: vi.fn(async () => []),
+    findFirst: vi.fn(async () => null),
+  },
 };
 
 vi.mock('../prisma.js', () => ({ prisma: prismaMock }));
@@ -167,6 +175,14 @@ vi.mock('../../../../packages/api/src/services/lead-assignment.js', () => ({
 vi.mock('../../../../packages/api/src/services/brain-service.js', () => ({
   evaluateDealState: vi.fn(async () => ({})),
   buildLatestInboundContext: (input: unknown) => input,
+  // KAN-1065 (Cluster II PR III) — sibling-test mock additions for new
+  // exports threaded into lead-received-push. M3-2.5b tests do not exercise
+  // engine-phase logic; no-op stubs satisfy the import contract.
+  resolveEnginePhases: vi.fn(async () => []),
+  computeCurrentEnginePhase: vi.fn(() => ({
+    currentPhase: { key: 'qualify' as const, label: 'Qualify', subObjectives: [], priority: 1 },
+    reason: 'derived' as const,
+  })),
 }));
 vi.mock('../../../../packages/api/src/services/message-shaper.js', () => ({
   composeMessage: vi.fn(),
