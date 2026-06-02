@@ -292,8 +292,47 @@ export interface BrainLatestInbound {
    * Thread depth — PR3 publisher ships hardcoded `1`. PR4 renders the
    * value verbatim; true depth derivation is deferred to a future
    * iteration when the engine actually uses it for context-window sizing.
+   *
+   * KAN-1052 — initial-lead path passes `0` (the inbound is a fresh
+   * inquiry, not a reply to anything). Reply path continues to pass `1`
+   * pending PR3's threadDepth derivation work.
    */
   threadDepth: number;
+}
+
+/**
+ * KAN-1052 — pure builder for the `BrainLatestInbound` shape. Single
+ * source of truth used by BOTH:
+ *   - `apps/api/src/subscribers/lead-received-push.ts` (initial-lead path;
+ *     KAN-1052) — inbound is a fresh inquiry, no prior Decision exists at
+ *     the call site; passes `event.eventId` (lead.received) as the
+ *     forensic anchor for `inReplyToDecisionId`.
+ *   - `apps/api/src/subscribers/contact-replied-push.ts` (reply chain; PR4)
+ *     — inbound IS a reply; passes the originating outbound's Decision id.
+ *
+ * Cluster I roadmap pin: Phase B's multi-turn thread context extension
+ * (~1-2 weeks of work) will add prior-turn fields. Centralizing the
+ * construction here means Phase B touches ONE helper, not TWO callers.
+ *
+ * Pure passthrough — no business logic, no defaulting. Forces explicit
+ * value supply for each field at call sites; no hidden decisions.
+ */
+export function buildLatestInboundContext(input: {
+  receivedAt: string;
+  senderEmail: string;
+  bodyText: string;
+  subjectLine: string;
+  inReplyToDecisionId: string;
+  threadDepth: number;
+}): BrainLatestInbound {
+  return {
+    receivedAt: input.receivedAt,
+    senderEmail: input.senderEmail,
+    bodyText: input.bodyText,
+    subjectLine: input.subjectLine,
+    inReplyToDecisionId: input.inReplyToDecisionId,
+    threadDepth: input.threadDepth,
+  };
 }
 
 /**
@@ -920,7 +959,7 @@ Use this objective intent to inform your next-action choice — but DO NOT overr
 
 ## Latest inbound
 
-The contact replied on ${latestInbound.receivedAt} (thread depth: ${latestInbound.threadDepth}).
+The contact ${latestInbound.threadDepth === 0 ? 'reached out for the first time' : 'replied'} on ${latestInbound.receivedAt} (thread depth: ${latestInbound.threadDepth}).
 From: ${latestInbound.senderEmail}
 Subject: ${latestInbound.subjectLine}
 

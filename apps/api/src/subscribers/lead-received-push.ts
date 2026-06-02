@@ -278,6 +278,20 @@ async function loadSubObjectivesModule(): Promise<SubObjectivesModule> {
 // KAN-798a + KAN-660 dispatch) are wired in 815b/815c.
 // ─────────────────────────────────────────────
 
+// KAN-1052 — local mirror of `BrainLatestInbound` (canonical at
+// packages/api/src/services/brain-service.ts). KAN-689 boundary
+// (variable-specifier dynamic import; apps/api cannot statically import
+// packages/api types). Sibling-discipline pattern: both shapes must
+// move together.
+interface BrainLatestInbound {
+  receivedAt: string;
+  senderEmail: string;
+  bodyText: string;
+  subjectLine: string;
+  inReplyToDecisionId: string;
+  threadDepth: number;
+}
+
 interface BrainServiceModule {
   evaluateDealState: (
     prisma: unknown,
@@ -295,6 +309,10 @@ interface BrainServiceModule {
       // retrieval. Inline mirror of canonical `EvaluateOptions.redis/openai`.
       redis?: unknown;
       openai?: unknown;
+      // KAN-1037-PR4 — latestInbound for the reply-chain cognitive
+      // surface. KAN-1052 extends use to the initial-lead path so the
+      // engine reads first-inquiry body text on the FIRST evaluation.
+      latestInbound?: BrainLatestInbound;
     },
   ) => Promise<{
     dealId: string;
@@ -342,6 +360,11 @@ interface BrainServiceModule {
     llmInputTokens: number;
     llmOutputTokens: number;
   }>;
+  // KAN-1052 — pure builder for `BrainLatestInbound`. Surfaced through the
+  // loader so both initial-lead (here) and reply-chain (contact-replied-
+  // push.ts) callers go through one helper. Phase B's multi-turn extension
+  // touches one helper, not two callers.
+  buildLatestInboundContext: (input: BrainLatestInbound) => BrainLatestInbound;
 }
 let _brainServiceModule: BrainServiceModule | null = null;
 async function loadBrainServiceModule(): Promise<BrainServiceModule> {
@@ -675,7 +698,35 @@ leadReceivedPushApp.post('/lead-received', async (c) => {
     // committed; failing the response would trigger Pub/Sub redelivery
     // and potentially double-write the Engagement).
     if (dealId) {
-      await wirePhase2Consumers(dealId, event.eventId).catch((err) => {
+      // KAN-1052 — construct the latestInbound context from the just-
+      // received lead.received event so the engine prompt's `## Latest
+      // inbound` section + Stop-condition guidance render on the FIRST
+      // evaluation (not just on reply chains). `event.metadata.bodyPreview`
+      // carries the full normalized body (≤2000 chars per the normalizer
+      // convention; misleading field name — see KAN-1052 Phase 1 trace).
+      const { buildLatestInboundContext } = await loadBrainServiceModule();
+      const initialLeadInbound = buildLatestInboundContext({
+        receivedAt: event.receivedAt,
+        senderEmail: event.metadata.fromAddress ?? '',
+        bodyText: event.metadata.bodyPreview ?? '',
+        subjectLine: event.metadata.subject ?? '',
+        // KAN-1052: initial leads have no prior Decision row at this point;
+        // using lead.received eventId as forensic anchor. Phase B (multi-turn
+        // thread context) will revisit when a real prior-turn reference becomes
+        // available across the multi-turn surface.
+        inReplyToDecisionId: event.eventId,
+        // KAN-1052: initial leads are the contact's first inquiry — no prior
+        // outbound to reply to. threadDepth=0 triggers the "reached out for
+        // the first time" prompt phrasing at brain-service.ts:962.
+        threadDepth: 0,
+      });
+      await wirePhase2Consumers(
+        dealId,
+        event.eventId,
+        false,
+        undefined,
+        initialLeadInbound,
+      ).catch((err) => {
         console.warn(
           `[lead-received-push] phase-2-wiring-error dealId=${dealId} eventId=${event.eventId} err=${(err as Error)?.message ?? String(err)}`,
         );
@@ -1392,6 +1443,15 @@ export async function wirePhase2Consumers(
   // optional param defaults to undefined → the eval runs as before.
   // Back-compat is zero-change for those callers.
   precomputedDecision?: Phase2BrainDecision,
+  // KAN-1052 — initial-lead path threads `latestInbound` into the
+  // internal evaluateDealState call so the engine prompt renders the
+  // contact's first-inquiry body text via the `## Latest inbound`
+  // section (the same surface PR4 lit up for the reply chain). Optional
+  // 5th arg; legacy callers pass nothing → latestInbound stays
+  // undefined → existing behavior preserved. Ignored when
+  // `precomputedDecision` is provided (PR4.5 path — the precomputed
+  // decision already captures the latestInbound-aware reasoning).
+  latestInbound?: BrainLatestInbound,
 ): Promise<void> {
   // KAN-814 — supersession path. A fresh inbound on this (dealId, contactId)
   // means any prior pending deferred_send for the same conversation is now
@@ -1447,6 +1507,12 @@ export async function wirePhase2Consumers(
     (await evaluateDealState(prisma, dealId, {
       redis,
       openai,
+      // KAN-1052 — thread initial-lead body text into the engine prompt's
+      // `## Latest inbound` section + Stop-condition guidance sub-section.
+      // Undefined for legacy callers (post_stage_advance / chained calls
+      // / pre-KAN-1052 callers) → section omits gracefully via the
+      // existing conditional render at brain-service.ts:918.
+      latestInbound,
     }));
 
   console.log(

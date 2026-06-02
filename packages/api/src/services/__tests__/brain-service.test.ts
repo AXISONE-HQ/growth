@@ -1555,3 +1555,125 @@ describe('buildEvaluationPrompt — KAN-1042 PR B prompt extensions', () => {
     expect(stageHistoryIdx).toBeGreaterThan(gapStateIdx);
   });
 });
+
+// ─────────────────────────────────────────────
+// KAN-1052 — Initial lead body reading
+//
+// Extends the latestInbound cognitive surface from reply-chain-only
+// (PR4) to initial-lead inbounds. Engine now reads first-inbound body
+// content on the FIRST evaluation, not just on replies.
+//
+// Q4 sentinel pin: initial-lead phrasing ("reached out for the first
+// time" via threadDepth === 0) vs reply phrasing ("replied" via
+// threadDepth > 0). Any future regression to the bare "replied"
+// hardcode breaks these tests loudly.
+// ─────────────────────────────────────────────
+
+describe('buildEvaluationPrompt — KAN-1052 initial lead body reading', () => {
+  const baseInput = {
+    snapshot: {
+      dealStatus: 'open',
+      currentStageName: 'New',
+      currentStageOutcomeType: 'open',
+      daysInCurrentStage: 0,
+      engagementCount: 1,
+      lastEngagementType: 'email_received',
+      lastEngagementClass: 'positive',
+      daysSinceLastEngagement: 0,
+      moProgressPercent: null,
+      pipelineName: 'Default Sales Pipeline',
+      pipelineObjectiveType: 'book_appointment',
+    },
+    contact: {
+      id: 'c',
+      tenantId: 't',
+      email: 'alice@acme.com',
+      firstName: 'Alice',
+      lastName: null,
+      companyName: 'Acme Inc',
+      phone: null,
+      currentStageId: null,
+      microObjectiveProgress: {},
+      metadata: {},
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    } as never,
+    recentEngagements: [],
+    recentTransitions: [],
+  };
+
+  // ── (1/4) Initial-lead with body (threadDepth=0) — phrasing pin
+  it('initial-lead with body (threadDepth=0): renders "reached out for the first time" + Stop-condition guidance follows', () => {
+    const initialLeadInbound = {
+      receivedAt: '2026-06-02T00:00:00.000Z',
+      senderEmail: 'alice@acme.com',
+      bodyText: 'Hi, looking to learn more about your offering. Any time for a call?',
+      subjectLine: 'Pricing inquiry',
+      inReplyToDecisionId: 'evt_initial_lead_anchor',
+      threadDepth: 0,
+    };
+    const prompt = buildEvaluationPrompt({
+      ...baseInput,
+      latestInbound: initialLeadInbound,
+    });
+    expect(prompt).toContain('The contact reached out for the first time on 2026-06-02T00:00:00.000Z');
+    expect(prompt).not.toContain('The contact replied on');
+    expect(prompt).toContain('> Hi, looking to learn more');
+    expect(prompt).toContain('### Stop-condition guidance');
+    const inboundIdx = prompt.indexOf('## Latest inbound');
+    const stopCondIdx = prompt.indexOf('### Stop-condition guidance');
+    expect(stopCondIdx).toBeGreaterThan(inboundIdx);
+  });
+
+  // ── (2/4) Reply-path back-compat (threadDepth=1) — phrasing pin
+  it('reply-path back-compat (threadDepth=1): renders "replied" verbatim — Q4 sentinel pin against initial-lead phrasing regression', () => {
+    const replyInbound = {
+      receivedAt: '2026-06-02T01:00:00.000Z',
+      senderEmail: 'alice@acme.com',
+      bodyText: 'Yes, looking to start in Q3.',
+      subjectLine: 'Re: Pricing inquiry',
+      inReplyToDecisionId: 'cl_decision_real_anchor',
+      threadDepth: 1,
+    };
+    const prompt = buildEvaluationPrompt({
+      ...baseInput,
+      latestInbound: replyInbound,
+    });
+    expect(prompt).toContain('The contact replied on 2026-06-02T01:00:00.000Z');
+    expect(prompt).not.toContain('reached out for the first time');
+  });
+
+  // ── (3/4) Initial-lead with empty bodyText — graceful render
+  it('initial-lead with empty bodyText: section still renders header + body slot intact (parent ternary gates on latestInbound, not bodyText)', () => {
+    const initialLeadInbound = {
+      receivedAt: '2026-06-02T00:00:00.000Z',
+      senderEmail: 'alice@acme.com',
+      bodyText: '',
+      subjectLine: 'Empty body case',
+      inReplyToDecisionId: 'evt_anchor',
+      threadDepth: 0,
+    };
+    const prompt = buildEvaluationPrompt({
+      ...baseInput,
+      latestInbound: initialLeadInbound,
+    });
+    expect(prompt).toContain('## Latest inbound');
+    expect(prompt).toContain('reached out for the first time');
+    expect(prompt).toContain('> ');
+  });
+
+  // ── (4/4) buildLatestInboundContext helper — pure passthrough sentinel
+  it('buildLatestInboundContext: passes input fields through verbatim (Cluster I roadmap pin)', async () => {
+    const { buildLatestInboundContext } = await import('../brain-service.js');
+    const input = {
+      receivedAt: '2026-06-02T02:00:00.000Z',
+      senderEmail: 'sender@example.com',
+      bodyText: 'body content',
+      subjectLine: 'subject text',
+      inReplyToDecisionId: 'anchor_id',
+      threadDepth: 5,
+    };
+    const out = buildLatestInboundContext(input);
+    expect(out).toEqual(input);
+  });
+});

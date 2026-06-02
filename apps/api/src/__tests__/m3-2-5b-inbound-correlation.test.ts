@@ -162,8 +162,11 @@ vi.mock('../../../../packages/api/src/services/lead-assignment.js', () => ({
 }));
 
 // Brain Service Phase 2 wiring — stub to no-op.
+// KAN-1052 — buildLatestInboundContext is a pure passthrough builder
+// (asserts input == output); test mock matches the real implementation.
 vi.mock('../../../../packages/api/src/services/brain-service.js', () => ({
   evaluateDealState: vi.fn(async () => ({})),
+  buildLatestInboundContext: (input: unknown) => input,
 }));
 vi.mock('../../../../packages/api/src/services/message-shaper.js', () => ({
   composeMessage: vi.fn(),
