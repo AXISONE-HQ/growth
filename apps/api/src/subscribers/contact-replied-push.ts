@@ -176,6 +176,11 @@ interface BrainServiceModule {
     llmInputTokens: number;
     llmOutputTokens: number;
   }>;
+  // KAN-1052 — pure builder for `BrainLatestInbound`. Both this subscriber
+  // (reply chain, post-PR4) and lead-received-push (initial-lead path,
+  // KAN-1052) go through this helper. Phase B's multi-turn extension
+  // touches one helper, not two callers.
+  buildLatestInboundContext: (input: BrainLatestInboundLocal) => BrainLatestInboundLocal;
 }
 
 let _brainServiceModule: BrainServiceModule | null = null;
@@ -390,7 +395,7 @@ contactRepliedPushApp.post('/contact-replied', async (c) => {
     //
     // KAN-828 — inject redis + openai so the Knowledge Layer retrieval
     // fires. Same pattern as lead-received-push.ts:1335-1341.
-    const { evaluateDealState } = await loadBrainServiceModule();
+    const { evaluateDealState, buildLatestInboundContext } = await loadBrainServiceModule();
     const openai = getOpenAIClient();
     const brainDecision: BrainDecision = await evaluateDealState(prisma, event.dealId, {
       redis,
@@ -400,7 +405,10 @@ contactRepliedPushApp.post('/contact-replied', async (c) => {
       // ('post_stage_advance' / 'post_wait_acknowledgment') are for
       // chained calls that PR4 does not wire.
       triggerContext: 'inbound',
-      latestInbound: {
+      // KAN-1052 — symmetry pin: the same buildLatestInboundContext helper
+      // used by the initial-lead path at lead-received-push.ts:701. Phase B's
+      // multi-turn extension touches the helper, not both callers.
+      latestInbound: buildLatestInboundContext({
         receivedAt: event.replyReceivedAt,
         senderEmail: event.metadata.senderEmail,
         // bodyText already capped at 2000 chars upstream
@@ -409,7 +417,7 @@ contactRepliedPushApp.post('/contact-replied', async (c) => {
         subjectLine: event.metadata.subjectLine,
         inReplyToDecisionId: event.decisionId,
         threadDepth: event.metadata.threadDepth,
-      },
+      }),
     });
 
     await prisma.auditLog.create({

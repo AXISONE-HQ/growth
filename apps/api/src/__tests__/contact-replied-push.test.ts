@@ -103,8 +103,11 @@ vi.mock("../subscribers/lead-received-push.js", () => ({
 
 // Brain Service variable-specifier dynamic import — vitest intercepts the
 // resolved path. Same path mocked in lead-received-push.test.ts:102.
+// KAN-1052 — buildLatestInboundContext is a pure passthrough builder
+// (asserts input == output); test mock matches the real implementation.
 vi.mock("../../../../packages/api/src/services/brain-service.js", () => ({
   evaluateDealState: evaluateDealStateMock,
+  buildLatestInboundContext: (input: unknown) => input,
 }));
 
 import { contactRepliedPushApp } from "../subscribers/contact-replied-push.js";

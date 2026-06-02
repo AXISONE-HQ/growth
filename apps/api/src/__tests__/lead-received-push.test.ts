@@ -129,8 +129,11 @@ vi.mock("../../../../packages/api/src/services/engagement-service.js", () => ({
 }));
 
 // KAN-815 Phase 2 module mocks
+// KAN-1052 — buildLatestInboundContext is a pure passthrough builder
+// (asserts input == output); test mock matches the real implementation.
 vi.mock("../../../../packages/api/src/services/brain-service.js", () => ({
   evaluateDealState: evaluateDealStateMock,
+  buildLatestInboundContext: (input: unknown) => input,
 }));
 
 vi.mock("../../../../packages/api/src/services/stage-transition-engine.js", () => ({
