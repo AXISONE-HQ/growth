@@ -30,6 +30,7 @@
 import type {
   PrismaClient,
   Contact,
+  ContactSubObjectiveGapState,
   Engagement,
   DealStageHistory,
 } from '@prisma/client';
@@ -43,6 +44,12 @@ import { computeGapState } from './sub-objective-gap-tracker.js';
 import {
   DEFAULT_SUB_OBJECTIVES_GENERIC_B2B,
   type SubObjectiveGapState,
+  // KAN-1064 (Cluster II PR II) — EnginePhase canonical types + operator
+  // detection discriminator. SubObjectiveSource enum is the structured
+  // discriminator authored by KAN-1042 PR A2 (manual = operator; engine =
+  // dispatcher arm; decision_initialize / extraction / enrichment = system).
+  type BlueprintEnginePhase,
+  type SubObjectiveSource,
 } from '@growth/shared';
 
 // ─────────────────────────────────────────────
@@ -481,6 +488,151 @@ export function buildLatestInboundContext(input: {
     threadDepth: input.threadDepth,
     priorTurns: input.priorTurns ?? [],
   };
+}
+
+// ─────────────────────────────────────────────
+// KAN-1064 (Cluster II PR II) — Current EnginePhase derivation + operator
+// override (derived-with-fallback per Cluster II Phase 1 Lock 2)
+// ─────────────────────────────────────────────
+
+/**
+ * KAN-1064 — return shape for `computeCurrentEnginePhase`.
+ *
+ * `currentPhase` is the BlueprintEnginePhase the engine should treat as
+ * the contact's active workflow phase. `reason` carries the derivation
+ * provenance (the operator-override path vs. the unfilled-priority derive
+ * path). `operatorOverrideRecencyDays` is included ONLY on the
+ * `operator_override` branch so the prompt-renderer (PR IV) can splice
+ * the recency into the operator-override snippet.
+ */
+export interface CurrentEnginePhase {
+  currentPhase: BlueprintEnginePhase;
+  reason: 'operator_override' | 'derived';
+  operatorOverrideRecencyDays?: number;
+}
+
+/**
+ * KAN-1064 (Cluster II PR II) — pure-builder current EnginePhase
+ * derivation with recency-based operator-override detection.
+ *
+ * Derived-with-fallback discipline per Cluster II Phase 1 Lock 2:
+ *   - Operator-override path (Q2 lock): when `contactRecentSetBy` is
+ *     defined AND its `source === 'manual'` AND `setAt` is within the
+ *     7-day recency window (Q3 lock) AND the `subObjectiveKey` belongs
+ *     to a phase in `enginePhases` (Q6 lock — orphan keys derive
+ *     normally), return that phase with `reason = 'operator_override'`.
+ *   - Derived path: iterate `enginePhases` sorted by `priority` ascending;
+ *     return the FIRST phase where any sub-objective has state ∈
+ *     {unknown, partial}. When all sub-objectives across all phases are
+ *     filled (state ∈ {known, not_applicable}), return the LAST phase
+ *     (Closing) per Q7 sticky-at-closing lock.
+ *
+ * The operator-detection discriminator is `source === 'manual'` per
+ * KAN-1042 PR A2's structured SubObjectiveSource enum, NOT pattern-matching
+ * on `setBy` string (which is brittle to actor-naming drift — operator
+ * emails, system actor email-shaped names, etc.). Q2 of the Phase 1 trace
+ * surfaced this gap in the original spec and locked the structural fix.
+ *
+ * Pure builder — no Prisma I/O, no LLM, no side effects. Caller (PR III)
+ * loads gap state via `computeGapState` + EnginePhase config via
+ * `resolveEnginePhases` and threads both into this helper.
+ *
+ * @param input.gapState  Contact's full sub-objective gap state rows
+ *   (already loaded upstream — typically from `computeGapState`'s
+ *   internal fetch). The helper reads `subObjectiveKey` + `state` only;
+ *   other columns are ignored.
+ * @param input.enginePhases  Resolved EnginePhase config for the tenant
+ *   (typically from `resolveEnginePhases`). Iterated by `priority`
+ *   ascending for the derived path.
+ * @param input.contactRecentSetBy  Optional most-recent manual touch
+ *   marker for the operator-override path. When undefined, pure-derived
+ *   path is taken.
+ */
+export function computeCurrentEnginePhase(input: {
+  gapState: ContactSubObjectiveGapState[];
+  enginePhases: BlueprintEnginePhase[];
+  contactRecentSetBy?: {
+    setBy: string;
+    setAt: Date;
+    subObjectiveKey: string;
+    // KAN-1064 Q2 lock — structured discriminator over pattern-matching.
+    source: SubObjectiveSource;
+  };
+}): CurrentEnginePhase {
+  const { gapState, enginePhases, contactRecentSetBy } = input;
+
+  // Sort by priority ascending so iteration order matches phase progression.
+  // Defensive `.slice()` to avoid mutating the caller's array.
+  const sortedPhases = enginePhases.slice().sort((a, b) => a.priority - b.priority);
+
+  // ── Operator-override path (Q2 + Q3 + Q6 locks) ──────────────────────
+  if (contactRecentSetBy && contactRecentSetBy.source === 'manual') {
+    const recencyMs = Date.now() - contactRecentSetBy.setAt.getTime();
+    const recencyDays = recencyMs / (1000 * 60 * 60 * 24);
+
+    // Q3 lock — 7-day recency window. Negative recency (clock skew) also
+    // accepted as "very recent" (defensive against test fixtures with
+    // future timestamps).
+    if (recencyDays <= 7) {
+      // Q6 lock — orphan subObjectiveKey (not in any configured phase)
+      // → derive normally. Defensive against vocab-extension drift where
+      // a row exists for a key that the current Blueprint config doesn't
+      // bucket into any phase yet.
+      const overridePhase = sortedPhases.find((phase) =>
+        phase.subObjectives.includes(contactRecentSetBy.subObjectiveKey),
+      );
+      if (overridePhase) {
+        return {
+          currentPhase: overridePhase,
+          reason: 'operator_override',
+          operatorOverrideRecencyDays: recencyDays,
+        };
+      }
+      // Orphan key → fall through to derived path. Audit-row pin for the
+      // orphan case is a Phase 2.5 follow-up candidate if empirical
+      // signal warrants.
+    }
+  }
+
+  // ── Derived path ─────────────────────────────────────────────────────
+  // Build O(1) lookup from subObjectiveKey → row.state for the loop below.
+  const stateByKey = new Map<string, ContactSubObjectiveGapState['state']>();
+  for (const row of gapState) {
+    stateByKey.set(row.subObjectiveKey, row.state);
+  }
+
+  // Iterate phases in priority order; return the first phase with any
+  // unfilled sub-objective. "Unfilled" = state ∈ {unknown, partial};
+  // "filled" = state ∈ {known, not_applicable}. Missing rows (no entry in
+  // gapState for a configured key) treat as unfilled (`unknown` default).
+  for (const phase of sortedPhases) {
+    const hasUnfilled = phase.subObjectives.some((key) => {
+      const state = stateByKey.get(key);
+      return state !== 'known' && state !== 'not_applicable';
+    });
+    if (hasUnfilled) {
+      return { currentPhase: phase, reason: 'derived' };
+    }
+  }
+
+  // Q7 lock — all sub-objectives filled across all phases. Sticky at
+  // closing (LAST phase by priority order). Engine continues operating
+  // in closing; emits `advance_stage` / `close_deal_lost` /
+  // `wait_for_response` / `escalate_to_human` via the existing action
+  // vocabulary at the closing boundary per Lock 4.
+  //
+  // Defensive: if enginePhases is empty (config edge case), fall back to
+  // the first DEFAULT phase (qualify). This shouldn't happen in practice
+  // because `resolveEnginePhases` fail-safes to DEFAULT, but guards
+  // against caller misuse.
+  const lastPhase = sortedPhases[sortedPhases.length - 1];
+  if (!lastPhase) {
+    // Unreachable in practice; defensive only.
+    throw new Error(
+      '[brain-service] computeCurrentEnginePhase: enginePhases array is empty — caller must supply at least one phase',
+    );
+  }
+  return { currentPhase: lastPhase, reason: 'derived' };
 }
 
 // ─────────────────────────────────────────────
