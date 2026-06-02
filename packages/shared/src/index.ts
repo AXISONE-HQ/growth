@@ -15,6 +15,10 @@ export * from "./decision-payload.js";
 export * from "./run-decision-types.js";
 // M3-1 Sub-Objective Framework MVP — single source of truth for gap-state types + Generic-B2B default set + score-scale constants.
 export * from "./sub-objective-types.js";
+// KAN-1064 (Cluster II PR II) — EnginePhase canonical types + DEFAULT_ENGINE_PHASES_GENERIC_B2B.
+// Shared so packages/api (resolveEnginePhases + computeCurrentEnginePhase + brain-eval rendering) and
+// apps/* (operator UI surfaces for phase focus — Cluster III/IV downstream consumers) consume one source.
+export * from "./engine-phase-types.js";
 // M3-2.5a Inbound Reply Correlation — known email providers + soft validator + sidecar shape.
 export * from "./email-providers.js";
 // M3-2.5b Inbound Reply Correlation — RFC 5322 Message-ID/References normalization, shared between webhook publish + consumer lookup.
