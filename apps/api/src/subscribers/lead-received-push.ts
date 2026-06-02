@@ -283,6 +283,20 @@ async function loadSubObjectivesModule(): Promise<SubObjectivesModule> {
 // (variable-specifier dynamic import; apps/api cannot statically import
 // packages/api types). Sibling-discipline pattern: both shapes must
 // move together.
+//
+// KAN-1058 (Phase B PR III) — adds `priorTurns: ThreadTurn[]` field +
+// local `ThreadTurn` mirror per the same sibling-discipline pattern that
+// motivated BrainLatestInbound's mirror. Initial-lead path always passes
+// `priorTurns: []` (no prior turns on a fresh inquiry), so the local
+// mirror exists for type-safety on the buildLatestInboundContext typedef
+// rather than for runtime use of buildThreadContext here.
+interface ThreadTurn {
+  direction: 'outbound' | 'inbound';
+  occurredAt: string;
+  subjectLine: string;
+  bodyText: string;
+}
+
 interface BrainLatestInbound {
   receivedAt: string;
   senderEmail: string;
@@ -290,6 +304,7 @@ interface BrainLatestInbound {
   subjectLine: string;
   inReplyToDecisionId: string;
   threadDepth: number;
+  priorTurns: ThreadTurn[];
 }
 
 interface BrainServiceModule {
@@ -362,9 +377,19 @@ interface BrainServiceModule {
   }>;
   // KAN-1052 — pure builder for `BrainLatestInbound`. Surfaced through the
   // loader so both initial-lead (here) and reply-chain (contact-replied-
-  // push.ts) callers go through one helper. Phase B's multi-turn extension
-  // touches one helper, not two callers.
-  buildLatestInboundContext: (input: BrainLatestInbound) => BrainLatestInbound;
+  // push.ts) callers go through one helper. KAN-1058 (Phase B PR III)
+  // extends with optional `priorTurns?: ThreadTurn[]` input that defaults
+  // to `[]` on the resolved object (Q1+Q2 locks: optional input ergonomics,
+  // required-defaulted resolved-shape for downstream safety).
+  buildLatestInboundContext: (
+    input: Omit<BrainLatestInbound, 'priorTurns'> & { priorTurns?: ThreadTurn[] },
+  ) => BrainLatestInbound;
+  // KAN-1058 NOTE: NO `buildThreadContext` typedef here per Phase B
+  // Phase 1 Q3 lock. The initial-lead path passes `priorTurns: []`
+  // literally — never calls `buildThreadContext` — so including it in
+  // this loader would be dead surface that misleads readers into
+  // thinking the initial-lead path queries history. See
+  // contact-replied-push.ts loader for the reply-chain typedef.
 }
 let _brainServiceModule: BrainServiceModule | null = null;
 async function loadBrainServiceModule(): Promise<BrainServiceModule> {
@@ -717,8 +742,13 @@ leadReceivedPushApp.post('/lead-received', async (c) => {
         inReplyToDecisionId: event.eventId,
         // KAN-1052: initial leads are the contact's first inquiry — no prior
         // outbound to reply to. threadDepth=0 triggers the "reached out for
-        // the first time" prompt phrasing at brain-service.ts:962.
+        // the first time" prompt phrasing at brain-service.ts latestInboundBlock.
         threadDepth: 0,
+        // KAN-1058 (Phase B PR III): initial leads have no prior conversation
+        // turns to render. Explicit empty array makes the
+        // `### Prior conversation context` sub-section omit at render time
+        // (Q4 gating lock on priorTurns.length === 0).
+        priorTurns: [],
       });
       await wirePhase2Consumers(
         dealId,

@@ -49,7 +49,7 @@ interface AuditCreateArg {
     payload: Record<string, unknown>;
   };
 }
-const { verifyPubsubOidcMock, auditLogCreateMock, evaluateDealStateMock, wirePhase2ConsumersMock } = vi.hoisted(() => ({
+const { verifyPubsubOidcMock, auditLogCreateMock, evaluateDealStateMock, wirePhase2ConsumersMock, buildThreadContextMock } = vi.hoisted(() => ({
   verifyPubsubOidcMock: vi.fn<(arg: unknown) => Promise<boolean>>(),
   auditLogCreateMock: vi.fn<(arg: AuditCreateArg) => Promise<{ id: string }>>(
     async () => ({ id: "audit_x" }),
@@ -60,6 +60,24 @@ const { verifyPubsubOidcMock, auditLogCreateMock, evaluateDealStateMock, wirePha
   // realistic-shape fixture so assertions on brainActionType /
   // brainConfidence / brainReasoning have non-undefined values.
   evaluateDealStateMock: vi.fn(),
+  // KAN-1058 (Phase B PR III) — buildThreadContext mock. Default resolved
+  // value is `[]` so the subscriber's `priorTurns` argument is empty for
+  // most tests, matching pre-PR-III behavior (the `### Prior conversation
+  // context` sub-section omits at render time). Specific tests override
+  // via `mockResolvedValueOnce([...])` to assert multi-turn surface.
+  buildThreadContextMock: vi.fn<
+    (
+      prisma: unknown,
+      input: { tenantId: string; dealId: string; excludeEngagementId: string },
+    ) => Promise<
+      Array<{
+        direction: 'outbound' | 'inbound';
+        occurredAt: string;
+        subjectLine: string;
+        bodyText: string;
+      }>
+    >
+  >(),
   // KAN-1037-PR4.5 — wirePhase2Consumers mock. The subscriber now passes
   // the precomputed brainDecision as the 4th arg per the KAN-834
   // precomputed-decision pattern (avoids double-eval inside
@@ -108,6 +126,10 @@ vi.mock("../subscribers/lead-received-push.js", () => ({
 vi.mock("../../../../packages/api/src/services/brain-service.js", () => ({
   evaluateDealState: evaluateDealStateMock,
   buildLatestInboundContext: (input: unknown) => input,
+  // KAN-1058 (Phase B PR III) — buildThreadContext is now part of the
+  // loader surface for the reply chain. Mock returns whatever
+  // buildThreadContextMock yields per-test (default `[]` set in beforeEach).
+  buildThreadContext: buildThreadContextMock,
 }));
 
 import { contactRepliedPushApp } from "../subscribers/contact-replied-push.js";
@@ -261,6 +283,12 @@ beforeEach(() => {
   // KAN-1037-PR4.5 — default wirePhase2Consumers to a successful no-op.
   // Specific tests override to assert call args or to simulate failure.
   wirePhase2ConsumersMock.mockResolvedValue(undefined);
+  // KAN-1058 (Phase B PR III) — default buildThreadContext to empty array.
+  // The reply chain fires it before evaluateDealState; empty array means
+  // the `### Prior conversation context` sub-section omits at render time
+  // (matches pre-PR-III rendering). Specific multi-turn tests override
+  // via `mockResolvedValueOnce([...])`.
+  buildThreadContextMock.mockResolvedValue([]);
   __setRedisClientForTest(null);
 });
 
@@ -329,6 +357,12 @@ describe("KAN-1037-PR3 — contact.replied push subscriber (skeleton)", () => {
     // The load-bearing assertion: latestInbound carries the engine the
     // contact's verbatim words + thread metadata. Shape matches the
     // BrainLatestInbound interface in brain-service.ts.
+    //
+    // KAN-1058 (Phase B PR III) — priorTurns defaults to `[]` here because
+    // buildThreadContextMock.mockResolvedValue([]) is the beforeEach
+    // default. Tests in the KAN-1058 describe block below override the
+    // mock to assert multi-turn threading; this test pins the empty-turns
+    // back-compat shape.
     expect(optionsArg.latestInbound).toEqual({
       receivedAt: "2026-05-31T11:55:00.000Z",
       senderEmail: "alice@customer.example",
@@ -336,6 +370,7 @@ describe("KAN-1037-PR3 — contact.replied push subscriber (skeleton)", () => {
       subjectLine: "Re: Quick question",
       inReplyToDecisionId: DECISION_X,
       threadDepth: 1,
+      priorTurns: [],
     });
 
     // Single decision_re_evaluated audit row written — PR3 skeleton bookmark
@@ -596,6 +631,98 @@ describe("KAN-1037-PR3 — contact.replied push subscriber (skeleton)", () => {
     // Tenant B's cooldown freshly set.
     expect(redis.store.get(`decision-run:cooldown:${TENANT_B}:${CONTACT_X}`)?.value).toBe(
       DECISION_X,
+    );
+  });
+});
+
+// ─────────────────────────────────────────────
+// KAN-1058 (Phase B PR III) — buildThreadContext wiring tests
+//
+// Reply chain: contact.replied → buildThreadContext(prisma, {tenantId,
+// dealId, excludeEngagementId}) → result threaded as priorTurns into
+// evaluateDealState's latestInbound argument. event.dealId is guaranteed
+// non-null at the fetch site (the L360-378 null-dealId short-circuit
+// returns 200 + audit + cooldown without calling the brain).
+//
+// Wiring-level pins only — prompt-rendering semantics live in
+// packages/api/src/services/__tests__/brain-service.test.ts.
+// ─────────────────────────────────────────────
+
+describe("KAN-1058 (Phase B PR III) — buildThreadContext wiring", () => {
+  it("calls buildThreadContext with {tenantId, dealId, excludeEngagementId: event.inboundEngagementId}", async () => {
+    const redis = makeFakeRedis();
+    __setRedisClientForTest(redis as never);
+    const { body } = makeEnvelope(makeValidEvent());
+    const res = await makeApp().request("/pubsub/contact-replied", {
+      method: "POST",
+      body,
+    });
+    expect(res.status).toBe(200);
+    // Sentinel: buildThreadContext fired exactly once before evaluateDealState.
+    expect(buildThreadContextMock).toHaveBeenCalledTimes(1);
+    const callArg = buildThreadContextMock.mock.calls[0]![1];
+    expect(callArg).toEqual({
+      tenantId: TENANT_A,
+      dealId: DEAL_X,
+      // event.inboundEngagementId is the just-received row; the helper
+      // excludes it from the walk via WHERE id NOT IN.
+      excludeEngagementId: INBOUND_ENG,
+    });
+  });
+
+  it("threads buildThreadContext result into evaluateDealState.latestInbound.priorTurns", async () => {
+    const priorTurnsFixture = [
+      {
+        direction: "outbound" as const,
+        occurredAt: "2026-06-01T10:00:00.000Z",
+        subjectLine: "Earlier outbound",
+        bodyText: "Checking on your timeline.",
+      },
+      {
+        direction: "inbound" as const,
+        occurredAt: "2026-06-01T14:00:00.000Z",
+        subjectLine: "Re: Earlier outbound",
+        bodyText: "Looking at Q3.",
+      },
+    ];
+    buildThreadContextMock.mockResolvedValueOnce(priorTurnsFixture);
+    const redis = makeFakeRedis();
+    __setRedisClientForTest(redis as never);
+    const { body } = makeEnvelope(makeValidEvent());
+    const res = await makeApp().request("/pubsub/contact-replied", {
+      method: "POST",
+      body,
+    });
+    expect(res.status).toBe(200);
+    // The evaluateDealState call receives latestInbound with the
+    // priorTurns fixture verbatim. buildLatestInboundContext is the
+    // passthrough mock here (L110) so the assertion shows end-to-end
+    // threading from buildThreadContext through the helper.
+    expect(evaluateDealStateMock).toHaveBeenCalledTimes(1);
+    const evaluateOptions = evaluateDealStateMock.mock.calls[0]![2] as {
+      latestInbound: { priorTurns: typeof priorTurnsFixture };
+    };
+    expect(evaluateOptions.latestInbound.priorTurns).toEqual(priorTurnsFixture);
+  });
+
+  it("null-dealId short-circuit does NOT call buildThreadContext (preserves the guard)", async () => {
+    // L360-378 short-circuit: event.dealId === null → audit + cooldown + 200,
+    // NO brain call. buildThreadContext must not fire either; the no-deal
+    // path has no Deal to walk.
+    const redis = makeFakeRedis();
+    __setRedisClientForTest(redis as never);
+    const { body } = makeEnvelope(makeValidEvent({ dealId: null }));
+    const res = await makeApp().request("/pubsub/contact-replied", {
+      method: "POST",
+      body,
+    });
+    expect(res.status).toBe(200);
+    // The skip-with-audit was written; buildThreadContext + evaluateDealState
+    // both stayed silent.
+    expect(buildThreadContextMock).not.toHaveBeenCalled();
+    expect(evaluateDealStateMock).not.toHaveBeenCalled();
+    expect(auditLogCreateMock.mock.calls[0]![0].data.actionType).toBe(
+      "decision_re_evaluated_skipped_no_deal",
     );
   });
 });

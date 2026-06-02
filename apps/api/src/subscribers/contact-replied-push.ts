@@ -125,10 +125,32 @@ function getOpenAIClient(): OpenAI | null {
 // ─────────────────────────────────────────────
 
 /**
+ * KAN-1058 (Phase B PR III) — local mirror of brain-service.ts's `ThreadTurn`
+ * shape. Same sibling-discipline pattern as `BrainLatestInboundLocal` below
+ * (KAN-1037-PR4 convention). Reply chain calls buildThreadContext at L398+
+ * and threads the result into buildLatestInboundContext as `priorTurns`.
+ *
+ * Naming asymmetry with lead-received-push.ts (`ThreadTurn` no Local suffix)
+ * is established convention, NOT drift — see
+ * `feedback_subscriber_local_type_mirror_naming_asymmetry.md`.
+ */
+interface ThreadTurnLocal {
+  direction: 'outbound' | 'inbound';
+  occurredAt: string;
+  subjectLine: string;
+  bodyText: string;
+}
+
+/**
  * KAN-1037-PR4 — local mirror of brain-service.ts's `BrainLatestInbound`
  * shape. Same field-by-field structure as ContactRepliedEvent.metadata
  * subset; the prompt section in buildEvaluationPrompt renders these
  * fields verbatim.
+ *
+ * KAN-1058 (Phase B PR III) — extended with `priorTurns: ThreadTurnLocal[]`
+ * for the multi-turn rendering surface. Required on the resolved object
+ * (Phase B Phase 1 Q2 lock) so the prompt template can read
+ * `priorTurns.length === 0` directly without optional-chaining.
  */
 interface BrainLatestInboundLocal {
   receivedAt: string;
@@ -137,6 +159,7 @@ interface BrainLatestInboundLocal {
   subjectLine: string;
   inReplyToDecisionId: string;
   threadDepth: number;
+  priorTurns: ThreadTurnLocal[];
 }
 
 interface BrainServiceModule {
@@ -178,9 +201,28 @@ interface BrainServiceModule {
   }>;
   // KAN-1052 — pure builder for `BrainLatestInbound`. Both this subscriber
   // (reply chain, post-PR4) and lead-received-push (initial-lead path,
-  // KAN-1052) go through this helper. Phase B's multi-turn extension
-  // touches one helper, not two callers.
-  buildLatestInboundContext: (input: BrainLatestInboundLocal) => BrainLatestInboundLocal;
+  // KAN-1052) go through this helper. KAN-1058 (Phase B PR III) extends
+  // with optional `priorTurns?: ThreadTurnLocal[]` input that defaults
+  // to `[]` on the resolved object (Q1+Q2 locks).
+  buildLatestInboundContext: (
+    input: Omit<BrainLatestInboundLocal, 'priorTurns'> & {
+      priorTurns?: ThreadTurnLocal[];
+    },
+  ) => BrainLatestInboundLocal;
+  // KAN-1058 (Phase B PR III) — chronological-by-deal walk of prior email
+  // engagements. Fetched before `evaluateDealState` at L398+ and threaded
+  // into `buildLatestInboundContext({...priorTurns})`. Fail-safes to `[]`
+  // on any throw (matches computeGapState fail-safe posture). See
+  // packages/api/src/services/brain-service.ts buildThreadContext docstring
+  // for the full contract.
+  buildThreadContext: (
+    prisma: unknown,
+    input: {
+      tenantId: string;
+      dealId: string;
+      excludeEngagementId: string;
+    },
+  ) => Promise<ThreadTurnLocal[]>;
 }
 
 let _brainServiceModule: BrainServiceModule | null = null;
@@ -395,8 +437,22 @@ contactRepliedPushApp.post('/contact-replied', async (c) => {
     //
     // KAN-828 — inject redis + openai so the Knowledge Layer retrieval
     // fires. Same pattern as lead-received-push.ts:1335-1341.
-    const { evaluateDealState, buildLatestInboundContext } = await loadBrainServiceModule();
+    const { evaluateDealState, buildLatestInboundContext, buildThreadContext } =
+      await loadBrainServiceModule();
     const openai = getOpenAIClient();
+    // KAN-1058 (Phase B PR III) — fetch prior conversation turns BEFORE the
+    // evaluateDealState call so the result threads into the
+    // `## Latest inbound` block's `### Prior conversation context` sub-section.
+    // event.dealId is guaranteed non-null by the L360-378 short-circuit above
+    // (writeSidecarAndCorrelate's null-dealId path returns 200 with audit +
+    // cooldown). buildThreadContext fail-safes to `[]` on any DB error
+    // (PR II contract), so a transient query failure gracefully omits the
+    // sub-section rather than blocking the engine call.
+    const priorTurns = await buildThreadContext(prisma, {
+      tenantId: event.tenantId,
+      dealId: event.dealId,
+      excludeEngagementId: event.inboundEngagementId,
+    });
     const brainDecision: BrainDecision = await evaluateDealState(prisma, event.dealId, {
       redis,
       openai,
@@ -417,6 +473,8 @@ contactRepliedPushApp.post('/contact-replied', async (c) => {
         subjectLine: event.metadata.subjectLine,
         inReplyToDecisionId: event.decisionId,
         threadDepth: event.metadata.threadDepth,
+        // KAN-1058 — multi-turn rendering surface.
+        priorTurns,
       }),
     });
 
