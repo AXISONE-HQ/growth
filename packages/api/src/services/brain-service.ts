@@ -1058,6 +1058,12 @@ export async function evaluateDealState(
     // resolvedGaps.length > 0; legacy callers with no gap data see the
     // section omitted.
     subObjectiveGapState: gapState,
+    // KAN-1066 (Cluster II PR IV) — Engine phase focus for the new
+    // prompt section. Conditional render gated on currentEnginePhase
+    // !== undefined; legacy callers (pre-KAN-1065 sites) see the
+    // section omitted. PR III threaded the field through EvaluateOptions
+    // ahead of this PR.
+    currentEnginePhase: options.currentEnginePhase,
   });
 
   // 5. Call LLM. tenantId derived from the loaded Deal (KAN-745 per-tenant
@@ -1215,6 +1221,7 @@ Given the current state of a Deal — its Stage, recent engagement history, Pipe
 - close_deal_lost: stalled too long; give up
 - no_action: explicit no-op
 - transition_sub_objective: the contact's reply provides factual information matching an unfilled BANT sub-objective (timeline / budget / authority / need / motivation) — set the value (specify subObjectiveKey, toState, value via the subObjectiveTransition payload)
+- advance_engine_phase: all sub-objectives in the current Engine phase are resolved — advance to the next sequential phase per qualify → problem → proof → closing (specify fromPhase + toPhase via the enginePhaseAdvance payload). Cannot emit FROM \`closing\` (terminal).
 
 Respond ONLY with valid JSON in this exact shape:
 {
@@ -1228,12 +1235,17 @@ Respond ONLY with valid JSON in this exact shape:
       "subObjectiveKey": "<one of: timeline|budget|authority|need|motivation>",
       "toState": "<known|not_applicable>",
       "value": "<string|number or null>"
+    },
+    "enginePhaseAdvance": {
+      "fromPhase": "<qualify|problem|proof>",
+      "toPhase": "<problem|proof|closing>"
     }
   },
   "confidence": <0.0-1.0>
 }
 
 \`subObjectiveTransition\` is required ONLY when \`type === "transition_sub_objective"\`; omit or set null on all other action types.
+\`enginePhaseAdvance\` is required ONLY when \`type === "advance_engine_phase"\`; omit or set null on all other action types.
 
 Be conservative: if unsure, recommend escalate_to_human or wait_for_response with low confidence.`;
 
@@ -1286,6 +1298,21 @@ export function buildEvaluationPrompt(input: {
    * sub-objective-gap-tracker fail-safes to empty per its own contract).
    */
   subObjectiveGapState?: SubObjectiveGapState;
+  /**
+   * KAN-1066 (Cluster II PR IV) — current EnginePhase focus computed by
+   * the caller (PR III wiring). When defined, renders a
+   * `## Engine phase focus` section BETWEEN `## Latest inbound` and
+   * `## Sub-objective gap state for this contact`. Header alone carries
+   * the derived signal (Q4 lock); an operator-override snippet renders
+   * inline when `reason === 'operator_override'` (Q3 lock). A sibling
+   * `### Phase-transition guidance` sub-section teaches the engine WHEN
+   * to emit `advance_engine_phase` (Q5 lock — PR IV scope).
+   *
+   * Section is OMITTED when undefined — every legacy caller (pre-KAN-1065
+   * sites + the in-process trpc paths) flows through this branch
+   * unchanged.
+   */
+  currentEnginePhase?: CurrentEnginePhase;
 }): string {
   const {
     snapshot,
@@ -1297,6 +1324,7 @@ export function buildEvaluationPrompt(input: {
     knowledge,
     latestInbound,
     subObjectiveGapState,
+    currentEnginePhase,
   } = input;
 
   const contactName =
@@ -1450,6 +1478,22 @@ If the contact's reply expresses opt-out intent ("please stop emailing me", "rem
 `
     : '';
 
+  // KAN-1066 (Cluster II PR IV) — `## Engine phase focus` section.
+  // Renders ONLY when currentEnginePhase is provided. Slot per Phase 1
+  // trace + Q1-Q5 locks: BETWEEN `## Latest inbound` and `## Sub-objective
+  // gap state for this contact`. Ordering invariant: "what just happened
+  // (signal + body) → where the engine should focus (phase) → what we
+  // know about this contact (gap state) → where we are (stage state)".
+  //
+  // Header alone carries derived signal (Q4: no "derived from gap-state"
+  // line). Operator-override snippet renders inline when reason ===
+  // 'operator_override' (Q3). Sibling `### Phase-transition guidance`
+  // sub-section teaches WHEN to emit advance_engine_phase (Q5: PR IV
+  // scope; PR V handles post-emission dispatcher flow).
+  const enginePhaseFocusBlock = currentEnginePhase
+    ? renderEnginePhaseFocusSection(currentEnginePhase)
+    : '';
+
   // KAN-1042 PR B (Half A) — `## Sub-objective gap state for this contact`
   // section. Renders ONLY when subObjectiveGapState is provided AND has
   // non-empty arrays (prioritizedGaps OR resolvedGaps). Legacy callers
@@ -1494,7 +1538,7 @@ Micro-objective progress: ${snapshot.moProgressPercent ?? '(none tracked)'}${sna
 ${engagementsBlock}
 Last engagement signal: ${snapshot.lastEngagementClass ?? '(none)'}
 Days since last engagement: ${snapshot.daysSinceLastEngagement ?? '(no engagements)'}
-${latestInboundBlock}${gapStateBlock}
+${latestInboundBlock}${enginePhaseFocusBlock}${gapStateBlock}
 ## Recent stage transitions (last 3)
 ${transitionsBlock}
 ${knowledge ? `\n## Company knowledge (relevant to this conversation)\n${renderKnowledgeSectionInline(knowledge)}\n` : ''}
@@ -1626,6 +1670,54 @@ Subject: ${turn.subjectLine}
 The following prior outbound + reply pairs led to this latest inbound, ordered oldest-first. Use them to understand the contact's evolving state across the thread.
 
 ${turnsRendered}
+`;
+}
+
+/**
+ * KAN-1066 (Cluster II PR IV) — render the `## Engine phase focus`
+ * section. Slot per Q2 lock (after `renderPriorTurnsSection`,
+ * chronological-by-PR convention).
+ *
+ * Q1: Header is `## Engine phase focus` (matches `## X` convention).
+ * Q3: When `reason === 'operator_override'`, prepend a snippet that
+ *   tells the engine an operator manually set this focus; engine treats
+ *   the override as authoritative regardless of derived gap-state. TTL
+ *   detail (7-day recency window) is implementation detail and is NOT
+ *   surfaced in the prompt (engine doesn't need to know the window;
+ *   it just needs to know "respect the override now").
+ * Q4: Derived path renders ONLY the header line — no "derived from
+ *   gap-state" annotation. Engine infers "derived" by absence of override
+ *   snippet. Saves tokens; if empirical signal shows engine confusion
+ *   about derivation source, add a follow-up via Phase 2.5.
+ * Q5: Phase-transition guidance sub-section teaches WHEN to emit
+ *   `advance_engine_phase`. Mirrors `### Stop-condition guidance` shape
+ *   (action-type identifiers backtick-escaped to prevent template-literal
+ *   interpolation). PR V handles WHAT HAPPENS post-emission via dispatcher
+ *   docstrings; the prompt-side guidance lives here.
+ *
+ * Pure-function module-private helper — sibling to
+ * `renderPriorTurnsSection` above. No persistence, no LLM, no DB; caller
+ * (`buildEvaluationPrompt`) supplies validated input shape.
+ */
+function renderEnginePhaseFocusSection(currentEnginePhase: CurrentEnginePhase): string {
+  const { currentPhase, reason } = currentEnginePhase;
+  const overrideSnippet =
+    reason === 'operator_override'
+      ? `An operator manually set this contact's phase focus to \`${currentPhase.key}\` (${currentPhase.label}). Treat this as the authoritative current phase regardless of derived gap-state.
+
+`
+      : '';
+  return `
+
+## Engine phase focus
+
+Current phase: \`${currentPhase.key}\` (${currentPhase.label}). Sub-objectives in scope for this phase: ${currentPhase.subObjectives.map((k) => `\`${k}\``).join(', ') || '(none)'}.
+
+${overrideSnippet}### Phase-transition guidance
+
+When ALL sub-objectives listed for the current phase are resolved (state ∈ {known, not_applicable} in the gap state below), emit \`advance_engine_phase\` with \`fromPhase\` set to the current phase and \`toPhase\` set to the next sequential phase per qualify → problem → proof → closing. Cite the resolved sub-objectives in your reasoning.
+
+Do NOT skip phases (e.g., qualify → proof) — the validator rejects non-sequential advances. Do NOT emit \`advance_engine_phase\` FROM \`closing\` (terminal phase; use \`advance_stage\`, \`close_deal_lost\`, \`wait_for_response\`, or \`escalate_to_human\` instead). When sub-objectives in the current phase remain unresolved, prefer \`send_follow_up\` or \`transition_sub_objective\` over premature phase advance.
 `;
 }
 
@@ -1798,6 +1890,51 @@ export function parseLlmResponse(text: string): ParsedLlmResponse {
       toState: payload.toState as 'known' | 'not_applicable',
       value: value as string | number | null,
     };
+  }
+
+  // KAN-1066 (Cluster II PR IV) — enginePhaseAdvance payload validation.
+  // The field is REQUIRED when type === 'advance_engine_phase' and dropped
+  // otherwise. Validation layers:
+  //   1. Payload presence (mirrors transition_sub_objective shape)
+  //   2. Both phases are members of VALID_ENGINE_PHASES (PR I @ L166)
+  //   3. isValidPhaseAdvance(fromPhase, toPhase) enforces strict-sequential
+  //      contract (PR I @ L203 — rejects skips, reverses, same-phase, and
+  //      Lock 4 closing-exit attempts)
+  // Malformed payload on an advance_engine_phase emission → reject the
+  // whole response; caller falls back to graceful escalation.
+  if (a.type === 'advance_engine_phase') {
+    const adv = a.enginePhaseAdvance;
+    if (!adv || typeof adv !== 'object') {
+      return { ok: false, error: 'enginePhaseAdvance payload missing for advance_engine_phase action' };
+    }
+    const payload = adv as Record<string, unknown>;
+    if (
+      typeof payload.fromPhase !== 'string' ||
+      !VALID_ENGINE_PHASES.has(payload.fromPhase as EnginePhaseKey)
+    ) {
+      return {
+        ok: false,
+        error: `invalid enginePhaseAdvance.fromPhase: ${String(payload.fromPhase)} (must be one of qualify|problem|proof|closing)`,
+      };
+    }
+    if (
+      typeof payload.toPhase !== 'string' ||
+      !VALID_ENGINE_PHASES.has(payload.toPhase as EnginePhaseKey)
+    ) {
+      return {
+        ok: false,
+        error: `invalid enginePhaseAdvance.toPhase: ${String(payload.toPhase)} (must be one of qualify|problem|proof|closing)`,
+      };
+    }
+    const fromPhase = payload.fromPhase as EnginePhaseKey;
+    const toPhase = payload.toPhase as EnginePhaseKey;
+    if (!isValidPhaseAdvance(fromPhase, toPhase)) {
+      return {
+        ok: false,
+        error: `invalid enginePhaseAdvance: ${fromPhase} → ${toPhase} violates strict-sequential contract (qualify → problem → proof → closing; no skips, no reverses, no exit from closing)`,
+      };
+    }
+    nextBestAction.enginePhaseAdvance = { fromPhase, toPhase };
   }
 
   return { ok: true, value: { nextBestAction, confidence } };
