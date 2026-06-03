@@ -594,6 +594,17 @@ contactRepliedPushApp.post('/contact-replied', async (c) => {
           llmInputTokens: brainDecision.llmInputTokens,
           llmOutputTokens: brainDecision.llmOutputTokens,
           threadDepth: event.metadata.threadDepth,
+          // KAN-1067 (Cluster II PR V) — Tier 1 telemetry. EnginePhase
+          // focus snapshot threaded through PR III wiring. Lock 2's
+          // derived-from-gap-state contract means the phase key + reason
+          // are recoverable at eval time but lossy in PROD without an
+          // audit anchor. enginePhasesAvailable is the compact phase-key
+          // list (Q4 lock) — full BlueprintEnginePhase config recoverable
+          // via Tenant.enginePhasesOverride + Blueprint.enginePhases lookup
+          // if a forensic deep-dive needs it.
+          currentEnginePhase: currentEnginePhase?.currentPhase.key ?? null,
+          currentEnginePhaseReason: currentEnginePhase?.reason ?? null,
+          enginePhasesAvailable: enginePhases.map((p) => p.key),
           // Forensic anchors — let operators join back to the originating
           // engagement chain for full trace.
           inboundEngagementId: event.inboundEngagementId,

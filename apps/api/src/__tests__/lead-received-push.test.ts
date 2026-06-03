@@ -2747,3 +2747,249 @@ describe("KAN-1065 (Cluster II PR III) — engine input wiring (initial-lead pat
     expect(evaluateOptions.currentEnginePhase).toBeUndefined();
   });
 });
+
+// ─────────────────────────────────────────────
+// KAN-1067 (Cluster II PR V) — advance_engine_phase dispatcher arm.
+//
+// Mirrors KAN-1042 PR A2's transition_sub_objective shape with two
+// critical semantic differences (Q2 lock — see memo
+// feedback_advance_engine_phase_is_audit_signal_not_state_mutation):
+//   - DISPATCH path is AUDIT-ONLY (no state mutation). engine_phase
+//     is derived-from-gap-state per Lock 2; next eval re-derives.
+//   - Both branches emit a new audit actionType: engine_phase.advanced
+//     (DISPATCH) or engine_phase.advance_escalated (ESCALATE).
+// ─────────────────────────────────────────────
+
+function buildAdvancePhaseBrainDecision(overrides: {
+  fromPhase?: "qualify" | "problem" | "proof";
+  toPhase?: "problem" | "proof" | "closing";
+  confidence?: number;
+  reasoning?: string;
+} = {}) {
+  return {
+    dealId: DEAL_A,
+    evaluatedAt: new Date(),
+    currentStateSnapshot: {
+      dealStatus: "open",
+      currentStageName: "Qualified",
+      currentStageOutcomeType: "open",
+      daysInCurrentStage: 0,
+      engagementCount: 1,
+      lastEngagementType: "email_received",
+      lastEngagementClass: "positive",
+      daysSinceLastEngagement: 0,
+      moProgressPercent: null,
+      pipelineName: "KAN-1067 Verify Pipeline",
+      pipelineObjectiveType: "book_appointment",
+    },
+    nextBestAction: {
+      type: "advance_engine_phase" as const,
+      reasoning:
+        overrides.reasoning ??
+        'Authority signal resolved ("I\'m the VP of Sales — I make this call"); qualify phase complete, moving to problem.',
+      enginePhaseAdvance: {
+        fromPhase: overrides.fromPhase ?? "qualify",
+        toPhase: overrides.toPhase ?? "problem",
+      },
+    },
+    confidence: overrides.confidence ?? 0.78,
+    modelTier: "reasoning" as const,
+    llmInputTokens: 540,
+    llmOutputTokens: 110,
+  };
+}
+
+describe("KAN-1067 (Cluster II PR V) — advance_engine_phase dispatcher arm", () => {
+  beforeEach(() => {
+    setupHappyPathMocks();
+    escalationCreateMock.mockClear();
+    escalationCreateMock.mockResolvedValue({ id: "esc_advance_phase_a" });
+    decisionFindFirstMock.mockClear();
+    decisionFindFirstMock.mockResolvedValue({ id: "decision_advance_trigger_a" });
+    tenantFindUniqueMock.mockReset();
+    auditLogCreateLeadReceivedMock.mockClear();
+    dealFindUniqueMock.mockResolvedValue({
+      id: DEAL_A,
+      tenantId: TENANT_A,
+      contactId: CONTACT_A,
+    });
+  });
+
+  it("ESCALATE path: autoAdvanceEnginePhase=false → Escalation row + engine_phase.advance_escalated audit", async () => {
+    tenantFindUniqueMock.mockResolvedValue({ autoAdvanceEnginePhase: false });
+    const precomputed = buildAdvancePhaseBrainDecision({
+      fromPhase: "qualify",
+      toPhase: "problem",
+      confidence: 0.78,
+    });
+
+    await (await getWirePhase2Consumers())(DEAL_A, "evt_advance_escalate", false, precomputed as never);
+
+    expect(escalationCreateMock).toHaveBeenCalledTimes(1);
+    const escArgs = escalationCreateMock.mock.calls[0]![0] as {
+      data: {
+        tenantId: string;
+        contactId: string;
+        decisionId: string | null;
+        triggerType: string;
+        originalAction: { actionType: string; channel: string | null; payload: Record<string, unknown> };
+        context: Record<string, unknown>;
+      };
+    };
+    expect(escArgs.data.tenantId).toBe(TENANT_A);
+    expect(escArgs.data.contactId).toBe(CONTACT_A);
+    expect(escArgs.data.decisionId).toBe("decision_advance_trigger_a");
+    expect(escArgs.data.triggerType).toBe("engine_proposed_action");
+    expect(escArgs.data.originalAction.actionType).toBe("advance_engine_phase");
+    expect(escArgs.data.originalAction.channel).toBeNull();
+    expect(escArgs.data.originalAction.payload).toMatchObject({
+      fromPhase: "qualify",
+      toPhase: "problem",
+      brainConfidence: 0.78,
+    });
+    expect(escArgs.data.context.source).toBe("kan_1067_engine_phase_advance_proposal");
+    expect(escArgs.data.context.tenantOptIn).toBe(false);
+
+    // engine_phase.advance_escalated audit MUST fire after Escalation.
+    const escAuditCall = auditLogCreateLeadReceivedMock.mock.calls.find(
+      (call) =>
+        (call[0] as { data: { actionType: string } }).data.actionType ===
+        "engine_phase.advance_escalated",
+    );
+    expect(escAuditCall).toBeDefined();
+    const escAuditArgs = escAuditCall![0] as {
+      data: { actionType: string; payload: Record<string, unknown> };
+    };
+    expect(escAuditArgs.data.actionType).toBe("engine_phase.advance_escalated");
+    expect(escAuditArgs.data.payload).toMatchObject({
+      fromPhase: "qualify",
+      toPhase: "problem",
+      escalationId: "esc_advance_phase_a",
+      tenantOptIn: false,
+    });
+  });
+
+  it("DISPATCH path: autoAdvanceEnginePhase=true → engine_phase.advanced audit ONLY (no state mutation, no Escalation)", async () => {
+    tenantFindUniqueMock.mockResolvedValue({ autoAdvanceEnginePhase: true });
+    const precomputed = buildAdvancePhaseBrainDecision({
+      fromPhase: "problem",
+      toPhase: "proof",
+      confidence: 0.88,
+    });
+
+    await (await getWirePhase2Consumers())(DEAL_A, "evt_advance_dispatch", false, precomputed as never);
+
+    // Q2 lock: AUDIT-ONLY. No Escalation row written on dispatch path.
+    expect(escalationCreateMock).not.toHaveBeenCalled();
+
+    const dispatchAuditCall = auditLogCreateLeadReceivedMock.mock.calls.find(
+      (call) =>
+        (call[0] as { data: { actionType: string } }).data.actionType ===
+        "engine_phase.advanced",
+    );
+    expect(dispatchAuditCall).toBeDefined();
+    const dispatchAuditArgs = dispatchAuditCall![0] as {
+      data: { actionType: string; payload: Record<string, unknown> };
+    };
+    expect(dispatchAuditArgs.data.actionType).toBe("engine_phase.advanced");
+    expect(dispatchAuditArgs.data.payload).toMatchObject({
+      fromPhase: "problem",
+      toPhase: "proof",
+      brainConfidence: 0.88,
+      tenantOptIn: true,
+      // Q2 lock — explicit marker that this is an audit signal, not a
+      // state mutation.
+      stateMutation: false,
+    });
+  });
+
+  it("ESCALATE path: missing tenant row → defaults to opt-out (fail-safe direction)", async () => {
+    tenantFindUniqueMock.mockResolvedValue(null);
+    const precomputed = buildAdvancePhaseBrainDecision();
+
+    await (await getWirePhase2Consumers())(DEAL_A, "evt_advance_no_tenant", false, precomputed as never);
+
+    expect(escalationCreateMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("ESCALATE path: tenant row with autoAdvanceEnginePhase=null → defaults to opt-out", async () => {
+    tenantFindUniqueMock.mockResolvedValue({ autoAdvanceEnginePhase: null });
+    const precomputed = buildAdvancePhaseBrainDecision();
+
+    await (await getWirePhase2Consumers())(DEAL_A, "evt_advance_null_flag", false, precomputed as never);
+
+    expect(escalationCreateMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("severity heuristic: confidence < 0.4 → severity='high'; otherwise 'medium'", async () => {
+    tenantFindUniqueMock.mockResolvedValue({ autoAdvanceEnginePhase: false });
+    const lowConfidence = buildAdvancePhaseBrainDecision({ confidence: 0.35 });
+    await (await getWirePhase2Consumers())(DEAL_A, "evt_advance_low_conf", false, lowConfidence as never);
+    const lowEscArgs = escalationCreateMock.mock.calls[0]![0] as {
+      data: { severity: string };
+    };
+    expect(lowEscArgs.data.severity).toBe("high");
+
+    escalationCreateMock.mockClear();
+    auditLogCreateLeadReceivedMock.mockClear();
+    const mediumConfidence = buildAdvancePhaseBrainDecision({ confidence: 0.5 });
+    await (await getWirePhase2Consumers())(DEAL_A, "evt_advance_med_conf", false, mediumConfidence as never);
+    const mediumEscArgs = escalationCreateMock.mock.calls[0]![0] as {
+      data: { severity: string };
+    };
+    expect(mediumEscArgs.data.severity).toBe("medium");
+  });
+
+  it("Deal lookup miss → arm skipped (no Escalation, no audit)", async () => {
+    dealFindUniqueMock.mockResolvedValue(null);
+    const precomputed = buildAdvancePhaseBrainDecision();
+
+    await (await getWirePhase2Consumers())(DEAL_A, "evt_advance_no_deal", false, precomputed as never);
+
+    expect(escalationCreateMock).not.toHaveBeenCalled();
+    const advanceAudits = auditLogCreateLeadReceivedMock.mock.calls.filter((call) => {
+      const at = (call[0] as { data: { actionType: string } }).data.actionType;
+      return at === "engine_phase.advanced" || at === "engine_phase.advance_escalated";
+    });
+    expect(advanceAudits).toHaveLength(0);
+  });
+
+  it("Missing enginePhaseAdvance payload → arm skipped (defensive parser-bypass guard)", async () => {
+    tenantFindUniqueMock.mockResolvedValue({ autoAdvanceEnginePhase: false });
+    const malformed = buildAdvancePhaseBrainDecision();
+    // Strip the payload (simulates parser-bypass scenario).
+    delete (malformed.nextBestAction as { enginePhaseAdvance?: unknown }).enginePhaseAdvance;
+
+    await (await getWirePhase2Consumers())(DEAL_A, "evt_advance_no_payload", false, malformed as never);
+
+    expect(escalationCreateMock).not.toHaveBeenCalled();
+  });
+
+  it("Chained invocation guard: isChainedInvocation=true → arm skipped (no double-dispatch on chained Brain call)", async () => {
+    tenantFindUniqueMock.mockResolvedValue({ autoAdvanceEnginePhase: false });
+    const precomputed = buildAdvancePhaseBrainDecision();
+
+    await (await getWirePhase2Consumers())(DEAL_A, "evt_advance_chained", true, precomputed as never);
+
+    expect(escalationCreateMock).not.toHaveBeenCalled();
+  });
+
+  it("ESCALATE path: Escalation create failure → swallowed (best-effort posture; caller's fire-and-forget boundary catches)", async () => {
+    tenantFindUniqueMock.mockResolvedValue({ autoAdvanceEnginePhase: false });
+    escalationCreateMock.mockRejectedValueOnce(new Error("DB connection broken"));
+    const precomputed = buildAdvancePhaseBrainDecision();
+
+    // Should NOT throw — best-effort posture per memo.
+    await expect(
+      (await getWirePhase2Consumers())(DEAL_A, "evt_advance_esc_fail", false, precomputed as never),
+    ).resolves.not.toThrow();
+
+    // engine_phase.advance_escalated audit NOT written (escalation insert failed).
+    const escAudits = auditLogCreateLeadReceivedMock.mock.calls.filter(
+      (call) =>
+        (call[0] as { data: { actionType: string } }).data.actionType ===
+        "engine_phase.advance_escalated",
+    );
+    expect(escAudits).toHaveLength(0);
+  });
+});
