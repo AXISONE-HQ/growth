@@ -629,6 +629,11 @@ interface StageTransitionEngineModule {
       // (the prior "MVP accepts the double-eval" comment described what
       // closes here). Single Brain call per inbound now.
       brainDecision?: Phase2BrainDecision;
+      // KAN-1081 (Cluster III PR II) — EnginePhase → PipelineStage mapping
+      // entry resolved by the dispatcher via resolveEnginePhaseStageMap
+      // (KAN-1080 PR I). When provided, resolveAdvanceTargetStage uses
+      // mapEntry.stageId BEFORE falling back to "next by order".
+      mapEntry?: { stageId: string };
     },
   ) => Promise<{
     type: 'transitioned' | 'no_transition' | 'skipped';
@@ -1735,12 +1740,84 @@ export async function wirePhase2Consumers(
     brainDecision.nextBestAction.type === 'close_deal_lost'
   ) {
     const { evaluateStageTransition } = await loadStageTransitionEngineModule();
+
+    // KAN-1081 (Cluster III PR II) — EnginePhase → PipelineStage mapping
+    // consult. Q3 lock: INSIDE the advance_stage branch (lazy load — only
+    // fires when engine emits, saves Prisma round-trip on every Brain eval).
+    // Q2 lock: load resolveEnginePhaseStageMap from BrainServiceModule (PR I
+    // added the typedef + canonical re-export at brain-service.ts:588).
+    //
+    // Gate on closing-phase + advance_stage action (NOT close_deal_lost —
+    // close_deal_lost has its own terminal_lost stage resolution; mapping
+    // doesn't apply). When currentEnginePhase is undefined (legacy callers
+    // pre-Cluster-II) OR not closing OR mapping returned null, mapEntry stays
+    // undefined → evaluateStageTransition falls through to existing "next by
+    // order" logic. Zero regression on the existing 8-transitions/30d engine-
+    // driven advance_stage flow.
+    let mapEntry: { stageId: string } | undefined;
+    let mappingSource: 'tenant_or_blueprint' | 'fallback' = 'fallback';
+    if (
+      brainDecision.nextBestAction.type === 'advance_stage' &&
+      currentEnginePhase?.currentPhase.key === 'closing'
+    ) {
+      try {
+        const { resolveEnginePhaseStageMap } = await loadBrainServiceModule();
+        const deal = await prisma.deal.findUnique({
+          where: { id: dealId },
+          select: { tenantId: true, pipelineId: true, contactId: true },
+        });
+        if (deal) {
+          const mapping = await resolveEnginePhaseStageMap(prisma, deal.tenantId, deal.pipelineId);
+          if (mapping.closing) {
+            mapEntry = { stageId: mapping.closing.stageId };
+            mappingSource = 'tenant_or_blueprint';
+            // Audit row — Q1 lock: binary mappingSource discriminator.
+            // Granular tenant_override vs blueprint attribution deferred per
+            // feedback_audit_payload_source_discrimination_phase_2_5_pattern.
+            try {
+              await prisma.auditLog.create({
+                data: {
+                  tenantId: deal.tenantId,
+                  actor: 'lead_received_subscriber',
+                  actionType: 'engine_phase_stage_mapped',
+                  reasoning: brainDecision.nextBestAction.reasoning,
+                  payload: {
+                    eventId,
+                    dealId,
+                    contactId: deal.contactId,
+                    currentEnginePhase: 'closing',
+                    mappingSource,
+                    targetStageId: mapping.closing.stageId,
+                    targetStageName: mapping.closing.stageName,
+                    ...(mapping.closing.stageRoleHint
+                      ? { stageRoleHint: mapping.closing.stageRoleHint }
+                      : {}),
+                  },
+                },
+              });
+            } catch (auditErr) {
+              console.warn(
+                `[lead-received-push] kan-1081-mapping-audit-failed dealId=${dealId} eventId=${eventId} err=${(auditErr as Error)?.message ?? String(auditErr)}`,
+              );
+            }
+          }
+        }
+      } catch (err) {
+        console.warn(
+          `[lead-received-push] kan-1081-mapping-consult-failed dealId=${dealId} eventId=${eventId} err=${(err as Error)?.message ?? String(err)} — falling through to next-by-order`,
+        );
+      }
+    }
+
     // KAN-834 — thread the dispatcher's first Brain decision into the
     // engine so it doesn't re-evaluate. Single Brain call per inbound;
     // engine's terminal-stage short-circuit still runs first; KAN-825
     // chain logic downstream sees the same decision the dispatcher saw.
+    // KAN-1081 (Cluster III PR II) — mapEntry threaded through when closing-
+    // phase mapping resolved; undefined otherwise (backcompat preserved).
     const transitionResult = await evaluateStageTransition(prisma, dealId, {
       brainDecision,
+      mapEntry,
     });
     console.log(
       `[lead-received-push] phase-2-stage-transition dealId=${dealId} eventId=${eventId} brainAction=${brainDecision.nextBestAction.type} resultType=${transitionResult.type}${transitionResult.reason ? ` reason=${transitionResult.reason}` : ''}${transitionResult.toStageId ? ` toStageId=${transitionResult.toStageId}` : ''}`,
