@@ -58,6 +58,13 @@ model Tenant {
   // `blueprint?.enginePhases` then DEFAULT_ENGINE_PHASES_GENERIC_B2B.
   // Resolution lives in `blueprint-engine-phases-resolver.ts` (Cluster II PR II).
   enginePhasesOverride            Json?                 @map("engine_phases_override")
+  // KAN-1080 (Cluster III PR I, Phase 1 Q4 lock) — per-tenant override of
+  // Blueprint.enginePhaseStageMap. Sibling to enginePhasesOverride above (same
+  // engine-config family). Per Phase 1.5 audit (32 idiosyncratic Stage.name
+  // values across PROD), this is the PRIMARY config path — Blueprint defaults
+  // are intentionally empty. Resolution lives in
+  // `engine-phase-stage-map-resolver.ts` (PR I).
+  enginePhaseStageMapOverride     Json?                 @map("engine_phase_stage_map_override")
   dailyActionLimit                Int                   @default(100) @map("daily_action_limit")
   // KAN-1009 SAE PR4 — per-tenant daily LLM cost cap (USD). NULL = use
   // the env-default (DECISION_RUN_DAILY_COST_CAP_USD_DEFAULT, conservative
@@ -231,6 +238,17 @@ model Blueprint {
   // (Cluster II PR II). When null on Blueprint AND null on Tenant override,
   // engine falls back to DEFAULT_ENGINE_PHASES_GENERIC_B2B.
   enginePhases      Json?    @map("engine_phases")
+  // KAN-1080 (Cluster III PR I, Phase 1 Q4 lock) — per-vertical EnginePhase →
+  // PipelineStage mapping. Shape (Json): `{ qualify?: { stageName, stageRoleHint? },
+  // problem?: ..., proof?: ..., closing?: ... }`. Sibling slot to `enginePhases`
+  // above (same engine-config family; engine_phases defines the phases themselves,
+  // this maps each phase to a PipelineStage.name for `advance_stage` target
+  // resolution). Per-tenant override lives at `tenants.enginePhaseStageMapOverride`.
+  // Empty default (DEFAULT_ENGINE_PHASE_STAGE_MAP_GENERIC_B2B = {}) per Phase 1.5
+  // audit finding: PROD shows 32 distinct Stage.name values with idiosyncratic
+  // naming; Blueprint defaults near-useless, per-tenant override is the primary
+  // config path. Resolution lives in `engine-phase-stage-map-resolver.ts` (PR I).
+  enginePhaseStageMap Json?  @map("engine_phase_stage_map")
   isActive          Boolean  @default(true) @map("is_active")
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")

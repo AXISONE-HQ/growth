@@ -19,6 +19,10 @@ export * from "./sub-objective-types.js";
 // Shared so packages/api (resolveEnginePhases + computeCurrentEnginePhase + brain-eval rendering) and
 // apps/* (operator UI surfaces for phase focus — Cluster III/IV downstream consumers) consume one source.
 export * from "./engine-phase-types.js";
+// KAN-1080 (Cluster III PR I) — EnginePhase → PipelineStage mapping types +
+// empty DEFAULT_ENGINE_PHASE_STAGE_MAP_GENERIC_B2B (per Phase 1.5 audit:
+// PROD stage naming too idiosyncratic for useful Blueprint defaults).
+export * from "./engine-phase-stage-map-types.js";
 // M3-2.5a Inbound Reply Correlation — known email providers + soft validator + sidecar shape.
 export * from "./email-providers.js";
 // M3-2.5b Inbound Reply Correlation — RFC 5322 Message-ID/References normalization, shared between webhook publish + consumer lookup.

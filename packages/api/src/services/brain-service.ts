@@ -586,6 +586,14 @@ export interface CurrentEnginePhase {
 // `feedback_loader_vs_canonical_test_divergence` for full discipline.
 export { resolveEnginePhases } from './blueprint-engine-phases-resolver.js';
 
+// KAN-1080 (Cluster III PR I) — re-export resolveEnginePhaseStageMap at the
+// canonical loader path. Subscribers load via variable-specifier dynamic
+// import of `brain-service.js`; the symbol MUST be exposed here OR the
+// KAN-1067 loader-vs-canonical-test divergence recurs. The vi.importActual
+// integration guard in brain-service.test.ts asserts this contract at
+// test time (extended from 5 to 6 symbols in this PR).
+export { resolveEnginePhaseStageMap } from './engine-phase-stage-map-resolver.js';
+
 export function computeCurrentEnginePhase(input: {
   gapState: ContactSubObjectiveGapState[];
   enginePhases: BlueprintEnginePhase[];

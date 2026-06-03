@@ -273,6 +273,24 @@ interface BrainServiceModule {
       source: string;
     };
   }) => CurrentEnginePhaseSnapshotLocal;
+  // KAN-1080 (Cluster III PR I) — EnginePhase → PipelineStage mapping resolver.
+  // Mirror of the lead-received-push BrainServiceModule typedef. Class-fix
+  // discipline per KAN-1067: extending the loader contract symmetrically
+  // across both subscribers in PR I (even though contact-replied-push won't
+  // CALL the resolver until PR II's dispatcher arm wiring lands) keeps the
+  // module-surface contract honest at both load sites. Per
+  // `feedback_subscriber_local_type_mirror_naming_asymmetry` — Local-suffix
+  // naming preserved.
+  resolveEnginePhaseStageMap: (
+    prisma: unknown,
+    tenantId: string,
+    pipelineId: string,
+  ) => Promise<{
+    qualify: { stageId: string; stageName: string; stageRoleHint?: string } | null;
+    problem: { stageId: string; stageName: string; stageRoleHint?: string } | null;
+    proof: { stageId: string; stageName: string; stageRoleHint?: string } | null;
+    closing: { stageId: string; stageName: string; stageRoleHint?: string } | null;
+  }>;
 }
 
 let _brainServiceModule: BrainServiceModule | null = null;
