@@ -753,3 +753,87 @@ describe('evaluateStageTransition — KAN-834 pre-computed brainDecision', () =>
     expect(evaluateDealStateMock).not.toHaveBeenCalled();
   });
 });
+
+// ─────────────────────────────────────────────
+// KAN-1081 (Cluster III PR II) — mapEntry priority + backcompat
+//
+// `resolveAdvanceTargetStage` extended to consult `mapEntry?: { stageId }`
+// BETWEEN explicit `targetStageId` and "next by order" fallback. Bypasses
+// the `order > current.order` constraint so mappings can point to terminal
+// or earlier stages (Phase 1.5 audit empirical tolerance — many PROD
+// pipelines lack terminal markers).
+// ─────────────────────────────────────────────
+
+import { resolveAdvanceTargetStage } from '../stage-transition-engine.js';
+
+describe('KAN-1081 — resolveAdvanceTargetStage mapEntry priority', () => {
+  function buildDeal(currentStageId: string) {
+    return {
+      id: DEAL_A,
+      tenantId: 'tenant_a',
+      contactId: 'contact_a',
+      pipelineId: PIPELINE_A,
+      currentStageId,
+      currentStage: DEFAULT_PIPELINE_STAGES.find((s) => s.id === currentStageId)!,
+      pipeline: {
+        id: PIPELINE_A,
+        stages: DEFAULT_PIPELINE_STAGES,
+      },
+    };
+  }
+
+  it('mapEntry.stageId valid → uses mapped Stage (priority over next-by-order)', () => {
+    const deal = buildDeal(STAGE_NEW);
+    const target = resolveAdvanceTargetStage(deal, undefined, { stageId: STAGE_WON });
+    // STAGE_WON is outcomeType='terminal_won' — mapEntry bypasses outcome-type
+    // constraints (Phase 1.5 audit tolerance).
+    expect(target?.id).toBe(STAGE_WON);
+  });
+
+  it('mapEntry.stageId not in Pipeline → fall through to next-by-order', () => {
+    const deal = buildDeal(STAGE_NEW);
+    const target = resolveAdvanceTargetStage(deal, undefined, { stageId: 'nonexistent_stage' });
+    expect(target?.id).toBe(STAGE_QUALIFIED);
+  });
+
+  it('explicit targetStageId valid → takes precedence over mapEntry', () => {
+    const deal = buildDeal(STAGE_NEW);
+    const target = resolveAdvanceTargetStage(deal, STAGE_QUOTE_SENT, { stageId: STAGE_WON });
+    expect(target?.id).toBe(STAGE_QUOTE_SENT);
+  });
+
+  it('explicit targetStageId invalid + mapEntry valid → falls through to mapEntry', () => {
+    const deal = buildDeal(STAGE_NEW);
+    const target = resolveAdvanceTargetStage(
+      deal,
+      'invalid_explicit_target',
+      { stageId: STAGE_QUOTE_SENT },
+    );
+    expect(target?.id).toBe(STAGE_QUOTE_SENT);
+  });
+
+  it('mapEntry.stageId allows bypass of order constraint (mapping to earlier stage)', () => {
+    const deal = buildDeal(STAGE_QUOTE_SENT);
+    const target = resolveAdvanceTargetStage(deal, undefined, { stageId: STAGE_NEW });
+    expect(target?.id).toBe(STAGE_NEW);
+  });
+
+  it("outcomeType='open' Stage valid for mapEntry (Phase 1.5 PROD empirical tolerance)", () => {
+    const deal = buildDeal(STAGE_NEW);
+    const target = resolveAdvanceTargetStage(deal, undefined, { stageId: STAGE_QUALIFIED });
+    expect(target?.id).toBe(STAGE_QUALIFIED);
+    expect(target?.outcomeType).toBe('open');
+  });
+
+  it('backcompat: no mapEntry + no explicit target → existing next-by-order behavior', () => {
+    const deal = buildDeal(STAGE_NEW);
+    const target = resolveAdvanceTargetStage(deal);
+    expect(target?.id).toBe(STAGE_QUALIFIED);
+  });
+
+  it('backcompat: explicit targetStageId only (pre-Cluster-III caller) works unchanged', () => {
+    const deal = buildDeal(STAGE_NEW);
+    const target = resolveAdvanceTargetStage(deal, STAGE_QUOTE_SENT);
+    expect(target?.id).toBe(STAGE_QUOTE_SENT);
+  });
+});

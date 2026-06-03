@@ -1738,6 +1738,10 @@ ${overrideSnippet}### Phase-transition guidance
 When ALL sub-objectives listed for the current phase are resolved (state ∈ {known, not_applicable} in the gap state below), emit \`advance_engine_phase\` with \`fromPhase\` set to the current phase and \`toPhase\` set to the next sequential phase per qualify → problem → proof → closing. Cite the resolved sub-objectives in your reasoning.
 
 Do NOT skip phases (e.g., qualify → proof) — the validator rejects non-sequential advances. Do NOT emit \`advance_engine_phase\` FROM \`closing\` (terminal phase; use \`advance_stage\`, \`close_deal_lost\`, \`wait_for_response\`, or \`escalate_to_human\` instead). When sub-objectives in the current phase remain unresolved, prefer \`send_follow_up\` or \`transition_sub_objective\` over premature phase advance.
+
+### Stage-progression guidance
+
+When the current Engine phase is \`closing\` AND all closing sub-objectives are resolved, emit \`advance_stage\` to move the Deal forward in the Pipeline. The target Stage is resolved by the dispatcher from the Engine phase → Pipeline stage mapping; you do not need to specify \`targetStageId\` explicitly (omit it or set to null). When the current Engine phase is NOT \`closing\`, prefer \`advance_engine_phase\` (phase advance) over \`advance_stage\` (Pipeline advance) — engine_phase progression is the inner loop; stage advance is the outer-loop bridge.
 `;
 }
 

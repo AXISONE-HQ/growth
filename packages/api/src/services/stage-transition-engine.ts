@@ -126,6 +126,31 @@ export interface EvaluateTransitionOptions {
    * dispatcher-side Brain call still work unchanged.
    */
   brainDecision?: BrainDecision;
+  /**
+   * KAN-1081 (Cluster III PR II) — EnginePhase → PipelineStage mapping entry
+   * resolved by the dispatcher (lead-received-push.ts) via
+   * `resolveEnginePhaseStageMap` from KAN-1080 PR I. When provided AND
+   * `mapEntry.stageId` exists in the Deal's Pipeline, `resolveAdvanceTargetStage`
+   * uses it BEFORE falling back to the "next non-terminal Stage by order"
+   * default.
+   *
+   * **Resolution priority** (preserves backcompat):
+   *   1. Brain's explicit `targetStageId` (if provided AND valid order)
+   *   2. NEW: `mapEntry.stageId` (if provided AND exists in Pipeline) — bypasses
+   *      the `order > current.order` constraint so mappings can point to
+   *      terminal stages OR earlier stages without artificial blocks
+   *   3. Default: next non-terminal Stage by order (existing behavior)
+   *
+   * Optional. Existing callers (cron, operator paths, pre-Cluster-III paths)
+   * pass nothing → existing resolution preserved → zero regression.
+   *
+   * **Outcome-type tolerance**: PR II accepts mapping resolution to any Stage
+   * in the Pipeline regardless of `outcomeType` (Phase 1.5 audit empirical
+   * finding — 28 of 32 distinct PROD Stage names are `outcomeType='open'`;
+   * many pipelines lack terminal markers; mappings to "Closed (open)" stages
+   * are legitimate operator semantics).
+   */
+  mapEntry?: { stageId: string };
 }
 
 export class StageTransitionDealNotFoundError extends Error {
@@ -259,7 +284,7 @@ export async function evaluateStageTransition(
   const action = brainDecision.nextBestAction;
 
   if (action.type === 'advance_stage') {
-    const targetStage = resolveAdvanceTargetStage(deal, action.targetStageId);
+    const targetStage = resolveAdvanceTargetStage(deal, action.targetStageId, options.mapEntry);
     if (!targetStage) {
       return {
         type: 'skipped',
@@ -308,9 +333,16 @@ export async function evaluateStageTransition(
  *      advance (Stage in same Pipeline + outcomeType=open + order > current
  *      OR a terminal Stage at greater order — Brain may explicitly target
  *      a terminal Stage to signal closure on the advance path), return it.
- *   2. Otherwise, return the next non-terminal Stage by order (the "natural
+ *   2. KAN-1081 (Cluster III PR II) — if `mapEntry.stageId` provided AND
+ *      exists in Pipeline, use it. **Bypasses the `order > current.order`
+ *      constraint** so mappings can point to terminal stages OR earlier
+ *      stages without artificial blocks. Outcome-type tolerance per Phase
+ *      1.5 audit: many PROD pipelines lack terminal markers; mappings
+ *      to "Closed (outcomeType='open')" stages are legitimate operator
+ *      semantics.
+ *   3. Otherwise, return the next non-terminal Stage by order (the "natural
  *      next step" in the Pipeline).
- *   3. If no candidate exists (current Stage is the last non-terminal one),
+ *   4. If no candidate exists (current Stage is the last non-terminal one),
  *      return null → caller emits skipped/no_target_resolved.
  *
  * Exported for test introspection.
@@ -318,6 +350,7 @@ export async function evaluateStageTransition(
 export function resolveAdvanceTargetStage(
   deal: LoadedDeal,
   explicitTargetStageId?: string,
+  mapEntry?: { stageId: string },
 ): LoadedStage | null {
   if (explicitTargetStageId) {
     const target = deal.pipeline.stages.find((s) => s.id === explicitTargetStageId);
@@ -325,7 +358,17 @@ export function resolveAdvanceTargetStage(
     if (target && target.order > deal.currentStage.order) {
       return target;
     }
-    // Invalid explicit target → fall through to default-by-order.
+    // Invalid explicit target → fall through to mapEntry → default-by-order.
+  }
+
+  // KAN-1081 — mapping consult (KAN-1080 resolver output). Bypasses order
+  // constraint per outcome-type tolerance.
+  if (mapEntry?.stageId) {
+    const mapped = deal.pipeline.stages.find((s) => s.id === mapEntry.stageId);
+    if (mapped) {
+      return mapped;
+    }
+    // Invalid mapEntry (stageId not in Pipeline) → fall through to default-by-order.
   }
 
   // Default: next open Stage by order.
