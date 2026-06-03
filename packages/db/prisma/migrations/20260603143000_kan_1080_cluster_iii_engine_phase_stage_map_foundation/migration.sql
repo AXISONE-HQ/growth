@@ -1,0 +1,58 @@
+-- KAN-1080 (Cluster III PR I — foundation) — additive schema changes for the
+-- EnginePhase → PipelineStage mapping (KAN-1079 Cluster III epic).
+--
+-- Two additive nullable JSONB columns. PURELY additive; zero data migration;
+-- existing rows backfill cleanly via column defaults (NULL).
+--
+-- # Lock 4 (Cluster III Phase 1 design trace, 2026-06-03): Option (b) hybrid shape
+--
+-- Both columns carry a Json object keyed by EnginePhaseKey
+-- (qualify | problem | proof | closing). Per-phase entries have shape
+-- `{ stageName: string, stageRoleHint?: string }`. The `stageName` field is
+-- v1 resolution mechanism (matched against `Pipeline.stages[].name` at runtime);
+-- `stageRoleHint` is v1 forensic-only metadata (activated via Phase 2.5 if
+-- name-resolution brittleness empirically surfaces).
+--
+-- `blueprints.engine_phase_stage_map` (JSONB nullable) — per-vertical default
+-- mapping. Per Phase 1.5 stage-name audit (2026-06-03 on PROD): 32 distinct
+-- Stage.name values across AxisOne's 10 pipelines with idiosyncratic naming.
+-- Long-tail naming makes Blueprint defaults near-useless; per-tenant override
+-- is the PRIMARY config path. DEFAULT_ENGINE_PHASE_STAGE_MAP_GENERIC_B2B = {}.
+--
+-- `tenants.engine_phase_stage_map_override` (JSONB nullable) — per-tenant
+-- override. Resolution chain: Tenant override > Blueprint > empty.
+--
+-- # Process-discipline recovery
+--
+-- PR #267 (commit d95a6ed) shipped the schema.prisma additions WITHOUT a
+-- corresponding migration file. `prisma generate` was run (Prisma client
+-- regenerated), but `prisma migrate dev --create-only` was NOT run.
+-- KAN-709 v4 auto-migrate-deploy step ran on deploy but found no new
+-- migrations to apply. PROD column visibility check post-deploy returned
+-- 0 rows for both expected columns.
+--
+-- This migration restores the missed step. Migration timestamp
+-- (20260603143000) is AFTER the merged commit timestamp (d95a6ed @
+-- ~2026-06-03 14:23Z) so the migration applies cleanly on the next deploy.
+--
+-- # Drift-strip discipline (KAN-786 / KAN-787 / KAN-1034 history)
+--
+-- `prisma migrate diff` would emit spurious schema drift items along with
+-- the real changes. None applied here — this migration was authored by hand
+-- to be PURELY additive against `tenants` and `blueprints`. Confirming the
+-- items typically stripped:
+--
+--   1. DROP INDEX "knowledge_chunk_embedding_hnsw_idx" — KAN-786, KAN-787.
+--      The HNSW index is real and load-bearing; Prisma can't model it
+--      (custom pgvector index type). Auto-DROP would silently nuke PROD's
+--      vector search; INTENTIONALLY OMITTED.
+--
+--   2. ALTER INDEX tenant_objective_selection_tenant_id_objective_id_…
+--      RENAME TO …. KAN-1034 cosmetic rename; not load-bearing for any code
+--      path; INTENTIONALLY OMITTED to keep this migration purely additive.
+
+-- AlterTable: Blueprint
+ALTER TABLE "blueprints" ADD COLUMN     "engine_phase_stage_map" JSONB;
+
+-- AlterTable: Tenant
+ALTER TABLE "tenants" ADD COLUMN     "engine_phase_stage_map_override" JSONB;
