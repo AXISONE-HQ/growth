@@ -453,6 +453,22 @@ interface BrainServiceModule {
       source: string;
     };
   }) => CurrentEnginePhaseSnapshot;
+  // KAN-1080 (Cluster III PR I) — EnginePhase → PipelineStage mapping resolver.
+  // Loaded here in PR I to keep the BrainServiceModule contract symmetric;
+  // PR II (KAN-1081) wires the actual call site at the advance_stage dispatcher
+  // arm. Class-fix discipline from KAN-1067: extending the loader contract
+  // BEFORE PR II's call sites prevents test-vs-runtime divergence on the
+  // typedef boundary.
+  resolveEnginePhaseStageMap: (
+    prisma: unknown,
+    tenantId: string,
+    pipelineId: string,
+  ) => Promise<{
+    qualify: { stageId: string; stageName: string; stageRoleHint?: string } | null;
+    problem: { stageId: string; stageName: string; stageRoleHint?: string } | null;
+    proof: { stageId: string; stageName: string; stageRoleHint?: string } | null;
+    closing: { stageId: string; stageName: string; stageRoleHint?: string } | null;
+  }>;
 }
 let _brainServiceModule: BrainServiceModule | null = null;
 async function loadBrainServiceModule(): Promise<BrainServiceModule> {

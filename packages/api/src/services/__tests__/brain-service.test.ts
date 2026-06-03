@@ -2381,4 +2381,16 @@ describe('KAN-1067 fix-fwd — loader-resolved export surface', () => {
     );
     expect(typeof realMod.buildThreadContext).toBe('function');
   });
+
+  // KAN-1080 (Cluster III PR I) — extends KAN-1067 guard block from 5 → 6
+  // symbols. New resolver imported by lead-received-push + contact-replied-push
+  // subscribers via the BrainServiceModule loader contract; must be re-exported
+  // at the canonical loader path.
+  it('brain-service.ts exposes resolveEnginePhaseStageMap (loader contract)', async () => {
+    vi.doUnmock('../brain-service.js');
+    const realMod = await vi.importActual<typeof import('../brain-service.js')>(
+      '../brain-service.js',
+    );
+    expect(typeof realMod.resolveEnginePhaseStageMap).toBe('function');
+  });
 });
