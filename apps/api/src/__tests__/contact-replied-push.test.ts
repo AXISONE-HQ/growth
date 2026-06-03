@@ -899,3 +899,101 @@ describe("KAN-1065 (Cluster II PR III) — engine input wiring (reply chain)", (
     expect(evaluateDealStateMock).not.toHaveBeenCalled();
   });
 });
+
+// ─────────────────────────────────────────────
+// KAN-1067 (Cluster II PR V) — Tier 1 telemetry on decision_re_evaluated.
+//
+// Audit payload extension at contact-replied-push.ts:586. Three new fields:
+//   - currentEnginePhase: string | null — phase key or null when omitted
+//   - currentEnginePhaseReason: 'derived' | 'operator_override' | null
+//   - enginePhasesAvailable: string[] — compact phase keys (Q4 lock)
+//
+// Field semantics confirm Lock 2 derived-from-gap-state contract: the
+// phase + reason are recoverable at eval time but lossy in PROD without
+// an audit anchor. Telemetry surface enables Tier 1 phase-distribution
+// + override-rate dashboards.
+// ─────────────────────────────────────────────
+
+describe("KAN-1067 (Cluster II PR V) — decision_re_evaluated audit telemetry extension", () => {
+  it("derived path: audit payload contains currentEnginePhase=qualify + reason=derived + compact enginePhasesAvailable", async () => {
+    const redis = makeFakeRedis();
+    __setRedisClientForTest(redis as never);
+    const event = makeValidEvent();
+    const { body } = makeEnvelope(event);
+    const res = await makeApp().request("/pubsub/contact-replied", {
+      method: "POST",
+      body,
+    });
+    expect(res.status).toBe(200);
+
+    const decisionAudit = auditLogCreateMock.mock.calls.find(
+      (call) => call[0].data.actionType === "decision_re_evaluated",
+    );
+    expect(decisionAudit).toBeDefined();
+    const payload = decisionAudit![0].data.payload;
+
+    // Q3 + Q4 lock — exact field names + compact phase-key list.
+    expect(payload.currentEnginePhase).toBe("qualify");
+    expect(payload.currentEnginePhaseReason).toBe("derived");
+    expect(payload.enginePhasesAvailable).toEqual([
+      "qualify",
+      "problem",
+      "proof",
+      "closing",
+    ]);
+  });
+
+  it("operator-override path: audit payload reflects currentEnginePhaseReason=operator_override", async () => {
+    const redis = makeFakeRedis();
+    __setRedisClientForTest(redis as never);
+    computeCurrentEnginePhaseMock.mockReturnValueOnce({
+      currentPhase: {
+        key: "problem",
+        label: "Problem",
+        subObjectives: ["need", "motivation", "budget", "cost_of_problem"],
+        priority: 2,
+      },
+      reason: "operator_override",
+    });
+
+    const event = makeValidEvent();
+    const { body } = makeEnvelope(event);
+    const res = await makeApp().request("/pubsub/contact-replied", {
+      method: "POST",
+      body,
+    });
+    expect(res.status).toBe(200);
+
+    const decisionAudit = auditLogCreateMock.mock.calls.find(
+      (call) => call[0].data.actionType === "decision_re_evaluated",
+    );
+    expect(decisionAudit).toBeDefined();
+    const payload = decisionAudit![0].data.payload;
+    expect(payload.currentEnginePhase).toBe("problem");
+    expect(payload.currentEnginePhaseReason).toBe("operator_override");
+  });
+
+  it("null-dealId short-circuit: audit row is decision_re_evaluated_skipped_no_deal (PR III L360-378 guard preserved — no telemetry fields added there)", async () => {
+    const redis = makeFakeRedis();
+    __setRedisClientForTest(redis as never);
+    const event = makeValidEvent({ dealId: null });
+    const { body } = makeEnvelope(event);
+    const res = await makeApp().request("/pubsub/contact-replied", {
+      method: "POST",
+      body,
+    });
+    expect(res.status).toBe(200);
+
+    // The skip-with-audit row is NOT decision_re_evaluated — it's
+    // decision_re_evaluated_skipped_no_deal. PR V's telemetry fields are
+    // scoped to the brain-eval success path; the skip path doesn't have
+    // a phase snapshot to surface (evaluateDealState never ran).
+    const skipAudit = auditLogCreateMock.mock.calls.find(
+      (call) => call[0].data.actionType === "decision_re_evaluated_skipped_no_deal",
+    );
+    expect(skipAudit).toBeDefined();
+    // Confirm PR V fields are NOT smuggled into the skip-path audit.
+    expect(skipAudit![0].data.payload.currentEnginePhase).toBeUndefined();
+    expect(skipAudit![0].data.payload.currentEnginePhaseReason).toBeUndefined();
+  });
+});

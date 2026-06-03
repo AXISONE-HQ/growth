@@ -383,7 +383,12 @@ interface BrainServiceModule {
         // KAN-1042 PR A1 — engine-driven sub-objective transition.
         // Dispatcher-level governance (PR A2's new arm reads
         // Tenant.autoTransitionSubObjectives).
-        | 'transition_sub_objective';
+        | 'transition_sub_objective'
+        // KAN-1067 (Cluster II PR V) — engine-driven phase advance.
+        // Dispatcher-level governance reads Tenant.autoAdvanceEnginePhase
+        // (PR I schema). Q2 lock: audit-only on dispatch; emissions are
+        // audit signals, not state mutations.
+        | 'advance_engine_phase';
       targetStageId?: string;
       suggestedChannel?: 'email' | 'sms' | 'meta_messenger';
       suggestedTone?: 'curious' | 'professional' | 'urgent' | 'closing';
@@ -395,6 +400,13 @@ interface BrainServiceModule {
         subObjectiveKey: 'timeline' | 'budget' | 'authority' | 'need' | 'motivation';
         toState: 'known' | 'not_applicable';
         value: string | number | null;
+      };
+      // KAN-1067 (Cluster II PR V) — payload carried when type ===
+      // 'advance_engine_phase'. Phase keys match the EnginePhaseKey
+      // contract from brain-service.ts:124.
+      enginePhaseAdvance?: {
+        fromPhase: 'qualify' | 'problem' | 'proof' | 'closing';
+        toPhase: 'qualify' | 'problem' | 'proof' | 'closing';
       };
     };
     confidence: number;
@@ -1904,6 +1916,31 @@ export async function wirePhase2Consumers(
   ) {
     await handleEngineTransitionSubObjective(dealId, eventId, brainDecision);
   }
+
+  // KAN-1067 (Cluster II PR V) — engine-proposed phase advance consumer.
+  //
+  // When Brain emits `advance_engine_phase`, the engine has reasoned that
+  // all sub-objectives in the current phase are resolved and the contact
+  // signal supports moving to the next phase. Per Q2 lock (audit-only),
+  // emissions are AUDIT SIGNALS, NOT state mutations — Cluster II's Lock 2
+  // derived-from-gap-state contract means the next eval re-derives the
+  // phase from gap state. See feedback_advance_engine_phase_is_audit_signal_not_state_mutation
+  // for the load-bearing architectural rationale.
+  //
+  // Dispatcher-level gating mirrors transition_sub_objective:
+  //   - Tenant.autoAdvanceEnginePhase === false (default) → escalate to
+  //     Recommendations queue with originalAction.actionType = 'advance_engine_phase'
+  //   - Tenant.autoAdvanceEnginePhase === true (opt-in) → audit-only
+  //     ('engine_phase.advanced') and trust derivation to self-heal.
+  //
+  // Chain-depth guard mirrors siblings — a chained call returning
+  // advance_engine_phase would create two escalations/audits per inbound.
+  if (
+    brainDecision.nextBestAction.type === 'advance_engine_phase' &&
+    !isChainedInvocation
+  ) {
+    await handleEngineAdvancePhase(dealId, eventId, brainDecision);
+  }
 }
 
 /**
@@ -2188,6 +2225,196 @@ async function handleEngineTransitionSubObjective(
   } catch (err) {
     console.warn(
       `[lead-received-push] kan-1042-transition-dispatch-failed dealId=${dealId} eventId=${eventId} subObjectiveKey=${payload.subObjectiveKey} err=${(err as Error)?.message ?? String(err)}`,
+    );
+  }
+}
+
+/**
+ * KAN-1067 (Cluster II PR V) — engine-proposed phase advance consumer.
+ *
+ * **Audit-signal semantics** (Q2 lock + see memo
+ * `feedback_advance_engine_phase_is_audit_signal_not_state_mutation`):
+ * Cluster II's Lock 2 implements `engine_phase` as derived-from-gap-state.
+ * No per-contact `engine_phase` column exists. `advance_engine_phase`
+ * emissions are audit signals, NOT state mutations. The handler is
+ * intentionally audit-only on the DISPATCH path — the next eval will
+ * re-derive the phase from gap state. "Wrong" emissions (engine says
+ * advance, gap state disagrees) revert harmlessly at next eval (cost:
+ * one wasted LLM round-trip, zero state damage). "Right" emissions
+ * (engine + gap state agree) produce a discrete audit event for Tier 1
+ * telemetry + Cluster III bridge.
+ *
+ * Future engineers tempted to make the action vocabulary mutate state:
+ * pursue KAN-1069 (ContactEnginePhaseOverride table) rather than coupling
+ * engine_phase semantics to gap_state semantics.
+ *
+ * Mirrors handleEngineTransitionSubObjective shape:
+ *   - Q1: handler name parallel to sibling
+ *   - Q3 pre-checks: payload defensive, Deal lookup, Tenant flag lookup,
+ *     recentDecision lookup
+ *   - ESCALATE path (tenant opt-out, default): Escalation row +
+ *     `engine_phase.advance_escalated` audit
+ *   - DISPATCH path (tenant opt-in): audit-only with
+ *     `engine_phase.advanced` (Q2 lock — no state write)
+ *
+ * Best-effort posture: on any failure (Deal lookup miss, Escalation
+ * create reject, audit write fail), log + return without throwing. The
+ * caller's outer `.catch` in wirePhase2Consumers (fire-and-forget
+ * pattern) is the boundary; downstream failures don't destabilize the
+ * cognitive audit row already committed upstream.
+ */
+async function handleEngineAdvancePhase(
+  dealId: string,
+  eventId: string,
+  brainDecision: Phase2BrainDecision,
+): Promise<void> {
+  // Defensive: parser at brain-service.ts:1828+ enforces payload presence
+  // when type === 'advance_engine_phase'. Empty payload here would indicate
+  // a parser bypass; warn + return.
+  const payload = brainDecision.nextBestAction.enginePhaseAdvance;
+  if (!payload) {
+    console.warn(
+      `[lead-received-push] kan-1067-advance-no-payload dealId=${dealId} eventId=${eventId} — type=advance_engine_phase without enginePhaseAdvance payload`,
+    );
+    return;
+  }
+
+  // Load Deal for tenantId + contactId. Mirrors handleEngineTransitionSubObjective.
+  const deal = await prisma.deal.findUnique({
+    where: { id: dealId },
+    select: { id: true, tenantId: true, contactId: true },
+  });
+  if (!deal) {
+    console.warn(
+      `[lead-received-push] kan-1067-advance-no-deal dealId=${dealId} eventId=${eventId} — Deal lookup miss; arm skipped`,
+    );
+    return;
+  }
+
+  // Dispatcher-level gating — read Tenant.autoAdvanceEnginePhase (PR I
+  // schema). Default false / null → escalate. true → dispatch (audit-only).
+  // Missing-row = opt-out (fail-safe direction).
+  const tenant = await prisma.tenant.findUnique({
+    where: { id: deal.tenantId },
+    select: { autoAdvanceEnginePhase: true },
+  });
+  const optedIn = tenant?.autoAdvanceEnginePhase === true;
+
+  // Find originating Decision for audit linkage.
+  const recentDecision = await prisma.decision.findFirst({
+    where: { tenantId: deal.tenantId, contactId: deal.contactId },
+    orderBy: { createdAt: 'desc' },
+    select: { id: true },
+  });
+
+  if (!optedIn) {
+    // ESCALATE path — tenant opt-out (default). Write an Escalation row
+    // with originalAction carrying the enginePhaseAdvance payload, then
+    // write `engine_phase.advance_escalated` audit (Q6 lock).
+    const originalAction = {
+      actionType: 'advance_engine_phase',
+      channel: null,
+      payload: {
+        reasoning: brainDecision.nextBestAction.reasoning,
+        fromPhase: payload.fromPhase,
+        toPhase: payload.toPhase,
+        brainConfidence: brainDecision.confidence,
+        brainModelTier: brainDecision.modelTier,
+      },
+    };
+    try {
+      const created = await prisma.escalation.create({
+        data: {
+          tenantId: deal.tenantId,
+          contactId: deal.contactId,
+          decisionId: recentDecision?.id ?? null,
+          triggerType: 'engine_proposed_action',
+          triggerReason: brainDecision.nextBestAction.reasoning,
+          severity: brainDecision.confidence < 0.4 ? 'high' : 'medium',
+          aiSuggestion: brainDecision.nextBestAction.reasoning,
+          originalAction: originalAction as unknown as object,
+          status: 'open',
+          context: {
+            source: 'kan_1067_engine_phase_advance_proposal',
+            eventId,
+            dealId,
+            fromPhase: payload.fromPhase,
+            toPhase: payload.toPhase,
+            brainConfidence: brainDecision.confidence,
+            brainModelTier: brainDecision.modelTier,
+            llmInputTokens: brainDecision.llmInputTokens,
+            llmOutputTokens: brainDecision.llmOutputTokens,
+            tenantOptIn: false,
+          } as unknown as object,
+        },
+        select: { id: true },
+      });
+      // Q6 — `engine_phase.advance_escalated` audit row.
+      await prisma.auditLog.create({
+        data: {
+          tenantId: deal.tenantId,
+          actor: 'lead_received_subscriber',
+          actionType: 'engine_phase.advance_escalated',
+          reasoning: brainDecision.nextBestAction.reasoning,
+          payload: {
+            eventId,
+            dealId,
+            contactId: deal.contactId,
+            escalationId: created.id,
+            decisionId: recentDecision?.id ?? null,
+            fromPhase: payload.fromPhase,
+            toPhase: payload.toPhase,
+            brainConfidence: brainDecision.confidence,
+            brainModelTier: brainDecision.modelTier,
+            tenantOptIn: false,
+          },
+        },
+      });
+      console.log(
+        `[lead-received-push] kan-1067-advance-escalated dealId=${dealId} eventId=${eventId} escalationId=${created.id} fromPhase=${payload.fromPhase} toPhase=${payload.toPhase} reason=tenant_opt_out confidence=${brainDecision.confidence.toFixed(2)}`,
+      );
+    } catch (err) {
+      console.warn(
+        `[lead-received-push] kan-1067-advance-escalate-failed dealId=${dealId} eventId=${eventId} fromPhase=${payload.fromPhase} toPhase=${payload.toPhase} err=${(err as Error)?.message ?? String(err)}`,
+      );
+    }
+    return;
+  }
+
+  // DISPATCH path — tenant opt-in. Q2 lock: audit-only, NO state mutation.
+  // Next eval re-derives phase from gap state. `engine_phase.advanced`
+  // audit captures the dispatch decision; no Escalation row written.
+  try {
+    await prisma.auditLog.create({
+      data: {
+        tenantId: deal.tenantId,
+        actor: 'lead_received_subscriber',
+        actionType: 'engine_phase.advanced',
+        reasoning: brainDecision.nextBestAction.reasoning,
+        payload: {
+          eventId,
+          dealId,
+          contactId: deal.contactId,
+          decisionId: recentDecision?.id ?? null,
+          fromPhase: payload.fromPhase,
+          toPhase: payload.toPhase,
+          brainConfidence: brainDecision.confidence,
+          brainModelTier: brainDecision.modelTier,
+          llmInputTokens: brainDecision.llmInputTokens,
+          llmOutputTokens: brainDecision.llmOutputTokens,
+          tenantOptIn: true,
+          // Q2 lock — emissions are AUDIT SIGNALS, not state mutations.
+          // The next eval re-derives phase from gap state.
+          stateMutation: false,
+        },
+      },
+    });
+    console.log(
+      `[lead-received-push] kan-1067-advance-auto-dispatched dealId=${dealId} eventId=${eventId} fromPhase=${payload.fromPhase} toPhase=${payload.toPhase} confidence=${brainDecision.confidence.toFixed(2)} stateMutation=false`,
+    );
+  } catch (err) {
+    console.warn(
+      `[lead-received-push] kan-1067-advance-dispatch-failed dealId=${dealId} eventId=${eventId} fromPhase=${payload.fromPhase} toPhase=${payload.toPhase} err=${(err as Error)?.message ?? String(err)}`,
     );
   }
 }
