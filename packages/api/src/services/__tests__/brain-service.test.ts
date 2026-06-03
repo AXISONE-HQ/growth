@@ -2320,3 +2320,65 @@ describe('parseLlmResponse — KAN-1066 advance_engine_phase payload', () => {
     expect(result.value.nextBestAction.enginePhaseAdvance).toBeUndefined();
   });
 });
+
+// ─────────────────────────────────────────────
+// KAN-1067 fix-forward (2026-06-03) — loader-resolved export guard.
+//
+// The subscriber's variable-specifier dynamic-import loader at
+// lead-received-push.ts:460 resolves './brain-service.js' and destructures
+// `resolveEnginePhases` + `computeCurrentEnginePhase` from the module.
+//
+// Pre-incident: brain-service.ts re-exported neither. The vi.mock of
+// brain-service.js in subscriber tests FAKED both exports → tests passed
+// while PROD silently failed with "TypeError: resolveEnginePhases is not
+// a function" on every lead.received event (3 PRs / 200+ NACKs in 2hrs).
+//
+// This test uses the REAL dynamic import (no vi.mock) to assert the
+// brain-service module surface matches what loaders expect. Pinned here
+// to prevent regression: future PRs adding loader-resolved symbols MUST
+// re-export them from this file OR extend this test fails.
+//
+// See feedback_loader_vs_canonical_test_divergence memo.
+// ─────────────────────────────────────────────
+
+describe('KAN-1067 fix-fwd — loader-resolved export surface', () => {
+  it('brain-service.ts exposes resolveEnginePhases (loader contract)', async () => {
+    vi.doUnmock('../brain-service.js');
+    const realMod = await vi.importActual<typeof import('../brain-service.js')>(
+      '../brain-service.js',
+    );
+    expect(typeof realMod.resolveEnginePhases).toBe('function');
+  });
+
+  it('brain-service.ts exposes computeCurrentEnginePhase (loader contract)', async () => {
+    vi.doUnmock('../brain-service.js');
+    const realMod = await vi.importActual<typeof import('../brain-service.js')>(
+      '../brain-service.js',
+    );
+    expect(typeof realMod.computeCurrentEnginePhase).toBe('function');
+  });
+
+  it('brain-service.ts exposes evaluateDealState (loader contract)', async () => {
+    vi.doUnmock('../brain-service.js');
+    const realMod = await vi.importActual<typeof import('../brain-service.js')>(
+      '../brain-service.js',
+    );
+    expect(typeof realMod.evaluateDealState).toBe('function');
+  });
+
+  it('brain-service.ts exposes buildLatestInboundContext (loader contract)', async () => {
+    vi.doUnmock('../brain-service.js');
+    const realMod = await vi.importActual<typeof import('../brain-service.js')>(
+      '../brain-service.js',
+    );
+    expect(typeof realMod.buildLatestInboundContext).toBe('function');
+  });
+
+  it('brain-service.ts exposes buildThreadContext (loader contract)', async () => {
+    vi.doUnmock('../brain-service.js');
+    const realMod = await vi.importActual<typeof import('../brain-service.js')>(
+      '../brain-service.js',
+    );
+    expect(typeof realMod.buildThreadContext).toBe('function');
+  });
+});

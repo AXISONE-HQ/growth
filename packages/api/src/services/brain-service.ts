@@ -574,6 +574,18 @@ export interface CurrentEnginePhase {
  *   marker for the operator-override path. When undefined, pure-derived
  *   path is taken.
  */
+// KAN-1067-fixfwd 2026-06-03 — re-export resolveEnginePhases so the
+// subscriber's variable-specifier dynamic-import loader at
+// lead-received-push.ts:460 (which resolves './brain-service.js') can
+// resolve the symbol at runtime. The function lives in
+// `blueprint-engine-phases-resolver.ts` (KAN-1064 PR II), but unit tests
+// vi.mock('./brain-service.js', () => ({ resolveEnginePhases: ... }))
+// FAKED the export — masking the test-vs-runtime divergence across
+// 3 merged PRs (III/IV/V). Gated empirical smoke caught it on the first
+// real publish post-KAN-1067 deploy. See memo
+// `feedback_loader_vs_canonical_test_divergence` for full discipline.
+export { resolveEnginePhases } from './blueprint-engine-phases-resolver.js';
+
 export function computeCurrentEnginePhase(input: {
   gapState: ContactSubObjectiveGapState[];
   enginePhases: BlueprintEnginePhase[];
