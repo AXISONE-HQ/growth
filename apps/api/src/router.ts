@@ -1746,6 +1746,58 @@ const auditLogRouter = router({
 });
 
 // ============================================================================
+// COGNITIVE METRICS ROUTER (KAN-1086 — Tier 2 telemetry)
+// ============================================================================
+// Variable-specifier dynamic import per KAN-689; mirrors loadAuditLogModule.
+// Lives in packages/api/src/services/cognitive-metrics-aggregator.ts.
+interface CognitiveMetricsModule {
+  getAllCognitiveMetrics: (
+    prisma: unknown,
+    input: {
+      tenantId: string | null;
+      windowStart: Date;
+      windowEnd: Date;
+      forceRefresh?: boolean;
+      sparklineBucket?: 'hour' | 'day';
+    },
+  ) => Promise<unknown>;
+}
+let _cognitiveMetricsModule: CognitiveMetricsModule | null = null;
+async function loadCognitiveMetricsModule(): Promise<CognitiveMetricsModule> {
+  if (_cognitiveMetricsModule) return _cognitiveMetricsModule;
+  const spec = "../../../packages/api/src/services/cognitive-metrics-aggregator.js";
+  _cognitiveMetricsModule = (await import(spec)) as CognitiveMetricsModule;
+  return _cognitiveMetricsModule;
+}
+
+// adminProcedure gate: ADMIN_EMAILS env-var allowlist (see apps/api/src/trpc.ts:116).
+// Phase 1 Lock 4: super-admin only — cross-tenant aggregate view is forensic
+// observability, not operator-facing UX.
+// Phase 1 Lock B (Anchor 5): tenantId is OPTIONAL — null means cross-tenant.
+const cognitiveMetricsRouter = router({
+  getMetrics: adminProcedure
+    .input(
+      z.object({
+        tenantId: z.string().uuid().nullable(),
+        windowStart: z.string().datetime(),
+        windowEnd: z.string().datetime(),
+        forceRefresh: z.boolean().default(false),
+        sparklineBucket: z.enum(['hour', 'day']).default('day'),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      const { getAllCognitiveMetrics } = await loadCognitiveMetricsModule();
+      return getAllCognitiveMetrics(ctx.prisma, {
+        tenantId: input.tenantId,
+        windowStart: new Date(input.windowStart),
+        windowEnd: new Date(input.windowEnd),
+        forceRefresh: input.forceRefresh,
+        sparklineBucket: input.sparklineBucket,
+      });
+    }),
+});
+
+// ============================================================================
 // BRAIN ROUTER
 // ============================================================================
 
@@ -6673,6 +6725,8 @@ export const appRouter = router({
   circuitBreaker: circuitBreakerRouter,
   // M3-1c — Sub-objective gap-state read + operator manual transition.
   subObjectives: subObjectivesRouter,
+  // KAN-1086 — Tier 2 cognitive-quality aggregate metrics (super-admin only).
+  cognitiveMetrics: cognitiveMetricsRouter,
 });
 
 export type AppRouter = typeof appRouter;
