@@ -187,7 +187,7 @@ export async function getDecisionDistributionByEnginePhase(
       ${tenantFilterSql(tenantId)}
       AND created_at >= ${windowStart}
       AND created_at <= ${windowEnd}
-    GROUP BY engine_phase, action_type
+    GROUP BY payload->>'currentEnginePhase', payload->>'brainActionType'
     ORDER BY count DESC
   `;
   return rows.map((r) => ({
@@ -219,8 +219,8 @@ export async function getBrainConfidenceDistribution(
       ${tenantFilterSql(tenantId)}
       AND created_at >= ${windowStart}
       AND created_at <= ${windowEnd}
-    GROUP BY bucket
-    ORDER BY bucket
+    GROUP BY LEAST(FLOOR((payload->>'brainConfidence')::float * 10), 9)::int
+    ORDER BY LEAST(FLOOR((payload->>'brainConfidence')::float * 10), 9)::int
   `;
 
   const byBucket = new Map<number, number>();
@@ -257,7 +257,7 @@ export async function getBrainSuggestedToneDistribution(
       ${tenantFilterSql(tenantId)}
       AND created_at >= ${windowStart}
       AND created_at <= ${windowEnd}
-    GROUP BY tone
+    GROUP BY payload->>'brainSuggestedTone'
     ORDER BY count DESC
   `;
   return rows.map((r) => ({
@@ -286,7 +286,7 @@ export async function getGuardrailDeflectionByCategory(
       ${tenantFilterSql(tenantId)}
       AND created_at >= ${windowStart}
       AND created_at <= ${windowEnd}
-    GROUP BY category
+    GROUP BY payload->>'guardrailCategory'
     ORDER BY count DESC
   `;
   return rows.map((r) => ({
@@ -315,7 +315,7 @@ export async function getMappingResolutionRate(
       ${tenantFilterSql(tenantId)}
       AND created_at >= ${windowStart}
       AND created_at <= ${windowEnd}
-    GROUP BY source
+    GROUP BY payload->>'mappingSource'
     ORDER BY count DESC
   `;
   return rows.map((r) => ({
@@ -344,7 +344,7 @@ export async function getOperatorOverrideFrequency(
       ${tenantFilterSql(tenantId)}
       AND created_at >= ${windowStart}
       AND created_at <= ${windowEnd}
-    GROUP BY source
+    GROUP BY payload->>'source'
     ORDER BY count DESC
   `;
   return rows.map((r) => ({
@@ -385,7 +385,7 @@ export async function getTokenUsageByActionType(
       ${tenantFilterSql(tenantId)}
       AND created_at >= ${windowStart}
       AND created_at <= ${windowEnd}
-    GROUP BY brain_action_type
+    GROUP BY payload->>'brainActionType'
     ORDER BY total_input_tokens DESC NULLS LAST
   `;
   return rows.map((r) => ({
@@ -422,8 +422,8 @@ export async function getEngineActivitySparkline(
       ${tenantFilterSql(tenantId)}
       AND created_at >= ${windowStart}
       AND created_at <= ${windowEnd}
-    GROUP BY bucket
-    ORDER BY bucket
+    GROUP BY DATE_TRUNC(${truncUnit}, created_at)
+    ORDER BY DATE_TRUNC(${truncUnit}, created_at)
   `;
   return rows.map((r) => ({
     bucket: r.bucket.toISOString(),
