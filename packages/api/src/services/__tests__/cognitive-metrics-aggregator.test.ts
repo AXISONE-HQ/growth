@@ -139,6 +139,54 @@ describe('SENTINEL — import.row.committed.* rows MUST NOT contaminate aggregat
     }
   });
 
+  it('SENTINEL — GROUP BY uses expressions, never SELECT aliases (PostgreSQL 42803 regression guard per KAN-1089)', async () => {
+    const { prisma, calls } = makePrismaMock([]);
+
+    await getDecisionDistributionByEnginePhase(prisma, AGG_INPUT);
+    await getBrainConfidenceDistribution(prisma, AGG_INPUT);
+    await getBrainSuggestedToneDistribution(prisma, AGG_INPUT);
+    await getGuardrailDeflectionByCategory(prisma, AGG_INPUT);
+    await getMappingResolutionRate(prisma, AGG_INPUT);
+    await getOperatorOverrideFrequency(prisma, AGG_INPUT);
+    await getTokenUsageByActionType(prisma, AGG_INPUT);
+    await getEngineActivitySparkline(prisma, AGG_INPUT);
+
+    // SELECT aliases that PostgreSQL rejects in GROUP BY: scan every query
+    // for `GROUP BY <bare_alias>` patterns. Allowed forms: expression-based
+    // (`GROUP BY payload->>'X'`), function calls (`GROUP BY DATE_TRUNC(...)`),
+    // cast results (`GROUP BY LEAST(...)::int`).
+    //
+    // Bug class root-cause: Prisma rewraps $queryRaw output in a subquery
+    // for some shapes which loses the outer SELECT's alias scope; safest
+    // discipline is to never reference SELECT aliases in GROUP BY at all.
+    const FORBIDDEN_ALIAS_PATTERNS = [
+      /GROUP BY engine_phase\b/i,
+      /GROUP BY action_type\b/i,
+      /GROUP BY bucket\b/i,
+      /GROUP BY tone\b/i,
+      /GROUP BY category\b/i,
+      /GROUP BY source\b/i,
+      /GROUP BY brain_action_type\b/i,
+    ];
+
+    for (const call of calls) {
+      for (const pattern of FORBIDDEN_ALIAS_PATTERNS) {
+        expect(call.joined).not.toMatch(pattern);
+      }
+      // Positive assertion: every GROUP BY clause uses an expression
+      // (payload->> jsonb projection, DATE_TRUNC, or LEAST/FLOOR cast).
+      const groupByMatches = call.joined.match(/GROUP BY ([^\n]+)/g) ?? [];
+      for (const gb of groupByMatches) {
+        const isExpressionBased =
+          gb.includes("payload->>'") ||
+          gb.includes('DATE_TRUNC') ||
+          gb.includes('LEAST(') ||
+          gb.includes('FLOOR(');
+        expect(isExpressionBased).toBe(true);
+      }
+    }
+  });
+
   it('orchestrator Prisma-layer totalTier1Rows count uses actionType IN filter', async () => {
     cognitiveMetricsCache.clear();
     const { prisma, auditLogCountCalls } = makePrismaMock(
