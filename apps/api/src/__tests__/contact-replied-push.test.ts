@@ -997,3 +997,73 @@ describe("KAN-1067 (Cluster II PR V) — decision_re_evaluated audit telemetry e
     expect(skipAudit![0].data.payload.currentEnginePhaseReason).toBeUndefined();
   });
 });
+
+// ─────────────────────────────────────────────
+// KAN-1083 — local mirror symmetry pin + reply-chain guardrail coverage
+// note. The audit row itself is written by wirePhase2Consumers in
+// lead-received-push.ts (which contact-replied-push fires via
+// precomputedDecision pass-through per KAN-1037-PR4.5). This test
+// confirms the precomputed decision retains guardrailTrigger when
+// forwarded; the audit-row write itself is unit-tested in
+// lead-received-push.test.ts.
+// ─────────────────────────────────────────────
+
+describe('KAN-1083 — guardrailTrigger preserved on precomputed-decision pass-through', () => {
+  it('precomputed brainDecision retains guardrailTrigger when forwarded to wirePhase2Consumers', async () => {
+    const redis = makeFakeRedis();
+    __setRedisClientForTest(redis as never);
+
+    // Brain returns send_follow_up with guardrailTrigger='politics'
+    evaluateDealStateMock.mockResolvedValueOnce({
+      ...buildBrainDecisionFixture(),
+      nextBestAction: {
+        type: 'send_follow_up',
+        reasoning: "Contact's reply raised a political topic; deflecting.",
+        suggestedChannel: 'email',
+        suggestedTone: 'professional',
+        guardrailTrigger: 'politics',
+      },
+    });
+
+    const event = makeValidEvent();
+    const { body } = makeEnvelope(event);
+    const res = await makeApp().request('/pubsub/contact-replied', {
+      method: 'POST',
+      body,
+    });
+    expect(res.status).toBe(200);
+
+    // wirePhase2Consumers called with the precomputed decision; the 4th arg
+    // is the brainDecision. Assert guardrailTrigger preserved.
+    expect(wirePhase2ConsumersMock).toHaveBeenCalledTimes(1);
+    const wireCall = wirePhase2ConsumersMock.mock.calls[0];
+    const precomputed = wireCall[3] as {
+      nextBestAction: { type: string; guardrailTrigger?: string };
+    };
+    expect(precomputed.nextBestAction.type).toBe('send_follow_up');
+    expect(precomputed.nextBestAction.guardrailTrigger).toBe('politics');
+  });
+
+  it('non-guardrail send_follow_up flows through without guardrailTrigger field', async () => {
+    const redis = makeFakeRedis();
+    __setRedisClientForTest(redis as never);
+
+    // Brain returns standard send_follow_up (no guardrailTrigger)
+    evaluateDealStateMock.mockResolvedValueOnce(buildBrainDecisionFixture());
+
+    const event = makeValidEvent();
+    const { body } = makeEnvelope(event);
+    const res = await makeApp().request('/pubsub/contact-replied', {
+      method: 'POST',
+      body,
+    });
+    expect(res.status).toBe(200);
+
+    expect(wirePhase2ConsumersMock).toHaveBeenCalledTimes(1);
+    const wireCall = wirePhase2ConsumersMock.mock.calls[0];
+    const precomputed = wireCall[3] as {
+      nextBestAction: { type: string; guardrailTrigger?: string };
+    };
+    expect(precomputed.nextBestAction.guardrailTrigger).toBeUndefined();
+  });
+});

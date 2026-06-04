@@ -2511,3 +2511,216 @@ describe('buildEvaluationPrompt — KAN-1081 Stage-progression guidance sub-sect
     expect(charCount).toBeLessThanOrEqual(640);
   });
 });
+
+// ─────────────────────────────────────────────
+// KAN-1083 — Topic guardrails section rendering + parser extension.
+//
+// Q1 slot: sibling to ### Stop-condition guidance inside ## Latest inbound.
+// Q2 categories: 5 baseline (politics, religion, regulated_advice,
+//   competitor_disparagement, prohibited_claims).
+// Q4 single-category guardrailTrigger field on send_follow_up emissions.
+// Q6 sentinel band [400, 640] chars (1.3× multiplier applied upfront).
+//
+// Coverage:
+//   - Section renders inside ## Latest inbound block when latestInbound present
+//   - All 5 categories listed in section body (sentinel literals)
+//   - Section absent when latestInbound undefined (no guardrails-without-inbound)
+//   - Token-budget sentinel char band per Q6
+//   - Parser: guardrailTrigger extracted on send_follow_up with valid category
+//   - Parser: invalid category silently dropped (best-effort posture)
+//   - Parser: missing field doesn't throw (optional)
+//   - Parser: field dropped on non-send_follow_up actions
+// ─────────────────────────────────────────────
+
+describe('buildEvaluationPrompt — KAN-1083 Topic guardrails section', () => {
+  const baseInput = {
+    snapshot: {
+      dealStatus: 'open',
+      currentStageName: 'New',
+      currentStageOutcomeType: 'open',
+      daysInCurrentStage: 0,
+      engagementCount: 0,
+      lastEngagementType: null,
+      lastEngagementClass: null,
+      daysSinceLastEngagement: null,
+      moProgressPercent: null,
+      pipelineName: 'Default',
+      pipelineObjectiveType: 'book_appointment',
+    },
+    contact: {
+      id: 'c',
+      tenantId: 't',
+      email: 'fred@example.com',
+      firstName: 'Fred',
+      lastName: null,
+      companyName: null,
+      phone: null,
+      currentStageId: null,
+      microObjectiveProgress: {},
+      metadata: {},
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    } as never,
+    recentEngagements: [],
+    recentTransitions: [],
+  };
+
+  const inboundFixture = {
+    receivedAt: '2026-06-04T10:00:00.000Z',
+    senderEmail: 'contact@example.com',
+    bodyText: 'Hello',
+    subjectLine: 'Re: discovery',
+    threadDepth: 0,
+    priorTurns: [],
+  };
+
+  it('renders ### Topic guardrails sub-section inside ## Latest inbound when latestInbound provided', () => {
+    const prompt = buildEvaluationPrompt({
+      ...baseInput,
+      latestInbound: inboundFixture,
+    });
+    const inboundIdx = prompt.indexOf('## Latest inbound');
+    const guardrailsIdx = prompt.indexOf('### Topic guardrails');
+    const stopCondIdx = prompt.indexOf('### Stop-condition guidance');
+    expect(inboundIdx).toBeGreaterThan(0);
+    expect(guardrailsIdx).toBeGreaterThan(0);
+    // Q1 lock: guardrails sit AFTER Stop-condition (chronological sibling)
+    expect(guardrailsIdx).toBeGreaterThan(stopCondIdx);
+    // Both stay inside ## Latest inbound block (before next ## section)
+    const nextSectionIdx = prompt.indexOf('\n## ', guardrailsIdx);
+    expect(nextSectionIdx === -1 || nextSectionIdx > guardrailsIdx).toBe(true);
+  });
+
+  it('section omitted when latestInbound undefined (no guardrails-without-inbound)', () => {
+    const prompt = buildEvaluationPrompt(baseInput);
+    expect(prompt).not.toContain('### Topic guardrails');
+  });
+
+  it('all 5 guardrail categories listed (sentinel literals)', () => {
+    const prompt = buildEvaluationPrompt({
+      ...baseInput,
+      latestInbound: inboundFixture,
+    });
+    expect(prompt).toContain('`politics`');
+    expect(prompt).toContain('`religion`');
+    expect(prompt).toContain('`regulated_advice`');
+    expect(prompt).toContain('`competitor_disparagement`');
+    expect(prompt).toContain('`prohibited_claims`');
+    // Load-bearing pattern phrasing
+    expect(prompt).toContain('guardrailTrigger');
+    expect(prompt).toContain('PRIMARY triggered category');
+  });
+
+  // Q6 lock — sentinel band shifted from [400, 640] to [1900, 2200] chars
+  // after Phase 2 empirical measurement (~2023 chars actual). Per
+  // feedback_phase_1_locks_are_hypotheses_subject_to_empirical_revision:
+  // Phase 1 projection was 3.3× under (not the systematic 1.3× pattern
+  // observed across KAN-1066/1081); guardrails section content is rich
+  // because per-category nuance (5 categories × decline templates +
+  // pattern phrasing + moralize/lecture explicit DON'Ts) compounds. Band
+  // shifted to empirical reality NOT to aspirational projection;
+  // padding/shrinking content rejected per discipline. Final character
+  // density reflects safety-critical phrasing — guardrails are pre-launch
+  // liability gap closure, not a place for terse prompting.
+  it('Q6 — guardrails sub-section char count in [1900, 2200] band (sentinel proxy)', () => {
+    const prompt = buildEvaluationPrompt({
+      ...baseInput,
+      latestInbound: inboundFixture,
+    });
+    const startIdx = prompt.indexOf('### Topic guardrails');
+    expect(startIdx).toBeGreaterThan(0);
+    // End of block = next "## " section header OR closing backtick of block
+    const block = prompt.substring(startIdx);
+    const nextSection = block.indexOf('\n## ');
+    const blockBody = nextSection > 0 ? block.substring(0, nextSection) : block;
+    const charCount = blockBody.length;
+    expect(charCount).toBeGreaterThanOrEqual(1900);
+    expect(charCount).toBeLessThanOrEqual(2200);
+  });
+});
+
+describe('parseLlmResponse — KAN-1083 guardrailTrigger payload', () => {
+  it('extracts guardrailTrigger on send_follow_up with valid category', () => {
+    const result = parseLlmResponse(
+      JSON.stringify({
+        nextBestAction: {
+          type: 'send_follow_up',
+          reasoning: 'Contact asked about a political topic; deflecting.',
+          guardrailTrigger: 'politics',
+        },
+        confidence: 0.8,
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.nextBestAction.type).toBe('send_follow_up');
+    expect(result.value.nextBestAction.guardrailTrigger).toBe('politics');
+  });
+
+  it('accepts all 5 valid category values', () => {
+    const categories = ['politics', 'religion', 'regulated_advice', 'competitor_disparagement', 'prohibited_claims'];
+    for (const cat of categories) {
+      const result = parseLlmResponse(
+        JSON.stringify({
+          nextBestAction: {
+            type: 'send_follow_up',
+            reasoning: 'deflection',
+            guardrailTrigger: cat,
+          },
+          confidence: 0.7,
+        }),
+      );
+      expect(result.ok).toBe(true);
+      if (!result.ok) continue;
+      expect(result.value.nextBestAction.guardrailTrigger).toBe(cat);
+    }
+  });
+
+  it('invalid category silently dropped (best-effort; no error)', () => {
+    const result = parseLlmResponse(
+      JSON.stringify({
+        nextBestAction: {
+          type: 'send_follow_up',
+          reasoning: 'something unknown',
+          guardrailTrigger: 'made_up_category',
+        },
+        confidence: 0.7,
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.nextBestAction.guardrailTrigger).toBeUndefined();
+  });
+
+  it('missing guardrailTrigger on send_follow_up does not throw (optional field)', () => {
+    const result = parseLlmResponse(
+      JSON.stringify({
+        nextBestAction: {
+          type: 'send_follow_up',
+          reasoning: 'standard follow-up',
+        },
+        confidence: 0.7,
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.nextBestAction.guardrailTrigger).toBeUndefined();
+  });
+
+  it('guardrailTrigger dropped on non-send_follow_up actions (semantic-leakage prevention)', () => {
+    const result = parseLlmResponse(
+      JSON.stringify({
+        nextBestAction: {
+          type: 'no_action',
+          reasoning: 'leftover field from previous turn',
+          guardrailTrigger: 'politics',
+        },
+        confidence: 0.5,
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.nextBestAction.type).toBe('no_action');
+    expect(result.value.nextBestAction.guardrailTrigger).toBeUndefined();
+  });
+});
