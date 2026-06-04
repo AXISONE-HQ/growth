@@ -408,6 +408,16 @@ interface BrainServiceModule {
         fromPhase: 'qualify' | 'problem' | 'proof' | 'closing';
         toPhase: 'qualify' | 'problem' | 'proof' | 'closing';
       };
+      // KAN-1083 — guardrail trigger category populated when engine emits
+      // send_follow_up deflection in response to a prohibited topic. Single
+      // category per Q4 lock; dispatcher writes engine_guardrail.deflected
+      // audit row when set.
+      guardrailTrigger?:
+        | 'politics'
+        | 'religion'
+        | 'regulated_advice'
+        | 'competitor_disparagement'
+        | 'prohibited_claims';
     };
     confidence: number;
     modelTier: 'cheap' | 'reasoning';
@@ -1932,6 +1942,43 @@ export async function wirePhase2Consumers(
   // dispatch deferred to KAN-800/801 Phase 3 connectors); non-email shaped
   // output is logged + skipped here.
   if (brainDecision.nextBestAction.type === 'send_follow_up') {
+    // KAN-1083 — guardrail audit row written BEFORE dispatchPhase2Send.
+    // Q4 single-category lock: when engine sets guardrailTrigger on a
+    // send_follow_up emission, the action is a topic-deflection rather
+    // than standard follow-up; capture the category + reasoning for
+    // pre-launch operator review + Tier 1 telemetry. Best-effort posture:
+    // audit-write failure does NOT block the send.
+    if (brainDecision.nextBestAction.guardrailTrigger) {
+      try {
+        const deal = await prisma.deal.findUnique({
+          where: { id: dealId },
+          select: { tenantId: true, contactId: true },
+        });
+        if (deal) {
+          await prisma.auditLog.create({
+            data: {
+              tenantId: deal.tenantId,
+              actor: 'lead_received_subscriber',
+              actionType: 'engine_guardrail.deflected',
+              reasoning: brainDecision.nextBestAction.reasoning,
+              payload: {
+                eventId,
+                dealId,
+                contactId: deal.contactId,
+                guardrailCategory: brainDecision.nextBestAction.guardrailTrigger,
+                brainConfidence: brainDecision.confidence,
+                brainModelTier: brainDecision.modelTier,
+                brainReasoning: brainDecision.nextBestAction.reasoning,
+              },
+            },
+          });
+        }
+      } catch (err) {
+        console.warn(
+          `[lead-received-push] kan-1083-guardrail-audit-failed dealId=${dealId} eventId=${eventId} err=${(err as Error)?.message ?? String(err)}`,
+        );
+      }
+    }
     await dispatchPhase2Send(dealId, eventId, brainDecision);
   }
 

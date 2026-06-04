@@ -223,6 +223,18 @@ interface BrainServiceModule {
       suggestedChannel?: 'email' | 'sms' | 'meta_messenger';
       suggestedTone?: 'curious' | 'professional' | 'urgent' | 'closing';
       reasoning: string;
+      // KAN-1083 — guardrail trigger category on send_follow_up deflection.
+      // Symmetric local-mirror extension (Local-suffix naming asymmetry
+      // not preserved here because this typedef is anonymous; the field
+      // survives the precomputedDecision pass-through to wirePhase2Consumers
+      // where lead-received-push.ts's dispatcher arm writes the
+      // engine_guardrail.deflected audit row).
+      guardrailTrigger?:
+        | 'politics'
+        | 'religion'
+        | 'regulated_advice'
+        | 'competitor_disparagement'
+        | 'prohibited_claims';
     };
     confidence: number;
     modelTier: 'cheap' | 'reasoning';

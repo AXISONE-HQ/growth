@@ -2993,3 +2993,127 @@ describe("KAN-1067 (Cluster II PR V) — advance_engine_phase dispatcher arm", (
     expect(escAudits).toHaveLength(0);
   });
 });
+
+// ─────────────────────────────────────────────
+// KAN-1083 — engine_guardrail.deflected audit row on send_follow_up
+// emissions when engine sets guardrailTrigger payload field.
+//
+// Q4 single-category lock; dispatcher writes audit row BEFORE invoking
+// dispatchPhase2Send. Best-effort posture: audit-write failure does NOT
+// block the send.
+// ─────────────────────────────────────────────
+
+function buildGuardrailBrainDecision(category:
+  | 'politics'
+  | 'religion'
+  | 'regulated_advice'
+  | 'competitor_disparagement'
+  | 'prohibited_claims',
+) {
+  return {
+    dealId: DEAL_A,
+    evaluatedAt: new Date(),
+    currentStateSnapshot: {
+      dealStatus: 'open',
+      currentStageName: 'New',
+      currentStageOutcomeType: 'open',
+      daysInCurrentStage: 0,
+      engagementCount: 1,
+      lastEngagementType: 'email_received',
+      lastEngagementClass: 'positive',
+      daysSinceLastEngagement: 0,
+      moProgressPercent: null,
+      pipelineName: 'KAN-1083 Verify Pipeline',
+      pipelineObjectiveType: 'book_appointment',
+    },
+    nextBestAction: {
+      type: 'send_follow_up' as const,
+      reasoning: `Contact's inbound raised a ${category} topic; deflecting per guardrails.`,
+      suggestedChannel: 'email' as const,
+      suggestedTone: 'professional' as const,
+      guardrailTrigger: category,
+    },
+    confidence: 0.82,
+    modelTier: 'reasoning' as const,
+    llmInputTokens: 540,
+    llmOutputTokens: 130,
+  };
+}
+
+describe('KAN-1083 — engine_guardrail.deflected audit row on send_follow_up dispatch arm', () => {
+  beforeEach(() => {
+    setupHappyPathMocks();
+    setupPhase2DispatchMocks();
+    auditLogCreateLeadReceivedMock.mockClear();
+    // Override the deal mock to ensure consistent shape across all calls
+    // (setupPhase2DispatchMocks uses mockResolvedValueOnce; our test
+    // makes multiple deal lookups — for the guardrail audit + the dispatch
+    // path — so use mockResolvedValue for persistent shape).
+    dealFindUniqueMock.mockResolvedValue({
+      id: DEAL_A,
+      tenantId: TENANT_A,
+      contactId: CONTACT_A,
+      contact: { id: CONTACT_A, email: 'alice@acme.com' },
+    });
+  });
+
+  it('writes engine_guardrail.deflected audit row when guardrailTrigger is set', async () => {
+    const precomputed = buildGuardrailBrainDecision('politics');
+
+    await (await getWirePhase2Consumers())(DEAL_A, 'evt_guardrail_politics', false, precomputed as never);
+
+    const guardrailAudit = auditLogCreateLeadReceivedMock.mock.calls.find(
+      (call) =>
+        (call[0] as { data: { actionType: string } }).data.actionType ===
+        'engine_guardrail.deflected',
+    );
+    expect(guardrailAudit).toBeDefined();
+    const args = guardrailAudit![0] as {
+      data: { actor: string; payload: Record<string, unknown> };
+    };
+    expect(args.data.actor).toBe('lead_received_subscriber');
+    expect(args.data.payload).toMatchObject({
+      eventId: 'evt_guardrail_politics',
+      dealId: DEAL_A,
+      contactId: CONTACT_A,
+      guardrailCategory: 'politics',
+      brainConfidence: 0.82,
+    });
+  });
+
+  it('captures category correctly across all 5 baseline values', async () => {
+    const categories: Array<
+      'politics' | 'religion' | 'regulated_advice' | 'competitor_disparagement' | 'prohibited_claims'
+    > = ['politics', 'religion', 'regulated_advice', 'competitor_disparagement', 'prohibited_claims'];
+
+    for (const cat of categories) {
+      // Re-arm dispatch mocks for each iteration (setupPhase2DispatchMocks
+      // uses mockResolvedValueOnce; the loop exhausts them after iteration 1).
+      setupPhase2DispatchMocks();
+      auditLogCreateLeadReceivedMock.mockClear();
+      const precomputed = buildGuardrailBrainDecision(cat);
+      await (await getWirePhase2Consumers())(DEAL_A, `evt_guardrail_${cat}`, false, precomputed as never);
+      const audit = auditLogCreateLeadReceivedMock.mock.calls.find(
+        (call) =>
+          (call[0] as { data: { actionType: string } }).data.actionType ===
+          'engine_guardrail.deflected',
+      );
+      expect(audit).toBeDefined();
+      const args = audit![0] as { data: { payload: { guardrailCategory: string } } };
+      expect(args.data.payload.guardrailCategory).toBe(cat);
+    }
+  });
+
+  it('does NOT write guardrail audit row when send_follow_up has no guardrailTrigger', async () => {
+    const standardFollowUp = buildBrainDecisionFixture({ type: 'send_follow_up', confidence: 0.85 });
+
+    await (await getWirePhase2Consumers())(DEAL_A, 'evt_standard_follow_up', false, standardFollowUp as never);
+
+    const guardrailAudits = auditLogCreateLeadReceivedMock.mock.calls.filter(
+      (call) =>
+        (call[0] as { data: { actionType: string } }).data.actionType ===
+        'engine_guardrail.deflected',
+    );
+    expect(guardrailAudits).toHaveLength(0);
+  });
+});

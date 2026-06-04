@@ -212,6 +212,37 @@ export function isValidPhaseAdvance(from: EnginePhaseKey, to: EnginePhaseKey): b
   );
 }
 
+/**
+ * KAN-1083 — Topic guardrail categories. v1 baseline list of 5 categories
+ * the engine refuses to engage on. Hardcoded-always-on per Q5 lock (no
+ * Tenant.guardrailsEnabled flag); per-tenant variance deferred to Phase 2.5
+ * if empirical signal surfaces.
+ *
+ * - politics: political topics, partisan opinions, candidates, elections
+ * - religion: religious topics, faith-based opinions
+ * - regulated_advice: legal/medical/financial advice requiring licensure
+ * - competitor_disparagement: negative claims about named competitors
+ * - prohibited_claims: ROI/outcome guarantees without disclaimers
+ *
+ * Engine emits SINGLE category per Q4 lock (not array). Multi-category
+ * extension deferred to Phase 2.5 if smoke surfaces engine struggling
+ * to pick among multiple triggers.
+ */
+export type GuardrailCategory =
+  | 'politics'
+  | 'religion'
+  | 'regulated_advice'
+  | 'competitor_disparagement'
+  | 'prohibited_claims';
+
+export const GUARDRAIL_CATEGORIES: ReadonlySet<GuardrailCategory> = new Set<GuardrailCategory>([
+  'politics',
+  'religion',
+  'regulated_advice',
+  'competitor_disparagement',
+  'prohibited_claims',
+]);
+
 export interface BrainNextBestAction {
   type: BrainActionType;
   targetStageId?: string;
@@ -231,6 +262,18 @@ export interface BrainNextBestAction {
    * type contract + validation infrastructure (isValidPhaseAdvance) only.
    */
   enginePhaseAdvance?: AdvanceEnginePhasePayload;
+  /**
+   * KAN-1083 — Topic guardrail trigger category. Populated when engine
+   * emits `send_follow_up` deflection in response to a prohibited topic
+   * in the contact's inbound. Single category per Q4 lock (engine picks
+   * the PRIMARY trigger when multiple categories present in one inbound).
+   * Subscriber writes `engine_guardrail.deflected` audit row when set.
+   *
+   * Omitted on send_follow_up emissions that AREN'T guardrail-triggered
+   * (standard follow-up messaging) and on all other action types
+   * (parser drops the field per validation discipline).
+   */
+  guardrailTrigger?: GuardrailCategory;
 }
 
 export interface BrainStateSnapshot {
@@ -1259,13 +1302,15 @@ Respond ONLY with valid JSON in this exact shape:
     "enginePhaseAdvance": {
       "fromPhase": "<qualify|problem|proof>",
       "toPhase": "<problem|proof|closing>"
-    }
+    },
+    "guardrailTrigger": "<politics|religion|regulated_advice|competitor_disparagement|prohibited_claims or null>"
   },
   "confidence": <0.0-1.0>
 }
 
 \`subObjectiveTransition\` is required ONLY when \`type === "transition_sub_objective"\`; omit or set null on all other action types.
 \`enginePhaseAdvance\` is required ONLY when \`type === "advance_engine_phase"\`; omit or set null on all other action types.
+\`guardrailTrigger\` is set ONLY when emitting a \`send_follow_up\` deflection in response to a prohibited topic per the \`### Topic guardrails\` section; omit or set null on all other emissions including non-guardrail send_follow_up.
 
 Be conservative: if unsure, recommend escalate_to_human or wait_for_response with low confidence.`;
 
@@ -1495,7 +1540,7 @@ ${renderPriorTurnsSection(latestInbound.priorTurns)}
 If the contact's reply expresses CLEAR disinterest, explicit rejection, or stated decision to go elsewhere ("we've decided to go with another vendor", "not a fit for us", "not interested"), prefer \`close_deal_lost\` over \`send_follow_up\`. Do NOT attempt to overcome stated objections via follow-up messaging — it erodes trust. \`send_follow_up\` is reserved for engaged contacts where the conversation needs continuation.
 
 If the contact's reply expresses opt-out intent ("please stop emailing me", "remove me from your list", "unsubscribe"), emit \`escalate_to_human\` so an operator can apply suppression. Cite the specific opt-out phrasing in your reasoning.
-`
+${renderTopicGuardrailsSection()}`
     : '';
 
   // KAN-1066 (Cluster II PR IV) — `## Engine phase focus` section.
@@ -1745,6 +1790,46 @@ When the current Engine phase is \`closing\` AND all closing sub-objectives are 
 `;
 }
 
+/**
+ * KAN-1083 — render the `### Topic guardrails` sub-section inside the
+ * `## Latest inbound` block (Q1 lock: sibling to `### Stop-condition
+ * guidance`; thematic family is "engine refusal behaviors").
+ *
+ * v1 baseline 5 categories (Q2 lock). Engine emits `send_follow_up` with
+ * deflection language when contact's inbound contains a prohibited topic;
+ * engine sets `guardrailTrigger` field on the action to flag the PRIMARY
+ * category (Q4 single-category lock; multi-category extension is Phase 2.5).
+ *
+ * Per-category nuance lives in the prompt content per Q3 lock — engine
+ * adapts deflection per context (regulated_advice → "consult a licensed
+ * professional" framing; prohibited_claims → "decline to guarantee" rather
+ * than redirect). If empirical smoke shows engine missing nuance, file
+ * Phase 2.5 prompt-iteration ticket.
+ *
+ * Hardcoded-always-on per Q5 (no Tenant.guardrailsEnabled flag); always
+ * renders when latestInbound is provided. Pure-function module-private
+ * helper — sibling to `renderEnginePhaseFocusSection` above.
+ */
+function renderTopicGuardrailsSection(): string {
+  return `
+### Topic guardrails
+
+If the contact's inbound raises a topic in any of the prohibited categories below, do NOT engage with the topic substantively. Emit \`send_follow_up\` with deflection language that briefly acknowledges the contact's question, declines to engage on the prohibited topic, and redirects to the product/service conversation. Set \`guardrailTrigger\` to the PRIMARY triggered category (single value; pick the most prominent if multiple categories appear in the inbound). Cite the triggering excerpt in your reasoning.
+
+- \`politics\`: political topics, partisan opinions, candidates, elections. Decline: "I'm not in a position to share views on political topics."
+- \`religion\`: religious topics, faith-based opinions. Decline: "I'm not in a position to discuss religious matters."
+- \`regulated_advice\`: legal advice / medical advice / financial advice positions requiring licensure. Decline + redirect: "That's a question best answered by a licensed [legal/medical/financial] professional — I can't give that kind of advice. Coming back to your interest in [PRODUCT]..."
+- \`competitor_disparagement\`: requests for negative claims about named competitors. Decline + redirect: "I won't speak to other companies' offerings, but I'm happy to walk through how [PRODUCT] handles [USE_CASE]."
+- \`prohibited_claims\`: outcome/ROI guarantees without disclaimers. Decline: "I can't promise specific outcomes — results depend on [FACTORS]. What I can share is [DATA_POINT]."
+
+Deflection language pattern (engine fills placeholders per context):
+
+> "Happy to discuss [PRODUCT] specifically, but [TOPIC_CATEGORY] isn't something I can speak to. Coming back to your question about [REDIRECT_HOOK]..."
+
+Do NOT moralize; do NOT lecture; do NOT explain WHY the topic is off-limits. Brief acknowledgement + decline + redirect. If the contact's inbound is ENTIRELY about a prohibited topic with no redirect hook available, deflect to the product surface explicitly ("Happy to help with [PRODUCT] questions whenever you're ready.").
+`;
+}
+
 // ─────────────────────────────────────────────
 // Response parsing (defensive — LLMs can return partial/wrong shapes)
 // ─────────────────────────────────────────────
@@ -1959,6 +2044,21 @@ export function parseLlmResponse(text: string): ParsedLlmResponse {
       };
     }
     nextBestAction.enginePhaseAdvance = { fromPhase, toPhase };
+  }
+
+  // KAN-1083 — guardrailTrigger payload extraction. Optional field on
+  // send_follow_up emissions (Q4 single-category lock). Engine sets this
+  // when emitting a deflection in response to a prohibited topic. Parser
+  // validates enum membership; invalid category → drop the field (don't
+  // reject the whole response — guardrail signaling is supplementary
+  // telemetry, not a load-bearing payload). Field is silently dropped on
+  // non-send_follow_up emissions to prevent semantic leakage.
+  if (a.type === 'send_follow_up' && typeof a.guardrailTrigger === 'string') {
+    if (GUARDRAIL_CATEGORIES.has(a.guardrailTrigger as GuardrailCategory)) {
+      nextBestAction.guardrailTrigger = a.guardrailTrigger as GuardrailCategory;
+    }
+    // Invalid category → silently drop; no error log (engine reasoning
+    // would surface the deflection intent regardless).
   }
 
   return { ok: true, value: { nextBestAction, confidence } };
