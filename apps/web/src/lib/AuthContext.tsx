@@ -47,8 +47,22 @@ function getInitials(name: string | null): string {
     .slice(0, 2);
 }
 
-// Admin emails — will be replaced by Firestore role lookup in production
-const ADMIN_EMAILS = ['fred@axisone.io', 'fred@mkze.vc', 'fredbbinette@gmail.com'];
+// KAN-1088 — eliminate client/server allowlist drift class. Surfaced
+// during KAN-1087 (Tier 2 dashboard) smoke when Fred (fred@axisone.ca)
+// got role:'member' from a stale hardcoded list while server-side
+// adminProcedure (ADMIN_EMAILS env var) correctly identified him.
+//
+// Mirrors server-side allowlist parsing at apps/api/src/trpc.ts:124.
+// NEXT_PUBLIC_ADMIN_EMAILS is inlined at apps/web build time via the
+// Dockerfile (see apps/web/Dockerfile near the @growth/web build step).
+// Setting it on Cloud Run alone is non-functional — Next.js inlines at
+// build, not runtime.
+//
+// Phase 2.5 follow-up: replace with Firestore role lookup (see KAN ticket).
+const ADMIN_EMAILS = (process.env.NEXT_PUBLIC_ADMIN_EMAILS ?? '')
+  .split(',')
+  .map((e) => e.trim().toLowerCase())
+  .filter(Boolean);
 
 function mapFirebaseUser(fbUser: User): GrowthUser {
   const role: UserRole = ADMIN_EMAILS.includes(fbUser.email || '') ? 'admin' : 'member';

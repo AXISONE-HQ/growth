@@ -38,6 +38,12 @@ ENV NEXT_PUBLIC_API_URL=https://growth-api-1086551891973.us-central1.run.app
 # flag-on in prod: no nav entry, no commit button, read-only,
 # direct-URL only at /settings/campaign-demo. Slice 2 retires the flag.
 ENV NEXT_PUBLIC_CAMPAIGN_LAYER_DEMO=true
+# KAN-1088 — client-side admin allowlist (mirrors server-side ADMIN_EMAILS
+# at apps/api Cloud Run env var). AuthContext.tsx parses comma-separated
+# with split/lowercase/trim. NEXT_PUBLIC_* are inlined at build time —
+# Cloud Run env var alone is non-functional. Adding a new admin = update
+# this line + redeploy.
+ENV NEXT_PUBLIC_ADMIN_EMAILS=fred@axisone.ca
 RUN npm run build --workspace=@growth/web
 
 FROM node:20-alpine AS runtime
