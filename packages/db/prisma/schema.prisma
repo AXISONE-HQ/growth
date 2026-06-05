@@ -65,6 +65,13 @@ model Tenant {
   // are intentionally empty. Resolution lives in
   // `engine-phase-stage-map-resolver.ts` (PR I).
   enginePhaseStageMapOverride     Json?                 @map("engine_phase_stage_map_override")
+  // KAN-1093 (Cluster IV-B PR I, Phase 1 Q2 lock) — per-tenant override of
+  // Blueprint.persona. Sibling to enginePhasesOverride + enginePhaseStageMapOverride
+  // (same engine-config family). Per discipline-pin-1 framing, populates per-tenant
+  // during onboarding (DEFAULT_PERSONA_GENERIC_B2B ships with empty toneDefaults +
+  // brandAttributes + voiceExamples so cognitive defaults stay unopinionated).
+  // Resolution lives in `blueprint-persona-resolver.ts` (PR I).
+  personaOverride                 Json?                 @map("persona_override")
   dailyActionLimit                Int                   @default(100) @map("daily_action_limit")
   // KAN-1009 SAE PR4 — per-tenant daily LLM cost cap (USD). NULL = use
   // the env-default (DECISION_RUN_DAILY_COST_CAP_USD_DEFAULT, conservative
@@ -249,6 +256,16 @@ model Blueprint {
   // naming; Blueprint defaults near-useless, per-tenant override is the primary
   // config path. Resolution lives in `engine-phase-stage-map-resolver.ts` (PR I).
   enginePhaseStageMap Json?  @map("engine_phase_stage_map")
+  // KAN-1093 (Cluster IV-B PR I, Phase 1 Q2 lock) — per-vertical Persona config
+  // (name, voice, per-phase tone defaults, brand attributes, voice examples).
+  // Sibling slot to enginePhases + enginePhaseStageMap above (same engine-config
+  // family; closes the engine-phase-types.ts:46-48 Cluster II → Cluster IV bridge).
+  // Per-tenant override lives at `tenants.personaOverride`. Empty default
+  // (DEFAULT_PERSONA_GENERIC_B2B with empty toneDefaults + brandAttributes +
+  // voiceExamples) per discipline-pin-1 — cognitive defaults stay unopinionated;
+  // design partners populate per-tenant during onboarding. Resolution lives in
+  // `blueprint-persona-resolver.ts` (PR I).
+  persona             Json?  @map("persona")
   isActive          Boolean  @default(true) @map("is_active")
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")
