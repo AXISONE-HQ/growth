@@ -39,6 +39,10 @@ import {
   FileText,
   Building2,
   ChevronRight,
+  // KAN-1100 — icon for the new admin-only Cognitive Metrics moverLink.
+  // BarChart3 chosen over Activity/Gauge for explicit metrics-dashboard
+  // semantic + visual distinction from Brain (AI tab).
+  BarChart3,
 } from 'lucide-react';
 import Link from 'next/link';
 import { useState, useEffect, useCallback } from 'react';
@@ -55,6 +59,10 @@ import {
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
 import { SectionCard } from '@/components/ui/detail-page-shell';
+// KAN-1100 — useAuth surfaces user.role for the moverLinks admin-conditional
+// render filter. Canonical client-side admin gate per AuthContext.tsx + the
+// NEXT_PUBLIC_ADMIN_EMAILS build-time-inlined pattern (KAN-1088).
+import { useAuth } from '@/lib/AuthContext';
 
 // — Helpers —
 function timeAgo(dateStr: string | null): string {
@@ -136,6 +144,11 @@ function SaveButton({
 }
 
 export default function SettingsPage() {
+  // KAN-1100 — read user.role to drive admin-conditional moverLinks render.
+  // useAuth is client-side only; non-admin users get filtered out of the
+  // moverLinks render (server-side adminProcedure on the dashboard's tRPC
+  // procedure remains the authoritative gate; this is UX polish).
+  const { user } = useAuth();
   const [activeTab, setActiveTab] = useState('ai');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -229,12 +242,29 @@ export default function SettingsPage() {
   // existing route (some leave the Settings shell — accepted Option-B
   // tradeoff). The Radix tablist semantics stay pure (6 inline tabs);
   // these are explicitly navigation links, not tab triggers.
-  const moverLinks = [
+  // KAN-1100 — explicit type widening introduces the `adminOnly?: boolean`
+  // field. This is the first admin-only moverLink; the `.filter()` idiom at
+  // the render site (`!m.adminOnly || user?.role === 'admin'`) establishes
+  // the canonical precedent for future admin-only moverLinks — same shape,
+  // same field name, same filter at the render call. The .map() render
+  // block below applies the filter before iterating.
+  const moverLinks: Array<{
+    href: string;
+    label: string;
+    icon: typeof Target;
+    adminOnly?: boolean;
+  }> = [
     { href: '/settings/objectives', label: 'Objectives', icon: Target },
     { href: '/settings/knowledge', label: 'Knowledge Center', icon: BookOpen },
     { href: '/imports', label: 'Data Imports', icon: Upload },
     { href: '/audit', label: 'Audit Log', icon: FileText },
     { href: '/settings/account/identity', label: 'Account', icon: Building2 },
+    {
+      href: '/settings/cognitive-metrics',
+      label: 'Cognitive Metrics',
+      icon: BarChart3,
+      adminOnly: true,
+    },
   ];
 
   // Flash messages
@@ -545,18 +575,26 @@ export default function SettingsPage() {
           data-testid="settings-mover-nav"
           className="mb-6 inline-flex flex-wrap items-center gap-1 rounded-full bg-muted p-1"
         >
-          {moverLinks.map((m) => (
-            <Link
-              key={m.href}
-              href={m.href}
-              data-testid={`settings-mover-${m.label.toLowerCase().replace(/\s+/g, '-')}`}
-              className="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-full px-4 py-1.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-card hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-            >
-              <m.icon className="h-4 w-4" />
-              {m.label}
-              <ChevronRight className="h-3.5 w-3.5 opacity-60" aria-hidden="true" />
-            </Link>
-          ))}
+          {moverLinks
+            // KAN-1100 — admin-only filter. Canonical precedent for future
+            // admin-conditional moverLinks: `!m.adminOnly || user?.role === 'admin'`.
+            // user?.role evaluates undefined when unauthenticated (useAuth
+            // returns user === null pre-login + during loading), so the
+            // filter correctly hides admin-only entries from unauthenticated
+            // users too.
+            .filter((m) => !m.adminOnly || user?.role === 'admin')
+            .map((m) => (
+              <Link
+                key={m.href}
+                href={m.href}
+                data-testid={`settings-mover-${m.label.toLowerCase().replace(/\s+/g, '-')}`}
+                className="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-full px-4 py-1.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-card hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+              >
+                <m.icon className="h-4 w-4" />
+                {m.label}
+                <ChevronRight className="h-3.5 w-3.5 opacity-60" aria-hidden="true" />
+              </Link>
+            ))}
         </nav>
 
         <div className="max-w-3xl">
