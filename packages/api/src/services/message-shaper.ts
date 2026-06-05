@@ -42,6 +42,12 @@
 import type { PrismaClient } from '@prisma/client';
 import { complete } from './llm-client.js';
 import { evaluateDealState, type BrainDecision } from './brain-service.js';
+// KAN-1098 (Cluster IV-B PR III) — scenario + persona block injection.
+// Types only; resolution stays at the caller (dispatchPhase2Send invokes
+// resolveScenarioContext upstream and threads the result through these
+// optional fields). Pure-module discipline preserved — shaper does not
+// fetch persona/scenario itself.
+import type { BlueprintPersona, Scenario } from '@growth/shared';
 
 // ─────────────────────────────────────────────
 // Types
@@ -101,6 +107,35 @@ export interface ShapeMessageOptions {
    */
   redis?: ShaperRedis | null;
   openai?: ShaperOpenAI | null;
+  /**
+   * KAN-1098 (Cluster IV-B PR III) — matched scenario tuple from
+   * `resolveScenarioContext`. When provided + non-null, `buildShapePrompt`
+   * renders `## Scenario guidance` between brain-suggested-intent and
+   * recent-inbound (Phase 1 item 5 lock — mirrors composer's
+   * pre-knowledgeBlock placement at message-composer.ts:180-181).
+   *
+   * Legacy / replay callers (cron-deferred-send re-dispatch path)
+   * omit this field; prompt rendering preserves the pre-KAN-1098 shape
+   * — section is OMITTED entirely.
+   *
+   * v1 channel scope: scenario tuples are email-channel-only;
+   * `resolveScenarioContext` returns `null` for sms / meta_messenger
+   * (KAN-1099 expands the registry).
+   */
+  scenario?: Scenario | null;
+  /**
+   * KAN-1098 (Cluster IV-B PR III) — resolved persona from
+   * `resolveScenarioContext`. When provided, `buildShapePrompt` renders
+   * `## Persona voice guidance` in the same placement as the scenario
+   * block. DEFAULT_PERSONA_GENERIC_B2B ships with empty `brandAttributes`
+   * + `voiceExamples` (Phase 1 discipline-pin-1) — only the Voice line
+   * renders for the default; branded tenants surface the additional
+   * structural lines.
+   *
+   * Legacy / replay callers omit this; prompt renders without the
+   * persona section.
+   */
+  persona?: BlueprintPersona;
 }
 
 /**
@@ -286,6 +321,11 @@ export async function shapeMessage(
     recentInbound: recentInbound
       ? { occurredAt: recentInbound.occurredAt, metadata: recentInbound.metadata }
       : null,
+    // KAN-1098 — thread scenario + persona blocks through to the prompt
+    // builder. Both optional; null/undefined omits the corresponding
+    // section entirely (legacy / replay caller posture).
+    scenario: options.scenario ?? null,
+    ...(options.persona ? { persona: options.persona } : {}),
   });
 
   // KAN-817 — gated smoke log. Enables capturing the rendered Shaper user
@@ -449,8 +489,23 @@ export function buildShapePrompt(input: {
    * `## Recent inbound from contact` and `## Channel + tone`.
    */
   knowledge?: ShaperKnowledgeResult | null;
+  /**
+   * KAN-1098 (Cluster IV-B PR III) — matched Scenario tuple. When non-null,
+   * renders `## Scenario guidance` between `## Brain-suggested intent`
+   * and `## Recent inbound from contact` (Phase 1 item 5 lock — mirrors
+   * composer's pre-knowledgeBlock placement). When null, section omitted.
+   */
+  scenario?: Scenario | null;
+  /**
+   * KAN-1098 — resolved Persona. When provided, renders
+   * `## Persona voice guidance` in the same placement zone as the
+   * scenario block. brandAttributes / voiceExamples lines only render
+   * when non-empty (DEFAULT_PERSONA_GENERIC_B2B surfaces only the Voice
+   * line — discipline-pin-1).
+   */
+  persona?: BlueprintPersona;
 }): string {
-  const { contact, pipeline, currentStage, brainReasoning, channel, tone, recentOutbound, recentInbound, knowledge } = input;
+  const { contact, pipeline, currentStage, brainReasoning, channel, tone, recentOutbound, recentInbound, knowledge, scenario, persona } = input;
 
   const contactName =
     [contact.firstName, contact.lastName].filter((p) => !!p && p.trim().length > 0).join(' ') ||
@@ -500,6 +555,37 @@ export function buildShapePrompt(input: {
     }
   }
 
+  // KAN-1098 — persona voice guidance block. Always renders the Voice
+  // line when a persona is provided (DEFAULT_PERSONA_GENERIC_B2B has a
+  // non-empty voice string per Phase 1 Q2 sub-option (i) lock).
+  // brandAttributes + voiceExamples lines render only when non-empty,
+  // honoring discipline-pin-1 (DEFAULT ships these arrays empty so
+  // unbranded tenants don't get aesthetic baggage).
+  let personaBlock = '';
+  if (persona) {
+    const lines: string[] = ['## Persona voice guidance', '', `Voice: ${persona.voice}`];
+    if (persona.brandAttributes.length > 0) {
+      lines.push(`Brand attributes: ${persona.brandAttributes.join(', ')}`);
+    }
+    if (persona.voiceExamples.length > 0) {
+      lines.push('Voice examples:');
+      for (const example of persona.voiceExamples) {
+        lines.push(`- "${example}"`);
+      }
+    }
+    personaBlock = `\n${lines.join('\n')}\n`;
+  }
+
+  // KAN-1098 — scenario guidance block. Renders only when a matched
+  // scenario tuple is provided (non-null + non-empty promptBlock).
+  // Resolver returns null for non-email channels (v1 scope) +
+  // unmatched tuples; the corresponding section is OMITTED entirely
+  // — composer/shaper falls through to free-form prompt construction.
+  const scenarioBlock =
+    scenario && scenario.promptBlock.length > 0
+      ? `\n## Scenario guidance\n\n${scenario.promptBlock}\n`
+      : '';
+
   return `## Contact
 ${contactName} @ ${company}
 
@@ -509,7 +595,7 @@ Current Stage: ${currentStage.name} (${currentStage.outcomeType})
 
 ## Brain-suggested intent
 ${brainReasoning}
-
+${personaBlock}${scenarioBlock}
 ## Recent inbound from contact
 ${recentInboundBlock}
 ${knowledge ? `\n## Company knowledge (relevant to this conversation)\n${renderShaperKnowledgeSection(knowledge)}\n` : ''}
