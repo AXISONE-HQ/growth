@@ -23,6 +23,10 @@ export * from "./engine-phase-types.js";
 // empty DEFAULT_ENGINE_PHASE_STAGE_MAP_GENERIC_B2B (per Phase 1.5 audit:
 // PROD stage naming too idiosyncratic for useful Blueprint defaults).
 export * from "./engine-phase-stage-map-types.js";
+// KAN-1093 (Cluster IV-B PR I) — Persona canonical types + DEFAULT_PERSONA_GENERIC_B2B
+// (empty toneDefaults + brandAttributes + voiceExamples per discipline-pin-1; cognitive
+// defaults stay unopinionated, populate per-tenant during onboarding).
+export * from "./persona-types.js";
 // M3-2.5a Inbound Reply Correlation — known email providers + soft validator + sidecar shape.
 export * from "./email-providers.js";
 // M3-2.5b Inbound Reply Correlation — RFC 5322 Message-ID/References normalization, shared between webhook publish + consumer lookup.

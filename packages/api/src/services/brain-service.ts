@@ -637,6 +637,15 @@ export { resolveEnginePhases } from './blueprint-engine-phases-resolver.js';
 // test time (extended from 5 to 6 symbols in this PR).
 export { resolveEnginePhaseStageMap } from './engine-phase-stage-map-resolver.js';
 
+// KAN-1093 (Cluster IV-B PR I) — re-export resolveBlueprintPersona at the
+// canonical loader path. Same loader-contract discipline as the two
+// re-exports above. Cluster IV-A consumers (composer's tone resolution +
+// brand-voice prompt line) will load via variable-specifier dynamic import
+// of brain-service.js. PR I (this re-export) establishes the surface;
+// consumers wire in when KAN-1096 activation gate fires (≥50 decisions
+// with non-NULL currentEnginePhase).
+export { resolveBlueprintPersona } from './blueprint-persona-resolver.js';
+
 export function computeCurrentEnginePhase(input: {
   gapState: ContactSubObjectiveGapState[];
   enginePhases: BlueprintEnginePhase[];

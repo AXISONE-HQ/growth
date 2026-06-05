@@ -1,0 +1,54 @@
+-- KAN-1093 (Cluster IV-B PR I — foundation) — additive schema changes for
+-- the Persona config (KAN-1092 Cluster IV epic).
+--
+-- Two additive nullable JSONB columns. PURELY additive; zero data migration;
+-- existing rows backfill cleanly via column defaults (NULL).
+--
+-- # Lock Q2 (Cluster IV Phase 1 design trace, 2026-06-04): Option (b)
+--
+-- Standard precedent pattern mirroring Cluster II (engine_phases) +
+-- Cluster III (engine_phase_stage_map): per-vertical Blueprint default +
+-- per-tenant override. Persona content shape (BlueprintPersona):
+--   `{ name, voice, toneDefaults, brandAttributes, voiceExamples }`
+-- Resolution chain: Tenant.personaOverride → Blueprint.persona → DEFAULT.
+--
+-- `blueprints.persona` (JSONB nullable) — per-vertical default Persona.
+-- DEFAULT_PERSONA_GENERIC_B2B ships with EMPTY toneDefaults + brandAttributes
+-- + voiceExamples per discipline-pin-1 (cognitive defaults stay unopinionated;
+-- design partners populate per-tenant during onboarding). When null on
+-- Blueprint AND null on Tenant override, resolver falls back to DEFAULT.
+--
+-- `tenants.persona_override` (JSONB nullable) — per-tenant override of
+-- Blueprint.persona. Sibling slot to engine_phases_override +
+-- engine_phase_stage_map_override (same engine-config family). Primary
+-- config path for design partners post-onboarding.
+--
+-- # Migration discipline carry (KAN-1080 fix-forward lesson)
+--
+-- Per `feedback_schema_prisma_changes_need_explicit_migrate_dev_step`: this
+-- migration file IS the source of truth. CI's deploy-api workflow runs
+-- `npx prisma migrate deploy` (KAN-709 v4 pattern); the migration applies
+-- automatically on next push to main. No manual `prisma generate` step
+-- substitutes for this file existing.
+--
+-- # Drift-strip discipline (KAN-786 / KAN-787 / KAN-1034 history)
+--
+-- `prisma migrate diff` would emit spurious schema drift items along with
+-- the real changes. None applied here — this migration was authored by hand
+-- to be PURELY additive against `tenants` and `blueprints`. Confirming the
+-- items typically stripped:
+--
+--   1. DROP INDEX "knowledge_chunk_embedding_hnsw_idx" — KAN-786, KAN-787.
+--      The HNSW index is real and load-bearing; Prisma can't model it
+--      (custom pgvector index type). Auto-DROP would silently nuke PROD's
+--      vector search; INTENTIONALLY OMITTED.
+--
+--   2. ALTER INDEX tenant_objective_selection_tenant_id_objective_id_…
+--      RENAME TO …. KAN-1034 cosmetic rename; not load-bearing for any code
+--      path; INTENTIONALLY OMITTED to keep this migration purely additive.
+
+-- AlterTable: Blueprint
+ALTER TABLE "blueprints" ADD COLUMN     "persona" JSONB;
+
+-- AlterTable: Tenant
+ALTER TABLE "tenants" ADD COLUMN     "persona_override" JSONB;
