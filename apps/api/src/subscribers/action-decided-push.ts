@@ -30,77 +30,50 @@ import {
   gateAndPublishComposed,
 } from '../../../../packages/api/src/services/message-composer.js';
 import { loadKnowledge } from '../../../../packages/api/src/services/context-assembler.js';
-// KAN-1094 (Cluster IV-B PR II) — Scenario resolution at composer call site.
-// Option B (Phase 1 Q1 lock): re-derive currentEnginePhase + ScenarioTrigger
-// in this subscriber rather than extending ActionDecidedEvent payload.
-// Phase 2.5 escape-hatch to Option A if Tier 2 dashboards show double-compute
-// as material cost (action audit + this re-derive both compute phase).
+// KAN-1098 (Cluster IV-B PR III) — Shared scenario-context helper. Replaces
+// KAN-1094's inline 4-loader resolution block (scenario + persona +
+// engine-phases + brain-service computeCurrentEnginePhase) with a single
+// dynamic-import loader for the consolidated `scenario-resolution-context`
+// helper. Same call site here as the autonomy path at
+// lead-received-push.ts:~2562 dispatchPhase2Send (KAN-1098 wiring) —
+// helper is the single source of truth for the resolution pipeline.
 //
-// Variable-specifier dynamic-import pattern for cross-rootDir scenario/persona/
-// phase modules — same KAN-689 boundary discipline as the BrainServiceModule
-// loader at lead-received-push.ts:486 (TS6059 bypass). The existing
-// message-composer + context-assembler static imports were grandfathered
-// pre-TS6059-strict; new cross-rootDir imports go through loaders.
-import {
-  DEFAULT_SCENARIOS_GENERIC_B2B,
-  type Scenario,
-  type ScenarioTrigger,
-  type BlueprintPersona,
-  type BlueprintEnginePhase,
-} from '@growth/shared';
+// Variable-specifier dynamic-import pattern preserved per KAN-689 cohort
+// hygiene (TS6059 bypass for apps/api → packages/api cross-rootDir).
+import type { Scenario } from '@growth/shared';
 
-interface ScenarioModule {
-  resolveScenario: (
-    scenarios: ReadonlyArray<Scenario>,
-    context: {
-      personaName: string;
+interface ScenarioResolutionContextModule {
+  resolveScenarioContext: (
+    prisma: unknown,
+    input: {
+      tenantId: string;
+      contactId: string;
+      dealId: string;
+      channel: string;
       actionType: string;
-      phase: 'qualify' | 'problem' | 'proof' | 'closing' | null;
-      trigger: ScenarioTrigger | null;
     },
-  ) => Scenario | null;
+  ) => Promise<{
+    // Local-mirror of `ScenarioContext` from
+    // packages/api/src/services/scenario-resolution-context.ts.
+    // Inline rather than imported because a static type import would
+    // pull the helper into apps/api's typecheck graph + trigger TS6059
+    // (KAN-689 cohort cross-rootDir constraint). Variable-specifier
+    // dynamic-import resolution at runtime; type integrity preserved
+    // by lockstep mirroring (same naming-asymmetry discipline as the
+    // MessageShaperModule + MessageComposerModule locals at
+    // lead-received-push.ts).
+    persona: import('@growth/shared').BlueprintPersona;
+    currentEnginePhase: import('@growth/shared').EnginePhaseKey | null;
+    trigger: import('@growth/shared').ScenarioTrigger | null;
+    scenario: import('@growth/shared').Scenario | null;
+  }>;
 }
-interface PersonaModule {
-  resolveBlueprintPersona: (prisma: unknown, tenantId: string) => Promise<BlueprintPersona>;
-}
-interface EnginePhasesModule {
-  resolveEnginePhases: (prisma: unknown, tenantId: string) => Promise<BlueprintEnginePhase[]>;
-}
-interface BrainServiceModule {
-  computeCurrentEnginePhase: (input: {
-    gapState: unknown[];
-    enginePhases: BlueprintEnginePhase[];
-  }) => { currentPhase: { key: 'qualify' | 'problem' | 'proof' | 'closing' } };
-}
-
-let _scenarioModule: ScenarioModule | null = null;
-let _personaModule: PersonaModule | null = null;
-let _enginePhasesModule: EnginePhasesModule | null = null;
-let _brainServiceModule: BrainServiceModule | null = null;
-
-async function loadScenarioModule(): Promise<ScenarioModule> {
-  if (_scenarioModule) return _scenarioModule;
-  const spec = '../../../../packages/api/src/services/scenario-resolver.js';
-  _scenarioModule = (await import(spec)) as ScenarioModule;
-  return _scenarioModule;
-}
-async function loadPersonaModule(): Promise<PersonaModule> {
-  if (_personaModule) return _personaModule;
-  const spec = '../../../../packages/api/src/services/blueprint-persona-resolver.js';
-  _personaModule = (await import(spec)) as PersonaModule;
-  return _personaModule;
-}
-async function loadEnginePhasesModule(): Promise<EnginePhasesModule> {
-  if (_enginePhasesModule) return _enginePhasesModule;
-  const spec = '../../../../packages/api/src/services/blueprint-engine-phases-resolver.js';
-  _enginePhasesModule = (await import(spec)) as EnginePhasesModule;
-  return _enginePhasesModule;
-}
-async function loadBrainServiceModule(): Promise<BrainServiceModule> {
-  if (_brainServiceModule) return _brainServiceModule;
-  const spec = '../../../../packages/api/src/services/brain-service.js';
-  _brainServiceModule = (await import(spec)) as BrainServiceModule;
-  return _brainServiceModule;
+let _scenarioResolutionContextModule: ScenarioResolutionContextModule | null = null;
+async function loadScenarioResolutionContextModule(): Promise<ScenarioResolutionContextModule> {
+  if (_scenarioResolutionContextModule) return _scenarioResolutionContextModule;
+  const spec = '../../../../packages/api/src/services/scenario-resolution-context.js';
+  _scenarioResolutionContextModule = (await import(spec)) as ScenarioResolutionContextModule;
+  return _scenarioResolutionContextModule;
 }
 // KAN-1005 M2-5 — human-review sampling lives in apps/api/src/lib/
 // (M2-4 pattern). Same-rootDir import; engine never sees this module
@@ -348,64 +321,35 @@ actionDecidedPushApp.post('/action-decided', async (c) => {
       );
     }
 
-    // KAN-1094 (Cluster IV-B PR II) — Scenario resolution. Option B re-derives
-    // currentEnginePhase + trigger at the composer call site (Phase 1 Q1 lock).
-    // Best-effort: resolution failures fall back to null context → resolver
-    // returns null → composer falls back to current free-form path (sparse-data
-    // discipline pin from epic).
+    // KAN-1098 (Cluster IV-B PR III) — Shared scenario-context helper.
+    // Replaces KAN-1094's inline 4-step resolution block. Helper internally
+    // writes its own `scenario_resolution_context.failed` audit row on
+    // failure; subscriber owns the kan-1094-prefixed scenario-matched log
+    // line so the Tier 2 dashboard can disaggregate composer-path vs
+    // shaper-path emission.
     let scenario: Scenario | undefined;
     try {
-      // Step 1: trigger derivation via Engagement count (Phase 1 Q4 lock).
-      // Only `initial_inbound` + `reply` derived in v1; other triggers null.
-      const counts = await prisma.engagement.groupBy({
-        by: ['engagementType'],
-        where: { contactId: event.contactId },
-        _count: true,
+      const { resolveScenarioContext } = await loadScenarioResolutionContextModule();
+      const context = await resolveScenarioContext(prisma, {
+        tenantId: event.tenantId,
+        contactId: event.contactId,
+        // ActionDecidedEvent doesn't carry dealId (legacy KAN-660 shape);
+        // pass empty so the helper's audit payload still typechecks.
+        // Composer-path scenarios don't key off dealId today.
+        dealId: '',
+        channel: 'email',
+        actionType: event.action.actionType,
       });
-      const inboundCount =
-        counts.find((c) => c.engagementType === 'email_received')?._count ?? 0;
-      const outboundCount =
-        counts.find((c) => c.engagementType === 'email_send')?._count ?? 0;
-      const trigger: ScenarioTrigger | null =
-        outboundCount === 0 && inboundCount > 0
-          ? 'initial_inbound'
-          : outboundCount > 0 && inboundCount > 0
-            ? 'reply'
-            : null; // operator_initiated + no_touch_followup deferred to v2
-
-      // Step 2: currentEnginePhase re-derivation. Load gap state + phase
-      // config; compute via the same primitives lead-received-push uses.
-      const gapState = await prisma.contactSubObjectiveGapState.findMany({
-        where: { contactId: event.contactId },
-      });
-      const { resolveEnginePhases } = await loadEnginePhasesModule();
-      const enginePhases = await resolveEnginePhases(prisma, event.tenantId);
-      const { computeCurrentEnginePhase } = await loadBrainServiceModule();
-      const phaseSnapshot = computeCurrentEnginePhase({
-        gapState,
-        enginePhases,
-      });
-
-      // Step 3: persona resolution → personaName for tuple match.
-      const { resolveBlueprintPersona } = await loadPersonaModule();
-      const persona = await resolveBlueprintPersona(prisma, event.tenantId);
-
-      // Step 4: scenario resolution.
-      const { resolveScenario } = await loadScenarioModule();
-      scenario =
-        resolveScenario(DEFAULT_SCENARIOS_GENERIC_B2B, {
-          personaName: persona.name,
-          actionType: event.action.actionType,
-          phase: phaseSnapshot.currentPhase.key,
-          trigger,
-        }) ?? undefined;
+      scenario = context.scenario ?? undefined;
       if (scenario) {
         console.log(
-          `[action-decided-push] kan-1094 scenario-matched decisionId=${event.decisionId} persona=${persona.name} actionType=${event.action.actionType} phase=${phaseSnapshot.currentPhase.key} trigger=${trigger}`,
+          `[action-decided-push] kan-1094 scenario-matched decisionId=${event.decisionId} persona=${context.persona.name} actionType=${event.action.actionType} phase=${context.currentEnginePhase} trigger=${context.trigger}`,
         );
       }
     } catch (err) {
-      // Non-blocking — log warn + proceed with composer free-form fallback.
+      // Defensive — helper already has its own try/catch + audit-row
+      // posture. This outer guard is belt-and-suspenders for loader-load
+      // failures (TS6059 cohort variable-specifier dynamic import).
       console.warn(
         `[action-decided-push] kan-1094 scenario-resolution-failed decisionId=${event.decisionId} err=${(err as Error)?.message ?? String(err)} — falling back to free-form composer`,
       );

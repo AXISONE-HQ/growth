@@ -508,6 +508,12 @@ interface MessageShaperModule {
       // KAN-828 — duck-typed clients for Knowledge Layer retrieval.
       redis?: unknown;
       openai?: unknown;
+      // KAN-1098 (Cluster IV-B PR III) — scenario + persona threaded
+      // through to buildShapePrompt. Lockstep with the canonical
+      // ShapeMessageOptions surface at packages/api/src/services/
+      // message-shaper.ts:~79 — any extension there must mirror here.
+      scenario?: import('@growth/shared').Scenario | null;
+      persona?: import('@growth/shared').BlueprintPersona;
     },
   ) => Promise<
     | {
@@ -612,6 +618,37 @@ async function loadMessageComposerModule(): Promise<MessageComposerModule> {
   const spec = '../../../../packages/api/src/services/message-composer.js';
   _messageComposerModule = (await import(spec)) as MessageComposerModule;
   return _messageComposerModule;
+}
+
+// KAN-1098 (Cluster IV-B PR III) — shared scenario-resolution-context helper.
+// Variable-specifier dynamic-import (cross-rootDir KAN-689 cohort hygiene).
+// Sibling caller at action-decided-push.ts uses the same helper — single
+// source of truth for the persona + phase + trigger + scenario resolution
+// pipeline. See packages/api/src/services/scenario-resolution-context.ts
+// file-header for the enumerated-callers discipline.
+interface ScenarioResolutionContextModule {
+  resolveScenarioContext: (
+    prisma: unknown,
+    input: {
+      tenantId: string;
+      contactId: string;
+      dealId: string;
+      channel: string;
+      actionType: string;
+    },
+  ) => Promise<{
+    persona: import('@growth/shared').BlueprintPersona;
+    currentEnginePhase: import('@growth/shared').EnginePhaseKey | null;
+    trigger: import('@growth/shared').ScenarioTrigger | null;
+    scenario: import('@growth/shared').Scenario | null;
+  }>;
+}
+let _scenarioResolutionContextModule: ScenarioResolutionContextModule | null = null;
+async function loadScenarioResolutionContextModule(): Promise<ScenarioResolutionContextModule> {
+  if (_scenarioResolutionContextModule) return _scenarioResolutionContextModule;
+  const spec = '../../../../packages/api/src/services/scenario-resolution-context.js';
+  _scenarioResolutionContextModule = (await import(spec)) as ScenarioResolutionContextModule;
+  return _scenarioResolutionContextModule;
 }
 
 interface PubSubClientModule {
@@ -2564,6 +2601,55 @@ async function dispatchPhase2Send(
   eventId: string,
   brainDecision: Phase2BrainDecision,
 ): Promise<void> {
+  // KAN-1098 (Cluster IV-B PR III) — Step 0: resolve scenario + persona
+  // context BEFORE shapeMessage so the resolved tuple can be threaded into
+  // the shaper's prompt builder. Resolution requires tenantId + contactId;
+  // shaper's own deal lookup at message-shaper.ts:~181 happens later and
+  // doesn't accept inputs, so we do a small focused deal lookup here.
+  // Helper is best-effort + writes its own failure audit row — wrap the
+  // loader-load step in try/catch for defense-in-depth against TS6059
+  // cohort variable-specifier import surprises.
+  //
+  // The dual deal fetch (this small select + shaper's full include at
+  // message-shaper.ts:~181) is accepted per Phase 1 Q2 lock — indexed PK
+  // query, negligible vs the LLM round-trip already paid.
+  let scenarioContext: {
+    persona: import('@growth/shared').BlueprintPersona;
+    currentEnginePhase: import('@growth/shared').EnginePhaseKey | null;
+    trigger: import('@growth/shared').ScenarioTrigger | null;
+    scenario: import('@growth/shared').Scenario | null;
+  } | null = null;
+  try {
+    const dealForContext = await prisma.deal.findUnique({
+      where: { id: dealId },
+      select: { tenantId: true, contactId: true },
+    });
+    if (dealForContext) {
+      const { resolveScenarioContext } = await loadScenarioResolutionContextModule();
+      scenarioContext = await resolveScenarioContext(prisma, {
+        tenantId: dealForContext.tenantId,
+        contactId: dealForContext.contactId,
+        dealId,
+        channel: 'email',
+        actionType: brainDecision.nextBestAction.type,
+      });
+      if (scenarioContext.scenario) {
+        // Telemetry parity with action-decided-push composer-path emission
+        // — Tier 2 dashboard disaggregates kan-1094 (composer) vs kan-1098
+        // (shaper) emissions.
+        console.log(
+          `[lead-received-push] kan-1098 scenario-matched dealId=${dealId} eventId=${eventId} persona=${scenarioContext.persona.name} actionType=${brainDecision.nextBestAction.type} phase=${scenarioContext.currentEnginePhase} trigger=${scenarioContext.trigger}`,
+        );
+      }
+    }
+  } catch (err) {
+    // Defensive — helper has its own try/catch + audit-row writer; this
+    // outer guard catches only loader-load / deal-fetch failures.
+    console.warn(
+      `[lead-received-push] kan-1098 scenario-resolution-failed dealId=${dealId} eventId=${eventId} err=${(err as Error)?.message ?? String(err)} — falling back to free-form shaper`,
+    );
+  }
+
   // 1. Shape the message via KAN-797a. Pass the pre-computed brainDecision
   //    to avoid double Brain eval. KAN-828: inject redis + openai so the
   //    Knowledge Layer retrieval HITs the cache from Brain's earlier call
@@ -2571,7 +2657,16 @@ async function dispatchPhase2Send(
   const { shapeMessage } = await loadMessageShaperModule();
   const redis = getRedisClient();
   const openai = getOpenAIClient();
-  const shapeResult = await shapeMessage(prisma, dealId, { brainDecision, redis, openai });
+  const shapeResult = await shapeMessage(prisma, dealId, {
+    brainDecision,
+    redis,
+    openai,
+    // KAN-1098 — thread the resolved scenario + persona through to the
+    // shaper's buildShapePrompt. `null` / `undefined` are safe defaults
+    // — buildShapePrompt omits the corresponding sections.
+    scenario: scenarioContext?.scenario ?? null,
+    ...(scenarioContext?.persona ? { persona: scenarioContext.persona } : {}),
+  });
   if (shapeResult.type !== 'shaped') {
     console.warn(
       `[lead-received-push] phase-2-shape-no-shape dealId=${dealId} eventId=${eventId} reason=${shapeResult.reason}`,
