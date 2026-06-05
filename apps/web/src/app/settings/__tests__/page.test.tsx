@@ -54,6 +54,16 @@ vi.mock("@/lib/api", () => ({
   },
 }));
 
+// KAN-1100 — AuthContext mock. Default returns `user: null` so the
+// admin-only Cognitive Metrics moverLink is filtered out, preserving the
+// pre-KAN-1100 5-link contract for the existing KAN-993 D.3 tests below.
+// The KAN-1100 describe block overrides this mock per-test to exercise
+// admin / non-admin / unauthenticated branches of the moverLinks filter.
+const useAuthMock = vi.fn();
+vi.mock("@/lib/AuthContext", () => ({
+  useAuth: () => useAuthMock(),
+}));
+
 beforeEach(() => {
   getAIConfig.mockReset();
   updateAIConfig.mockReset();
@@ -63,6 +73,7 @@ beforeEach(() => {
   getNotifications.mockReset();
   updateNotification.mockReset();
   getSecurity.mockReset();
+  useAuthMock.mockReset();
 
   getAIConfig.mockResolvedValue(aiConfig);
   listChannels.mockResolvedValue([]);
@@ -80,6 +91,10 @@ beforeEach(() => {
     auditRetentionDays: 365,
     gdprCompliant: true,
   });
+
+  // KAN-1100 default — unauthenticated. The admin-only Cognitive Metrics
+  // moverLink is filtered out; existing KAN-993 D.3 5-link contracts hold.
+  useAuthMock.mockReturnValue({ user: null, loading: false });
 });
 
 describe("KAN-990 — SettingsPage (DS v1 restyle)", () => {
@@ -193,5 +208,50 @@ describe("KAN-990 — SettingsPage (DS v1 restyle)", () => {
     const teamTab = screen.getByRole("tab", { name: /Team & roles/i });
     expect(teamTab.textContent).toMatch(/Team & roles/);
     expect(teamTab.textContent).not.toMatch(/Team & Roles/);
+  });
+});
+
+// KAN-1100 — Cognitive Metrics moverLink admin gating
+//
+// Sentinel coverage for the first admin-only moverLink. The `.filter()`
+// idiom at the render site (`!m.adminOnly || user?.role === 'admin'`)
+// becomes the canonical precedent for future admin-only moverLinks; these
+// tests lock that idiom in machine-enforced regression coverage so future
+// changes to the filter shape are caught at CI rather than UI smoke.
+describe("KAN-1100 — Cognitive Metrics moverLink admin gating", () => {
+  it("renders the Cognitive Metrics moverLink when user.role === 'admin'", () => {
+    useAuthMock.mockReturnValue({
+      user: { role: "admin", email: "admin@test.local" },
+      loading: false,
+    });
+    render(<SettingsPage />);
+    const nav = screen.getByRole("navigation", { name: /More settings/i });
+    const link = nav.querySelector('a[href="/settings/cognitive-metrics"]');
+    expect(link).not.toBeNull();
+    expect(link?.textContent).toMatch(/Cognitive Metrics/);
+  });
+
+  it("does NOT render the Cognitive Metrics moverLink when user.role === 'member'", () => {
+    useAuthMock.mockReturnValue({
+      user: { role: "member", email: "member@test.local" },
+      loading: false,
+    });
+    render(<SettingsPage />);
+    const nav = screen.getByRole("navigation", { name: /More settings/i });
+    expect(nav.querySelector('a[href="/settings/cognitive-metrics"]')).toBeNull();
+    // Sibling moverLinks remain visible — the 5 non-admin links should all
+    // be present, confirming the filter only removes the admin-only entry.
+    expect(nav.querySelector('a[href="/settings/objectives"]')).not.toBeNull();
+    expect(nav.querySelector('a[href="/settings/knowledge"]')).not.toBeNull();
+    expect(nav.querySelector('a[href="/imports"]')).not.toBeNull();
+    expect(nav.querySelector('a[href="/audit"]')).not.toBeNull();
+    expect(nav.querySelector('a[href="/settings/account/identity"]')).not.toBeNull();
+  });
+
+  it("does NOT render the Cognitive Metrics moverLink when user is null (unauthenticated)", () => {
+    useAuthMock.mockReturnValue({ user: null, loading: false });
+    render(<SettingsPage />);
+    const nav = screen.getByRole("navigation", { name: /More settings/i });
+    expect(nav.querySelector('a[href="/settings/cognitive-metrics"]')).toBeNull();
   });
 });
