@@ -27,6 +27,12 @@ export * from "./engine-phase-stage-map-types.js";
 // (empty toneDefaults + brandAttributes + voiceExamples per discipline-pin-1; cognitive
 // defaults stay unopinionated, populate per-tenant during onboarding).
 export * from "./persona-types.js";
+// KAN-1094 (Cluster IV-B PR II) — Scenario tuple registry types + DEFAULT_SCENARIOS_GENERIC_B2B
+// (8 canonical tuples for send_follow_up × {4 phases} × {initial_inbound, reply} per Phase 1 Q5 lock).
+// Other tuples (operator_initiated + no_touch_followup, or other actionTypes) fall back to composer
+// free-form path until activated. Q2 (ii) lock: generic "concrete proof point" phrasing in PROOF
+// scenarios until KAN-828 corpus seeded (KAN-1095 deferred-activation ticket).
+export * from "./scenario-types.js";
 // M3-2.5a Inbound Reply Correlation — known email providers + soft validator + sidecar shape.
 export * from "./email-providers.js";
 // M3-2.5b Inbound Reply Correlation — RFC 5322 Message-ID/References normalization, shared between webhook publish + consumer lookup.
