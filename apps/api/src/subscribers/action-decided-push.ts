@@ -30,6 +30,78 @@ import {
   gateAndPublishComposed,
 } from '../../../../packages/api/src/services/message-composer.js';
 import { loadKnowledge } from '../../../../packages/api/src/services/context-assembler.js';
+// KAN-1094 (Cluster IV-B PR II) — Scenario resolution at composer call site.
+// Option B (Phase 1 Q1 lock): re-derive currentEnginePhase + ScenarioTrigger
+// in this subscriber rather than extending ActionDecidedEvent payload.
+// Phase 2.5 escape-hatch to Option A if Tier 2 dashboards show double-compute
+// as material cost (action audit + this re-derive both compute phase).
+//
+// Variable-specifier dynamic-import pattern for cross-rootDir scenario/persona/
+// phase modules — same KAN-689 boundary discipline as the BrainServiceModule
+// loader at lead-received-push.ts:486 (TS6059 bypass). The existing
+// message-composer + context-assembler static imports were grandfathered
+// pre-TS6059-strict; new cross-rootDir imports go through loaders.
+import {
+  DEFAULT_SCENARIOS_GENERIC_B2B,
+  type Scenario,
+  type ScenarioTrigger,
+  type BlueprintPersona,
+  type BlueprintEnginePhase,
+} from '@growth/shared';
+
+interface ScenarioModule {
+  resolveScenario: (
+    scenarios: ReadonlyArray<Scenario>,
+    context: {
+      personaName: string;
+      actionType: string;
+      phase: 'qualify' | 'problem' | 'proof' | 'closing' | null;
+      trigger: ScenarioTrigger | null;
+    },
+  ) => Scenario | null;
+}
+interface PersonaModule {
+  resolveBlueprintPersona: (prisma: unknown, tenantId: string) => Promise<BlueprintPersona>;
+}
+interface EnginePhasesModule {
+  resolveEnginePhases: (prisma: unknown, tenantId: string) => Promise<BlueprintEnginePhase[]>;
+}
+interface BrainServiceModule {
+  computeCurrentEnginePhase: (input: {
+    gapState: unknown[];
+    enginePhases: BlueprintEnginePhase[];
+  }) => { currentPhase: { key: 'qualify' | 'problem' | 'proof' | 'closing' } };
+}
+
+let _scenarioModule: ScenarioModule | null = null;
+let _personaModule: PersonaModule | null = null;
+let _enginePhasesModule: EnginePhasesModule | null = null;
+let _brainServiceModule: BrainServiceModule | null = null;
+
+async function loadScenarioModule(): Promise<ScenarioModule> {
+  if (_scenarioModule) return _scenarioModule;
+  const spec = '../../../../packages/api/src/services/scenario-resolver.js';
+  _scenarioModule = (await import(spec)) as ScenarioModule;
+  return _scenarioModule;
+}
+async function loadPersonaModule(): Promise<PersonaModule> {
+  if (_personaModule) return _personaModule;
+  const spec = '../../../../packages/api/src/services/blueprint-persona-resolver.js';
+  _personaModule = (await import(spec)) as PersonaModule;
+  return _personaModule;
+}
+async function loadEnginePhasesModule(): Promise<EnginePhasesModule> {
+  if (_enginePhasesModule) return _enginePhasesModule;
+  const spec = '../../../../packages/api/src/services/blueprint-engine-phases-resolver.js';
+  _enginePhasesModule = (await import(spec)) as EnginePhasesModule;
+  return _enginePhasesModule;
+}
+async function loadBrainServiceModule(): Promise<BrainServiceModule> {
+  if (_brainServiceModule) return _brainServiceModule;
+  const spec = '../../../../packages/api/src/services/brain-service.js';
+  _brainServiceModule = (await import(spec)) as BrainServiceModule;
+  return _brainServiceModule;
+}
 // KAN-1005 M2-5 — human-review sampling lives in apps/api/src/lib/
 // (M2-4 pattern). Same-rootDir import; engine never sees this module
 // so no new TS6059 in the KAN-689 cohort.
@@ -276,6 +348,69 @@ actionDecidedPushApp.post('/action-decided', async (c) => {
       );
     }
 
+    // KAN-1094 (Cluster IV-B PR II) — Scenario resolution. Option B re-derives
+    // currentEnginePhase + trigger at the composer call site (Phase 1 Q1 lock).
+    // Best-effort: resolution failures fall back to null context → resolver
+    // returns null → composer falls back to current free-form path (sparse-data
+    // discipline pin from epic).
+    let scenario: Scenario | undefined;
+    try {
+      // Step 1: trigger derivation via Engagement count (Phase 1 Q4 lock).
+      // Only `initial_inbound` + `reply` derived in v1; other triggers null.
+      const counts = await prisma.engagement.groupBy({
+        by: ['engagementType'],
+        where: { contactId: event.contactId },
+        _count: true,
+      });
+      const inboundCount =
+        counts.find((c) => c.engagementType === 'email_received')?._count ?? 0;
+      const outboundCount =
+        counts.find((c) => c.engagementType === 'email_send')?._count ?? 0;
+      const trigger: ScenarioTrigger | null =
+        outboundCount === 0 && inboundCount > 0
+          ? 'initial_inbound'
+          : outboundCount > 0 && inboundCount > 0
+            ? 'reply'
+            : null; // operator_initiated + no_touch_followup deferred to v2
+
+      // Step 2: currentEnginePhase re-derivation. Load gap state + phase
+      // config; compute via the same primitives lead-received-push uses.
+      const gapState = await prisma.contactSubObjectiveGapState.findMany({
+        where: { contactId: event.contactId },
+      });
+      const { resolveEnginePhases } = await loadEnginePhasesModule();
+      const enginePhases = await resolveEnginePhases(prisma, event.tenantId);
+      const { computeCurrentEnginePhase } = await loadBrainServiceModule();
+      const phaseSnapshot = computeCurrentEnginePhase({
+        gapState,
+        enginePhases,
+      });
+
+      // Step 3: persona resolution → personaName for tuple match.
+      const { resolveBlueprintPersona } = await loadPersonaModule();
+      const persona = await resolveBlueprintPersona(prisma, event.tenantId);
+
+      // Step 4: scenario resolution.
+      const { resolveScenario } = await loadScenarioModule();
+      scenario =
+        resolveScenario(DEFAULT_SCENARIOS_GENERIC_B2B, {
+          personaName: persona.name,
+          actionType: event.action.actionType,
+          phase: phaseSnapshot.currentPhase.key,
+          trigger,
+        }) ?? undefined;
+      if (scenario) {
+        console.log(
+          `[action-decided-push] kan-1094 scenario-matched decisionId=${event.decisionId} persona=${persona.name} actionType=${event.action.actionType} phase=${phaseSnapshot.currentPhase.key} trigger=${trigger}`,
+        );
+      }
+    } catch (err) {
+      // Non-blocking — log warn + proceed with composer free-form fallback.
+      console.warn(
+        `[action-decided-push] kan-1094 scenario-resolution-failed decisionId=${event.decisionId} err=${(err as Error)?.message ?? String(err)} — falling back to free-form composer`,
+      );
+    }
+
     const composed = await composeMessage(prisma, {
       tenantId: event.tenantId,
       contactId: event.contactId,
@@ -284,6 +419,7 @@ actionDecidedPushApp.post('/action-decided', async (c) => {
       publicWebhookBaseUrl,
       knowledge,
       ...(gapContext ? { gapContext } : {}),
+      ...(scenario ? { scenario } : {}),
     });
 
     const connectionId =

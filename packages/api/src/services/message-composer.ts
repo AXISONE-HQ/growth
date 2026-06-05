@@ -69,6 +69,18 @@ export interface ComposeMessageInput {
   /** Per-MicroObjective progress: `{ moId: { completed, completedAt, evidence } }`. M3-1b adds `gapContext` below. */
   microObjectiveProgress?: Record<string, unknown>;
   gapContext?: { subObjectiveKey: string; label: string; currentState?: 'unknown' | 'partial'; valueIfPartial?: string; compound?: boolean }; // M3-1b discovery
+  /**
+   * KAN-1094 (Cluster IV-B PR II) — optional matched Scenario.
+   * When provided, the composer injects `scenario.promptBlock` into the
+   * userPrompt as a "Scenario guidance" block (structural alignment
+   * instruction for the LLM). Resolution happens at the call site
+   * (action-decided-push.ts:279) via `resolveScenario(registry, context)`
+   * where context = { personaName, actionType, phase, trigger }. When
+   * resolver returns null (non-matched tuple OR null trigger), this field
+   * stays undefined and composer falls back to current free-form path
+   * per sparse-data discipline pin (epic Phase 1).
+   */
+  scenario?: import('@growth/shared').Scenario;
 }
 
 /** KAN-698: render knowledge hits as a compact prompt block. */
@@ -160,13 +172,21 @@ export async function composeMessage(
 
   const knowledgeBlock = formatKnowledgeBlock(knowledge ?? []);
   const pipelineBlock = formatPipelineBlock(pipeline, stage, microObjectives, microObjectiveProgress);
+  // KAN-1094 (Cluster IV-B PR II) — Scenario guidance block. When resolved
+  // (matched tuple per scenario-resolver), the structural promptBlock from
+  // the matched Scenario injects after the discovery block + before the
+  // knowledge block. Empty string when no scenario matched → falls back
+  // to current free-form composer path per sparse-data discipline pin.
+  const scenarioBlock = input.scenario
+    ? `\nScenario guidance (structural shape for this message):\n${input.scenario.promptBlock}\n`
+    : '';
 
   const userPrompt = `Compose a short email (3-5 sentences) based on this instruction and context.
 
 Instruction: "${instruction}"
 Recipient first name: ${firstName}
 Brand voice: ${tone}
-${pipelineBlock}${formatDiscoveryBlock(input.gapContext)}${knowledgeBlock}
+${pipelineBlock}${formatDiscoveryBlock(input.gapContext)}${scenarioBlock}${knowledgeBlock}
 Respond with a JSON object with these fields:
 1. "subject" — a natural subject line that includes the recipient's first name. Keep under 60 characters.
 2. "body" — the email body, plain text, 3-5 sentences, reflecting the instruction intent and the brand voice. Sign off with a warm closing but no name (the connector layer appends sender identity).
