@@ -1162,13 +1162,25 @@ describe("KAN-815 — Phase 2 wiring (Brain trigger framework + consumer dispatc
     expect(shapeMessageMock).toHaveBeenCalledOnce();
     // Channel skip happens BEFORE policy / connection lookup / publish.
     expect(evaluateSendPolicyMock).not.toHaveBeenCalled();
-    // KAN-814: supersession lookup at top of wirePhase2Consumers calls
-    // dealFindUnique ONCE (just for contactId). The DISPATCH lookup
-    // (full shape) doesn't happen because SMS short-circuits before
-    // dispatchPhase2Send's deal-load. So exactly 1 call, not 0.
-    expect(dealFindUniqueMock).toHaveBeenCalledOnce();
+    // KAN-814 + KAN-1098: dealFindUnique fires TWICE on the SMS short-circuit
+    // path:
+    //   call 0 — supersession lookup at top of wirePhase2Consumers
+    //            (`select: { contactId: true }`, pre-KAN-1098)
+    //   call 1 — KAN-1098 scenario-context Step 0 inside dispatchPhase2Send
+    //            (`select: { tenantId: true, contactId: true }`) — fires
+    //            BEFORE the shaper's channel filter so it runs even on
+    //            non-email shapes; helper returns scenario:null for non-email
+    //            and the call doesn't bear on dispatch behavior, but the
+    //            mock spy still records it
+    // The dispatchPhase2Send recipient-load (full deal+contact include) is
+    // STILL skipped because SMS short-circuits before that step. So exactly
+    // 2 calls, not 3.
+    expect(dealFindUniqueMock).toHaveBeenCalledTimes(2);
     expect(dealFindUniqueMock.mock.calls[0]![0]).toMatchObject({
       select: { contactId: true },
+    });
+    expect(dealFindUniqueMock.mock.calls[1]![0]).toMatchObject({
+      select: { tenantId: true, contactId: true },
     });
     expect(publishActionSendMock).not.toHaveBeenCalled();
     expect(decisionCreateMock).not.toHaveBeenCalled();

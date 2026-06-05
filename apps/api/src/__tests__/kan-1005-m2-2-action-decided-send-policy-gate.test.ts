@@ -83,14 +83,31 @@ vi.mock('../lib/oidc-pubsub-verify.js', () => ({
 }));
 
 // ── Prisma mock — contact lookup + auditLog/deferredSend writes ─────
+// KAN-1098 fixup: the action-decided-push allow-path now invokes the shared
+// resolveScenarioContext helper, which in turn calls resolveBlueprintPersona
+// (tenant.findUnique), engagement.groupBy (trigger derivation), and
+// contactSubObjectiveGapState.findMany (current-phase derivation). Without
+// these stubs the helper throws → resolver writes blueprint_persona.resolve_failed
+// audit row → the allow-path's "no AuditLog writes" invariant breaks. Stub each
+// to a benign empty/null return so the helper hits its "no persona override +
+// no blueprint persona → DEFAULT_PERSONA_GENERIC_B2B" branch silently, and
+// scenario lookup falls through (no trigger derivation match → scenario:null).
+// The composer free-form fallback runs identically to pre-KAN-1098.
 const contactFindFirstMock = vi.fn();
 const auditLogCreateMock = vi.fn(async () => ({ id: 'audit-row-1' }));
 const deferredSendCreateMock = vi.fn(async () => ({ id: 'deferred-row-1' }));
+const tenantFindUniqueMock = vi.fn(async () => null);
+const engagementGroupByMock = vi.fn(async () => []);
+const contactSubObjectiveGapStateFindManyMock = vi.fn(async () => []);
 vi.mock('../prisma.js', () => ({
   prisma: {
     contact: { findFirst: contactFindFirstMock },
     auditLog: { create: auditLogCreateMock },
     deferredSend: { create: deferredSendCreateMock },
+    // KAN-1098 helper surface — see file-header comment above.
+    tenant: { findUnique: tenantFindUniqueMock },
+    engagement: { groupBy: engagementGroupByMock },
+    contactSubObjectiveGapState: { findMany: contactSubObjectiveGapStateFindManyMock },
   },
 }));
 
