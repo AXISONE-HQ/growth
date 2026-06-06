@@ -2197,25 +2197,29 @@ const dashboardRouter = router({
       escalations,
       auditLogsToday,
     ] = await Promise.all([
-      ctx.prisma.contact.count({ where: { tenant_id: ctx.tenantId } }),
+      ctx.prisma.contact.count({ where: { tenantId: ctx.tenantId } }),
+      // KAN-1104 cascade fix: Objective model has no `status` field (verified
+      // schema L442-466). Using `isActive: true` as temporary approximation —
+      // counts currently-active objectives in tenant catalog. Proper completion
+      // semantic (via ContactObjectiveStack or Outcome) tracked at KAN-1105.
       ctx.prisma.objective.count({
-        where: { tenant_id: ctx.tenantId, status: "completed" },
+        where: { tenantId: ctx.tenantId, isActive: true },
       }),
       ctx.prisma.action.count({
         where: {
-          tenant_id: ctx.tenantId,
-          created_at: {
+          tenantId: ctx.tenantId,
+          createdAt: {
             gte: new Date(new Date().setHours(0, 0, 0, 0)),
           },
         },
       }),
       ctx.prisma.escalation.findMany({
-        where: { tenant_id: ctx.tenantId },
+        where: { tenantId: ctx.tenantId },
       }),
       ctx.prisma.auditLog.findMany({
         where: {
-          tenant_id: ctx.tenantId,
-          created_at: {
+          tenantId: ctx.tenantId,
+          createdAt: {
             gte: new Date(new Date().setHours(0, 0, 0, 0)),
           },
         },
