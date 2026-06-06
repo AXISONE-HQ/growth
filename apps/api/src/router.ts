@@ -2521,133 +2521,16 @@ const dashboardRouter = router({
   // BrainSnapshot rows + ZERO Blueprint rows. Empty-state branch will fire
   // on day-1 deploy. UI auto-evolves as Blueprint + BrainSnapshot data flows.
   getBrainLayers: protectedProcedure.query(async ({ ctx }) => {
-    // Read tenant + Blueprint (single Prisma call; tenant has blueprintId
-    // FK to Blueprint).
-    const tenant = await ctx.prisma.tenant.findUnique({
-      where: { id: ctx.tenantId },
-      select: {
-        blueprintId: true,
-        blueprint: {
-          select: { isActive: true, vertical: true },
-        },
-      },
-    });
-
-    // Item 5 HYBRID empty-state: blueprintId IS NULL → empty-state branch fires
-    // for entire panel. Honest Doctrine 5 framing: "engine has no starting
-    // model yet". The UI consumes `blueprint.isActive = null` as the empty
-    // signal.
-    if (!tenant?.blueprintId || !tenant.blueprint) {
-      return {
-        blueprint: { isActive: null as boolean | null, vertical: null as string | null },
-        companyTruth: { populated: 0, total: 7, pct: 0 },
-        behavioralLearning: { pct: 0 },
-        outcomeLearning: { pct: 0 },
-        overallScore: null as number | null,
-        gaps: [] as Array<{ id: string; message: string; severity: 'info' | 'warning' }>,
-      };
-    }
-
-    // Read latest BrainSnapshot (orderBy version desc; null when not yet
-    // written — Phase 1.5 finding: AxisOne PROD has none today).
-    const snapshot = await ctx.prisma.brainSnapshot.findFirst({
-      where: { tenantId: ctx.tenantId },
-      orderBy: { version: 'desc' },
-      select: { companyTruth: true, behavioralModel: true, outcomeModel: true },
-    });
-
-    // Layer 2 — Company Truth: 7 canonical categories per
-    // packages/api/src/services/company-truth.ts:29-37 Zod enum.
-    const CT_CATEGORIES = ['products', 'pricing', 'positioning', 'constraints', 'team', 'process', 'custom'] as const;
-    const ct = (snapshot?.companyTruth ?? {}) as Record<string, unknown>;
-    const isPopulated = (val: unknown): boolean => {
-      if (val == null) return false;
-      if (Array.isArray(val)) return val.length > 0;
-      if (typeof val === 'object') return Object.keys(val as object).length > 0;
-      if (typeof val === 'string') return val.length > 0;
-      return true;
-    };
-    const ctPopulated = CT_CATEGORIES.filter((cat) => isPopulated(ct[cat])).length;
-    const ctPct = Math.round((ctPopulated / CT_CATEGORIES.length) * 100);
-
-    // Layer 3 — Behavioral Learning: behavioralModel JSON top-level populated
-    // keys. Future-ready: empirical JSON shape pending first BrainSnapshot
-    // write. Heuristic: count non-empty top-level keys; cap at 5 expected
-    // keys for percentage normalization.
-    const bm = (snapshot?.behavioralModel ?? {}) as Record<string, unknown>;
-    const BM_EXPECTED = 5; // conservative denominator pending Phase 1.5 PROD writes
-    const bmPopulated = Object.values(bm).filter(isPopulated).length;
-    const bmPct = Math.min(100, Math.round((bmPopulated / BM_EXPECTED) * 100));
-
-    // Layer 4 — Outcome Learning: same pattern as Layer 3.
-    const om = (snapshot?.outcomeModel ?? {}) as Record<string, unknown>;
-    const OM_EXPECTED = 5;
-    const omPopulated = Object.values(om).filter(isPopulated).length;
-    const omPct = Math.min(100, Math.round((omPopulated / OM_EXPECTED) * 100));
-
-    // Overall Intelligence Score HYBRID:
-    // - isActive=false → Doctrine-gated cap 25
-    // - isActive=true → simple average of 4 layers (Blueprint = 100 when active)
-    const blueprintPct = tenant.blueprint.isActive ? 100 : 0;
-    const rawAvg = (blueprintPct + ctPct + bmPct + omPct) / 4;
-    const overallScore = tenant.blueprint.isActive
-      ? Math.round(rawAvg)
-      : Math.min(25, Math.round(rawAvg));
-
-    // Gap detection — 3 hardcoded rules (KAN-1114 replaces with
-    // blueprint-config-diff system in Phase 3+).
-    const gaps: Array<{ id: string; message: string; severity: 'info' | 'warning' }> = [];
-
-    // Rule #1 — Deal pricing gap (25% threshold).
-    const [totalDeals, dealsWithZeroValue] = await Promise.all([
-      ctx.prisma.deal.count({
-        where: { tenantId: ctx.tenantId, deletedAt: null },
-      }),
-      ctx.prisma.deal.count({
-        where: { tenantId: ctx.tenantId, deletedAt: null, value: 0 },
-      }),
-    ]);
-    if (totalDeals > 0) {
-      const pctMissing = Math.round((dealsWithZeroValue / totalDeals) * 100);
-      if (pctMissing > 25) {
-        gaps.push({
-          id: 'deal_pricing_missing',
-          message: `Pricing data incomplete — ${pctMissing}% of deals missing value`,
-          severity: 'warning',
-        });
-      }
-    }
-
-    // Rule #2 — Company Truth pricing not yet defined.
-    if (!isPopulated(ct['pricing'])) {
-      gaps.push({
-        id: 'company_truth_pricing_empty',
-        message: 'Pricing not yet defined in Company Truth',
-        severity: 'info',
-      });
-    }
-
-    // Rule #3 — Competitive positioning not yet ingested.
-    const positioning = ct['positioning'] as Record<string, unknown> | undefined;
-    if (!isPopulated(positioning?.['competitiveAdvantages'])) {
-      gaps.push({
-        id: 'competitor_positioning_empty',
-        message: 'Competitor positioning not yet ingested',
-        severity: 'info',
-      });
-    }
-
-    return {
-      blueprint: {
-        isActive: tenant.blueprint.isActive,
-        vertical: tenant.blueprint.vertical,
-      },
-      companyTruth: { populated: ctPopulated, total: CT_CATEGORIES.length, pct: ctPct },
-      behavioralLearning: { pct: bmPct },
-      outcomeLearning: { pct: omPct },
-      overallScore,
-      gaps,
-    };
+    // KAN-1115 fix-forward — implementation extracted to
+    // apps/api/src/services/brain-layers-impl.ts for backend-level testability
+    // ahead of KAN-1112 integration-test infrastructure. The placement bug
+    // fixed there (gap rule #1 hoist above empty-state early-return) was
+    // undetectable by mocked-response-shape sentinels in apps/web tests.
+    const { getBrainLayersImpl } = await import('./services/brain-layers-impl.js');
+    // PrismaClient type → BrainLayersPrismaSurface (the minimal subset the impl
+    // needs); cast preserves Prisma typing at the call site while the impl
+    // works against a lightweight interface for testability.
+    return getBrainLayersImpl(ctx.prisma as unknown as Parameters<typeof getBrainLayersImpl>[0], ctx.tenantId);
   }),
 });
 
