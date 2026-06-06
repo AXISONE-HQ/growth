@@ -916,6 +916,30 @@ export const auditLogApi = {
     trpcQuery<AuditLogEntry>('auditLog.getById', { id }),
 };
 
+/* ── Dashboard API (KAN-1103) ───────────────────────────────────────
+ * Backend: apps/api/src/router.ts:2191 → dashboardRouter.getStats.
+ * Aggregate tenant-scoped operator KPIs (contacts, objectives, actions,
+ * avg response time, escalation rate).
+ *
+ * `avgResponseTimeMinutes` field renamed from pre-KAN-1103 `avgResponseTime`
+ * — explicit unit suffix prevents future drift. Computed from `email_received
+ *  → next email_send same contact` engagement timestamp deltas, rolling 7d
+ * window (vs `actionsToday` which uses calendar-today semantics; see
+ * router.ts comment for the per-field window rationale).
+ * ─────────────────────────────────────────────────────────────────────── */
+export interface DashboardStats {
+  contacts: number;
+  objectivesCompleted: number;
+  actionsToday: number;
+  avgResponseTimeMinutes: number;
+  escalationRate: number;
+  totalEscalations: number;
+}
+
+export const dashboardApi = {
+  getStats: () => trpcQuery<DashboardStats>('dashboard.getStats', undefined),
+};
+
 /* ── Contacts API (KAN-718 Day 10) ──────────────────────────────────
  * Backend: apps/api/src/router.ts → contactsRouter, delegates to
  * packages/api/src/services/contacts-router.ts.

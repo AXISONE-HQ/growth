@@ -40,28 +40,64 @@ import { AssistantCard } from '@/components/ui/assistant-card';
 // in place) + client useAuth check (this file) + panel-level conditional
 // render. Mirrors the KAN-1100 moverLinks pattern for admin-conditional UI.
 import { useAuth } from '@/lib/AuthContext';
-import { recommendationsApi, type RecommendationListItem } from '@/lib/api';
+import {
+  recommendationsApi,
+  type RecommendationListItem,
+  // KAN-1103 — Dashboard v2 PR 2: KPI strip + Audit Log wire-up adapters.
+  dashboardApi,
+  type DashboardStats,
+  auditLogApi,
+  type AuditLogEntry,
+} from '@/lib/api';
 import { severityBadge } from '@/lib/severity-projection';
 import { formatRelativeTime } from '@/lib/format-relative-time';
 import { Badge } from '@/components/ui/badge';
 
-// ─── Stats Row ────────────────────────────────────────────────────────
-// KAN-985 — deltas were string-only ("+ 23 this week"). Stats with a clean
-// ±N% map to MetricCard's `delta`; the rest pass `subtitle`.
-const stats: Array<{
+// ─── KPI strip (KAN-1103 — wired to dashboard.getStats) ───────────────
+// KAN-1103 — fixture removed; data flows from dashboard.getStats via the
+// useKpis hook inside DashboardPage. Render block at line ~ "Stats Row"
+// consumes the hook result.
+//
+// Phase 1 Q2 deferral: all 5 KPIs ship values-only (delta=undefined,
+// subtitle=undefined). Trend sub-labels ("+ 23 this week", "↑ 18%", etc.)
+// are Phase 2.5 backend work post-Designer-activation.
+
+// KAN-1103 — KPI polling cadence: 60s. KPIs change slowly; aggressive
+// polling burns Prisma without operator benefit.
+const KPI_POLL_MS = 60_000;
+
+// KAN-1103 — KPI card config keys map 1:1 to DashboardStats fields. Order
+// matches the fixture's visual layout (Active Contacts → Escalation Rate).
+const KPI_CARDS: Array<{
+  key: keyof DashboardStats;
   label: string;
-  value: string;
   unit?: string;
-  delta?: number;
-  subtitle?: string;
-  icon?: typeof Users;
+  icon: typeof Users;
 }> = [
-  { label: 'Active Contacts', value: '847', subtitle: '+ 23 this week', icon: Users },
-  { label: 'Objectives Completed', value: '142', delta: 18, icon: Target },
-  { label: 'AI Actions Today', value: '87', subtitle: '+ 12 vs yesterday', icon: Activity },
-  { label: 'Avg Response Time', value: '2.4', unit: 'min', subtitle: 'down from 3.1 min', icon: Clock },
-  { label: 'Escalation Rate', value: '14', unit: '%', subtitle: 'down from 22% (Week 1)', icon: AlertTriangle },
+  { key: 'contacts', label: 'Active Contacts', icon: Users },
+  { key: 'objectivesCompleted', label: 'Objectives Completed', icon: Target },
+  { key: 'actionsToday', label: 'AI Actions Today', icon: Activity },
+  { key: 'avgResponseTimeMinutes', label: 'Avg Response Time', unit: 'min', icon: Clock },
+  { key: 'escalationRate', label: 'Escalation Rate', unit: '%', icon: AlertTriangle },
 ];
+
+// ─── Audit Log (KAN-1103 — wired to auditLog.list) ────────────────────
+// KAN-1103 — fixture removed; data flows from auditLog.list via the
+// useAuditLog hook inside DashboardPage. Render block consumes the result.
+//
+// Phase 1 Q3 lock: match /audit page convention. Render raw lowercase
+// actionType in monospace font; NO projection helper. Sibling /audit
+// page renders the same shape; consistency > prettification.
+//
+// Phase 1 Q4 lock: empty copy frames it as informational (audit log
+// grows continuously; "no recent" is temporal state, not failure).
+// Designer refines in Phase 4 polish.
+//
+// Phase 1 Panel-type convention: stream-like panel. NO count chip in
+// header (chips imply queue semantics). "View all →" CTA at footer is
+// the drill-down affordance.
+const AUDIT_LOG_POLL_MS = 30_000;
+const AUDIT_LOG_LIMIT = 5;
 
 // ─── Pipeline Health ──────────────────────────────────────────────────
 const pipelines = [
@@ -203,18 +239,10 @@ const strategies = [
   { name: 'Re-engagement', pct: 12, color: 'bg-red-400', count: '388 contacts' },
 ];
 
-// ─── Audit Log ────────────────────────────────────────────────────────
-// KAN-985 — em-dashes + middle-dot mojibake repaired.
-const auditEntries = [
-  { time: '14:32:08', action: 'SMS.SEND', detail: 'Sarah Chen — follow-up pricing · conf: 87% · strategy: direct' },
-  { time: '14:24:41', action: 'EMAIL.SEND', detail: 'Mark Thompson — re-engagement case study · conf: 71%' },
-  { time: '14:18:15', action: 'EMAIL.SEND', detail: 'Emma Davis — qualification questions · conf: 62% · strategy: guided' },
-  { time: '14:10:33', action: 'ESCALATE', detail: 'James Rivera — deal $28K above threshold · routed to admin' },
-  { time: '14:01:22', action: 'CALENDAR.BOOK', detail: 'Lisa Park — Thu 2:00pm consultation · conf: 94%' },
-  { time: '14:01:22', action: 'CRM.UPDATE', detail: 'Lisa Park — HubSpot deal stage: Meeting Booked' },
-  { time: '13:55:07', action: 'DECISION', detail: 'Lisa Park — strategy: direct · all sub-objectives complete' },
-  { time: '13:48:19', action: 'BRAIN.UPDATE', detail: 'Company Truth updated — new deal pattern detected in pipeline' },
-];
+// KAN-1103 — auditEntries fixture removed (was here). Data now flows from
+// auditLog.list via the useAuditLog hook inside DashboardPage. See the
+// "Audit Log (KAN-1103 ...)" comment block at the top of the file for the
+// panel-type convention + Q3/Q4 lock rationale.
 
 // Shared shell class for the inline "card" sections (Pipeline Health,
 // Brain Status, Decision Feed, Agent Actions, etc.). bg-card + hairline
@@ -279,20 +307,107 @@ export default function DashboardPage() {
     };
   }, [isAdmin, reloadEscalations]);
 
+  // KAN-1103 — KPI strip data + 60s polling. dashboard.getStats is
+  // protectedProcedure (all tenant-authenticated users see their tenant's
+  // metrics); no admin gate at the KPI level. Window-focus refetch matches
+  // the KAN-1102 pattern for return-to-tab freshness.
+  const [kpis, setKpis] = useState<DashboardStats | null>(null);
+  const [kpisLoading, setKpisLoading] = useState<boolean>(true);
+  const [kpisError, setKpisError] = useState<string | null>(null);
+
+  const reloadKpis = useCallback(async () => {
+    try {
+      setKpisError(null);
+      const result = await dashboardApi.getStats();
+      setKpis(result);
+    } catch (e) {
+      setKpisError((e as Error).message);
+      setKpis(null);
+    } finally {
+      setKpisLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void reloadKpis();
+    const interval = setInterval(() => {
+      void reloadKpis();
+    }, KPI_POLL_MS);
+    const onFocus = () => {
+      void reloadKpis();
+    };
+    window.addEventListener('focus', onFocus);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [reloadKpis]);
+
+  // KAN-1103 — Audit Log data + 30s polling. auditLog.list is
+  // protectedProcedure; default `includeInfrastructure=false` excludes
+  // `brain.blueprint_*` noise that fires on every server restart. Backend
+  // sorts createdAt DESC; no client-side re-sort (sentinel test locks).
+  const [auditLog, setAuditLog] = useState<AuditLogEntry[] | null>(null);
+  const [auditLogLoading, setAuditLogLoading] = useState<boolean>(true);
+  const [auditLogError, setAuditLogError] = useState<string | null>(null);
+
+  const reloadAuditLog = useCallback(async () => {
+    try {
+      setAuditLogError(null);
+      const result = await auditLogApi.list({ limit: AUDIT_LOG_LIMIT });
+      setAuditLog(result.items);
+    } catch (e) {
+      setAuditLogError((e as Error).message);
+      setAuditLog([]);
+    } finally {
+      setAuditLogLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void reloadAuditLog();
+    const interval = setInterval(() => {
+      void reloadAuditLog();
+    }, AUDIT_LOG_POLL_MS);
+    const onFocus = () => {
+      void reloadAuditLog();
+    };
+    window.addEventListener('focus', onFocus);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [reloadAuditLog]);
+
   return (
     <div className="p-6 flex flex-col gap-6">
-      {/* Stats Row — KAN-979 MetricCard adoption */}
+      {/* KAN-1103 — KPI strip wired to dashboard.getStats. Values-only
+          (Q2 trend sub-labels deferred to Phase 2.5). MetricCard wrapping
+          in a <div data-testid> for unit-test reach since MetricCard's
+          prop signature has no testid passthrough (verified KAN-1103
+          Phase 2 pre-edit). */}
       <div className="grid grid-cols-5 gap-4">
-        {stats.map((s) => (
-          <MetricCard
-            key={s.label}
-            label={s.label}
-            value={s.unit ? `${s.value} ${s.unit}` : s.value}
-            delta={s.delta}
-            subtitle={s.subtitle}
-            icon={s.icon}
-          />
-        ))}
+        {KPI_CARDS.map((card) => {
+          const rawValue = kpis?.[card.key];
+          const displayValue = kpisError
+            ? '—'
+            : kpisLoading || rawValue === undefined
+              ? ''
+              : card.unit
+                ? `${rawValue} ${card.unit}`
+                : String(rawValue);
+          return (
+            <div key={card.key} data-testid={`kpi-card-${card.key}`}>
+              <MetricCard
+                label={card.label}
+                value={displayValue}
+                loading={kpisLoading && !kpisError}
+                subtitle={kpisError ? "Couldn't load" : undefined}
+                icon={card.icon}
+              />
+            </div>
+          );
+        })}
       </div>
 
       {/* Assistant — KAN-983 */}
@@ -655,26 +770,77 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* Audit Log */}
-        <div className={CARD_SHELL}>
+        {/* KAN-1103 — Audit Log wired to auditLog.list (stream-like panel;
+            NO count chip in header per the panel-type convention from
+            Phase 1 review item +1; "View all →" CTA is the drill-down
+            affordance). Top-5 most recent in backend-authoritative sort
+            order (createdAt DESC at auditLog.list:147); sentinel test
+            locks the no-client-sort assumption.
+
+            Timestamp display: formatRelativeTime ("2m ago") for scannable
+            activity-feed UX. /audit page uses absolute timestamps for
+            forensic deep-dive UX — intentional divergence per Phase 1
+            review item 3 reasoning. */}
+        <div className={CARD_SHELL} data-testid="dashboard-audit-log">
           <div className="flex items-center justify-between px-5 py-4 border-b border-border">
             <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
               <FileText className="w-4 h-4 text-[var(--ds-violet-500)]" />
               Audit Log
             </div>
-            <span className="text-xs text-[var(--ds-violet-500)] cursor-pointer hover:underline inline-flex items-center gap-1">
-              View full log <ChevronRight className="w-3 h-3" />
-            </span>
+            {/* No count chip — stream-like panel convention (KAN-1103 forward lock) */}
           </div>
-          <div className="divide-y divide-border">
-            {auditEntries.map((e, i) => (
-              <div key={i} className="flex items-center gap-3 px-5 py-2">
-                <span className="text-[11px] font-mono text-muted-foreground w-[65px] flex-shrink-0">{e.time}</span>
-                <span className="text-[11px] font-semibold text-[var(--ds-violet-500)] bg-[var(--ds-violet-100)] px-2 py-0.5 rounded w-[100px] text-center flex-shrink-0">{e.action}</span>
-                <span className="text-[12px] text-muted-foreground flex-1 min-w-0 truncate">{e.detail}</span>
+
+          {auditLogLoading && auditLog === null ? (
+            <div className="divide-y divide-border" data-testid="audit-log-loading">
+              {[0, 1, 2].map((i) => (
+                <div key={i} className="flex items-center gap-3 px-5 py-2 animate-pulse">
+                  <div className="h-3 w-[65px] bg-muted rounded flex-shrink-0" />
+                  <div className="h-5 w-[140px] bg-muted rounded flex-shrink-0" />
+                  <div className="h-3 flex-1 bg-muted rounded" />
+                </div>
+              ))}
+            </div>
+          ) : auditLogError ? (
+            <div className="px-5 py-6 text-center" data-testid="audit-log-error">
+              <div className="text-[13px] text-foreground mb-2">Couldn&apos;t load audit log</div>
+              <button
+                onClick={() => void reloadAuditLog()}
+                className="text-[12px] font-semibold text-[var(--ds-violet-500)] bg-[var(--ds-violet-100)] px-3 py-1.5 rounded-lg hover:bg-[var(--ds-violet-100)]/80"
+              >
+                Retry
+              </button>
+            </div>
+          ) : auditLog && auditLog.length === 0 ? (
+            <div className="px-5 py-6 text-center text-[12px] text-muted-foreground" data-testid="audit-log-empty">
+              No recent activity — actions appear here as the engine and operators work.
+            </div>
+          ) : (
+            <>
+              <div className="divide-y divide-border">
+                {(auditLog ?? []).map((entry) => (
+                  <div key={entry.id} className="flex items-center gap-3 px-5 py-2">
+                    <span className="text-[11px] text-muted-foreground w-[65px] flex-shrink-0">
+                      {formatRelativeTime(entry.createdAt)}
+                    </span>
+                    <span className="text-[11px] font-mono text-foreground bg-[var(--ds-surface-sunken)] px-2 py-0.5 rounded w-[140px] flex-shrink-0 truncate">
+                      {entry.actionType}
+                    </span>
+                    <span className="text-[12px] text-muted-foreground flex-1 min-w-0 truncate">
+                      {entry.reasoning ?? '(no reasoning)'}
+                    </span>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
+              <div className="px-5 py-3 border-t border-border text-right">
+                <Link
+                  href="/audit"
+                  className="text-xs text-[var(--ds-violet-500)] cursor-pointer hover:underline inline-flex items-center gap-1"
+                >
+                  View all <ChevronRight className="w-3 h-3" />
+                </Link>
+              </div>
+            </>
+          )}
         </div>
       </div>
     </div>
