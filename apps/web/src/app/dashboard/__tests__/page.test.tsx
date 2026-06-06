@@ -14,7 +14,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import DashboardPage from '../page';
-import type { RecommendationListItem, DashboardStats, AuditLogEntry } from '@/lib/api';
+import type { RecommendationListItem, DashboardStats, AuditLogEntry, DecisionFeedItem, ActionStreamItem } from '@/lib/api';
 
 const useAuthMock = vi.fn();
 vi.mock('@/lib/AuthContext', () => ({
@@ -24,6 +24,8 @@ vi.mock('@/lib/AuthContext', () => ({
 const recommendationsListMock = vi.fn();
 const dashboardGetStatsMock = vi.fn();
 const auditLogListMock = vi.fn();
+const decisionsFeedMock = vi.fn();
+const actionsListMock = vi.fn();
 vi.mock('@/lib/api', async () => {
   const actual = await vi.importActual<typeof import('@/lib/api')>('@/lib/api');
   return {
@@ -43,6 +45,14 @@ vi.mock('@/lib/api', async () => {
     auditLogApi: {
       list: (...args: unknown[]) => auditLogListMock(...args),
       getById: vi.fn(),
+    },
+    // KAN-1107 — mock decisionsApi.feed + actionsApi.list for Decision
+    // Feed + Agent Actions panel tests.
+    decisionsApi: {
+      feed: (...args: unknown[]) => decisionsFeedMock(...args),
+    },
+    actionsApi: {
+      list: (...args: unknown[]) => actionsListMock(...args),
     },
   };
 });
@@ -104,11 +114,57 @@ function buildAuditEntry(overrides: Partial<AuditLogEntry> = {}): AuditLogEntry 
   };
 }
 
+// KAN-1107 — DecisionFeedItem builder. Defaults model a Decision row
+// (kind='decision'); pass kind='escalation' for the human-side fixture.
+function buildDecisionFeedItem(overrides: Partial<DecisionFeedItem> = {}): DecisionFeedItem {
+  return {
+    id: overrides.id ?? 'dec-1',
+    kind: 'decision',
+    contactId: 'contact-1',
+    contact: {
+      firstName: 'Sarah',
+      lastName: 'Chen',
+      email: 'sarah@example.com',
+      companyName: 'Acme Inc',
+    },
+    createdAt: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+    reasoning: 'Budget confirmed. Direct path selected.',
+    strategy: 'direct',
+    actionType: 'send_email',
+    channel: 'email',
+    confidence: 0.87,
+    ...overrides,
+  };
+}
+
+// KAN-1107 — ActionStreamItem builder. Defaults model an email Action
+// in delivered state.
+function buildActionStreamItem(overrides: Partial<ActionStreamItem> = {}): ActionStreamItem {
+  return {
+    id: overrides.id ?? 'act-1',
+    contactId: 'contact-1',
+    contact: {
+      firstName: 'Sarah',
+      lastName: 'Chen',
+      email: 'sarah@example.com',
+      companyName: 'Acme Inc',
+    },
+    agentType: 'communication_agent',
+    channel: 'email',
+    status: 'delivered',
+    payload: {},
+    createdAt: new Date(Date.now() - 3 * 60 * 1000).toISOString(),
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   useAuthMock.mockReset();
   recommendationsListMock.mockReset();
   dashboardGetStatsMock.mockReset();
   auditLogListMock.mockReset();
+  decisionsFeedMock.mockReset();
+  actionsListMock.mockReset();
   // Default: admin user. Override per-test for non-admin path.
   useAuthMock.mockReturnValue({
     user: { role: 'admin', email: 'admin@test.local' },
@@ -123,6 +179,14 @@ beforeEach(() => {
     limit: 5,
     offset: 0,
     includeInfrastructure: false,
+  });
+  // KAN-1107 defaults — empty feeds. Most KAN-1102/1103 tests don't
+  // exercise these panels; the empty default avoids polluting their
+  // assertions while still letting our panel-specific tests override.
+  decisionsFeedMock.mockResolvedValue({ items: [], total: 0 });
+  actionsListMock.mockResolvedValue({
+    actions: [],
+    pagination: { page: 1, limit: 6, total: 0, pages: 0 },
   });
 });
 
@@ -502,6 +566,188 @@ describe('KAN-1103 — polling cadences', () => {
     });
     await vi.advanceTimersByTimeAsync(30_000);
     expect(auditLogListMock).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+  });
+});
+
+describe('KAN-1107 — Decision Feed panel', () => {
+  it('Test 1 — loading state shows skeleton rows', async () => {
+    decisionsFeedMock.mockImplementation(
+      () => new Promise(() => undefined), // never resolves
+    );
+    render(<DashboardPage />);
+    expect(await screen.findByTestId('decision-feed-loading')).toBeInTheDocument();
+  });
+
+  it('Test 2 — empty state renders observer-framed copy', async () => {
+    decisionsFeedMock.mockResolvedValue({ items: [], total: 0 });
+    render(<DashboardPage />);
+    const empty = await screen.findByTestId('decision-feed-empty');
+    expect(empty.textContent).toMatch(/No recent engine activity — the brain is observing/i);
+  });
+
+  it('Test 3 — error state shows Retry button + refetches on click', async () => {
+    decisionsFeedMock.mockRejectedValueOnce(new Error('Network error'));
+    render(<DashboardPage />);
+    const errorContainer = await screen.findByTestId('decision-feed-error');
+    expect(errorContainer.textContent).toMatch(/Couldn.?t load decision feed/i);
+    // Refetch path: button click triggers a second call
+    decisionsFeedMock.mockResolvedValueOnce({ items: [], total: 0 });
+    const retry = errorContainer.querySelector('button');
+    expect(retry).toBeTruthy();
+    fireEvent.click(retry!);
+    await waitFor(() => {
+      expect(decisionsFeedMock).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it('Test 4 — populated UNION renders kind discriminator (AI + H badges + channel + contact)', async () => {
+    decisionsFeedMock.mockResolvedValue({
+      items: [
+        buildDecisionFeedItem({ id: 'dec-1', kind: 'decision', channel: 'email', actionType: 'send_email' }),
+        buildDecisionFeedItem({
+          id: 'esc-1',
+          kind: 'escalation',
+          contact: { firstName: 'James', lastName: 'Rivera', email: null, companyName: 'Acme' },
+          severity: 'high',
+          triggerType: 'confidence_below_threshold',
+          reasoning: 'Above $15K threshold',
+          // Strip Decision-only fields for escalation row
+          strategy: undefined, actionType: undefined, channel: undefined, confidence: undefined,
+        }),
+      ],
+      total: 2,
+    });
+    render(<DashboardPage />);
+    const populated = await screen.findByTestId('decision-feed-populated');
+    // Both kind discriminators render (AI for decision, H for escalation)
+    expect(populated.querySelector('[data-testid="decision-kind-decision"]')?.textContent).toBe('AI');
+    expect(populated.querySelector('[data-testid="decision-kind-escalation"]')?.textContent).toBe('H');
+    // Contact name from composeContactName
+    expect(populated.textContent).toMatch(/Sarah Chen — Acme Inc/);
+    expect(populated.textContent).toMatch(/James Rivera — Acme/);
+    // Channel label rendered for decision row (email)
+    expect(populated.textContent).toMatch(/Email/);
+  });
+
+  it('Test 5 — sentinel: UNION shape carries `kind` field (regression guard for accidental shape change)', async () => {
+    decisionsFeedMock.mockResolvedValue({
+      items: [buildDecisionFeedItem({ id: 'dec-1', kind: 'decision' })],
+      total: 1,
+    });
+    render(<DashboardPage />);
+    const populated = await screen.findByTestId('decision-feed-populated');
+    // The data-testid `decision-kind-${kind}` literally embeds the `kind`
+    // field. If a future PR rename/drops `kind`, this selector breaks loudly.
+    expect(populated.querySelector('[data-testid="decision-kind-decision"]')).toBeInTheDocument();
+  });
+});
+
+describe('KAN-1107 — Agent Actions panel', () => {
+  it('Test 1 — loading state shows skeleton rows', async () => {
+    actionsListMock.mockImplementation(() => new Promise(() => undefined));
+    render(<DashboardPage />);
+    expect(await screen.findByTestId('agent-actions-loading')).toBeInTheDocument();
+  });
+
+  it('Test 2 — empty state renders governance-framed copy', async () => {
+    actionsListMock.mockResolvedValue({
+      actions: [],
+      pagination: { page: 1, limit: 6, total: 0, pages: 0 },
+    });
+    render(<DashboardPage />);
+    const empty = await screen.findByTestId('agent-actions-empty');
+    expect(empty.textContent).toMatch(
+      /No recent agent actions — the engine is evaluating decisions but holding for high-confidence signal/i,
+    );
+  });
+
+  it('Test 3 — error state shows Retry button + refetches on click', async () => {
+    actionsListMock.mockRejectedValueOnce(new Error('Network'));
+    render(<DashboardPage />);
+    const errorContainer = await screen.findByTestId('agent-actions-error');
+    expect(errorContainer.textContent).toMatch(/Couldn.?t load agent actions/i);
+    actionsListMock.mockResolvedValueOnce({
+      actions: [],
+      pagination: { page: 1, limit: 6, total: 0, pages: 0 },
+    });
+    const retry = errorContainer.querySelector('button');
+    expect(retry).toBeTruthy();
+    fireEvent.click(retry!);
+    await waitFor(() => {
+      expect(actionsListMock).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it('Test 4 — populated stream renders icon + status badge + contact name', async () => {
+    actionsListMock.mockResolvedValue({
+      actions: [
+        buildActionStreamItem({ id: 'act-1', channel: 'email', status: 'delivered' }),
+        buildActionStreamItem({
+          id: 'act-2',
+          channel: 'sms',
+          status: 'sent',
+          contact: { firstName: 'Mark', lastName: 'Thompson', email: null, companyName: null },
+        }),
+      ],
+      pagination: { page: 1, limit: 6, total: 2, pages: 1 },
+    });
+    render(<DashboardPage />);
+    const populated = await screen.findByTestId('agent-actions-populated');
+    // Contact names rendered
+    expect(populated.textContent).toMatch(/Sarah Chen/);
+    expect(populated.textContent).toMatch(/Mark Thompson/);
+    // Status badge labels rendered (statusBadge projection)
+    expect(populated.textContent).toMatch(/Delivered/);
+    expect(populated.textContent).toMatch(/Sent/);
+    // Channel labels rendered (actionIcon projection)
+    expect(populated.textContent).toMatch(/Email/);
+    expect(populated.textContent).toMatch(/SMS/);
+  });
+
+  it('Test 5 — sentinel: backend payload order preserved (no client-side sort)', async () => {
+    // Two actions; payload order is [a, b]; UI must render [a, b], not
+    // re-sort by status/createdAt/etc.
+    actionsListMock.mockResolvedValue({
+      actions: [
+        buildActionStreamItem({ id: 'act-A', contact: { firstName: 'Aaa', lastName: 'Aaa', email: null, companyName: null } }),
+        buildActionStreamItem({ id: 'act-B', contact: { firstName: 'Bbb', lastName: 'Bbb', email: null, companyName: null } }),
+      ],
+      pagination: { page: 1, limit: 6, total: 2, pages: 1 },
+    });
+    render(<DashboardPage />);
+    const populated = await screen.findByTestId('agent-actions-populated');
+    const text = populated.textContent ?? '';
+    // 'Aaa' must appear before 'Bbb' in DOM-text order
+    expect(text.indexOf('Aaa Aaa')).toBeLessThan(text.indexOf('Bbb Bbb'));
+  });
+});
+
+describe('KAN-1107 — Decision Feed + Agent Actions polling cadence', () => {
+  it('Decision Feed — second decisions.feed fires at 30s interval', async () => {
+    vi.useFakeTimers();
+    decisionsFeedMock.mockResolvedValue({ items: [], total: 0 });
+    render(<DashboardPage />);
+    await vi.waitFor(() => {
+      expect(decisionsFeedMock).toHaveBeenCalledTimes(1);
+    });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(decisionsFeedMock).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+  });
+
+  it('Agent Actions — second actions.list fires at 30s interval', async () => {
+    vi.useFakeTimers();
+    actionsListMock.mockResolvedValue({
+      actions: [],
+      pagination: { page: 1, limit: 6, total: 0, pages: 0 },
+    });
+    render(<DashboardPage />);
+    await vi.waitFor(() => {
+      expect(actionsListMock).toHaveBeenCalledTimes(1);
+    });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(actionsListMock).toHaveBeenCalledTimes(2);
     vi.useRealTimers();
   });
 });

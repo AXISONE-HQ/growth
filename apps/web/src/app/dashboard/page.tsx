@@ -48,9 +48,15 @@ import {
   type DashboardStats,
   auditLogApi,
   type AuditLogEntry,
+  // KAN-1107 — Dashboard v2 PR 3: Decision Feed + Agent Actions wire-up.
+  decisionsApi,
+  type DecisionFeedItem,
+  actionsApi,
+  type ActionStreamItem,
 } from '@/lib/api';
 import { severityBadge } from '@/lib/severity-projection';
 import { formatRelativeTime } from '@/lib/format-relative-time';
+import { actionIcon, channelLabel, statusBadge } from '@/lib/action-icon-projection';
 import { Badge } from '@/components/ui/badge';
 
 // ─── KPI strip (KAN-1103 — wired to dashboard.getStats) ───────────────
@@ -139,51 +145,36 @@ const brainLayers = [
   { label: 'Outcome Learning', pct: 43, display: '43%', level: 'low' },
 ];
 
-// ─── Decision Feed ────────────────────────────────────────────────────
-// KAN-973 — strategyClass/confClass already migrated to ds-chip-*.
-// KAN-985 — em-dashes in note + reasoning text repaired.
-const decisions = [
-  {
-    type: 'ai', headline: 'Follow-up SMS to', contact: 'Sarah Chen',
-    strategy: 'Direct Conversion', strategyClass: 'ds-chip-base ds-chip-green', channel: 'SMS',
-    confidence: 87, confClass: 'ds-chip-base ds-chip-green', time: '2m ago',
-    reasoning: 'Budget confirmed ($12K). Timeline Q2. Decision maker reached. Missing: pricing tolerance. 3 of 5 sub-objectives complete — direct path to booking selected.',
-  },
-  {
-    type: 'ai', headline: 'Re-engagement email to', contact: 'Mark Thompson',
-    strategy: 'Re-engagement', strategyClass: 'ds-chip-base ds-chip-amber', channel: 'Email',
-    confidence: 71, confClass: 'ds-chip-base ds-chip-ai', time: '8m ago',
-    reasoning: 'Contact dormant 34 days. Previously showed interest in enterprise plan. New angle: reference recent case study in similar industry.',
-  },
-  {
-    type: 'ai', headline: 'Qualification questions to', contact: 'Emma Davis',
-    strategy: 'Guided Assistance', strategyClass: 'ds-chip-base ds-chip-ai', channel: 'Email',
-    confidence: 62, confClass: 'ds-chip-base ds-chip-amber', time: '14m ago',
-    reasoning: 'New inbound lead from website form. Need identified (HR consulting) but budget and timeline unknown. Guided approach: ask qualifying questions before direct conversion attempt.',
-  },
-  {
-    type: 'human', headline: 'Escalated:', contact: 'James Rivera — deal value $28,000',
-    confidence: 34, confClass: 'ds-chip-base ds-chip-rose', time: '22m ago',
-    note: 'Above $15K threshold — human review',
-  },
-  {
-    type: 'ai', headline: 'Book meeting for', contact: 'Lisa Park',
-    strategy: 'Direct Conversion', strategyClass: 'ds-chip-base ds-chip-green', channel: 'Calendar',
-    confidence: 94, confClass: 'ds-chip-base ds-chip-green', time: '31m ago',
-    reasoning: 'All 5 sub-objectives complete. Budget: $8K. Timeline: this month. Decision maker confirmed. Direct path — send calendar link with 3 available slots this week.',
-  },
-];
+// ─── Decision Feed (KAN-1107 — wired to decisions.feed) ──────────────
+// KAN-1107 — fixture removed; chronologically-merged UNION of Decisions
+// + OPEN Escalations flows from `decisions.feed` (server-side merge).
+// Phase 1 Finding B: Decision.source field doesn't exist; the "AI vs H"
+// semantic surfaces via Escalation rows mixed in by `kind` discriminator.
+// Phase 1 Finding C: Decision.channel doesn't exist; hybrid resolution
+// (Action[0].channel + actionType-derived proxy) on server.
+//
+// Polling cadence: 30s (matches KAN-1102 escalation feel; engine decides
+// multiple times/min during active triage; window-focus refetch).
+//
+// Panel-type convention (KAN-1103 forward lock): stream-like → NO count
+// chip in header; "View all →" CTA at footer is the drill-down affordance.
+const DECISION_FEED_POLL_MS = 30_000;
+const DECISION_FEED_LIMIT = 5;
 
-// ─── Agent Actions ────────────────────────────────────────────────────
-// KAN-985 — em-dashes + middle-dot mojibake repaired throughout.
-const agentActions = [
-  { icon: MessageSquare, iconClass: 'bg-blue-100 text-blue-600', text: 'SMS sent to', contact: 'Sarah Chen', detail: '— follow-up on pricing', status: '✓ Delivered', time: '2m' },
-  { icon: Mail, iconClass: 'bg-purple-100 text-purple-600', text: 'Email sent to', contact: 'Mark Thompson', detail: '— re-engagement', status: '✓ Delivered', time: '8m' },
-  { icon: Mail, iconClass: 'bg-purple-100 text-purple-600', text: 'Email sent to', contact: 'Emma Davis', detail: '— qualification', status: '✓ Delivered', time: '14m' },
-  { icon: Calendar, iconClass: 'bg-emerald-100 text-emerald-600', text: 'Meeting booked —', contact: 'Lisa Park', detail: '· Thu 2pm', status: '✓ Confirmed', time: '31m' },
-  { icon: Flag, iconClass: 'bg-indigo-100 text-indigo-600', text: 'HubSpot updated —', contact: 'Lisa Park', detail: '— Meeting Booked', status: '✓ Synced', time: '31m' },
-  { icon: AlertTriangle, iconClass: 'bg-red-100 text-red-600', text: 'Escalated', contact: 'James Rivera', detail: '— above deal threshold', status: '⏳ Pending review', statusClass: 'text-amber-600', time: '22m' },
-];
+// ─── Agent Actions (KAN-1107 — wired to actions.list) ────────────────
+// KAN-1107 — fixture removed; data flows from `actions.list` via the
+// useAgentActions hook. Contact JOIN added at backend for "FirstName
+// LastName" display. Icon + status badge projections via
+// `apps/web/src/lib/action-icon-projection.ts` (extracted from settings
+// page channelIcons — class-fix consolidation).
+//
+// Empirical state 2026-06-06: PROD Action table is currently empty (engine
+// pre-launch; 13.6k Decisions, 0 dispatches). Empty-state copy frames this
+// as healthy governance posture, not broken engine.
+//
+// Polling cadence: 30s (same rationale as Decision Feed — paired panel).
+const AGENT_ACTIONS_POLL_MS = 30_000;
+const AGENT_ACTIONS_LIMIT = 6;
 
 // ─── Contact Objective ────────────────────────────────────────────────
 const subObjectives = [
@@ -379,6 +370,87 @@ export default function DashboardPage() {
     };
   }, [reloadAuditLog]);
 
+  // KAN-1107 — Decision Feed data + 30s polling. decisions.feed is
+  // protectedProcedure (tenant-scoped). Server returns chronologically-merged
+  // UNION of recent Decisions + OPEN Escalations; `kind` discriminator
+  // distinguishes them in the render.
+  const [decisionFeed, setDecisionFeed] = useState<DecisionFeedItem[] | null>(null);
+  const [decisionFeedLoading, setDecisionFeedLoading] = useState<boolean>(true);
+  const [decisionFeedError, setDecisionFeedError] = useState<string | null>(null);
+
+  const reloadDecisionFeed = useCallback(async () => {
+    try {
+      setDecisionFeedError(null);
+      const result = await decisionsApi.feed({ limit: DECISION_FEED_LIMIT });
+      setDecisionFeed(result.items);
+    } catch (e) {
+      setDecisionFeedError((e as Error).message);
+      setDecisionFeed([]);
+    } finally {
+      setDecisionFeedLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void reloadDecisionFeed();
+    const interval = setInterval(() => {
+      void reloadDecisionFeed();
+    }, DECISION_FEED_POLL_MS);
+    const onFocus = () => {
+      void reloadDecisionFeed();
+    };
+    window.addEventListener('focus', onFocus);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [reloadDecisionFeed]);
+
+  // KAN-1107 — Agent Actions data + 30s polling. actions.list is
+  // protectedProcedure. Empirical state 2026-06-06: PROD Action table is
+  // empty; empty-state copy frames this as healthy governance posture.
+  const [agentActions, setAgentActions] = useState<ActionStreamItem[] | null>(null);
+  const [agentActionsLoading, setAgentActionsLoading] = useState<boolean>(true);
+  const [agentActionsError, setAgentActionsError] = useState<string | null>(null);
+
+  const reloadAgentActions = useCallback(async () => {
+    try {
+      setAgentActionsError(null);
+      const result = await actionsApi.list({ limit: AGENT_ACTIONS_LIMIT });
+      setAgentActions(result.actions);
+    } catch (e) {
+      setAgentActionsError((e as Error).message);
+      setAgentActions([]);
+    } finally {
+      setAgentActionsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void reloadAgentActions();
+    const interval = setInterval(() => {
+      void reloadAgentActions();
+    }, AGENT_ACTIONS_POLL_MS);
+    const onFocus = () => {
+      void reloadAgentActions();
+    };
+    window.addEventListener('focus', onFocus);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [reloadAgentActions]);
+
+  // KAN-1107 — composeContactName: shared helper for Decision Feed +
+  // Agent Actions panels. Pattern matches composeEscalationName (KAN-1102)
+  // but kept local — Decision Feed + Agent Actions are dashboard-only
+  // consumers; lift to shared lib if a 3rd consumer surfaces.
+  const composeContactName = (c: { firstName: string | null; lastName: string | null; email: string | null; companyName: string | null }): string => {
+    const name = [c.firstName, c.lastName].filter(Boolean).join(' ').trim();
+    const base = name || c.email || 'Unknown contact';
+    return c.companyName ? `${base} — ${c.companyName}` : base;
+  };
+
   return (
     <div className="p-6 flex flex-col gap-6">
       {/* KAN-1103 — KPI strip wired to dashboard.getStats. Values-only
@@ -513,96 +585,159 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* Decision Feed */}
-        <div className={CARD_SHELL}>
+        {/* Decision Feed (KAN-1107) */}
+        <div className={CARD_SHELL} data-testid="dashboard-decision-feed">
           <div className="flex items-center justify-between px-5 py-4 border-b border-border">
             <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
               <Activity className="w-4 h-4 text-[var(--ds-violet-500)]" />
               Decision Feed
             </div>
-            <span className="text-xs text-[var(--ds-violet-500)] cursor-pointer hover:underline inline-flex items-center gap-1">
+            <Link href="/decisions" className="text-xs text-[var(--ds-violet-500)] hover:underline inline-flex items-center gap-1">
               View all <ChevronRight className="w-3 h-3" />
-            </span>
+            </Link>
           </div>
-          <div className="divide-y divide-border">
-            {decisions.map((d, i) => (
-              <div key={i} className="flex items-start gap-3 px-5 py-3 hover:bg-accent transition-colors cursor-pointer"
-                onClick={() => d.reasoning && setExpandedDecision(expandedDecision === i ? null : i)}>
-                <div className={`w-8 h-8 rounded-full flex items-center justify-center text-[11px] font-bold flex-shrink-0 ${
-                  d.type === 'ai' ? 'bg-[var(--ds-violet-100)] text-[var(--ds-violet-500)]' : 'bg-amber-100 text-amber-600'
-                }`}>{d.type === 'ai' ? 'AI' : 'H'}</div>
-                <div className="flex-1 min-w-0">
-                  <div className="text-[13px] text-foreground">
-                    {d.headline} <strong>{d.contact}</strong>
+          {decisionFeedLoading ? (
+            <div className="divide-y divide-border" data-testid="decision-feed-loading">
+              {[0, 1, 2, 3, 4].map((i) => (
+                <div key={i} className="flex items-start gap-3 px-5 py-3">
+                  <div className="w-8 h-8 rounded-full bg-muted animate-pulse" />
+                  <div className="flex-1 space-y-2">
+                    <div className="h-3 w-2/3 bg-muted rounded animate-pulse" />
+                    <div className="h-3 w-1/3 bg-muted rounded animate-pulse" />
                   </div>
-                  <div className="flex items-center gap-2 mt-1 flex-wrap">
-                    {d.strategy && (
-                      <span className={`text-[11px] font-medium px-2 py-0.5 rounded ${d.strategyClass}`}>{d.strategy}</span>
-                    )}
-                    {d.channel && (
-                      <span className="ds-chip-base ds-chip-muted">{d.channel}</span>
-                    )}
-                    {d.note && (
-                      <span className="text-[12px] text-muted-foreground">{d.note}</span>
-                    )}
-                    {d.reasoning && (
-                      <span className="text-[11px] text-muted-foreground cursor-pointer inline-flex items-center gap-0.5">
-                        {expandedDecision === i ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
-                        Show reasoning
-                      </span>
-                    )}
-                  </div>
-                  {expandedDecision === i && d.reasoning && (
-                    <div className="mt-2 text-[12px] text-muted-foreground bg-[var(--ds-surface-sunken)] rounded-lg p-3 border border-border">
-                      {d.reasoning}
+                </div>
+              ))}
+            </div>
+          ) : decisionFeedError ? (
+            <div className="p-5 text-[13px]" data-testid="decision-feed-error">
+              <span className="text-red-600">Couldn&apos;t load decision feed.</span>{' '}
+              <button onClick={() => void reloadDecisionFeed()} className="text-[var(--ds-violet-500)] hover:underline">Retry</button>
+            </div>
+          ) : !decisionFeed || decisionFeed.length === 0 ? (
+            <div className="p-5 text-[13px] text-muted-foreground" data-testid="decision-feed-empty">
+              No recent engine activity — the brain is observing.
+            </div>
+          ) : (
+            <div className="divide-y divide-border" data-testid="decision-feed-populated">
+              {decisionFeed.map((d, i) => {
+                const contactName = composeContactName(d.contact);
+                const isEscalation = d.kind === 'escalation';
+                // Decision: confidence is 0-1; Escalation: derive numeric from severity for chip color
+                const confidencePct = isEscalation
+                  ? (d.severity === 'high' || d.severity === 'critical' ? 30 : d.severity === 'medium' ? 50 : 70)
+                  : Math.round((d.confidence ?? 0) * 100);
+                const headlineText = isEscalation
+                  ? 'Escalated:'
+                  : d.actionType
+                    ? `${d.actionType.replace(/_/g, ' ')} to`
+                    : 'Decision for';
+                const chanLabel = d.kind === 'decision' ? channelLabel(d.channel) : null;
+                return (
+                  <div
+                    key={d.id}
+                    className="flex items-start gap-3 px-5 py-3 hover:bg-accent transition-colors cursor-pointer"
+                    onClick={() => d.reasoning && setExpandedDecision(expandedDecision === i ? null : i)}
+                  >
+                    <div className={`w-8 h-8 rounded-full flex items-center justify-center text-[11px] font-bold flex-shrink-0 ${
+                      isEscalation ? 'bg-amber-100 text-amber-600' : 'bg-[var(--ds-violet-100)] text-[var(--ds-violet-500)]'
+                    }`} data-testid={`decision-kind-${d.kind}`}>{isEscalation ? 'H' : 'AI'}</div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-[13px] text-foreground">
+                        {headlineText} <strong>{contactName}</strong>
+                      </div>
+                      <div className="flex items-center gap-2 mt-1 flex-wrap">
+                        {d.strategy && (
+                          <span className="ds-chip-base ds-chip-ai">{d.strategy.replace(/_/g, ' ')}</span>
+                        )}
+                        {chanLabel && chanLabel !== '—' && (
+                          <span className="ds-chip-base ds-chip-muted">{chanLabel}</span>
+                        )}
+                        {isEscalation && d.triggerType && (
+                          <span className="text-[12px] text-muted-foreground">{d.triggerType.replace(/_/g, ' ')}</span>
+                        )}
+                        {d.reasoning && (
+                          <span className="text-[11px] text-muted-foreground cursor-pointer inline-flex items-center gap-0.5">
+                            {expandedDecision === i ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+                            Show reasoning
+                          </span>
+                        )}
+                      </div>
+                      {expandedDecision === i && d.reasoning && (
+                        <div className="mt-2 text-[12px] text-muted-foreground bg-[var(--ds-surface-sunken)] rounded-lg p-3 border border-border">
+                          {d.reasoning}
+                        </div>
+                      )}
                     </div>
-                  )}
-                </div>
-                <div className="flex flex-col items-end gap-1 flex-shrink-0">
-                  <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full flex items-center gap-1 ${d.confClass}`}>
-                    <span className={`w-1.5 h-1.5 rounded-full ${
-                      d.confidence >= 80 ? 'bg-[var(--ds-emerald-500)]' : d.confidence >= 50 ? 'bg-amber-500' : 'bg-red-500'
-                    }`} />
-                    {d.confidence}%
-                  </span>
-                  <span className="text-[11px] text-muted-foreground">{d.time}</span>
-                </div>
-              </div>
-            ))}
-          </div>
+                    <div className="flex flex-col items-end gap-1 flex-shrink-0">
+                      <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full flex items-center gap-1 ds-chip-base ds-chip-muted">
+                        <span className={`w-1.5 h-1.5 rounded-full ${
+                          confidencePct >= 80 ? 'bg-[var(--ds-emerald-500)]' : confidencePct >= 50 ? 'bg-amber-500' : 'bg-red-500'
+                        }`} />
+                        {confidencePct}%
+                      </span>
+                      <span className="text-[11px] text-muted-foreground">{formatRelativeTime(d.createdAt)}</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       </div>
 
       {/* Agent Actions + Objective + Escalations */}
       <div className="grid grid-cols-3 gap-4">
-        {/* Agent Action Stream */}
-        <div className={CARD_SHELL}>
+        {/* Agent Action Stream (KAN-1107) */}
+        <div className={CARD_SHELL} data-testid="dashboard-agent-actions">
           <div className="flex items-center justify-between px-5 py-4 border-b border-border">
             <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
               <Megaphone className="w-4 h-4 text-[var(--ds-violet-500)]" />
               Agent Actions
             </div>
-            <span className="text-xs text-[var(--ds-violet-500)] cursor-pointer hover:underline inline-flex items-center gap-1">
+            <Link href="/actions" className="text-xs text-[var(--ds-violet-500)] hover:underline inline-flex items-center gap-1">
               View all <ChevronRight className="w-3 h-3" />
-            </span>
+            </Link>
           </div>
-          <div className="divide-y divide-border">
-            {agentActions.map((a, i) => {
-              const Icon = a.icon;
-              return (
+          {agentActionsLoading ? (
+            <div className="divide-y divide-border" data-testid="agent-actions-loading">
+              {[0, 1, 2, 3, 4, 5].map((i) => (
                 <div key={i} className="flex items-center gap-3 px-5 py-2.5">
-                  <div className={`w-7 h-7 rounded-md flex items-center justify-center flex-shrink-0 ${a.iconClass}`}>
-                    <Icon className="w-3.5 h-3.5" />
-                  </div>
-                  <span className="text-[12px] text-foreground flex-1 min-w-0 truncate">
-                    {a.text} <strong>{a.contact}</strong> {a.detail}
-                  </span>
-                  <span className={`text-[11px] flex-shrink-0 ${a.statusClass || 'text-[var(--ds-emerald-700)]'}`}>{a.status}</span>
-                  <span className="text-[11px] text-muted-foreground flex-shrink-0 w-8 text-right">{a.time}</span>
+                  <div className="w-7 h-7 rounded-md bg-muted animate-pulse" />
+                  <div className="flex-1 h-3 bg-muted rounded animate-pulse" />
                 </div>
-              );
-            })}
-          </div>
+              ))}
+            </div>
+          ) : agentActionsError ? (
+            <div className="p-5 text-[13px]" data-testid="agent-actions-error">
+              <span className="text-red-600">Couldn&apos;t load agent actions.</span>{' '}
+              <button onClick={() => void reloadAgentActions()} className="text-[var(--ds-violet-500)] hover:underline">Retry</button>
+            </div>
+          ) : !agentActions || agentActions.length === 0 ? (
+            <div className="p-5 text-[13px] text-muted-foreground" data-testid="agent-actions-empty">
+              No recent agent actions — the engine is evaluating decisions but holding for high-confidence signal.
+            </div>
+          ) : (
+            <div className="divide-y divide-border" data-testid="agent-actions-populated">
+              {agentActions.map((a) => {
+                const iconCfg = actionIcon({ channel: a.channel, agentType: a.agentType });
+                const Icon = iconCfg.icon;
+                const status = statusBadge(a.status);
+                const contactName = composeContactName(a.contact);
+                return (
+                  <div key={a.id} className="flex items-center gap-3 px-5 py-2.5">
+                    <div className={`w-7 h-7 rounded-md flex items-center justify-center flex-shrink-0 ${iconCfg.color}`}>
+                      <Icon className="w-3.5 h-3.5" />
+                    </div>
+                    <span className="text-[12px] text-foreground flex-1 min-w-0 truncate">
+                      <strong>{iconCfg.label}</strong> for <strong>{contactName}</strong>
+                    </span>
+                    <span className={`text-[11px] flex-shrink-0 ${status.className}`}>{status.label}</span>
+                    <span className="text-[11px] text-muted-foreground flex-shrink-0 w-8 text-right">{formatRelativeTime(a.createdAt)}</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
 
         {/* Contact Objective Gap */}
