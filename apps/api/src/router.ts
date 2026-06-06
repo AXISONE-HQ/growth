@@ -2222,8 +2222,53 @@ const dashboardRouter = router({
       }),
     ]);
 
-    // Calculate average response time (mock - would use actual data)
-    const avgResponseTime = 2.5; // hours
+    // KAN-1103 — replaces the pre-KAN-1103 hardcoded `avgResponseTime = 2.5`
+    // mock (commented "would use actual data") with the real T1 response-time
+    // calculation. Pair definition: per contact, `email_received` paired with
+    // the next chronological `email_send`. Window: rolling 7 days. Returns
+    // minutes (field renamed `avgResponseTimeMinutes` for explicit unit
+    // suffix; no future drift on consumer side). Empty-tenant posture: zero
+    // matched pairs → return 0 (honest "no responses happened yet" signal
+    // rather than null/NaN sentinel).
+    //
+    // Semantic note (relative to sibling fields above): `actionsToday` uses
+    // `setHours(0,0,0,0)` = calendar today (operator's "what fired today"
+    // signal); `avgResponseTimeMinutes` uses rolling 7d (operator's "how
+    // fast is the engine responding lately" signal, avoiding weekend step
+    // effects). Two different windows for two different operator questions.
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const recentEngagements = await ctx.prisma.engagement.findMany({
+      where: {
+        tenantId: ctx.tenantId,
+        occurredAt: { gte: sevenDaysAgo },
+        engagementType: { in: ["email_received", "email_send"] },
+      },
+      select: { contactId: true, engagementType: true, occurredAt: true },
+      orderBy: { occurredAt: "asc" },
+    });
+
+    const responseDeltasMin: number[] = [];
+    const pendingReceiveByContact = new Map<string, Date>();
+    for (const e of recentEngagements) {
+      if (e.engagementType === "email_received") {
+        pendingReceiveByContact.set(e.contactId, e.occurredAt);
+      } else if (e.engagementType === "email_send") {
+        const receivedAt = pendingReceiveByContact.get(e.contactId);
+        if (receivedAt) {
+          const deltaMs = e.occurredAt.getTime() - receivedAt.getTime();
+          responseDeltasMin.push(deltaMs / (1000 * 60));
+          pendingReceiveByContact.delete(e.contactId);
+        }
+      }
+    }
+    const avgResponseTimeMinutes =
+      responseDeltasMin.length === 0
+        ? 0
+        : Math.round(
+            (responseDeltasMin.reduce((a, b) => a + b, 0) /
+              responseDeltasMin.length) *
+              10,
+          ) / 10;
 
     // Calculate escalation rate
     const totalEscalations = escalations.length;
@@ -2237,7 +2282,7 @@ const dashboardRouter = router({
       contacts: contactsCount,
       objectivesCompleted,
       actionsToday,
-      avgResponseTime,
+      avgResponseTimeMinutes,
       escalationRate: Math.round(escalationRate),
       totalEscalations,
     };
