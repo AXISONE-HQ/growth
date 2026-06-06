@@ -342,7 +342,16 @@ describe("KAN-754 — broken escalationsRouter retired in favor of recommendatio
     // The pre-KAN-689 broken Escalation field references — none of these
     // exist in the canonical schema. Catches regression if a future PR
     // copies the old shape into a new Escalation router/handler.
-    expect(text).not.toMatch(/escalation\.(findMany|findFirst|update)[\s\S]*?claimed_at/);
-    expect(text).not.toMatch(/escalation\.(findMany|findFirst|update)[\s\S]*?dismissed_at/);
+    //
+    // KAN-1107 — regex tightened from `[\s\S]*?` (any chars across lines,
+    // including comments) to `\([^)]*` (within the Prisma call's arg
+    // block only). The looser form false-positived when a legitimate new
+    // `escalation.findMany` (UNION feed at L1509) sat BEFORE the KAN-754
+    // retirement comment at L1642 that mentions `claimed_at` literally
+    // for archaeological docs. Tightening preserves protection against
+    // re-introducing broken field references while permitting legitimate
+    // reads that don't touch the dead fields.
+    expect(text).not.toMatch(/escalation\.(findMany|findFirst|update)\([^)]*claimed_at/);
+    expect(text).not.toMatch(/escalation\.(findMany|findFirst|update)\([^)]*dismissed_at/);
   });
 });
