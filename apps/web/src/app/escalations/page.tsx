@@ -53,7 +53,7 @@ import {
   type RecommendationListItem,
   type RecommendationDetail,
 } from '@/lib/api';
-import { Badge, type BadgeProps } from '@/components/ui/badge';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
@@ -62,37 +62,14 @@ import {
   confidenceLevel,
   confidencePercent,
 } from '@/lib/board-helpers';
-
-// ─────────────────────────────────────────────────────────────
-// Severity → Badge variant mapping (light DS tokens)
-//
-// The Escalation.severity column is a string (no enum) with values
-// 'low'|'medium'|'high'|'critical'. Map each to the closest semantic
-// chip variant so the queue's color language matches dashboards.
-// Intentional ranking (most → least concern): rose → amber → ai → muted.
-// ─────────────────────────────────────────────────────────────
-const SEVERITY_VARIANT: Record<string, NonNullable<BadgeProps['variant']>> = {
-  critical: 'rose',
-  high: 'amber',
-  medium: 'ai',
-  low: 'muted',
-};
-const SEVERITY_LABEL: Record<string, string> = {
-  critical: 'Critical',
-  high: 'High',
-  medium: 'Medium',
-  low: 'Low',
-};
-
-function severityBadge(severity: string): {
-  variant: NonNullable<BadgeProps['variant']>;
-  label: string;
-} {
-  return {
-    variant: SEVERITY_VARIANT[severity] ?? 'muted',
-    label: SEVERITY_LABEL[severity] ?? severity,
-  };
-}
+// KAN-1102 — Severity → Badge projection helpers extracted to a shared
+// module so the Dashboard Escalation Queue panel (and future consumers)
+// share one canonical 5-severity → 3-visual-tier mapping. See the file
+// header at `@/lib/severity-projection` for the enumerated consumer list.
+import {
+  SEVERITY_LABEL,
+  severityBadge,
+} from '@/lib/severity-projection';
 
 function initials(c: { firstName: string | null; lastName: string | null }): string {
   const f = (c.firstName ?? '').charAt(0);

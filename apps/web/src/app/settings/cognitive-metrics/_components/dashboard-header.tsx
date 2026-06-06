@@ -10,7 +10,10 @@
 import * as React from 'react';
 import { RefreshCw, BarChart3 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { formatRelativeTime } from './format-relative-time';
+// KAN-1102 — relocated to apps/web/src/lib/format-relative-time.ts so
+// multiple dashboards consume the same canonical helper. Import path
+// updated; consumer behavior unchanged.
+import { formatRelativeTime } from '@/lib/format-relative-time';
 import type { WindowOption } from '@/lib/cognitive-metrics-api';
 
 export interface DashboardHeaderProps {

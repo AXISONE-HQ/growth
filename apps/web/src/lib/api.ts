@@ -770,6 +770,10 @@ export interface RecommendationListItem {
     firstName: string | null;
     lastName: string | null;
     email: string | null;
+    // KAN-1102 — `companyName` projection added so dashboard panels can
+    // render "FirstName LastName — Company" without a separate Contact
+    // fetch. Backend extension at packages/api/src/services/recommendations.ts.
+    companyName: string | null;
   };
   decisionId: string | null;
   severity: string;
