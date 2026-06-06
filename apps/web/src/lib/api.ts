@@ -452,6 +452,20 @@ export interface PipelineSummary {
   objectiveDescription: string | null;
   stageCount: number;
   activeLeadCount: number;
+  // KAN-1108 — Dashboard v2 PR 4 extensions:
+  //   pipelineValue: SUM(Deal.value) where status='open' (Phase 1 Q1)
+  //   avgConfidence: AVG(Decision.confidence) via Deal join, 7d window
+  //                 (Phase 1 Q2 Path B.1; null if no decisions in window)
+  //   microObjectives: catalog only (names + structure; per-pipeline progress
+  //                    derivation deferred to KAN-1110 follow-up)
+  pipelineValue: number;
+  avgConfidence: number | null;
+  microObjectives: Array<{
+    id: string;
+    name: string;
+    isDefault: boolean;
+    order: number;
+  }>;
   targets: Array<{
     metric: TargetMetric;
     period: TargetPeriod;
@@ -460,7 +474,7 @@ export interface PipelineSummary {
   }>;
 }
 
-export interface PipelineDetail extends Omit<PipelineSummary, 'stageCount' | 'activeLeadCount' | 'targets'> {
+export interface PipelineDetail extends Omit<PipelineSummary, 'stageCount' | 'activeLeadCount' | 'targets' | 'pipelineValue' | 'avgConfidence' | 'microObjectives'> {
   defaultAutoApproveMatrix: unknown;
   stages: PipelineStage[];
   targets: PipelineTarget[];
@@ -936,8 +950,42 @@ export interface DashboardStats {
   totalEscalations: number;
 }
 
+/* ── Focus Contact (KAN-1108) ──────────────────────────────────────
+ * Backend: apps/api/src/router.ts → dashboardRouter.getFocusContact.
+ * Selection priority (Phase 1 Q13 lock):
+ *   (i)  highest-severity OPEN Escalation (excluding sampled) → contactId
+ *   (ii) fallback: most-recent Decision → contactId
+ *   (iii) fallback: null (empty panel)
+ *
+ * `focusReason` discriminates between the two non-null paths so the UI can
+ * frame the focus differently ("In focus due to escalation" vs "In focus due
+ * to recent engine activity").
+ *
+ * Sub-objective gap state is fetched via a SEPARATE chained call from the
+ * client (subObjectivesApi.getStateForContact by contactId) — keeps endpoints
+ * orthogonal.
+ * ─────────────────────────────────────────────────────────────────────── */
+export interface FocusContact {
+  contactId: string;
+  contact: {
+    firstName: string | null;
+    lastName: string | null;
+    email: string | null;
+    companyName: string | null;
+    currentStageName: string | null;
+  };
+  currentObjective: {
+    strategy: string;
+    actionType: string;
+    /** 0-1 float; multiply by 100 for UI percentage. */
+    confidence: number;
+  } | null;
+  focusReason: 'escalation' | 'recent_decision' | null;
+}
+
 export const dashboardApi = {
   getStats: () => trpcQuery<DashboardStats>('dashboard.getStats', undefined),
+  getFocusContact: () => trpcQuery<FocusContact | null>('dashboard.getFocusContact', undefined),
 };
 
 /* ── Decisions API (KAN-1107) ───────────────────────────────────────

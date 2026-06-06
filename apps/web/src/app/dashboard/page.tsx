@@ -53,6 +53,12 @@ import {
   type DecisionFeedItem,
   actionsApi,
   type ActionStreamItem,
+  // KAN-1108 — Dashboard v2 PR 4: Pipeline Health + Focus Contact + Sub-objective Gap.
+  pipelinesApi,
+  type PipelineSummary,
+  type FocusContact,
+  subObjectivesApi,
+  type DiscoveryStateForContact,
 } from '@/lib/api';
 import { severityBadge } from '@/lib/severity-projection';
 import { formatRelativeTime } from '@/lib/format-relative-time';
@@ -105,37 +111,19 @@ const KPI_CARDS: Array<{
 const AUDIT_LOG_POLL_MS = 30_000;
 const AUDIT_LOG_LIMIT = 5;
 
-// ─── Pipeline Health ──────────────────────────────────────────────────
-const pipelines = [
-  {
-    name: 'Sales Pipeline', color: 'bg-indigo-500', value: '$124,900', leads: '16', confidence: '62%',
-    progressLabel: 'Revenue Won', progressValue: '$41,200 / $125K', progressPct: 33, progressColor: 'from-emerald-500 to-emerald-400',
-    objectives: [
-      { text: 'First 10 leads ingested', status: 'done' },
-      { text: 'Automation rules configured', status: 'done' },
-      { text: 'Close 5 deals this quarter', status: 'active', tag: '2/5' },
-      { text: 'Reach $125K pipeline target', status: 'pending' },
-    ],
-  },
-  {
-    name: 'Re-engagement', color: 'bg-amber-500', value: '$56,000', leads: '8', confidence: '41%',
-    progressLabel: 'Win-Back Rate', progressValue: '3 / 8 leads', progressPct: 38, progressColor: 'from-amber-500 to-amber-400',
-    objectives: [
-      { text: 'Dormant leads identified', status: 'done' },
-      { text: 'Re-engage 5 churned accounts', status: 'active', tag: '3/5' },
-      { text: 'Convert 2 win-backs to revenue', status: 'pending' },
-    ],
-  },
-  {
-    name: 'Upsell / Expansion', color: 'bg-emerald-500', value: '$38,400', leads: '6', confidence: '78%',
-    progressLabel: 'Expansion Revenue', progressValue: '$14,200 / $40K', progressPct: 36, progressColor: 'from-emerald-500 to-emerald-300',
-    objectives: [
-      { text: 'Top 10 upsell candidates identified', status: 'done' },
-      { text: 'Upgrade 3 customers to Growth plan', status: 'active', tag: '1/3' },
-      { text: 'Reach $40K expansion target', status: 'pending' },
-    ],
-  },
-];
+// ─── Pipeline Health (KAN-1108 — wired to pipelines.list) ────────────
+// KAN-1108 — fixture removed; data flows from `pipelines.list` with
+// extensions: pipelineValue (SUM of Deal.value where status='open'),
+// avgConfidence (AVG of Decision.confidence via Deal join, 7d window),
+// microObjectives catalog (names only — KAN-1110 follow-up for status badges).
+//
+// Q3 framing refinement (Fred 2026-06-06): render microObjective list WITHOUT
+// status badges. Honest framing — operator sees "engine is tracking these
+// objectives per pipeline" without faking completion %.
+//
+// Polling: 60s (Phase 1 Q4 — slow-changing aggregations; minute-scale Deal
+// updates; pipeline-level signal doesn't tick fast).
+const PIPELINE_HEALTH_POLL_MS = 60_000;
 
 // ─── Brain Layers ─────────────────────────────────────────────────────
 const brainLayers = [
@@ -176,14 +164,21 @@ const DECISION_FEED_LIMIT = 5;
 const AGENT_ACTIONS_POLL_MS = 30_000;
 const AGENT_ACTIONS_LIMIT = 6;
 
-// ─── Contact Objective ────────────────────────────────────────────────
-const subObjectives = [
-  { label: 'Name confirmed', status: 'done' },
-  { label: 'Phone confirmed', status: 'done' },
-  { label: 'Budget: $12K range', status: 'done' },
-  { label: 'Pricing tolerance', status: 'in-progress', tag: '↑ AI targeting' },
-  { label: 'Meeting confirmed', status: 'pending' },
-];
+// ─── Focus Contact + Sub-objective Gap (KAN-1108) ────────────────────
+// KAN-1108 — fixture removed; data flows from `dashboard.getFocusContact`
+// + chained `subObjectives.getStateForContact` on the focused contactId.
+//
+// Phase 1 Q13 lock: selection priority is (i) highest-severity OPEN
+// Escalation → (ii) most-recent Decision → (iii) null. `focusReason`
+// discriminator lets the UI frame the focus honestly.
+//
+// Empty-state copy (Phase 1 strawman, Fred 2026-06-06):
+//   "No active contact in focus right now — the engine isn't blocked."
+//
+// Polling: 60s on focus contact (changes minute-scale at most). Sub-objective
+// gap state is fetched on the chained call (not independently polled) —
+// matches focusContact cadence implicitly.
+const FOCUS_CONTACT_POLL_MS = 60_000;
 
 // ─── Escalation Queue ─────────────────────────────────────────────────
 // KAN-1102 — fixture removed; data now flows from recommendations.list via
@@ -451,6 +446,89 @@ export default function DashboardPage() {
     return c.companyName ? `${base} — ${c.companyName}` : base;
   };
 
+  // KAN-1108 — Pipeline Health data + 60s polling.
+  const [pipelinesData, setPipelinesData] = useState<PipelineSummary[] | null>(null);
+  const [pipelinesLoading, setPipelinesLoading] = useState<boolean>(true);
+  const [pipelinesError, setPipelinesError] = useState<string | null>(null);
+
+  const reloadPipelines = useCallback(async () => {
+    try {
+      setPipelinesError(null);
+      const result = await pipelinesApi.list();
+      setPipelinesData(result);
+    } catch (e) {
+      setPipelinesError((e as Error).message);
+      setPipelinesData([]);
+    } finally {
+      setPipelinesLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void reloadPipelines();
+    const interval = setInterval(() => {
+      void reloadPipelines();
+    }, PIPELINE_HEALTH_POLL_MS);
+    const onFocus = () => {
+      void reloadPipelines();
+    };
+    window.addEventListener('focus', onFocus);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [reloadPipelines]);
+
+  // KAN-1108 — Focus Contact + chained Sub-objective Gap state. 60s polling
+  // on focus contact; sub-objectives chain after focusContact loads (no
+  // independent poll — match focusContact cadence implicitly).
+  const [focusContact, setFocusContact] = useState<FocusContact | null>(null);
+  const [focusLoading, setFocusLoading] = useState<boolean>(true);
+  const [focusError, setFocusError] = useState<string | null>(null);
+  const [subObjectiveState, setSubObjectiveState] = useState<DiscoveryStateForContact | null>(null);
+
+  const reloadFocusContact = useCallback(async () => {
+    try {
+      setFocusError(null);
+      const fc = await dashboardApi.getFocusContact();
+      setFocusContact(fc);
+      // Chained call: only fetch sub-objective state if a contact is in focus.
+      if (fc?.contactId) {
+        try {
+          const sos = await subObjectivesApi.getStateForContact(fc.contactId);
+          setSubObjectiveState(sos);
+        } catch {
+          // Sub-objective failure shouldn't tear down focus contact panel; render
+          // contact header with empty sub-objective list. Honest degradation.
+          setSubObjectiveState(null);
+        }
+      } else {
+        setSubObjectiveState(null);
+      }
+    } catch (e) {
+      setFocusError((e as Error).message);
+      setFocusContact(null);
+      setSubObjectiveState(null);
+    } finally {
+      setFocusLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void reloadFocusContact();
+    const interval = setInterval(() => {
+      void reloadFocusContact();
+    }, FOCUS_CONTACT_POLL_MS);
+    const onFocus = () => {
+      void reloadFocusContact();
+    };
+    window.addEventListener('focus', onFocus);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [reloadFocusContact]);
+
   return (
     <div className="p-6 flex flex-col gap-6">
       {/* KAN-1103 — KPI strip wired to dashboard.getStats. Values-only
@@ -494,47 +572,91 @@ export default function DashboardPage() {
         }}
       />
 
-      {/* Pipeline Health */}
-      <div className="grid grid-cols-3 gap-4">
-        {pipelines.map((p) => (
-          <div key={p.name} className={`${CARD_SHELL} p-5 flex flex-col gap-3.5`}>
-            <div className="flex items-center gap-2">
-              <span className={`w-2 h-2 rounded-full ${p.color}`} />
-              <span className="text-sm font-bold text-foreground flex-1">{p.name}</span>
-              <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-[var(--ds-emerald-100)] text-[var(--ds-emerald-700)] uppercase tracking-wide">Active</span>
-            </div>
-            <div className="flex justify-between gap-1">
-              {[{ val: p.value, label: 'Pipeline Value' }, { val: p.leads, label: 'Active Leads' }, { val: p.confidence, label: 'Avg Confidence' }].map((m) => (
-                <div key={m.label} className="flex-1 text-center py-2 px-1 bg-[var(--ds-surface-sunken)] rounded-lg">
-                  <div className="text-base font-extrabold text-foreground leading-tight">{m.val}</div>
-                  <div className="text-[10px] text-muted-foreground font-medium mt-0.5">{m.label}</div>
-                </div>
-              ))}
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <div className="flex justify-between items-center">
-                <span className="text-[11px] font-semibold text-muted-foreground">{p.progressLabel}</span>
-                <span className="text-[11px] text-muted-foreground">{p.progressValue} <strong className="text-[var(--ds-emerald-700)]">{p.progressPct}%</strong></span>
+      {/* Pipeline Health (KAN-1108) */}
+      <div className="grid grid-cols-3 gap-4" data-testid="dashboard-pipeline-health">
+        {pipelinesLoading ? (
+          [0, 1, 2].map((i) => (
+            <div key={i} className={`${CARD_SHELL} p-5 flex flex-col gap-3.5`} data-testid="pipeline-health-loading">
+              <div className="h-4 w-3/5 bg-muted rounded animate-pulse" />
+              <div className="flex justify-between gap-1">
+                {[0, 1, 2].map((j) => (
+                  <div key={j} className="flex-1 h-10 bg-muted/60 rounded animate-pulse" />
+                ))}
               </div>
-              <div className="h-2 bg-[var(--ds-surface-sunken)] rounded-full overflow-hidden">
-                <div className={`h-full rounded-full bg-gradient-to-r ${p.progressColor}`} style={{ width: `${p.progressPct}%` }} />
-              </div>
+              <div className="h-2 bg-muted/60 rounded animate-pulse" />
             </div>
-            <div className="flex flex-col gap-1.5">
-              {p.objectives.map((obj) => (
-                <div key={obj.text} className="flex items-center gap-2 text-[12px]">
-                  <span className={`w-4 h-4 rounded-full flex items-center justify-center flex-shrink-0 text-[10px] ${
-                    obj.status === 'done' ? 'bg-[var(--ds-emerald-500)] text-white' :
-                    obj.status === 'active' ? 'border-2 border-[var(--ds-violet-500)]' :
-                    'border-2 border-border'
-                  }`}>{obj.status === 'done' ? '✓' : ''}</span>
-                  <span className={obj.status === 'done' ? 'text-muted-foreground line-through' : 'text-foreground'}>{obj.text}</span>
-                  {obj.tag && <span className="ml-auto text-[10px] font-semibold text-[var(--ds-violet-500)] bg-[var(--ds-violet-100)] px-1.5 py-0.5 rounded">{obj.tag}</span>}
-                </div>
-              ))}
-            </div>
+          ))
+        ) : pipelinesError ? (
+          <div className={`${CARD_SHELL} col-span-3 p-5 text-[13px]`} data-testid="pipeline-health-error">
+            <span className="text-red-600">Couldn&apos;t load pipeline health.</span>{' '}
+            <button onClick={() => void reloadPipelines()} className="text-[var(--ds-violet-500)] hover:underline">Retry</button>
           </div>
-        ))}
+        ) : !pipelinesData || pipelinesData.length === 0 ? (
+          <div className={`${CARD_SHELL} col-span-3 p-5 text-[13px] text-muted-foreground`} data-testid="pipeline-health-empty">
+            No pipelines configured yet — declare an objective in <Link href="/settings/objectives" className="text-[var(--ds-violet-500)] hover:underline">Settings</Link> and growth will build the pipeline.
+          </div>
+        ) : (
+          pipelinesData.map((p, idx) => {
+            // KAN-1108 — color rotation per pipeline index (3-cycle).
+            const colorDot = ['bg-indigo-500', 'bg-amber-500', 'bg-emerald-500'][idx % 3];
+            // Currency formatting; Phase 1 lock: USD only (Deal.currency default).
+            const valueFmt = `$${Math.round(p.pipelineValue).toLocaleString('en-US')}`;
+            const confidenceFmt = p.avgConfidence == null ? '—' : `${Math.round(p.avgConfidence * 100)}%`;
+            // Q4 — progress bar from existing targets[].
+            const primaryTarget = p.targets[0];
+            const progressPct = primaryTarget?.currentProgress != null && primaryTarget.value > 0
+              ? Math.round((primaryTarget.currentProgress / primaryTarget.value) * 100)
+              : null;
+            return (
+              <div key={p.id} className={`${CARD_SHELL} p-5 flex flex-col gap-3.5`} data-testid={`pipeline-card-${p.id}`}>
+                <div className="flex items-center gap-2">
+                  <span className={`w-2 h-2 rounded-full ${colorDot}`} />
+                  <span className="text-sm font-bold text-foreground flex-1">{p.name}</span>
+                  {p.isActive && (
+                    <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-[var(--ds-emerald-100)] text-[var(--ds-emerald-700)] uppercase tracking-wide">Active</span>
+                  )}
+                </div>
+                <div className="flex justify-between gap-1">
+                  {[
+                    { val: valueFmt, label: 'Pipeline Value' },
+                    { val: p.activeLeadCount, label: 'Active Leads' },
+                    { val: confidenceFmt, label: 'Avg Confidence' },
+                  ].map((m) => (
+                    <div key={m.label} className="flex-1 text-center py-2 px-1 bg-[var(--ds-surface-sunken)] rounded-lg">
+                      <div className="text-base font-extrabold text-foreground leading-tight">{m.val}</div>
+                      <div className="text-[10px] text-muted-foreground font-medium mt-0.5">{m.label}</div>
+                    </div>
+                  ))}
+                </div>
+                {primaryTarget && progressPct != null && (
+                  <div className="flex flex-col gap-1.5">
+                    <div className="flex justify-between items-center">
+                      <span className="text-[11px] font-semibold text-muted-foreground capitalize">{String(primaryTarget.metric).replace(/_/g, ' ')}</span>
+                      <span className="text-[11px] text-muted-foreground"><strong className="text-[var(--ds-emerald-700)]">{progressPct}%</strong></span>
+                    </div>
+                    <div className="h-2 bg-[var(--ds-surface-sunken)] rounded-full overflow-hidden">
+                      <div className="h-full rounded-full bg-gradient-to-r from-emerald-500 to-emerald-400" style={{ width: `${Math.min(100, progressPct)}%` }} />
+                    </div>
+                  </div>
+                )}
+                {/* KAN-1108 Q3 — microObjective catalog only (no status badges;
+                    progress derivation deferred to KAN-1110). Honest framing:
+                    operator sees the structure of what the engine tracks per
+                    pipeline without faking completion state. */}
+                {p.microObjectives.length > 0 && (
+                  <div className="flex flex-col gap-1.5" data-testid={`pipeline-mos-${p.id}`}>
+                    {p.microObjectives.map((mo) => (
+                      <div key={mo.id} className="flex items-center gap-2 text-[12px]">
+                        <span className="w-4 h-4 rounded-full flex items-center justify-center flex-shrink-0 text-[10px] border-2 border-border" />
+                        <span className="text-foreground">{mo.name}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })
+        )}
       </div>
 
       {/* Brain + Decision Feed */}
@@ -740,43 +862,90 @@ export default function DashboardPage() {
           )}
         </div>
 
-        {/* Contact Objective Gap */}
-        <div className={CARD_SHELL}>
-          <div className="flex items-center justify-between px-5 py-4 border-b border-border">
-            <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
-              <Clock className="w-4 h-4 text-[var(--ds-violet-500)]" />
-              Contact: Sarah Chen
+        {/* Focus Contact + Sub-objective Gap (KAN-1108) */}
+        <div className={CARD_SHELL} data-testid="dashboard-focus-contact">
+          {focusLoading ? (
+            <div className="p-5" data-testid="focus-contact-loading">
+              <div className="h-4 w-1/3 bg-muted rounded animate-pulse mb-3" />
+              <div className="h-20 bg-muted/60 rounded animate-pulse" />
             </div>
-            <span className="text-xs text-[var(--ds-violet-500)] cursor-pointer hover:underline inline-flex items-center gap-1">
-              View profile <ChevronRight className="w-3 h-3" />
-            </span>
-          </div>
-          <div className="p-5">
-            <div className="bg-[var(--ds-violet-100)] border border-[var(--ds-violet-500)]/30 rounded-lg p-4">
-              <div className="text-sm font-bold text-foreground mb-1">Book Consultation Meeting</div>
-              <div className="text-[12px] text-muted-foreground mb-4">Strategy: Direct Conversion · Confidence: 87%</div>
-              <div className="flex flex-col gap-2.5">
-                {subObjectives.map((obj) => (
-                  <div key={obj.label} className="flex items-center gap-2.5">
-                    <div className={`w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 text-[10px] ${
-                      obj.status === 'done' ? 'bg-[var(--ds-emerald-500)] text-white' :
-                      obj.status === 'in-progress' ? 'border-2 border-[var(--ds-violet-500)] bg-[var(--ds-violet-100)]' :
-                      'border-2 border-border'
-                    }`}>{obj.status === 'done' ? '✓' : ''}</div>
-                    <span className={`text-[13px] ${obj.status === 'done' ? 'text-muted-foreground line-through' : 'text-foreground'}`}>{obj.label}</span>
-                    {obj.tag && <span className="text-[11px] text-[var(--ds-violet-500)] font-medium">{obj.tag}</span>}
+          ) : focusError ? (
+            <div className="p-5 text-[13px]" data-testid="focus-contact-error">
+              <span className="text-red-600">Couldn&apos;t load focus contact.</span>{' '}
+              <button onClick={() => void reloadFocusContact()} className="text-[var(--ds-violet-500)] hover:underline">Retry</button>
+            </div>
+          ) : !focusContact ? (
+            <div className="p-5 text-[13px] text-muted-foreground" data-testid="focus-contact-empty">
+              No active contact in focus right now — the engine isn&apos;t blocked.
+            </div>
+          ) : (
+            (() => {
+              const contactName = composeContactName(focusContact.contact);
+              const objective = focusContact.currentObjective;
+              const confidencePct = objective ? Math.round(objective.confidence * 100) : null;
+              // Q16 — progress bar computed UI-side from gap counts.
+              const resolved = subObjectiveState?.resolvedGaps.length ?? 0;
+              const pending = subObjectiveState?.prioritizedGaps.length ?? 0;
+              const totalGaps = resolved + pending;
+              const progressPct = totalGaps > 0 ? Math.round((resolved / totalGaps) * 100) : 0;
+              return (
+                <>
+                  <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+                    <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                      <Clock className="w-4 h-4 text-[var(--ds-violet-500)]" />
+                      Contact: {contactName}
+                      {focusContact.focusReason === 'escalation' && (
+                        <span className="ml-2 text-[10px] font-semibold px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 uppercase">Escalated</span>
+                      )}
+                    </div>
+                    <Link href={`/contacts/${focusContact.contactId}`} className="text-xs text-[var(--ds-violet-500)] hover:underline inline-flex items-center gap-1">
+                      View profile <ChevronRight className="w-3 h-3" />
+                    </Link>
                   </div>
-                ))}
-              </div>
-              <div className="flex items-center gap-3 mt-4">
-                <span className="text-[11px] font-semibold text-muted-foreground">Progress</span>
-                <div className="flex-1 h-2 bg-card rounded-full overflow-hidden">
-                  <div className="h-full rounded-full bg-[var(--ds-violet-500)]" style={{ width: '60%' }} />
-                </div>
-                <span className="text-[12px] font-bold text-[var(--ds-violet-500)]">60%</span>
-              </div>
-            </div>
-          </div>
+                  <div className="p-5">
+                    <div className="bg-[var(--ds-violet-100)] border border-[var(--ds-violet-500)]/30 rounded-lg p-4">
+                      {objective ? (
+                        <>
+                          <div className="text-sm font-bold text-foreground mb-1 capitalize">{objective.actionType.replace(/_/g, ' ')}</div>
+                          <div className="text-[12px] text-muted-foreground mb-4">
+                            Strategy: <span className="capitalize">{objective.strategy.replace(/_/g, ' ')}</span> · Confidence: {confidencePct}%
+                          </div>
+                        </>
+                      ) : (
+                        <div className="text-sm font-bold text-foreground mb-4">No engine activity yet for this contact.</div>
+                      )}
+                      {subObjectiveState && totalGaps > 0 ? (
+                        <>
+                          <div className="flex flex-col gap-2.5" data-testid="focus-contact-gaps">
+                            {[...subObjectiveState.resolvedGaps.map((g) => ({ key: g.key, label: g.label, status: 'done' as const })),
+                              ...subObjectiveState.prioritizedGaps.map((g) => ({ key: g.key, label: g.label, status: g.hardTrigger ? 'in-progress' as const : 'pending' as const }))].map((obj) => (
+                              <div key={obj.key} className="flex items-center gap-2.5">
+                                <div className={`w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 text-[10px] ${
+                                  obj.status === 'done' ? 'bg-[var(--ds-emerald-500)] text-white' :
+                                  obj.status === 'in-progress' ? 'border-2 border-[var(--ds-violet-500)] bg-[var(--ds-violet-100)]' :
+                                  'border-2 border-border'
+                                }`}>{obj.status === 'done' ? '✓' : ''}</div>
+                                <span className={`text-[13px] ${obj.status === 'done' ? 'text-muted-foreground line-through' : 'text-foreground'}`}>{obj.label}</span>
+                              </div>
+                            ))}
+                          </div>
+                          <div className="flex items-center gap-3 mt-4">
+                            <span className="text-[11px] font-semibold text-muted-foreground">Progress</span>
+                            <div className="flex-1 h-2 bg-card rounded-full overflow-hidden">
+                              <div className="h-full rounded-full bg-[var(--ds-violet-500)]" style={{ width: `${progressPct}%` }} />
+                            </div>
+                            <span className="text-[12px] font-bold text-[var(--ds-violet-500)]">{progressPct}%</span>
+                          </div>
+                        </>
+                      ) : (
+                        <div className="text-[12px] text-muted-foreground">No sub-objective state yet for this contact.</div>
+                      )}
+                    </div>
+                  </div>
+                </>
+              );
+            })()
+          )}
         </div>
 
         {/* KAN-1102 — Escalation Queue (admin-only). Three-layer admin defense:
