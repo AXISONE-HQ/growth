@@ -74,11 +74,16 @@ describe('KAN-1111 — pipelines.list Q2 avgConfidence raw SQL', () => {
       const tenant = await createTenant(prisma);
       const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 
-      // PRE-FIX broken SQL — the ::uuid cast on d.tenant_id (text column)
-      // raises 42883 against real Postgres. Mocked unit tests never exercised
-      // this; CI green, PROD red. This test asserts the failure fires, which
-      // is the runnable-documentation proof that integration coverage would
-      // have caught KAN-1111 before deploy.
+      // PRE-FIX broken SQL — the asymmetric ::uuid cast (ONLY on the parameter
+      // side, leaving the text column un-cast) raises 42883 against real
+      // Postgres. Mocked unit tests never exercised this; CI green, PROD red.
+      //
+      // !! DISCIPLINE LOCK !! ASYMMETRIC ::uuid cast is intentional. The real
+      // KAN-1111 bug shape was `text_column = $1::uuid` → 42883 (no `text =
+      // uuid` operator). If a future reader "tidies" this to symmetric casts
+      // (`column::uuid = $1::uuid`), Postgres evaluates `uuid = uuid` cleanly,
+      // the test passes, the demo silently lies, and the runnable-doc
+      // discipline falls. Keep the asymmetry.
       await expect(
         prisma.$queryRawUnsafe(
           `
@@ -87,9 +92,9 @@ describe('KAN-1111 — pipelines.list Q2 avgConfidence raw SQL', () => {
             AVG(d.confidence)::float AS avg_confidence
           FROM decisions d
           JOIN deals deal
-            ON d.contact_id::uuid = deal.contact_id::uuid
-            AND deal.tenant_id::uuid = d.tenant_id::uuid
-          WHERE d.tenant_id::uuid = $1::uuid
+            ON d.contact_id = deal.contact_id::uuid
+            AND deal.tenant_id = d.tenant_id::uuid
+          WHERE d.tenant_id = $1::uuid
             AND d.created_at > $2
             AND deal.status = 'open'
             AND deal.deleted_at IS NULL
