@@ -27,8 +27,12 @@ export default defineConfig({
     environment: 'node',
     include: [
       // KAN-1112 — integration tests only; unit tests run via vitest.config.ts.
-      '../../apps/api/src/__tests__/integration/*.test.ts',
-      '../../packages/api/src/services/__tests__/integration/*.test.ts',
+      // Paths are repo-root-relative because both CI and the documented local-run
+      // command invoke vitest from the repo root (`npx vitest run --config
+      // apps/connectors/vitest.config.integration.ts`). vitest resolves `include`
+      // globs against `process.cwd()` when `root` is unset.
+      'apps/api/src/__tests__/integration/*.test.ts',
+      'packages/api/src/services/__tests__/integration/*.test.ts',
     ],
     // Integration tests run serially within a file (transaction rollback semantics)
     // but vitest parallelizes files by default. That's the correct posture.
@@ -46,7 +50,7 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       reporter: ['text', 'html'],
-      include: ['../../apps/api/src/**/*.ts', '../../packages/api/src/**/*.ts'],
+      include: ['apps/api/src/**/*.ts', 'packages/api/src/**/*.ts'],
       exclude: [
         '**/*.test.ts',
         '**/__tests__/**',
