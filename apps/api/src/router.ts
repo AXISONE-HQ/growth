@@ -4546,7 +4546,7 @@ const pipelinesRouter = router({
         JOIN deals deal
           ON d.contact_id = deal.contact_id
           AND deal.tenant_id = d.tenant_id
-        WHERE d.tenant_id = ${ctx.tenantId}::uuid
+        WHERE d.tenant_id = ${ctx.tenantId}
           AND d.created_at > ${sevenDaysAgo}
           AND deal.status = 'open'
           AND deal.deleted_at IS NULL
