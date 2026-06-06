@@ -12,9 +12,9 @@
  *      PR introduces client-side sort that diverges from backend)
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import DashboardPage from '../page';
-import type { RecommendationListItem, DashboardStats, AuditLogEntry, DecisionFeedItem, ActionStreamItem } from '@/lib/api';
+import type { RecommendationListItem, DashboardStats, AuditLogEntry, DecisionFeedItem, ActionStreamItem, PipelineSummary, FocusContact, DiscoveryStateForContact } from '@/lib/api';
 
 const useAuthMock = vi.fn();
 vi.mock('@/lib/AuthContext', () => ({
@@ -23,9 +23,12 @@ vi.mock('@/lib/AuthContext', () => ({
 
 const recommendationsListMock = vi.fn();
 const dashboardGetStatsMock = vi.fn();
+const dashboardGetFocusContactMock = vi.fn();
 const auditLogListMock = vi.fn();
 const decisionsFeedMock = vi.fn();
 const actionsListMock = vi.fn();
+const pipelinesListMock = vi.fn();
+const subObjectivesGetStateMock = vi.fn();
 vi.mock('@/lib/api', async () => {
   const actual = await vi.importActual<typeof import('@/lib/api')>('@/lib/api');
   return {
@@ -38,9 +41,10 @@ vi.mock('@/lib/api', async () => {
       dismiss: vi.fn(),
     },
     // KAN-1103 — mock dashboardApi + auditLogApi for KPI strip + Audit Log
-    // panel tests. Default returns set in beforeEach below.
+    // panel tests. KAN-1108 — extended with getFocusContact.
     dashboardApi: {
       getStats: (...args: unknown[]) => dashboardGetStatsMock(...args),
+      getFocusContact: (...args: unknown[]) => dashboardGetFocusContactMock(...args),
     },
     auditLogApi: {
       list: (...args: unknown[]) => auditLogListMock(...args),
@@ -53,6 +57,23 @@ vi.mock('@/lib/api', async () => {
     },
     actionsApi: {
       list: (...args: unknown[]) => actionsListMock(...args),
+    },
+    // KAN-1108 — mock pipelinesApi.list + dashboardApi.getFocusContact +
+    // subObjectivesApi.getStateForContact for Pipeline Health + Focus Contact
+    // panel tests. The pre-existing dashboardApi mock (KAN-1103) is replaced
+    // entirely below so getFocusContact is callable.
+    pipelinesApi: {
+      list: (...args: unknown[]) => pipelinesListMock(...args),
+      listWithStages: vi.fn(),
+      getById: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      toggleActive: vi.fn(),
+      delete: vi.fn(),
+    },
+    subObjectivesApi: {
+      getStateForContact: (...args: unknown[]) => subObjectivesGetStateMock(...args),
+      transitionState: vi.fn(),
     },
   };
 });
@@ -158,13 +179,81 @@ function buildActionStreamItem(overrides: Partial<ActionStreamItem> = {}): Actio
   };
 }
 
+// KAN-1108 — PipelineSummary builder. Defaults model a single open pipeline
+// with one Sales target + 2 microObjectives (no per-pipeline progress; QSP
+// catalog only per Q3 framing refinement).
+function buildPipelineSummary(overrides: Partial<PipelineSummary> = {}): PipelineSummary {
+  return {
+    id: overrides.id ?? 'pipe-1',
+    name: 'Sales Pipeline',
+    description: null,
+    isActive: true,
+    order: 0,
+    objectiveType: 'BOOK_APPOINTMENT' as PipelineSummary['objectiveType'],
+    objectiveDescription: null,
+    stageCount: 4,
+    activeLeadCount: 16,
+    pipelineValue: 124900,
+    avgConfidence: 0.62,
+    microObjectives: [
+      { id: 'mo-1', name: 'First 10 leads ingested', isDefault: false, order: 0 },
+      { id: 'mo-2', name: 'Close 5 deals this quarter', isDefault: false, order: 1 },
+    ],
+    targets: [
+      { metric: 'revenue_won' as PipelineSummary['targets'][0]['metric'], period: 'quarterly' as PipelineSummary['targets'][0]['period'], value: 125000, currentProgress: 41200 },
+    ],
+    ...overrides,
+  };
+}
+
+// KAN-1108 — FocusContact builder. Defaults model an escalation-driven focus.
+function buildFocusContact(overrides: Partial<FocusContact> = {}): FocusContact {
+  return {
+    contactId: overrides.contactId ?? 'contact-focus-1',
+    contact: {
+      firstName: 'Sarah',
+      lastName: 'Chen',
+      email: 'sarah@example.com',
+      companyName: 'Acme Inc',
+      currentStageName: 'Qualified',
+    },
+    currentObjective: {
+      strategy: 'direct',
+      actionType: 'send_email',
+      confidence: 0.87,
+    },
+    focusReason: 'escalation',
+    ...overrides,
+  };
+}
+
+// KAN-1108 — DiscoveryStateForContact builder. Defaults: 2 resolved + 3 pending.
+function buildDiscoveryState(overrides: Partial<DiscoveryStateForContact> = {}): DiscoveryStateForContact {
+  return {
+    prioritizedGaps: [
+      { key: 'pricing_tolerance', label: 'Pricing tolerance', valueType: 'text', state: 'unknown', priorityWeight: 1, recencyDaysSinceLastEval: 1, score: 80, hardTrigger: true },
+      { key: 'meeting_confirmed', label: 'Meeting confirmed', valueType: 'text', state: 'unknown', priorityWeight: 2, recencyDaysSinceLastEval: 1, score: 60, hardTrigger: false },
+      { key: 'decision_maker', label: 'Decision maker confirmed', valueType: 'text', state: 'unknown', priorityWeight: 3, recencyDaysSinceLastEval: 2, score: 40, hardTrigger: false },
+    ],
+    topCandidate: { key: 'pricing_tolerance', label: 'Pricing tolerance', score: 80, hardTrigger: true },
+    resolvedGaps: [
+      { key: 'budget', label: 'Budget confirmed', valueType: 'numeric' as DiscoveryStateForContact['resolvedGaps'][0]['valueType'], state: 'known', value: '$12K', source: 'decision_initialize', setBy: 'system', setAt: new Date().toISOString() },
+      { key: 'timeline', label: 'Timeline confirmed', valueType: 'text' as DiscoveryStateForContact['resolvedGaps'][0]['valueType'], state: 'known', value: 'Q2', source: 'decision_initialize', setBy: 'system', setAt: new Date().toISOString() },
+    ],
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   useAuthMock.mockReset();
   recommendationsListMock.mockReset();
   dashboardGetStatsMock.mockReset();
+  dashboardGetFocusContactMock.mockReset();
   auditLogListMock.mockReset();
   decisionsFeedMock.mockReset();
   actionsListMock.mockReset();
+  pipelinesListMock.mockReset();
+  subObjectivesGetStateMock.mockReset();
   // Default: admin user. Override per-test for non-admin path.
   useAuthMock.mockReturnValue({
     user: { role: 'admin', email: 'admin@test.local' },
@@ -187,6 +276,13 @@ beforeEach(() => {
   actionsListMock.mockResolvedValue({
     actions: [],
     pagination: { page: 1, limit: 6, total: 0, pages: 0 },
+  });
+  // KAN-1108 defaults — empty pipelines + null focus contact.
+  pipelinesListMock.mockResolvedValue([]);
+  dashboardGetFocusContactMock.mockResolvedValue(null);
+  subObjectivesGetStateMock.mockResolvedValue({
+    prioritizedGaps: [],
+    resolvedGaps: [],
   });
 });
 
@@ -748,6 +844,140 @@ describe('KAN-1107 — Decision Feed + Agent Actions polling cadence', () => {
     });
     await vi.advanceTimersByTimeAsync(30_000);
     expect(actionsListMock).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+  });
+});
+
+describe('KAN-1108 — Pipeline Health panel', () => {
+  it('Test 1 — loading state shows skeleton cards', async () => {
+    pipelinesListMock.mockImplementation(() => new Promise(() => undefined));
+    render(<DashboardPage />);
+    const loadings = await screen.findAllByTestId('pipeline-health-loading');
+    expect(loadings.length).toBe(3);
+  });
+
+  it('Test 2 — empty state renders objective-declaration prompt', async () => {
+    pipelinesListMock.mockResolvedValue([]);
+    render(<DashboardPage />);
+    const empty = await screen.findByTestId('pipeline-health-empty');
+    expect(empty.textContent).toMatch(/declare an objective in Settings/i);
+  });
+
+  it('Test 3 — error state shows Retry button + refetches on click', async () => {
+    pipelinesListMock.mockRejectedValueOnce(new Error('Network'));
+    render(<DashboardPage />);
+    const errorContainer = await screen.findByTestId('pipeline-health-error');
+    expect(errorContainer.textContent).toMatch(/Couldn.?t load pipeline health/i);
+    pipelinesListMock.mockResolvedValueOnce([]);
+    const retry = errorContainer.querySelector('button');
+    expect(retry).toBeTruthy();
+    fireEvent.click(retry!);
+    await waitFor(() => {
+      expect(pipelinesListMock).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it('Test 4 — populated renders pipelineValue ($) + activeLeadCount + avgConfidence (%) + microObjectives list', async () => {
+    pipelinesListMock.mockResolvedValue([
+      buildPipelineSummary({ id: 'pipe-1', name: 'Sales Pipeline', pipelineValue: 124900, activeLeadCount: 16, avgConfidence: 0.62 }),
+    ]);
+    render(<DashboardPage />);
+    const card = await screen.findByTestId('pipeline-card-pipe-1');
+    expect(card.textContent).toMatch(/Sales Pipeline/);
+    expect(card.textContent).toMatch(/\$124,900/);
+    expect(card.textContent).toMatch(/16/);
+    expect(card.textContent).toMatch(/62%/);
+    // Q3 framing refinement: microObjective NAMES rendered without status badges
+    const mos = within(card).getByTestId('pipeline-mos-pipe-1');
+    expect(mos.textContent).toMatch(/First 10 leads ingested/);
+    expect(mos.textContent).toMatch(/Close 5 deals this quarter/);
+  });
+
+  it('Test 5 — sentinel: avgConfidence=null renders "—" (honest "no decisions yet" signal)', async () => {
+    pipelinesListMock.mockResolvedValue([
+      buildPipelineSummary({ id: 'pipe-1', avgConfidence: null }),
+    ]);
+    render(<DashboardPage />);
+    const card = await screen.findByTestId('pipeline-card-pipe-1');
+    expect(card.textContent).toMatch(/—/);
+  });
+});
+
+describe('KAN-1108 — Focus Contact + Sub-objective Gap panel', () => {
+  it('Test 1 — loading state shows skeleton', async () => {
+    dashboardGetFocusContactMock.mockImplementation(() => new Promise(() => undefined));
+    render(<DashboardPage />);
+    expect(await screen.findByTestId('focus-contact-loading')).toBeInTheDocument();
+  });
+
+  it('Test 2 — empty state renders honest framing copy', async () => {
+    dashboardGetFocusContactMock.mockResolvedValue(null);
+    render(<DashboardPage />);
+    const empty = await screen.findByTestId('focus-contact-empty');
+    expect(empty.textContent).toMatch(/No active contact in focus right now — the engine isn.?t blocked/i);
+  });
+
+  it('Test 3 — error state shows Retry button', async () => {
+    dashboardGetFocusContactMock.mockRejectedValueOnce(new Error('Network'));
+    render(<DashboardPage />);
+    const errorContainer = await screen.findByTestId('focus-contact-error');
+    expect(errorContainer.querySelector('button')).toBeTruthy();
+  });
+
+  it('Test 4 — populated renders contact name + Escalated badge (focusReason=escalation) + objective header', async () => {
+    dashboardGetFocusContactMock.mockResolvedValue(buildFocusContact({ focusReason: 'escalation' }));
+    subObjectivesGetStateMock.mockResolvedValue(buildDiscoveryState());
+    render(<DashboardPage />);
+    const container = await screen.findByTestId('dashboard-focus-contact');
+    expect(container.textContent).toMatch(/Sarah Chen — Acme Inc/);
+    expect(container.textContent).toMatch(/Escalated/);  // Q13 focusReason badge
+    expect(container.textContent).toMatch(/send email/i);  // actionType projection
+    expect(container.textContent).toMatch(/87%/);  // confidence
+    // Sub-objective rendering
+    const gaps = within(container).getByTestId('focus-contact-gaps');
+    expect(gaps.textContent).toMatch(/Pricing tolerance/);
+    expect(gaps.textContent).toMatch(/Budget confirmed/);  // resolved
+  });
+
+  it('Test 5 — sentinel: focusReason selection priority (escalation wins when both exist)', async () => {
+    // Both fixtures populated; assert UI surfaces 'Escalated' badge.
+    dashboardGetFocusContactMock.mockResolvedValue(buildFocusContact({ focusReason: 'escalation' }));
+    render(<DashboardPage />);
+    const container = await screen.findByTestId('dashboard-focus-contact');
+    expect(container.textContent).toMatch(/Escalated/);
+  });
+
+  it('Test 6 — recent_decision focusReason renders WITHOUT Escalated badge', async () => {
+    dashboardGetFocusContactMock.mockResolvedValue(buildFocusContact({ focusReason: 'recent_decision' }));
+    render(<DashboardPage />);
+    const container = await screen.findByTestId('dashboard-focus-contact');
+    expect(container.textContent).toMatch(/Sarah Chen/);
+    expect(container.textContent).not.toMatch(/Escalated/);
+  });
+});
+
+describe('KAN-1108 — Pipeline Health + Focus Contact polling cadence', () => {
+  it('Pipeline Health — second pipelines.list fires at 60s interval', async () => {
+    vi.useFakeTimers();
+    pipelinesListMock.mockResolvedValue([]);
+    render(<DashboardPage />);
+    await vi.waitFor(() => {
+      expect(pipelinesListMock).toHaveBeenCalledTimes(1);
+    });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(pipelinesListMock).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+  });
+
+  it('Focus Contact — second dashboard.getFocusContact fires at 60s interval', async () => {
+    vi.useFakeTimers();
+    dashboardGetFocusContactMock.mockResolvedValue(null);
+    render(<DashboardPage />);
+    await vi.waitFor(() => {
+      expect(dashboardGetFocusContactMock).toHaveBeenCalledTimes(1);
+    });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(dashboardGetFocusContactMock).toHaveBeenCalledTimes(2);
     vi.useRealTimers();
   });
 });

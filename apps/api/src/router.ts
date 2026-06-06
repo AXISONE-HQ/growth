@@ -2404,6 +2404,102 @@ const dashboardRouter = router({
       totalEscalations,
     };
   }),
+
+  // KAN-1108 — Focus Contact selection for the Dashboard Sub-objective Gap
+  // panel. Selection priority (Phase 1 Q13 lock):
+  //   (i)  highest-severity OPEN Escalation (excluding triggerType='sampled')
+  //        → contactId; focusReason='escalation'
+  //   (ii) fallback: most-recent Decision row → contactId;
+  //        focusReason='recent_decision'
+  //   (iii) fallback: null (empty panel)
+  //
+  // Return shape carries the focusReason discriminator so the UI can render
+  // operator-honest framing ("In focus because of this escalation" vs
+  // "In focus because of recent engine activity"). Sub-objective gap state is
+  // a SEPARATE chained call from the client (subObjectives.getStateForContact
+  // by contactId returned here) — keeps endpoints orthogonal.
+  getFocusContact: protectedProcedure.query(async ({ ctx }) => {
+    // (i) Highest-severity OPEN Escalation (excluding sampled post-hoc reviews)
+    const escalation = await ctx.prisma.escalation.findFirst({
+      where: {
+        tenantId: ctx.tenantId,
+        status: "open",
+        triggerType: { not: "sampled" },
+      },
+      orderBy: [{ severity: "desc" }, { createdAt: "desc" }],
+      select: { contactId: true },
+    });
+
+    // (ii) Fallback: most-recent Decision row
+    let resolvedContactId: string | null = escalation?.contactId ?? null;
+    let resolvedReason: "escalation" | "recent_decision" | null = escalation
+      ? "escalation"
+      : null;
+    if (!resolvedContactId) {
+      const decision = await ctx.prisma.decision.findFirst({
+        where: { tenantId: ctx.tenantId },
+        orderBy: { createdAt: "desc" },
+        select: { contactId: true },
+      });
+      if (decision) {
+        resolvedContactId = decision.contactId;
+        resolvedReason = "recent_decision";
+      }
+    }
+
+    // (iii) Empty state: no escalations + no decisions → null
+    if (!resolvedContactId) return null;
+
+    // Resolve contact + most-recent Decision metadata for the header
+    // (currentObjective name + strategy + confidence).
+    const [contact, latestDecision] = await Promise.all([
+      ctx.prisma.contact.findFirst({
+        where: { id: resolvedContactId, tenantId: ctx.tenantId },
+        select: {
+          firstName: true,
+          lastName: true,
+          email: true,
+          companyName: true,
+          currentStageId: true,
+        },
+      }),
+      ctx.prisma.decision.findFirst({
+        where: { tenantId: ctx.tenantId, contactId: resolvedContactId },
+        orderBy: { createdAt: "desc" },
+        select: { strategySelected: true, actionType: true, confidence: true },
+      }),
+    ]);
+
+    if (!contact) return null;
+
+    let currentStageName: string | null = null;
+    if (contact.currentStageId) {
+      const stage = await ctx.prisma.stage.findUnique({
+        where: { id: contact.currentStageId },
+        select: { name: true },
+      });
+      currentStageName = stage?.name ?? null;
+    }
+
+    return {
+      contactId: resolvedContactId,
+      contact: {
+        firstName: contact.firstName,
+        lastName: contact.lastName,
+        email: contact.email,
+        companyName: contact.companyName,
+        currentStageName,
+      },
+      currentObjective: latestDecision
+        ? {
+            strategy: latestDecision.strategySelected,
+            actionType: latestDecision.actionType,
+            confidence: latestDecision.confidence,
+          }
+        : null,
+      focusReason: resolvedReason,
+    };
+  }),
 });
 
 // ============================================================================
@@ -4391,17 +4487,89 @@ const pipelinesRouter = router({
 
   // List the tenant's pipelines with computed counts (active leads + stages)
   // and the current period's target progress where a Target row exists.
+  //
+  // KAN-1108 — Dashboard v2 PR 4 extensions:
+  //   1. `as any` cast removed (was vestigial KAN-700 cohort pattern; Prisma
+  //      types have caught up — verified zero cascade 2026-06-06).
+  //   2. NEW `microObjectives` include — Phase 1 Q3 lock: catalog only (names);
+  //      per-pipeline completion progress derivation → KAN-1110 follow-up.
+  //   3. NEW `pipelineValue` aggregation — Phase 1 Q1: SUM(Deal.value) by
+  //      pipelineId; status='open' filter; index-perfect (Deal.@@index([tenantId,
+  //      pipelineId]) + @@index([tenantId, status])).
+  //   4. NEW `avgConfidence` aggregation — Phase 1 Q2 Path B (Fred 2026-06-06):
+  //      AVG(Decision.confidence) via Deal join on contactId; 7d rolling window;
+  //      Path B uses Deal.pipelineId (durable; Contact.currentPipelineId is
+  //      deprecated per schema L330). B.1 variant: accept duplicates from
+  //      multi-deal contacts (AVG normalizes; revisit if smoke shows skew).
   list: protectedProcedure.query(async ({ ctx }) => {
-    const pipelines: any[] =
-      (await (ctx.prisma as any).pipeline?.findMany({
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+    const [pipelines, pipelineValueAggs, avgConfidenceRows] = await Promise.all([
+      ctx.prisma.pipeline.findMany({
         where: { tenantId: ctx.tenantId },
         orderBy: [{ order: "asc" }, { createdAt: "asc" }],
         include: {
           targets: true,
           stages: { select: { id: true } },
           contacts: { select: { id: true } },
+          // KAN-1108 Q3 lock — microObjective catalog only (no per-pipeline
+          // progress derivation in this PR; KAN-1110 follow-up).
+          microObjectives: {
+            where: { isActive: true },
+            include: {
+              microObjective: {
+                select: { id: true, name: true, isDefault: true, order: true },
+              },
+            },
+          },
         },
-      })) ?? [];
+      }),
+      // KAN-1108 Q1 — pipelineValue aggregation.
+      ctx.prisma.deal.groupBy({
+        by: ["pipelineId"],
+        where: { tenantId: ctx.tenantId, status: "open", deletedAt: null },
+        _sum: { value: true },
+      }),
+      // KAN-1108 Q2 Path B.1 — avgConfidence via raw SQL (Prisma can't express
+      // GROUP BY across a JOIN cleanly). Aggregates last 7d of Decision rows
+      // joined to open Deals by tenantId + contactId. Index coverage:
+      //   - decisions (tenantId, createdAt) — covers the WHERE filter
+      //   - decisions (tenantId, contactId) — covers the JOIN
+      //   - deals (tenantId, pipelineId) — covers GROUP BY
+      //   - deals (tenantId, contactId) — covers JOIN
+      // Result shape: Array<{ pipelineId: string, avg_confidence: number }>.
+      ctx.prisma.$queryRaw<Array<{ pipelineId: string; avg_confidence: number }>>`
+        SELECT
+          deal.pipeline_id AS "pipelineId",
+          AVG(d.confidence)::float AS avg_confidence
+        FROM decisions d
+        JOIN deals deal
+          ON d.contact_id = deal.contact_id
+          AND deal.tenant_id = d.tenant_id
+        WHERE d.tenant_id = ${ctx.tenantId}::uuid
+          AND d.created_at > ${sevenDaysAgo}
+          AND deal.status = 'open'
+          AND deal.deleted_at IS NULL
+        GROUP BY deal.pipeline_id
+      `,
+    ]);
+
+    // Build lookup maps keyed by pipelineId.
+    const valueByPipeline = new Map<string, number>();
+    for (const agg of pipelineValueAggs) {
+      if (agg.pipelineId && agg._sum.value != null) {
+        valueByPipeline.set(
+          agg.pipelineId,
+          typeof agg._sum.value === "object" && "toNumber" in agg._sum.value
+            ? agg._sum.value.toNumber()
+            : Number(agg._sum.value),
+        );
+      }
+    }
+    const confidenceByPipeline = new Map<string, number>();
+    for (const row of avgConfidenceRows) {
+      confidenceByPipeline.set(row.pipelineId, row.avg_confidence);
+    }
 
     return pipelines.map((p) => ({
       id: p.id,
@@ -4413,7 +4581,17 @@ const pipelinesRouter = router({
       objectiveDescription: p.objectiveDescription,
       stageCount: p.stages?.length ?? 0,
       activeLeadCount: p.contacts?.length ?? 0,
-      targets: (p.targets ?? []).map((t: any) => ({
+      // KAN-1108 — new aggregations
+      pipelineValue: valueByPipeline.get(p.id) ?? 0,
+      avgConfidence: confidenceByPipeline.get(p.id) ?? null,
+      // KAN-1108 Q3 — microObjective catalog (names only; KAN-1110 progress)
+      microObjectives: (p.microObjectives ?? []).map((pmo) => ({
+        id: pmo.microObjective.id,
+        name: pmo.microObjective.name,
+        isDefault: pmo.microObjective.isDefault,
+        order: pmo.microObjective.order,
+      })),
+      targets: (p.targets ?? []).map((t) => ({
         metric: t.metric,
         period: t.period,
         value: typeof t.value === "object" && "toNumber" in t.value ? t.value.toNumber() : Number(t.value),
