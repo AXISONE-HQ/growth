@@ -14,7 +14,8 @@
  * Demo data preserved; behavior preserved (expand/collapse decision rows).
  */
 
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
+import Link from 'next/link';
 import {
   Brain,
   Activity,
@@ -34,6 +35,15 @@ import {
 } from 'lucide-react';
 import { MetricCard } from '@/components/growth/metric-card';
 import { AssistantCard } from '@/components/ui/assistant-card';
+// KAN-1102 — Escalation Queue wire-up to recommendations.list (KAN-754
+// adminProcedure). Three-layer admin defense: server adminProcedure (already
+// in place) + client useAuth check (this file) + panel-level conditional
+// render. Mirrors the KAN-1100 moverLinks pattern for admin-conditional UI.
+import { useAuth } from '@/lib/AuthContext';
+import { recommendationsApi, type RecommendationListItem } from '@/lib/api';
+import { severityBadge } from '@/lib/severity-projection';
+import { formatRelativeTime } from '@/lib/format-relative-time';
+import { Badge } from '@/components/ui/badge';
 
 // ─── Stats Row ────────────────────────────────────────────────────────
 // KAN-985 — deltas were string-only ("+ 23 this week"). Stats with a clean
@@ -149,12 +159,41 @@ const subObjectives = [
 ];
 
 // ─── Escalation Queue ─────────────────────────────────────────────────
-// KAN-985 — em-dashes repaired in name + reason.
-const escalations = [
-  { name: 'James Rivera — TechFlow Inc', reason: 'Deal value $28,000 — above $15K threshold', level: 'high' },
-  { name: 'Amanda Wu — Bright Solutions', reason: 'Complaint detected in reply — sentiment negative', level: 'high' },
-  { name: 'David Kim — Apex Digital', reason: 'Confidence below threshold — 32% on strategy selection', level: 'medium' },
-];
+// KAN-1102 — fixture removed; data now flows from recommendations.list via
+// the `useEscalationQueue` hook inside DashboardPage. Panel render at the
+// "Escalation Queue" JSX block below consumes the hook result.
+
+// KAN-1102 — Polling cadence: 30s. Verified safe per Phase 1 trace
+// (listRecommendations does NOT write audit rows; no audit_log pollution).
+// 30s = "live feel" without WebSocket cost; matches operator triage
+// expectation of returning-to-tab freshness.
+const ESCALATION_POLL_MS = 30_000;
+
+// KAN-1102 — Top-N rendered on the dashboard. Backend supports up to 100;
+// dashboard shows the most critical 5. "View all" CTA → /escalations for
+// the full queue.
+const ESCALATION_LIMIT = 5;
+
+// KAN-1102 — Compose display name from contact JOIN.
+// Pattern: "FirstName LastName — Company" with null-safe fallbacks to
+// email or "Unknown contact". Mirrors `/escalations` page's contactName
+// helper (kept page-local there for KAN-1006 scope) + adds the
+// companyName segment for dashboard-tier triage signal.
+function composeEscalationName(c: RecommendationListItem['contact']): string {
+  const name = [c.firstName, c.lastName].filter(Boolean).join(' ').trim();
+  const base = name || c.email || 'Unknown contact';
+  return c.companyName ? `${base} — ${c.companyName}` : base;
+}
+
+// KAN-1102 — Header chip framing per Phase 1 review item 3.
+//   total === 0  → null (empty state component owns the messaging)
+//   total <= 5   → "${total} pending"            (honest count; no slice framing)
+//   total >  5   → "Top 5 of ${total} pending"   (operator-grade slice signal)
+function escalationChipText(total: number): string | null {
+  if (total === 0) return null;
+  if (total <= ESCALATION_LIMIT) return `${total} pending`;
+  return `Top ${ESCALATION_LIMIT} of ${total} pending`;
+}
 
 // ─── Strategy Performance ─────────────────────────────────────────────
 const strategies = [
@@ -185,6 +224,60 @@ const CARD_SHELL = "bg-card border border-border rounded-[var(--ds-radius-card)]
 // ─── Component ────────────────────────────────────────────────────────
 export default function DashboardPage() {
   const [expandedDecision, setExpandedDecision] = useState<number | null>(null);
+
+  // KAN-1102 — Escalation Queue data + admin gate. The query only fires for
+  // admin users (`enabled` gate); non-admins skip the fetch entirely (server
+  // would FORBIDDEN-throw anyway via adminProcedure, but skipping here
+  // avoids a UI error state for non-admins and shaves the request).
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
+  const [escalations, setEscalations] = useState<RecommendationListItem[] | null>(null);
+  const [escalationsTotal, setEscalationsTotal] = useState<number>(0);
+  const [escalationsLoading, setEscalationsLoading] = useState<boolean>(true);
+  const [escalationsError, setEscalationsError] = useState<string | null>(null);
+
+  const reloadEscalations = useCallback(async () => {
+    if (!isAdmin) {
+      setEscalationsLoading(false);
+      return;
+    }
+    try {
+      setEscalationsError(null);
+      const result = await recommendationsApi.list({
+        status: 'open',
+        limit: ESCALATION_LIMIT,
+        // kind defaults to 'pending' at the backend (KAN-1005 M2-5 safety
+        // boundary — excludes sampled post-hoc reviews from the actionable
+        // queue). The dashboard panel intentionally consumes the default.
+      });
+      setEscalations(result.items);
+      setEscalationsTotal(result.total);
+    } catch (e) {
+      setEscalationsError((e as Error).message);
+      setEscalations([]);
+      setEscalationsTotal(0);
+    } finally {
+      setEscalationsLoading(false);
+    }
+  }, [isAdmin]);
+
+  useEffect(() => {
+    if (!isAdmin) return;
+    void reloadEscalations();
+    // 30s polling for live escalation feel + window-focus refresh so
+    // operator returning to tab sees fresh state.
+    const interval = setInterval(() => {
+      void reloadEscalations();
+    }, ESCALATION_POLL_MS);
+    const onFocus = () => {
+      void reloadEscalations();
+    };
+    window.addEventListener('focus', onFocus);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [isAdmin, reloadEscalations]);
 
   return (
     <div className="p-6 flex flex-col gap-6">
@@ -436,30 +529,101 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* Escalation Queue */}
-        <div className={CARD_SHELL}>
-          <div className="flex items-center justify-between px-5 py-4 border-b border-border">
-            <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
-              <AlertTriangle className="w-4 h-4 text-[var(--ds-danger)]" />
-              Escalation Queue
+        {/* KAN-1102 — Escalation Queue (admin-only). Three-layer admin defense:
+            server adminProcedure (recommendations.list) + client useAuth check
+            (the {isAdmin && ...} wrap) + panel-level conditional render. Non-
+            admins don't see the container at all; mirrors KAN-1100 moverLinks
+            adminOnly pattern. */}
+        {isAdmin && (
+          <div className={CARD_SHELL} data-testid="dashboard-escalation-queue">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+              <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                <AlertTriangle className="w-4 h-4 text-[var(--ds-danger)]" />
+                Escalation Queue
+              </div>
+              {(() => {
+                const chipText = escalationChipText(escalationsTotal);
+                return chipText ? (
+                  <span className="text-xs font-semibold text-[var(--ds-danger)]">{chipText}</span>
+                ) : null;
+              })()}
             </div>
-            <span className="text-xs font-semibold text-[var(--ds-danger)]">3 pending</span>
-          </div>
-          <div className="divide-y divide-border">
-            {escalations.map((e, i) => (
-              <div key={i} className="flex items-center gap-3 px-5 py-3">
-                <div className={`w-1 h-10 rounded-full flex-shrink-0 ${e.level === 'high' ? 'bg-[var(--ds-danger)]' : 'bg-amber-500'}`} />
-                <div className="flex-1 min-w-0">
-                  <div className="text-[13px] font-medium text-foreground">{e.name}</div>
-                  <div className="text-[12px] text-muted-foreground">{e.reason}</div>
-                </div>
-                <button className="text-[12px] font-semibold text-[var(--ds-violet-500)] bg-[var(--ds-violet-100)] px-3 py-1.5 rounded-lg hover:bg-[var(--ds-violet-100)]/80 flex-shrink-0">
-                  Review
+
+            {escalationsLoading && escalations === null ? (
+              // Loading — 3 skeleton rows matching the row layout below.
+              <div className="divide-y divide-border" data-testid="escalation-queue-loading">
+                {[0, 1, 2].map((i) => (
+                  <div key={i} className="flex items-center gap-3 px-5 py-3 animate-pulse">
+                    <div className="w-1 h-10 rounded-full bg-muted flex-shrink-0" />
+                    <div className="flex-1 min-w-0 space-y-2">
+                      <div className="h-3 w-2/3 bg-muted rounded" />
+                      <div className="h-3 w-1/2 bg-muted rounded" />
+                    </div>
+                    <div className="h-7 w-16 bg-muted rounded-lg flex-shrink-0" />
+                  </div>
+                ))}
+              </div>
+            ) : escalationsError ? (
+              // Error state — show message + Retry button.
+              <div className="px-5 py-6 text-center" data-testid="escalation-queue-error">
+                <div className="text-[13px] text-foreground mb-2">Couldn&apos;t load escalations</div>
+                <button
+                  onClick={() => void reloadEscalations()}
+                  className="text-[12px] font-semibold text-[var(--ds-violet-500)] bg-[var(--ds-violet-100)] px-3 py-1.5 rounded-lg hover:bg-[var(--ds-violet-100)]/80"
+                >
+                  Retry
                 </button>
               </div>
-            ))}
+            ) : escalations && escalations.length === 0 ? (
+              // Empty state — Phase 1 strawman copy frames empty as GOOD.
+              // Designer refines in Phase 4 polish per v2 PRD Q4.
+              <div className="px-5 py-6 text-center text-[12px] text-muted-foreground" data-testid="escalation-queue-empty">
+                No escalations right now — the engine is acting autonomously.
+              </div>
+            ) : (
+              // Populated — render top-N in backend-authoritative sort order
+              // (severity DESC, createdAt DESC at recommendations.ts:147).
+              // No client-side sort; sentinel test locks this assumption.
+              <>
+                <div className="divide-y divide-border">
+                  {(escalations ?? []).map((esc) => {
+                    const sev = severityBadge(esc.severity);
+                    const name = composeEscalationName(esc.contact);
+                    const reason = esc.triggerReason ?? '(no reason recorded)';
+                    return (
+                      <div key={esc.id} className="flex items-center gap-3 px-5 py-3">
+                        <div className="flex-shrink-0">
+                          <Badge variant={sev.variant}>{sev.label}</Badge>
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="text-[13px] font-medium text-foreground truncate">{name}</div>
+                          <div className="text-[12px] text-muted-foreground truncate">{reason}</div>
+                        </div>
+                        <span className="text-[11px] text-muted-foreground flex-shrink-0 whitespace-nowrap">
+                          {formatRelativeTime(esc.createdAt)}
+                        </span>
+                        <Link
+                          href={`/escalations?id=${esc.id}`}
+                          className="text-[12px] font-semibold text-[var(--ds-violet-500)] bg-[var(--ds-violet-100)] px-3 py-1.5 rounded-lg hover:bg-[var(--ds-violet-100)]/80 flex-shrink-0"
+                        >
+                          Review
+                        </Link>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="px-5 py-3 border-t border-border text-right">
+                  <Link
+                    href="/escalations"
+                    className="text-xs text-[var(--ds-violet-500)] cursor-pointer hover:underline inline-flex items-center gap-1"
+                  >
+                    View all <ChevronRight className="w-3 h-3" />
+                  </Link>
+                </div>
+              </>
+            )}
           </div>
-        </div>
+        )}
       </div>
 
       {/* Strategy Performance + Audit Log */}

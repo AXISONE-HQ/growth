@@ -1,5 +1,10 @@
 /**
  * KAN-1087 — format-relative-time unit tests (pure helper, deterministic).
+ * KAN-1102 — relocated alongside source from
+ * apps/web/src/app/settings/cognitive-metrics/_components/__tests__/ to
+ * apps/web/src/lib/__tests__/ matching the apps/web convention (test
+ * colocation with source — see also lib/__tests__/cognitive-metrics-api.test.ts
+ * + lib/__tests__/board-helpers.test.ts).
  */
 import { describe, it, expect } from 'vitest';
 import { formatRelativeTime } from '../format-relative-time';

@@ -149,7 +149,17 @@ export async function listRecommendations(
       take: limit,
       include: {
         contact: {
-          select: { id: true, firstName: true, lastName: true, email: true },
+          // KAN-1102 — `companyName` added so the Dashboard Escalation Queue
+          // panel can render "FirstName LastName — Company" without a
+          // separate Contact fetch. Class-fix bonus: the canonical
+          // `/escalations` page consumer also benefits (audit during build).
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            companyName: true,
+          },
         },
       },
     }),
@@ -160,7 +170,7 @@ export async function listRecommendations(
     items: rows.map((r) => ({
       id: r.id,
       contactId: r.contactId,
-      contact: r.contact,
+      contact: r.contact, // KAN-1102 — now includes `companyName` per the select above
       decisionId: r.decisionId, // null for guardrail-block / lead-assignment paths
       severity: r.severity,
       status: r.status,
