@@ -983,9 +983,39 @@ export interface FocusContact {
   focusReason: 'escalation' | 'recent_decision' | null;
 }
 
+/* ── Brain Layers (KAN-1108b / KAN-1113) ────────────────────────────
+ * Backend: apps/api/src/router.ts → dashboardRouter.getBrainLayers.
+ * Last fixture in Dashboard v2 epic. Surfaces 4 cognitive layers
+ * (Blueprint / Company Truth / Behavioral / Outcome) from canonical
+ * BrainSnapshot schema + Tenant.blueprintId + Blueprint.isActive.
+ *
+ * Phase 1 + 1.5 HYBRID empty-state (Item 5): blueprintId IS NULL →
+ * blueprint.isActive=null + overallScore=null → UI fires empty-state
+ * branch entirely. isActive=false → score capped at 25 (Doctrine 5).
+ * isActive=true → simple average of 4 layer percentages.
+ *
+ * Phase 1.5 PROD baseline 2026-06-06: AxisOne tenant has no Blueprint,
+ * no BrainSnapshot — empty-state branch is the day-1 PROD render.
+ * UI auto-evolves as engine writes BrainSnapshots over time.
+ * ─────────────────────────────────────────────────────────────────────── */
+export interface BrainLayers {
+  blueprint: {
+    /** null when no Blueprint assigned (empty-state branch trigger). */
+    isActive: boolean | null;
+    vertical: string | null;
+  };
+  companyTruth: { populated: number; total: number; pct: number };
+  behavioralLearning: { pct: number };
+  outcomeLearning: { pct: number };
+  /** null when empty-state; 0-100 otherwise. */
+  overallScore: number | null;
+  gaps: Array<{ id: string; message: string; severity: 'info' | 'warning' }>;
+}
+
 export const dashboardApi = {
   getStats: () => trpcQuery<DashboardStats>('dashboard.getStats', undefined),
   getFocusContact: () => trpcQuery<FocusContact | null>('dashboard.getFocusContact', undefined),
+  getBrainLayers: () => trpcQuery<BrainLayers>('dashboard.getBrainLayers', undefined),
 };
 
 /* ── Decisions API (KAN-1107) ───────────────────────────────────────

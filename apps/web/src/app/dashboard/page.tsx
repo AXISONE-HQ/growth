@@ -59,6 +59,8 @@ import {
   type FocusContact,
   subObjectivesApi,
   type DiscoveryStateForContact,
+  // KAN-1108b — Dashboard v2 PR 5 (epic close): Brain Layers wire-up.
+  type BrainLayers,
 } from '@/lib/api';
 import { severityBadge } from '@/lib/severity-projection';
 import { formatRelativeTime } from '@/lib/format-relative-time';
@@ -125,13 +127,22 @@ const AUDIT_LOG_LIMIT = 5;
 // updates; pipeline-level signal doesn't tick fast).
 const PIPELINE_HEALTH_POLL_MS = 60_000;
 
-// ─── Brain Layers ─────────────────────────────────────────────────────
-const brainLayers = [
-  { label: 'Blueprint', pct: 100, display: 'Active', level: 'high' },
-  { label: 'Company Truth', pct: 82, display: '82%', level: 'high' },
-  { label: 'Behavioral Learning', pct: 61, display: '61%', level: 'mid' },
-  { label: 'Outcome Learning', pct: 43, display: '43%', level: 'low' },
-];
+// ─── Brain Layers (KAN-1108b / KAN-1113 — wired to dashboard.getBrainLayers) ─
+// KAN-1108b — fixture removed; data flows from dashboard.getBrainLayers via
+// the useBrainLayers hook. Closes Dashboard v2 epic at 100%.
+//
+// Phase 1 + 1.5 HYBRID empty-state (Item 5 Fred lock 2026-06-06):
+//   - blueprintId IS NULL → empty-state branch fires entirely
+//   - isActive=false → Doctrine-gated cap at 25 on overall score
+//   - isActive=true → simple average of 4 layers
+//
+// Polling: 5min (cognitive readiness evolves days/weeks-scale, not seconds).
+// Window-focus refetch on all return-to-tab visits.
+//
+// Phase 1.5 PROD baseline: AxisOne has no Blueprint + no BrainSnapshot.
+// Day-1 render = empty-state for all 4 layers + 1 gap fires (deal pricing
+// 67% missing > 25% threshold). UI auto-lights-up as engine writes data.
+const BRAIN_LAYERS_POLL_MS = 5 * 60 * 1000; // 5 minutes
 
 // ─── Decision Feed (KAN-1107 — wired to decisions.feed) ──────────────
 // KAN-1107 — fixture removed; chronologically-merged UNION of Decisions
@@ -529,6 +540,42 @@ export default function DashboardPage() {
     };
   }, [reloadFocusContact]);
 
+  // KAN-1108b — Brain Layers data + 5min polling. Slow cadence reflects the
+  // cognitive-learning timescale (days/weeks). dashboard.getBrainLayers is
+  // protectedProcedure; empty-state branch via blueprint.isActive === null
+  // discriminator. PROD day-1: AxisOne has no Blueprint → empty-state fires.
+  const [brainLayers, setBrainLayers] = useState<BrainLayers | null>(null);
+  const [brainLayersLoading, setBrainLayersLoading] = useState<boolean>(true);
+  const [brainLayersError, setBrainLayersError] = useState<string | null>(null);
+
+  const reloadBrainLayers = useCallback(async () => {
+    try {
+      setBrainLayersError(null);
+      const result = await dashboardApi.getBrainLayers();
+      setBrainLayers(result);
+    } catch (e) {
+      setBrainLayersError((e as Error).message);
+      setBrainLayers(null);
+    } finally {
+      setBrainLayersLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void reloadBrainLayers();
+    const interval = setInterval(() => {
+      void reloadBrainLayers();
+    }, BRAIN_LAYERS_POLL_MS);
+    const onFocus = () => {
+      void reloadBrainLayers();
+    };
+    window.addEventListener('focus', onFocus);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [reloadBrainLayers]);
+
   return (
     <div className="p-6 flex flex-col gap-6">
       {/* KAN-1103 — KPI strip wired to dashboard.getStats. Values-only
@@ -661,50 +708,113 @@ export default function DashboardPage() {
 
       {/* Brain + Decision Feed */}
       <div className="grid grid-cols-2 gap-4">
-        {/* Brain Status */}
-        <div className={CARD_SHELL}>
+        {/* Business Brain (KAN-1108b — Dashboard v2 epic close) */}
+        <div className={CARD_SHELL} data-testid="dashboard-brain-layers">
           <div className="flex items-center justify-between px-5 py-4 border-b border-border">
             <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
               <Brain className="w-4 h-4 text-[var(--ds-violet-500)]" />
               Business Brain
             </div>
-            <span className="text-xs text-[var(--ds-violet-500)] cursor-pointer hover:underline inline-flex items-center gap-1">
+            <Link href="/settings/account" className="text-xs text-[var(--ds-violet-500)] hover:underline inline-flex items-center gap-1">
               View details <ChevronRight className="w-3 h-3" />
-            </span>
+            </Link>
           </div>
-          <div className="p-5 flex flex-col gap-4">
-            <div className="flex flex-col gap-3">
-              {brainLayers.map((l) => (
-                <div key={l.label} className="flex items-center gap-3">
-                  <span className="text-[12px] text-muted-foreground w-[130px] flex-shrink-0">{l.label}</span>
-                  <div className="flex-1 h-2 bg-[var(--ds-surface-sunken)] rounded-full overflow-hidden">
-                    <div className={`h-full rounded-full ${
-                      l.level === 'high' ? 'bg-[var(--ds-emerald-500)]' : l.level === 'mid' ? 'bg-amber-500' : 'bg-red-400'
-                    }`} style={{ width: `${l.pct}%` }} />
-                  </div>
-                  <span className={`text-[12px] font-medium w-12 text-right ${
-                    l.level === 'high' ? 'text-[var(--ds-emerald-700)]' : l.level === 'mid' ? 'text-amber-600' : 'text-red-500'
-                  }`}>{l.display}</span>
+          {brainLayersLoading ? (
+            <div className="p-5 flex flex-col gap-4" data-testid="brain-layers-loading">
+              {[0, 1, 2, 3].map((i) => (
+                <div key={i} className="flex items-center gap-3">
+                  <div className="h-3 w-24 bg-muted rounded animate-pulse" />
+                  <div className="flex-1 h-2 bg-muted rounded animate-pulse" />
+                  <div className="h-3 w-10 bg-muted rounded animate-pulse" />
                 </div>
               ))}
             </div>
-
-            <div className="[background-image:var(--ds-accent-gradient)] text-white rounded-lg px-4 py-3 flex items-center justify-between">
-              <span className="text-[12px] font-medium text-white/80">Overall Intelligence Score</span>
-              <div className="text-2xl font-bold">72 <span className="text-base text-white/60 font-normal">/ 100</span></div>
+          ) : brainLayersError ? (
+            <div className="p-5 text-[13px]" data-testid="brain-layers-error">
+              <span className="text-red-600">Couldn&apos;t load brain layers.</span>{' '}
+              <button onClick={() => void reloadBrainLayers()} className="text-[var(--ds-violet-500)] hover:underline">Retry</button>
             </div>
-
-            <div className="bg-[var(--ds-warning-soft)] border border-[var(--ds-warning)] rounded-lg p-3">
-              <div className="flex items-center gap-1.5 text-[12px] font-semibold text-[var(--ds-warning-text)] mb-2">
-                <AlertTriangle className="w-3.5 h-3.5" />
-                Gaps detected
+          ) : !brainLayers || brainLayers.blueprint.isActive === null ? (
+            /* Item 5 HYBRID empty-state: blueprintId IS NULL → operator-actionable CTA copy. */
+            <div className="p-5 flex flex-col gap-3" data-testid="brain-layers-empty">
+              <div className="text-[13px] text-muted-foreground">
+                growth is ready to learn. <Link href="/settings/account" className="text-[var(--ds-violet-500)] hover:underline">Connect a Blueprint in Settings</Link> to give the engine a starting model — cognitive readiness will grow from there.
               </div>
-              <ul className="list-disc list-inside text-[12px] text-[var(--ds-warning-text)] space-y-1">
-                <li>Pricing data incomplete — 40% of deals missing value</li>
-                <li>Competitor positioning not yet ingested</li>
-              </ul>
+              {/* Even in empty-state, surface any gaps that fire (e.g., the
+                  deal-pricing-missing rule works without BrainSnapshot). */}
+              {brainLayers && brainLayers.gaps.length > 0 && (
+                <div className="bg-[var(--ds-warning-soft)] border border-[var(--ds-warning)] rounded-lg p-3" data-testid="brain-layers-gaps">
+                  <div className="flex items-center gap-1.5 text-[12px] font-semibold text-[var(--ds-warning-text)] mb-2">
+                    <AlertTriangle className="w-3.5 h-3.5" />
+                    Gaps detected
+                  </div>
+                  <ul className="list-disc list-inside text-[12px] text-[var(--ds-warning-text)] space-y-1">
+                    {brainLayers.gaps.map((g) => (
+                      <li key={g.id}>{g.message}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </div>
-          </div>
+          ) : (
+            (() => {
+              // Populated branch — render 4 cognitive layers + score + gaps.
+              const layers = [
+                { key: 'blueprint', label: 'Blueprint', pct: 100, display: 'Active' as string },
+                { key: 'companyTruth', label: 'Company Truth', pct: brainLayers.companyTruth.pct, display: `${brainLayers.companyTruth.pct}%` },
+                { key: 'behavioral', label: 'Behavioral Learning', pct: brainLayers.behavioralLearning.pct, display: `${brainLayers.behavioralLearning.pct}%` },
+                { key: 'outcome', label: 'Outcome Learning', pct: brainLayers.outcomeLearning.pct, display: `${brainLayers.outcomeLearning.pct}%` },
+              ];
+              // Doctrine-gated cap: isActive=false → render "Inactive" + capped score
+              if (!brainLayers.blueprint.isActive) {
+                layers[0] = { key: 'blueprint', label: 'Blueprint', pct: 0, display: 'Inactive' };
+              }
+              const levelFor = (pct: number): 'high' | 'mid' | 'low' =>
+                pct >= 75 ? 'high' : pct >= 50 ? 'mid' : 'low';
+              const score = brainLayers.overallScore ?? 0;
+              return (
+                <div className="p-5 flex flex-col gap-4" data-testid="brain-layers-populated">
+                  <div className="flex flex-col gap-3">
+                    {layers.map((l) => {
+                      const level = l.key === 'blueprint' && !brainLayers.blueprint.isActive ? 'low' : levelFor(l.pct);
+                      return (
+                        <div key={l.key} className="flex items-center gap-3" data-testid={`brain-layer-${l.key}`}>
+                          <span className="text-[12px] text-muted-foreground w-[130px] flex-shrink-0">{l.label}</span>
+                          <div className="flex-1 h-2 bg-[var(--ds-surface-sunken)] rounded-full overflow-hidden">
+                            <div className={`h-full rounded-full ${
+                              level === 'high' ? 'bg-[var(--ds-emerald-500)]' : level === 'mid' ? 'bg-amber-500' : 'bg-red-400'
+                            }`} style={{ width: `${l.pct}%` }} />
+                          </div>
+                          <span className={`text-[12px] font-medium w-12 text-right ${
+                            level === 'high' ? 'text-[var(--ds-emerald-700)]' : level === 'mid' ? 'text-amber-600' : 'text-red-500'
+                          }`}>{l.display}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div className="[background-image:var(--ds-accent-gradient)] text-white rounded-lg px-4 py-3 flex items-center justify-between" data-testid="overall-intelligence-score">
+                    <span className="text-[12px] font-medium text-white/80">Overall Intelligence Score</span>
+                    <div className="text-2xl font-bold">{score} <span className="text-base text-white/60 font-normal">/ 100</span></div>
+                  </div>
+
+                  {brainLayers.gaps.length > 0 && (
+                    <div className="bg-[var(--ds-warning-soft)] border border-[var(--ds-warning)] rounded-lg p-3" data-testid="brain-layers-gaps">
+                      <div className="flex items-center gap-1.5 text-[12px] font-semibold text-[var(--ds-warning-text)] mb-2">
+                        <AlertTriangle className="w-3.5 h-3.5" />
+                        Gaps detected
+                      </div>
+                      <ul className="list-disc list-inside text-[12px] text-[var(--ds-warning-text)] space-y-1">
+                        {brainLayers.gaps.map((g) => (
+                          <li key={g.id}>{g.message}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              );
+            })()
+          )}
         </div>
 
         {/* Decision Feed (KAN-1107) */}

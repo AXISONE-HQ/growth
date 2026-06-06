@@ -14,7 +14,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import DashboardPage from '../page';
-import type { RecommendationListItem, DashboardStats, AuditLogEntry, DecisionFeedItem, ActionStreamItem, PipelineSummary, FocusContact, DiscoveryStateForContact } from '@/lib/api';
+import type { RecommendationListItem, DashboardStats, AuditLogEntry, DecisionFeedItem, ActionStreamItem, PipelineSummary, FocusContact, DiscoveryStateForContact, BrainLayers } from '@/lib/api';
 
 const useAuthMock = vi.fn();
 vi.mock('@/lib/AuthContext', () => ({
@@ -24,6 +24,7 @@ vi.mock('@/lib/AuthContext', () => ({
 const recommendationsListMock = vi.fn();
 const dashboardGetStatsMock = vi.fn();
 const dashboardGetFocusContactMock = vi.fn();
+const dashboardGetBrainLayersMock = vi.fn();
 const auditLogListMock = vi.fn();
 const decisionsFeedMock = vi.fn();
 const actionsListMock = vi.fn();
@@ -45,6 +46,7 @@ vi.mock('@/lib/api', async () => {
     dashboardApi: {
       getStats: (...args: unknown[]) => dashboardGetStatsMock(...args),
       getFocusContact: (...args: unknown[]) => dashboardGetFocusContactMock(...args),
+      getBrainLayers: (...args: unknown[]) => dashboardGetBrainLayersMock(...args),
     },
     auditLogApi: {
       list: (...args: unknown[]) => auditLogListMock(...args),
@@ -244,11 +246,26 @@ function buildDiscoveryState(overrides: Partial<DiscoveryStateForContact> = {}):
   };
 }
 
+// KAN-1108b — BrainLayers builder. Defaults model EMPTY-STATE (blueprintId IS NULL
+// per Phase 1.5 PROD reality). Use overrides for populated tests.
+function buildBrainLayers(overrides: Partial<BrainLayers> = {}): BrainLayers {
+  return {
+    blueprint: { isActive: null, vertical: null },
+    companyTruth: { populated: 0, total: 7, pct: 0 },
+    behavioralLearning: { pct: 0 },
+    outcomeLearning: { pct: 0 },
+    overallScore: null,
+    gaps: [],
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   useAuthMock.mockReset();
   recommendationsListMock.mockReset();
   dashboardGetStatsMock.mockReset();
   dashboardGetFocusContactMock.mockReset();
+  dashboardGetBrainLayersMock.mockReset();
   auditLogListMock.mockReset();
   decisionsFeedMock.mockReset();
   actionsListMock.mockReset();
@@ -284,6 +301,8 @@ beforeEach(() => {
     prioritizedGaps: [],
     resolvedGaps: [],
   });
+  // KAN-1108b defaults — empty-state BrainLayers (matches Phase 1.5 PROD).
+  dashboardGetBrainLayersMock.mockResolvedValue(buildBrainLayers());
 });
 
 describe('KAN-1102 — Escalation Queue panel', () => {
@@ -978,6 +997,96 @@ describe('KAN-1108 — Pipeline Health + Focus Contact polling cadence', () => {
     });
     await vi.advanceTimersByTimeAsync(60_000);
     expect(dashboardGetFocusContactMock).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+  });
+});
+
+describe('KAN-1108b — Brain Layers panel (Dashboard v2 epic close)', () => {
+  it('Test 1 — loading state shows skeleton rows', async () => {
+    dashboardGetBrainLayersMock.mockImplementation(() => new Promise(() => undefined));
+    render(<DashboardPage />);
+    expect(await screen.findByTestId('brain-layers-loading')).toBeInTheDocument();
+  });
+
+  it('Test 2 — empty state (blueprintId IS NULL) renders operator-actionable CTA', async () => {
+    dashboardGetBrainLayersMock.mockResolvedValue(buildBrainLayers());
+    render(<DashboardPage />);
+    const empty = await screen.findByTestId('brain-layers-empty');
+    expect(empty.textContent).toMatch(/growth is ready to learn/i);
+    expect(empty.textContent).toMatch(/Connect a Blueprint in Settings/i);
+  });
+
+  it('Test 3 — error state shows Retry button', async () => {
+    dashboardGetBrainLayersMock.mockRejectedValueOnce(new Error('Network'));
+    render(<DashboardPage />);
+    const errorContainer = await screen.findByTestId('brain-layers-error');
+    expect(errorContainer.querySelector('button')).toBeTruthy();
+  });
+
+  it('Test 4 — populated renders 4 layers + Overall Intelligence Score + gaps', async () => {
+    dashboardGetBrainLayersMock.mockResolvedValue(buildBrainLayers({
+      blueprint: { isActive: true, vertical: 'b2b_saas' },
+      companyTruth: { populated: 5, total: 7, pct: 71 },
+      behavioralLearning: { pct: 60 },
+      outcomeLearning: { pct: 40 },
+      overallScore: 68,
+      gaps: [
+        { id: 'deal_pricing_missing', message: 'Pricing data incomplete — 35% of deals missing value', severity: 'warning' },
+      ],
+    }));
+    render(<DashboardPage />);
+    const populated = await screen.findByTestId('brain-layers-populated');
+    expect(within(populated).getByTestId('brain-layer-blueprint').textContent).toMatch(/Active/);
+    expect(within(populated).getByTestId('brain-layer-companyTruth').textContent).toMatch(/71%/);
+    expect(within(populated).getByTestId('brain-layer-behavioral').textContent).toMatch(/60%/);
+    expect(within(populated).getByTestId('brain-layer-outcome').textContent).toMatch(/40%/);
+    const score = within(populated).getByTestId('overall-intelligence-score');
+    expect(score.textContent).toMatch(/68/);
+    const gaps = within(populated).getByTestId('brain-layers-gaps');
+    expect(gaps.textContent).toMatch(/Pricing data incomplete — 35%/);
+  });
+
+  it('Test 5 — Doctrine-gated: isActive=false caps overallScore at 25 + renders Inactive', async () => {
+    dashboardGetBrainLayersMock.mockResolvedValue(buildBrainLayers({
+      blueprint: { isActive: false, vertical: 'b2b_saas' },
+      companyTruth: { populated: 7, total: 7, pct: 100 },
+      behavioralLearning: { pct: 100 },
+      outcomeLearning: { pct: 100 },
+      overallScore: 25, // capped per Doctrine 5
+    }));
+    render(<DashboardPage />);
+    const populated = await screen.findByTestId('brain-layers-populated');
+    expect(within(populated).getByTestId('brain-layer-blueprint').textContent).toMatch(/Inactive/);
+    const score = within(populated).getByTestId('overall-intelligence-score');
+    expect(score.textContent).toMatch(/25 \/ 100/);
+  });
+
+  it('Test 6 — sentinel: empty-state still surfaces gaps when blueprintId=null AND gaps exist (e.g., deal-pricing rule)', async () => {
+    // Phase 1.5 reality: blueprint=null BUT deal-pricing gap fires.
+    dashboardGetBrainLayersMock.mockResolvedValue(buildBrainLayers({
+      gaps: [
+        { id: 'deal_pricing_missing', message: 'Pricing data incomplete — 67% of deals missing value', severity: 'warning' },
+      ],
+    }));
+    render(<DashboardPage />);
+    const empty = await screen.findByTestId('brain-layers-empty');
+    expect(empty.textContent).toMatch(/growth is ready to learn/i);
+    // Gap still surfaces even in empty-state branch
+    const gaps = within(empty).getByTestId('brain-layers-gaps');
+    expect(gaps.textContent).toMatch(/Pricing data incomplete — 67%/);
+  });
+});
+
+describe('KAN-1108b — Brain Layers polling cadence', () => {
+  it('Brain Layers — second dashboard.getBrainLayers fires at 5min interval', async () => {
+    vi.useFakeTimers();
+    dashboardGetBrainLayersMock.mockResolvedValue(buildBrainLayers());
+    render(<DashboardPage />);
+    await vi.waitFor(() => {
+      expect(dashboardGetBrainLayersMock).toHaveBeenCalledTimes(1);
+    });
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+    expect(dashboardGetBrainLayersMock).toHaveBeenCalledTimes(2);
     vi.useRealTimers();
   });
 });
