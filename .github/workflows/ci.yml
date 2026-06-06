@@ -90,6 +90,59 @@ jobs:
         env:
           NODE_ENV: test
 
+  # KAN-1112 — Integration test job. Runs against a real Postgres + pgvector
+  # service container (Option A docker-compose baseline) on every PR.
+  #
+  # Why this job exists: the KAN-1089 → KAN-1111 → KAN-1115 cluster proved
+  # mocked $queryRaw + mocked sentinel-shape tests pass CI while the SQL is
+  # syntactically broken (KAN-1089 alias GROUP BY, KAN-1111 ::uuid cast) or
+  # the backend handler branches wrong (KAN-1115 empty-state-skip-eval).
+  # This job is the bug-class fix: every new $queryRaw / $executeRaw OR
+  # behavior-asserting backend handler MUST ship with at least one test in
+  # apps/api/src/__tests__/integration/*.test.ts. Discipline memo:
+  # `feedback_query_raw_sql_must_have_integration_test_exercising_real_postgres.md`.
+  #
+  # The Postgres service container uses the pgvector/pgvector:pg15 image to
+  # match docker-compose.test.yml (local parity). DATABASE_URL points at
+  # localhost:5433 (matches local-run + vitest.config.integration.ts default).
+  # Migrations apply via `prisma migrate deploy` before tests run.
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres-test:
+        image: pgvector/pgvector:pg15
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: growth_test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U test -d growth_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      DATABASE_URL: postgresql://test:test@localhost:5433/growth_test
+      GCP_PROJECT_ID: test-project
+      INTERNAL_TRPC_AUTH_TOKEN: test-token-at-least-32-characters-long
+      NODE_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      - run: npm ci
+      - name: Generate Prisma Client
+        run: npx prisma generate
+        working-directory: packages/db
+      - name: Apply migrations to test DB
+        run: npx prisma migrate deploy --schema packages/db/prisma/schema.prisma
+      - name: Run integration tests
+        run: npx vitest run --config apps/connectors/vitest.config.integration.ts
+
   build:
     name: Build
     runs-on: ubuntu-latest

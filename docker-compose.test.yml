@@ -1,0 +1,35 @@
+# KAN-1112 — Integration test infrastructure.
+#
+# Spins up Postgres + pgvector on localhost:5433 for integration tests.
+# Port 5433 avoids collision with any running dev Postgres on the default 5432.
+#
+# Usage (local):
+#   docker compose -f docker-compose.test.yml up -d
+#   # ... wait for healthy ...
+#   DATABASE_URL=postgresql://test:test@localhost:5433/growth_test \
+#     npx prisma migrate deploy --schema packages/db/prisma/schema.prisma
+#   npx vitest run --config apps/connectors/vitest.config.integration.ts
+#   docker compose -f docker-compose.test.yml down
+#
+# Per KAN-1112 Phase 1 Q2 lock: Option A (docker-compose + pgvector baseline).
+# Option B (Cloud SQL Proxy) documented as fallback in docs/CLAUDE.md for
+# PROD-version-specific edge cases.
+
+services:
+  postgres-test:
+    image: pgvector/pgvector:pg15
+    container_name: growth-postgres-test
+    environment:
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: growth_test
+    ports:
+      - '5433:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U test -d growth_test']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    tmpfs:
+      # KAN-1112 — store DB data in RAM for fast test runs; transient, never persisted.
+      - /var/lib/postgresql/data

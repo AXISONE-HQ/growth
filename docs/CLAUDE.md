@@ -262,6 +262,59 @@ As of 2026-04-24, `npx tsc --noEmit` from `apps/api/` reports approximately:
 
 None of these are blockers for wedge-path work. Don't fix them as drive-bys — each has its own follow-up scope.
 
+## Integration tests — KAN-1112
+
+### Hard rule
+
+When a PR adds `$queryRaw` (or `$executeRaw`) to a procedure OR adds a sentinel
+test that asserts backend behavior, the PR **MUST include at least one
+integration test** under `apps/api/src/__tests__/integration/*.test.ts` that
+exercises the actual SQL / backend code path against real Postgres.
+
+Background: the KAN-1089 → KAN-1111 → KAN-1115 cluster shipped three
+consecutive bug classes where mocked unit tests passed (CI green) but PROD
+failed at the first request — alias-based GROUP BY (42803), `::uuid` cast on
+text columns (42883), and empty-state-skip-eval branching. Mocks validated
+response shapes; nothing executed the SQL or the handler against a database.
+
+Discipline memos:
+- `docs/memories/feedback_query_raw_sql_must_have_integration_test_exercising_real_postgres.md`
+- `docs/memories/feedback_sentinel_tests_for_backend_behavior_must_exercise_real_backend_not_mock.md`
+
+### Local run
+
+```sh
+# 1. Spin up Postgres + pgvector on localhost:5433
+docker compose -f docker-compose.test.yml up -d
+
+# 2. Wait for the container to be healthy (~5s)
+docker compose -f docker-compose.test.yml ps
+
+# 3. Apply migrations
+DATABASE_URL=postgresql://test:test@localhost:5433/growth_test \
+  npx prisma migrate deploy --schema packages/db/prisma/schema.prisma
+
+# 4. Run the integration suite
+DATABASE_URL=postgresql://test:test@localhost:5433/growth_test \
+  npx vitest run --config apps/connectors/vitest.config.integration.ts
+
+# 5. Tear down (tmpfs auto-discards data; nothing persists)
+docker compose -f docker-compose.test.yml down
+```
+
+The CI `integration-tests` job in `.github/workflows/ci.yml` handles the
+docker lifecycle automatically via service containers. Tests use per-test
+transaction rollback (`withRollback(async (prisma) => ...)`) — no manual
+cleanup ceremony, no cross-test pollution.
+
+### Fallback: Cloud SQL Proxy (Option B)
+
+If a test needs PROD-version-specific Postgres behavior (extensions, custom
+types, etc.), point `DATABASE_URL` at a Cloud SQL Proxy session against a
+read-replica. Use `WHERE 1=0` filters to avoid touching real rows during
+syntax validation. Document the Option-B fallback in the test file header
+so future readers know why local docker-compose isn't enough.
+
 ## CI state
 
 As of 2026-04-24, the `Lint & Type Check` and `Test` jobs have been **failing on `main` for multiple days** (4 of the last 5 runs red). Two root causes, both orthogonal to any individual PR's code:
