@@ -59,6 +59,8 @@ import {
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
 import { SectionCard } from '@/components/ui/detail-page-shell';
+// KAN-1107 — channelIcon helper consolidated into shared lib.
+import { channelIcon } from '@/lib/action-icon-projection';
 // KAN-1100 — useAuth surfaces user.role for the moverLinks admin-conditional
 // render filter. Canonical client-side admin gate per AuthContext.tsx + the
 // NEXT_PUBLIC_ADMIN_EMAILS build-time-inlined pattern (KAN-1088).
@@ -542,12 +544,10 @@ export default function SettingsPage() {
     return integrations.find((i) => i.provider === provider);
   };
 
-  const channelIcons: Record<string, { icon: typeof Mail; color: string }> = {
-    email: { icon: Mail, color: 'bg-[var(--ds-violet-100)] text-[var(--ds-violet-500)]' },
-    sms: { icon: Phone, color: 'bg-[var(--ds-emerald-100)] text-[var(--ds-emerald-700)]' },
-    whatsapp: { icon: MessageCircle, color: 'bg-[var(--ds-emerald-100)] text-[var(--ds-emerald-700)]' },
-    messenger: { icon: MessagesSquare, color: 'bg-[var(--ds-violet-100)] text-[var(--ds-violet-500)]' },
-  };
+  // KAN-1107 — channelIcons extracted to apps/web/src/lib/action-icon-projection.ts.
+  // Class-fix consolidation: dashboard Decision Feed + Agent Actions panels
+  // share the same icon mapping; single source of truth in lib/.
+  // Original inline mapping preserved via channelIcon() wrapper.
 
   return (
     <div className="mx-auto max-w-6xl px-6 py-8">
@@ -809,7 +809,7 @@ export default function SettingsPage() {
                 <div className="flex flex-col gap-4">
                   {(['email', 'sms', 'whatsapp', 'messenger'] as const).map((type) => {
                     const ch = channels.find((c) => c.type === type);
-                    const iconInfo = channelIcons[type];
+                    const iconInfo = channelIcon(type) ?? { icon: Mail, color: 'bg-muted text-muted-foreground' };
                     const Icon = iconInfo.icon;
                     const isConnected = ch?.status === 'connected';
 

@@ -940,6 +940,84 @@ export const dashboardApi = {
   getStats: () => trpcQuery<DashboardStats>('dashboard.getStats', undefined),
 };
 
+/* ── Decisions API (KAN-1107) ───────────────────────────────────────
+ * Backend: apps/api/src/router.ts → decisionsRouter.feed.
+ * Chronological UNION of recent Decisions + OPEN Escalations for the
+ * Dashboard Decision Feed panel. Phase 1 Finding B reframe: Decision.source
+ * doesn't exist; Escalation rows mixed in via `kind` discriminator surface
+ * the "AI vs H" semantic without schema column. Phase 1 Finding C reframe:
+ * Decision.channel doesn't exist; hybrid resolution (Action[0].channel +
+ * actionType-derived proxy) on server, icon mapping in
+ * action-icon-projection.ts.
+ * ─────────────────────────────────────────────────────────────────────── */
+export interface DecisionFeedItem {
+  id: string;
+  kind: 'decision' | 'escalation';
+  contactId: string;
+  contact: {
+    firstName: string | null;
+    lastName: string | null;
+    email: string | null;
+    companyName: string | null;
+  };
+  /** ISO timestamp from server (Date serialized over JSON). */
+  createdAt: string;
+  reasoning: string | null;
+  // Decision-side
+  strategy?: string;
+  actionType?: string;
+  channel?: string | null;
+  /** 0-1 float; multiply by 100 for UI percentage. */
+  confidence?: number;
+  // Escalation-side
+  severity?: string;
+  triggerType?: string;
+}
+
+export const decisionsApi = {
+  feed: (input?: { limit?: number }) =>
+    trpcQuery<{ items: DecisionFeedItem[]; total: number }>(
+      'decisions.feed',
+      input ?? {},
+    ),
+};
+
+/* ── Actions API (KAN-1107) ─────────────────────────────────────────
+ * Backend: apps/api/src/router.ts → actionsRouter.list. Action records
+ * carry channel + status from CommunicationAgent dispatch path. Contact
+ * JOIN added KAN-1107 for Agent Actions panel.
+ *
+ * Empirical vocab audit 2026-06-06: Action table is empty in PROD (engine
+ * pre-launch; 13.6k decisions, 0 dispatches). Status vocab cribbed from
+ * communication-agent.d.ts: pending | sent | delivered | failed | bounced
+ * | blocked | rejected. Defensive mapping in action-icon-projection.ts
+ * handles unknown values gracefully.
+ * ─────────────────────────────────────────────────────────────────────── */
+export interface ActionStreamItem {
+  id: string;
+  contactId: string;
+  contact: {
+    firstName: string | null;
+    lastName: string | null;
+    email: string | null;
+    companyName: string | null;
+  };
+  agentType: string;
+  channel: string | null;
+  status: string;
+  payload: Record<string, unknown>;
+  /** ISO timestamp from server. */
+  createdAt: string;
+}
+
+export const actionsApi = {
+  list: (input?: { limit?: number; decisionId?: string }) =>
+    trpcQuery<{ actions: ActionStreamItem[]; pagination: { page: number; limit: number; total: number; pages: number } }>(
+      'actions.list',
+      input ?? {},
+    ),
+};
+
 /* ── Contacts API (KAN-718 Day 10) ──────────────────────────────────
  * Backend: apps/api/src/router.ts → contactsRouter, delegates to
  * packages/api/src/services/contacts-router.ts.

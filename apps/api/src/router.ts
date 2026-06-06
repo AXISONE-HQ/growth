@@ -1475,6 +1475,113 @@ const decisionsRouter = router({
 
       return decision;
     }),
+
+  // KAN-1107 — Dashboard Decision Feed. Chronological UNION of recent
+  // Decisions + OPEN Escalations. Phase 1 Finding B reframe: Decision.source
+  // doesn't exist; "AI vs H" semantic surfaces via Escalation rows mixed
+  // chronologically with Decision rows. Each item carries `kind` discriminator.
+  //
+  // Phase 1 Q6 (Finding C): Decision.channel doesn't exist. Hybrid resolution:
+  // (a) JOINed actions[0]?.channel when present, (b) actionType-derived proxy
+  // (send_email → 'email', send_message → 'sms', send_follow_up → null).
+  // Empirical vocab audit 2026-06-06: Action table is currently empty in PROD
+  // (all 13.6k decisions, 0 dispatches yet — engine pre-launch posture).
+  // Action.channel resolution will populate as dispatches accumulate.
+  feed: protectedProcedure
+    .input(z.object({ limit: z.number().min(1).max(50).default(5) }))
+    .query(async ({ ctx, input }) => {
+      const [decisions, escalations] = await Promise.all([
+        ctx.prisma.decision.findMany({
+          where: { tenantId: ctx.tenantId },
+          orderBy: { createdAt: "desc" },
+          take: input.limit,
+          include: {
+            contact: {
+              select: { firstName: true, lastName: true, email: true, companyName: true },
+            },
+            actions: {
+              take: 1,
+              orderBy: { createdAt: "desc" },
+              select: { channel: true },
+            },
+          },
+        }),
+        ctx.prisma.escalation.findMany({
+          where: { tenantId: ctx.tenantId, status: "open" },
+          orderBy: { createdAt: "desc" },
+          take: input.limit,
+          include: {
+            contact: {
+              select: { firstName: true, lastName: true, email: true, companyName: true },
+            },
+          },
+        }),
+      ]);
+
+      // Q6 hybrid channel derivation (server-side projection, kept local
+      // here; UI-side projection helper in action-icon-projection.ts handles
+      // labeling + icons).
+      const actionTypeToChannel: Record<string, string | null> = {
+        send_email: "email",
+        send_message: "sms",
+        send_follow_up: null,
+      };
+
+      type FeedItem = {
+        id: string;
+        kind: "decision" | "escalation";
+        contactId: string;
+        contact: {
+          firstName: string | null;
+          lastName: string | null;
+          email: string | null;
+          companyName: string | null;
+        };
+        createdAt: Date;
+        reasoning: string | null;
+        // Decision-side
+        strategy?: string;
+        actionType?: string;
+        channel?: string | null;
+        confidence?: number;
+        // Escalation-side
+        severity?: string;
+        triggerType?: string;
+      };
+
+      const items: FeedItem[] = [
+        ...decisions.map((d): FeedItem => ({
+          id: d.id,
+          kind: "decision",
+          contactId: d.contactId,
+          contact: d.contact,
+          createdAt: d.createdAt,
+          reasoning: d.reasoning,
+          strategy: d.strategySelected,
+          actionType: d.actionType,
+          channel: d.actions[0]?.channel ?? actionTypeToChannel[d.actionType] ?? null,
+          confidence: d.confidence,
+        })),
+        ...escalations.map((e): FeedItem => ({
+          id: e.id,
+          kind: "escalation",
+          contactId: e.contactId,
+          contact: e.contact,
+          createdAt: e.createdAt,
+          reasoning: e.triggerReason ?? null,
+          severity: e.severity,
+          triggerType: e.triggerType,
+        })),
+      ];
+
+      // Chronological merge: createdAt DESC.
+      items.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+
+      return {
+        items: items.slice(0, input.limit),
+        total: decisions.length + escalations.length,
+      };
+    }),
 });
 
 // ============================================================================
@@ -1504,6 +1611,12 @@ const actionsRouter = router({
           skip,
           take: input.limit,
           orderBy: { createdAt: "desc" },
+          // KAN-1107 — Contact JOIN for Agent Actions panel; lean select.
+          include: {
+            contact: {
+              select: { firstName: true, lastName: true, email: true, companyName: true },
+            },
+          },
         }),
         ctx.prisma.action.count({ where }),
       ]);
