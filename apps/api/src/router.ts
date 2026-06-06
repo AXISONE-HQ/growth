@@ -2252,49 +2252,6 @@ const objectivesRouter = router({
 
       return { created: true, pipeline: created };
     }),
-
-  create: protectedProcedure
-    .input(
-      z.object({
-        title: z.string().min(1),
-        description: z.string().optional(),
-        status: z.string().default("active"),
-      })
-    )
-    .mutation(async ({ ctx, input }) => {
-      return ctx.prisma.objective.create({
-        data: {
-          ...input,
-          tenant_id: ctx.tenantId,
-        },
-      });
-    }),
-
-  update: protectedProcedure
-    .input(
-      z.object({
-        id: z.string().uuid(),
-        title: z.string().optional(),
-        description: z.string().optional(),
-        status: z.string().optional(),
-      })
-    )
-    .mutation(async ({ ctx, input }) => {
-      const { id, ...data } = input;
-
-      const existing = await ctx.prisma.objective.findFirst({
-        where: { id, tenant_id: ctx.tenantId },
-      });
-
-      if (!existing) {
-        throw new Error("Objective not found");
-      }
-
-      return ctx.prisma.objective.update({
-        where: { id },
-        data,
-      });
-    }),
 });
 
 // ============================================================================
