@@ -1434,8 +1434,8 @@ const decisionsRouter = router({
       const skip = (input.page - 1) * input.limit;
 
       const where = {
-        tenant_id: ctx.tenantId,
-        ...(input.contactId && { contact_id: input.contactId }),
+        tenantId: ctx.tenantId,
+        ...(input.contactId && { contactId: input.contactId }),
       };
 
       const [decisions, total] = await Promise.all([
@@ -1443,7 +1443,7 @@ const decisionsRouter = router({
           where,
           skip,
           take: input.limit,
-          orderBy: { created_at: "desc" },
+          orderBy: { createdAt: "desc" },
         }),
         ctx.prisma.decision.count({ where }),
       ]);
@@ -1465,7 +1465,7 @@ const decisionsRouter = router({
       const decision = await ctx.prisma.decision.findFirst({
         where: {
           id: input.id,
-          tenant_id: ctx.tenantId,
+          tenantId: ctx.tenantId,
         },
       });
 
@@ -1494,8 +1494,8 @@ const actionsRouter = router({
       const skip = (input.page - 1) * input.limit;
 
       const where = {
-        tenant_id: ctx.tenantId,
-        ...(input.decisionId && { decision_id: input.decisionId }),
+        tenantId: ctx.tenantId,
+        ...(input.decisionId && { decisionId: input.decisionId }),
       };
 
       const [actions, total] = await Promise.all([
@@ -1503,7 +1503,7 @@ const actionsRouter = router({
           where,
           skip,
           take: input.limit,
-          orderBy: { created_at: "desc" },
+          orderBy: { createdAt: "desc" },
         }),
         ctx.prisma.action.count({ where }),
       ]);
@@ -1805,11 +1805,11 @@ const brainRouter = router({
   getSnapshot: protectedProcedure.query(async ({ ctx }) => {
     // Returns aggregated snapshot of the AI brain state
     const [contacts, objectives, actions, escalations] = await Promise.all([
-      ctx.prisma.contact.count({ where: { tenant_id: ctx.tenantId } }),
-      ctx.prisma.objective.count({ where: { tenant_id: ctx.tenantId } }),
-      ctx.prisma.action.count({ where: { tenant_id: ctx.tenantId } }),
+      ctx.prisma.contact.count({ where: { tenantId: ctx.tenantId } }),
+      ctx.prisma.objective.count({ where: { tenantId: ctx.tenantId } }),
+      ctx.prisma.action.count({ where: { tenantId: ctx.tenantId } }),
       ctx.prisma.escalation.count({
-        where: { tenant_id: ctx.tenantId, status: "open" },
+        where: { tenantId: ctx.tenantId, status: "open" },
       }),
     ]);
 
