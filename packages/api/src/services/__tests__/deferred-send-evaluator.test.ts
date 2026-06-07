@@ -88,7 +88,12 @@ function makePrismaMock(claimedRows: RowFixture[]): { prisma: PrismaClient; stat
   const decisionCreateMock = vi.fn(async ({ data }: { data: { tenantId: string } }) => ({
     id: `decision_${data.tenantId}`,
   }));
-  const deferredSendUpdateMock = vi.fn(async () => ({}));
+  // KAN-1119 — helpers now call updateMany (status-guarded on 'processing')
+  // and check `result.count === 1` to detect supersession races. Mock returns
+  // count=1 so the happy-path tests assert "row was successfully updated."
+  // Variable name kept (`deferredSendUpdateMock`) to minimize churn — the
+  // assertions in tests below inspect call args, not the method name.
+  const deferredSendUpdateMock = vi.fn(async () => ({ count: 1 }));
   // KAN-1046 — audit log mock so the new catch-path audit emission
   // (deferred-send-evaluator.ts:228 catch block) doesn't crash on
   // undefined.create when error tests run.
@@ -97,7 +102,7 @@ function makePrismaMock(claimedRows: RowFixture[]): { prisma: PrismaClient; stat
   const prisma = {
     $queryRaw: $queryRawMock,
     decision: { create: decisionCreateMock },
-    deferredSend: { update: deferredSendUpdateMock },
+    deferredSend: { updateMany: deferredSendUpdateMock },
     auditLog: { create: auditLogCreateMock },
   } as unknown as PrismaClient;
 

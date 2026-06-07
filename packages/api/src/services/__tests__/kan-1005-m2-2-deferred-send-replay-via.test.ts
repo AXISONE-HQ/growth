@@ -69,14 +69,17 @@ function makePrismaMock(rows: EngineRowFixture[]): {
   };
 } {
   const $queryRaw = vi.fn(async () => rows);
-  const deferredSendUpdate = vi.fn(async () => ({}));
+  // KAN-1119 — helpers now call updateMany (status-guarded on 'processing')
+  // and check `result.count === 1` to detect supersession races. Mock returns
+  // count=1 so happy-path tests assert successful update.
+  const deferredSendUpdate = vi.fn(async () => ({ count: 1 }));
   const decisionCreate = vi.fn(async () => ({ id: 'd-cron' }));
   // KAN-1046 — audit log mock for the new catch-path audit emission.
   const auditLogCreate = vi.fn(async () => ({}));
   const prisma = {
     $queryRaw,
     decision: { create: decisionCreate },
-    deferredSend: { update: deferredSendUpdate },
+    deferredSend: { updateMany: deferredSendUpdate },
     auditLog: { create: auditLogCreate },
   } as unknown as PrismaClient;
   return {
@@ -232,10 +235,24 @@ describe('KAN-1046 — published-false guard + audit-row-on-error', () => {
     // Row's outcome surfaces the publish failure
     expect(result.rowResults[0]!.outcome).toBe('error');
     expect(result.rowResults[0]!.error).toBe('engine_replay_publish_failed');
-    // Critically: deferredSend.update NEVER fired — the row stays `pending`
-    // so the next cron tick retries naturally. The pre-fix silent-mark-
-    // dispatched bug is now structurally impossible.
-    expect(state.deferredSendUpdate).not.toHaveBeenCalled();
+    // KAN-1119 — Critically: deferredSend.updateMany IS called exactly once,
+    // for `markRevertToPending` (status: 'processing' → 'pending'). Without
+    // this revert, the CTE atomic claim's pending→processing transition
+    // would leave publish-failed rows stuck in 'processing' (the next cron
+    // tick's WHERE filter matches only 'pending'). Pre-KAN-1119 this test
+    // asserted `not.toHaveBeenCalled()` — correct under the old SELECT-only
+    // claim semantic but wrong under the CTE atomic claim contract.
+    //
+    // KAN-1046's load-bearing invariant (row NEVER transitions to
+    // 'dispatched' on publish failure) is preserved: the markDispatched
+    // call path is still skipped; only the revert-to-pending fires.
+    expect(state.deferredSendUpdate).toHaveBeenCalledTimes(1);
+    const revertArgs = state.deferredSendUpdate.mock.calls[0]![0] as {
+      where: { id: string; status: string };
+      data: { status: string };
+    };
+    expect(revertArgs.where.status).toBe('processing');
+    expect(revertArgs.data.status).toBe('pending');
   });
 
   it('row processing throws → AuditLog row written with actionType=deferred_send_replay_failed', async () => {
