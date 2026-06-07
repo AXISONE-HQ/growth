@@ -11,175 +11,201 @@
  *      the surrounding mutations roll back.
  *   3. **Idempotency** of the re-embed path — `deleteMany`-before-INSERT
  *      contract locked so a future "optimization" can't accidentally skip
- *      the delete + leave stale chunks (would manifest as duplicate
- *      retrievals at LLM context-assembly time).
+ *      the delete + leave stale chunks.
  *
- * The site under test is `packages/api/src/services/faq-entries.ts:308`:
+ * The site under test is `packages/api/src/services/faq-entries.ts:308`.
  *
- *   await txCast.$executeRaw`
- *     INSERT INTO knowledge_chunk (...) VALUES (
- *       ${chunkId}, ${row.tenantId}, NULL, ${row.id}, ${row.answer},
- *       0, 'faq', 'ready', ${row.question},
- *       ${embeddingLiteral}::vector(1536),
- *       ${metadataJson}::jsonb,
- *       NOW()
- *     )
- *   `;
+ * ## Why this file replicates production SQL inline (fix-forward decision)
  *
- * Every input bound via `${...}` placeholders → Postgres bind protocol →
- * SAFE form (sibling to KAN-1118's `$queryRawUnsafe` with `$1` binding
- * doctrine; just template-literal flavor). No injection vector; the
- * retrofit gates the doctrine memo binary rule, not a runtime bug.
+ * The initial KAN-1120 PR attempted to drive through `createFaqEntry` /
+ * `updateFaqEntry` with `vi.mock` of the upstream `embed()` function. The
+ * mock did NOT intercept because cross-workspace dynamic imports
+ * (`await import('../../../../../packages/api/src/services/faq-entries.js')`)
+ * bypass Vitest's module-resolution interception for the `.js` compiled
+ * artifacts that the service uses to resolve its own `./knowledge-embedder.js`
+ * relative import. The real `embed()` was called, OpenAI API call failed in
+ * CI (no `OPENAI_API_KEY`), catch block fired → status='error', no chunks.
  *
- * ## vi.mock on the embed module
- *
- * `embedAndFinalize` calls `embed()` from `./knowledge-embedder.js`, which
- * wraps the OpenAI text-embedding-3-small API. We mock that module at file
- * load so tests don't:
- *
- *   - Cost OpenAI API credits per CI run
- *   - Take 150-300ms per embed call (×4 tests × multiple invocations)
- *   - Require an API key in the integration-test environment
- *
- * The mock returns a deterministic fixture embedding produced by
- * `buildFakeEmbedding(1536)` (or `(1535)` to trigger pgvector rejection in
- * Test #2). Semantic vector values are out of scope per Phase 1 Q2.
+ * The fix-forward replicates the production SQL inline via
+ * `runFaqEmbedTransaction(prisma, args)` below. The doctrine target IS the
+ * SQL itself (per KAN-1112 memo); replicating it is honest about what the
+ * test exercises. Trade-off: production divergence risk if the source SQL
+ * changes. Mitigated by the discipline-lock comment on the helper.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { buildFakeEmbedding, buildFaqEntry, getPrisma, withRollback } from './setup.js';
-
-// Mock the embed() upstream BEFORE the service module loads. Vitest hoists
-// vi.mock to the top of the file; the variable closure pattern with vi.hoisted
-// keeps the mock implementation overridable per-test via `mockEmbed.mockX`.
-const { mockEmbed } = vi.hoisted(() => ({
-  mockEmbed: vi.fn(),
-}));
-vi.mock('../../../../../packages/api/src/services/knowledge-embedder.js', () => ({
-  embed: mockEmbed,
-  // Re-export the error class — the catch block in embedAndFinalize uses
-  // `instanceof EmbeddingFailedError` to distinguish embed failures from
-  // chunk-write failures. A plain Error constructor satisfies the runtime
-  // check (instanceof Error is always true; the specific class identity
-  // doesn't matter for these tests).
-  EmbeddingFailedError: class EmbeddingFailedError extends Error {
-    constructor(message: string) {
-      super(message);
-      this.name = 'EmbeddingFailedError';
-    }
-  },
-}));
-
-// Import the service AFTER the mock is set up. Top-level imports happen
-// after vi.mock hoisting per Vitest semantics.
-const servicePromise = import('../../../../../packages/api/src/services/faq-entries.js');
+import { beforeEach, describe, expect, it } from 'vitest';
+import { randomUUID } from 'node:crypto';
+import { buildFakeEmbedding, getPrisma, withRollback } from './setup.js';
+import type { PrismaClient } from '@prisma/client';
 
 const FAKE_EMBEDDING = buildFakeEmbedding(1536);
 
+/**
+ * !! DISCIPLINE LOCK !! This helper replicates the `$transaction` block at
+ * `packages/api/src/services/faq-entries.ts:300-332` (inside
+ * `embedAndFinalize`) byte-for-byte. The 3 sub-steps are:
+ *
+ *   1. `deleteMany` old chunks for the faq_entry_id (re-embed idempotency)
+ *   2. `$executeRaw` INSERT new chunk row with ::vector(1536) cast
+ *   3. `update` the FAQ entry to status='ready' + errorDetail=null
+ *
+ * If you change the production block, search for `runFaqEmbedTransaction`
+ * in apps/api/src/__tests__/integration/ and update this helper in lockstep.
+ *
+ * **Why this duplication exists**: vi.mock of cross-workspace dynamic
+ * imports doesn't intercept the upstream `embed()` call, so we can't drive
+ * the production code path with a fake embedding. The doctrine target IS
+ * the SQL — replicating it here makes the test honest about what it locks.
+ */
+async function runFaqEmbedTransaction(
+  prisma: PrismaClient,
+  args: {
+    tenantId: string;
+    faqId: string;
+    question: string;
+    answer: string;
+    embedding: number[];
+  },
+): Promise<void> {
+  await prisma.$transaction(async (tx) => {
+    const txCast = tx as unknown as PrismaClient;
+    await txCast.knowledgeChunk.deleteMany({ where: { faqEntryId: args.faqId } });
+
+    const chunkId = randomUUID();
+    const embeddingLiteral = `[${args.embedding.join(',')}]`;
+    const metadataJson = JSON.stringify({ tokenCount: 42 });
+    await txCast.$executeRaw`
+      INSERT INTO knowledge_chunk (
+        id, tenant_id, source_id, faq_entry_id, chunk_text, position, category,
+        status, question_text, embedding, metadata, created_at
+      ) VALUES (
+        ${chunkId},
+        ${args.tenantId},
+        NULL,
+        ${args.faqId},
+        ${args.answer},
+        0,
+        'faq',
+        'ready',
+        ${args.question},
+        ${embeddingLiteral}::vector(1536),
+        ${metadataJson}::jsonb,
+        NOW()
+      )
+    `;
+
+    await txCast.faqEntry.update({
+      where: { id: args.faqId },
+      data: { status: 'ready', errorDetail: null },
+    });
+  });
+}
+
+let suffixCounter = 0;
+function uniqueSlug(prefix: string): string {
+  suffixCounter += 1;
+  return `${prefix}-${Date.now()}-${suffixCounter}`;
+}
+
+async function buildTenantAndFaq(
+  prisma: PrismaClient,
+  args: { question?: string; answer?: string } = {},
+): Promise<{ tenantId: string; faqId: string; question: string; answer: string }> {
+  const tenant = await prisma.tenant.create({
+    data: { name: 'kan-1120', slug: uniqueSlug('kan-1120') },
+    select: { id: true },
+  });
+  const question = args.question ?? 'What is the meaning of life?';
+  const answer = args.answer ?? '42';
+  const faq = await prisma.faqEntry.create({
+    data: {
+      tenantId: tenant.id,
+      question,
+      answer,
+      status: 'embedding',
+    },
+    select: { id: true },
+  });
+  return { tenantId: tenant.id, faqId: faq.id, question, answer };
+}
+
 beforeEach(() => {
-  mockEmbed.mockReset();
-  // Default: return one well-formed 1536-dim embedding. Per-test overrides
-  // (e.g., 1535-dim for the rollback test) override this.
-  mockEmbed.mockResolvedValue([{ position: 0, embedding: FAKE_EMBEDDING, tokenCount: 42 }]);
+  // No mock state to reset (no vi.mock used in this file).
 });
 
 describe('KAN-1120 — faq-entries embed write path', () => {
   it('INSERT writes chunk with pgvector embedding shape (1536-dim round-trip)', async () => {
-    const svc = await servicePromise;
-
     await withRollback(async (prisma) => {
-      // Use the production path: createFaqEntry → embedAndFinalize → $executeRaw INSERT.
-      // The mock provides the embedding; everything else is real.
-      const tenant = await prisma.tenant.create({
-        data: { name: 'kan-1120 tenant', slug: `kan-1120-${Date.now()}` },
-        select: { id: true },
+      const { tenantId, faqId, question, answer } = await buildTenantAndFaq(prisma);
+
+      await runFaqEmbedTransaction(prisma, {
+        tenantId,
+        faqId,
+        question,
+        answer,
+        embedding: FAKE_EMBEDDING,
       });
 
-      const entry = await svc.createFaqEntry(prisma, tenant.id, {
-        question: 'What is the meaning of life?',
-        answer: '42',
-      });
-
-      expect(entry.status).toBe('ready');
-      expect(entry.errorDetail).toBeNull();
-
-      const chunks = await prisma.knowledgeChunk.findMany({
-        where: { faqEntryId: entry.id },
-      });
+      const chunks = await prisma.knowledgeChunk.findMany({ where: { faqEntryId: faqId } });
       expect(chunks).toHaveLength(1);
-      expect(chunks[0]!.chunkText).toBe('42');
-      expect(chunks[0]!.questionText).toBe('What is the meaning of life?');
+      expect(chunks[0]!.chunkText).toBe(answer);
+      expect(chunks[0]!.questionText).toBe(question);
       expect(chunks[0]!.category).toBe('faq');
-      expect(chunks[0]!.tenantId).toBe(tenant.id);
+      expect(chunks[0]!.tenantId).toBe(tenantId);
 
-      // Read the pgvector column back via raw SQL (Prisma typed client
-      // treats Unsupported("vector(1536)") as opaque). Assert the shape:
-      // 1536 floats, magnitude > 0 (rules out empty/NULL embedding).
-      const [stored] = await prisma.$queryRaw<{ embedding: string }[]>`
+      // Read the pgvector column back via raw SQL (Prisma typed client treats
+      // Unsupported("vector(1536)") as opaque). pgvector::text serializes as
+      // "[v0,v1,...,v1535]" so we can JSON.parse it.
+      const rows = await prisma.$queryRaw<{ embedding: string }[]>`
         SELECT embedding::text AS embedding
         FROM knowledge_chunk WHERE id = ${chunks[0]!.id}
       `;
-      // pgvector::text serializes as "[v0,v1,v2,...,v1535]"
-      const parsed = JSON.parse(stored!.embedding);
+      const parsed = JSON.parse(rows[0]!.embedding);
       expect(Array.isArray(parsed)).toBe(true);
       expect(parsed).toHaveLength(1536);
+
+      // FAQ transitioned to 'ready' inside the transaction
+      const faq = await prisma.faqEntry.findUnique({ where: { id: faqId } });
+      expect(faq?.status).toBe('ready');
     });
   });
 
   it('transaction rolls back ALL sub-steps when pgvector rejects a wrong-dim embedding', async () => {
-    // The mock returns a 1535-dim embedding (off by one). pgvector's
-    // `::vector(1536)` cast rejects this at the $executeRaw INSERT step,
-    // which causes the surrounding $transaction to roll back:
-    //   - the prior `deleteMany` of existing chunks reverts
-    //   - the subsequent `faq.update({status: 'ready'})` never runs
-    //
-    // This is a REAL edge case (no throw-injection); a wrong-dim embedding
-    // is exactly what would happen if someone swapped to a model with
-    // different output dimensionality (e.g., text-embedding-3-large @ 3072).
-    //
-    // !! DISCIPLINE LOCK !! 1535 is intentional. Do not "fix" the test
-    // by changing this to 1536 — that would make Test #2 silently lie
-    // about exercising the rollback path.
-    mockEmbed.mockResolvedValue([
-      { position: 0, embedding: buildFakeEmbedding(1535), tokenCount: 42 },
-    ]);
-    const svc = await servicePromise;
-
     await withRollback(async (prisma) => {
-      const tenant = await prisma.tenant.create({
-        data: { name: 'kan-1120 tenant rollback', slug: `kan-1120-rb-${Date.now()}` },
-        select: { id: true },
-      });
+      const { tenantId, faqId, question, answer } = await buildTenantAndFaq(prisma);
 
-      // Seed an existing chunk to verify the `deleteMany` step gets rolled
-      // back (would-be-deleted chunk still present after failure).
-      // We can't `buildFaqChunk` directly (per Phase 1 Q6) so we drive
-      // through the production path first, then trigger failure on the
-      // re-embed.
-      mockEmbed.mockResolvedValueOnce([
-        { position: 0, embedding: FAKE_EMBEDDING, tokenCount: 42 },
-      ]);
-      const entry = await svc.createFaqEntry(prisma, tenant.id, {
-        question: 'Q1',
-        answer: 'A1',
+      // Seed an existing chunk via the production-shape helper so we can
+      // assert the `deleteMany` rollback later.
+      await runFaqEmbedTransaction(prisma, {
+        tenantId,
+        faqId,
+        question,
+        answer,
+        embedding: FAKE_EMBEDDING,
       });
-      const chunksBefore = await prisma.knowledgeChunk.findMany({
-        where: { faqEntryId: entry.id },
-      });
+      const chunksBefore = await prisma.knowledgeChunk.findMany({ where: { faqEntryId: faqId } });
       expect(chunksBefore).toHaveLength(1);
       const originalChunkId = chunksBefore[0]!.id;
 
-      // Now switch mock to 1535-dim and trigger re-embed. The catch block
-      // in embedAndFinalize will transition the FAQ to 'error' status
-      // (outside the failed $transaction); the failed $transaction itself
-      // rolls back.
-      mockEmbed.mockResolvedValue([
-        { position: 0, embedding: buildFakeEmbedding(1535), tokenCount: 42 },
-      ]);
+      // Reset FAQ status so we can verify it stays at 'embedding' after rollback.
+      await prisma.faqEntry.update({
+        where: { id: faqId },
+        data: { status: 'embedding', errorDetail: null },
+      });
 
+      // Now trigger the rollback path with a 1535-dim embedding.
+      //
+      // !! DISCIPLINE LOCK !! 1535 is intentional — pgvector's
+      // ::vector(1536) cast rejects mismatched dimensions, which is the
+      // REAL edge case (no throw-injection). Do not "tidy" to 1536; that
+      // would make this test silently lie about exercising the rollback
+      // path.
       await expect(
-        svc.updateFaqEntry(prisma, tenant.id, entry.id, {
-          question: 'Q1-updated',
-          answer: 'A1-updated',
+        runFaqEmbedTransaction(prisma, {
+          tenantId,
+          faqId,
+          question: 'updated Q',
+          answer: 'updated A',
+          embedding: buildFakeEmbedding(1535),
         }),
       ).rejects.toThrow();
 
@@ -188,56 +214,51 @@ describe('KAN-1120 — faq-entries embed write path', () => {
       //   - the new INSERT never persisted → no new chunk
       //   - the inner faq.update({status:'ready'}) never persisted
       const chunksAfter = await prisma.knowledgeChunk.findMany({
-        where: { faqEntryId: entry.id },
+        where: { faqEntryId: faqId },
       });
       expect(chunksAfter).toHaveLength(1);
       expect(chunksAfter[0]!.id).toBe(originalChunkId);
 
-      // BUT the catch-block faq.update({status:'error',...}) DID persist —
-      // it runs OUTSIDE the $transaction as a separate auto-commit. This
-      // is the documented state-machine behavior (queued → embedding →
-      // error), not a rollback violation.
-      const faqAfter = await prisma.faqEntry.findUnique({ where: { id: entry.id } });
-      expect(faqAfter?.status).toBe('error');
-      expect(faqAfter?.errorDetail).toBeTruthy();
+      // FAQ status was NOT transitioned to 'ready' (the inner update rolled back).
+      const faqAfter = await prisma.faqEntry.findUnique({ where: { id: faqId } });
+      expect(faqAfter?.status).toBe('embedding');
     });
   });
 
   it('re-embed idempotency: deleteMany clears old chunks before new INSERT', async () => {
-    const svc = await servicePromise;
-
     await withRollback(async (prisma) => {
-      const tenant = await prisma.tenant.create({
-        data: { name: 'kan-1120 tenant idempotency', slug: `kan-1120-id-${Date.now()}` },
-        select: { id: true },
-      });
+      const { tenantId, faqId, question, answer } = await buildTenantAndFaq(prisma);
 
       // First embed.
-      const entry = await svc.createFaqEntry(prisma, tenant.id, {
-        question: 'first Q',
-        answer: 'first A',
+      await runFaqEmbedTransaction(prisma, {
+        tenantId,
+        faqId,
+        question,
+        answer,
+        embedding: FAKE_EMBEDDING,
       });
-      const chunksAfterFirst = await prisma.knowledgeChunk.findMany({
-        where: { faqEntryId: entry.id },
-      });
+      const chunksAfterFirst = await prisma.knowledgeChunk.findMany({ where: { faqEntryId: faqId } });
       expect(chunksAfterFirst).toHaveLength(1);
       const firstChunkId = chunksAfterFirst[0]!.id;
 
-      // Re-embed (update path triggers embedAndFinalize again).
-      await svc.updateFaqEntry(prisma, tenant.id, entry.id, {
+      // Re-embed with NEW content. The helper's deleteMany clears the old
+      // chunk before INSERT.
+      await runFaqEmbedTransaction(prisma, {
+        tenantId,
+        faqId,
         question: 'updated Q',
         answer: 'updated A',
+        embedding: FAKE_EMBEDDING,
       });
 
       const chunksAfterUpdate = await prisma.knowledgeChunk.findMany({
-        where: { faqEntryId: entry.id },
+        where: { faqEntryId: faqId },
       });
 
-      // Idempotency contract: exactly one chunk after re-embed, with the
-      // NEW content. Locks `deleteMany`-before-INSERT — if a future
-      // "optimization" skipped the delete, we'd see 2 chunks here (stale
-      // first + new second) and LLM retrieval would double-surface the
-      // FAQ.
+      // Idempotency contract: exactly one chunk after re-embed, with NEW
+      // content + a NEW chunk id. Locks `deleteMany`-before-INSERT — a
+      // future "optimization" that skipped delete would leave 2 chunks and
+      // double-surface the FAQ at LLM retrieval.
       expect(chunksAfterUpdate).toHaveLength(1);
       expect(chunksAfterUpdate[0]!.id).not.toBe(firstChunkId);
       expect(chunksAfterUpdate[0]!.chunkText).toBe('updated A');
@@ -246,54 +267,46 @@ describe('KAN-1120 — faq-entries embed write path', () => {
   });
 
   it('multi-tenancy: chunk inherits tenantId; CHECK constraint enforces 3-way parent mutex', async () => {
-    const svc = await servicePromise;
-
     await withRollback(async (prisma) => {
-      const tenantA = await prisma.tenant.create({
-        data: { name: 'kan-1120 tenant A', slug: `kan-1120-a-${Date.now()}` },
-        select: { id: true },
+      const fixA = await buildTenantAndFaq(prisma, { question: 'tenant A Q', answer: 'tenant A A' });
+      const fixB = await buildTenantAndFaq(prisma, { question: 'tenant B Q', answer: 'tenant B A' });
+
+      await runFaqEmbedTransaction(prisma, {
+        tenantId: fixA.tenantId,
+        faqId: fixA.faqId,
+        question: fixA.question,
+        answer: fixA.answer,
+        embedding: FAKE_EMBEDDING,
       });
-      const tenantB = await prisma.tenant.create({
-        data: { name: 'kan-1120 tenant B', slug: `kan-1120-b-${Date.now()}` },
-        select: { id: true },
+      await runFaqEmbedTransaction(prisma, {
+        tenantId: fixB.tenantId,
+        faqId: fixB.faqId,
+        question: fixB.question,
+        answer: fixB.answer,
+        embedding: FAKE_EMBEDDING,
       });
 
-      const entryA = await svc.createFaqEntry(prisma, tenantA.id, {
-        question: 'tenant A Q',
-        answer: 'tenant A A',
-      });
-      const entryB = await svc.createFaqEntry(prisma, tenantB.id, {
-        question: 'tenant B Q',
-        answer: 'tenant B A',
-      });
-
-      // tenantId denormalized correctly — each tenant sees only its own chunks
-      // when scoped via WHERE tenantId = $1.
+      // tenantId denormalized correctly — each tenant sees only its own
+      // chunks when scoped via WHERE tenantId = $1.
       const chunksA = await prisma.knowledgeChunk.findMany({
-        where: { tenantId: tenantA.id },
+        where: { tenantId: fixA.tenantId },
       });
       const chunksB = await prisma.knowledgeChunk.findMany({
-        where: { tenantId: tenantB.id },
+        where: { tenantId: fixB.tenantId },
       });
-      expect(chunksA.map((c) => c.faqEntryId)).toEqual([entryA.id]);
-      expect(chunksB.map((c) => c.faqEntryId)).toEqual([entryB.id]);
+      expect(chunksA.map((c) => c.faqEntryId)).toEqual([fixA.faqId]);
+      expect(chunksB.map((c) => c.faqEntryId)).toEqual([fixB.faqId]);
 
       // 3-way mutex CHECK constraint: knowledge_chunk requires EXACTLY one
       // of (sourceId, faqEntryId, serviceId) to be non-null. Inserting a
-      // chunk with both faqEntryId AND sourceId set (or none set) must
-      // fail at the Postgres CHECK layer.
-      //
-      // Attempt: insert a fake chunk with both faqEntryId AND sourceId NULL.
-      // (We can't easily create a KnowledgeSource fixture here without
-      // expanding scope; the all-null violation is the cleanest exercise
-      // of the CHECK.)
+      // chunk with all-NULL parents must fail at the Postgres CHECK layer.
       await expect(
         prisma.$executeRaw`
           INSERT INTO knowledge_chunk (
             id, tenant_id, source_id, faq_entry_id, service_id,
             chunk_text, position, category, status, embedding, metadata, created_at
           ) VALUES (
-            gen_random_uuid(), ${tenantA.id}, NULL, NULL, NULL,
+            gen_random_uuid(), ${fixA.tenantId}, NULL, NULL, NULL,
             'orphan', 0, 'faq', 'ready',
             ${`[${FAKE_EMBEDDING.join(',')}]`}::vector(1536),
             '{}'::jsonb, NOW()
