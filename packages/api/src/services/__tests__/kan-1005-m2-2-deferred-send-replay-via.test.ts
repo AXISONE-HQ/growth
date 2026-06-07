@@ -69,14 +69,17 @@ function makePrismaMock(rows: EngineRowFixture[]): {
   };
 } {
   const $queryRaw = vi.fn(async () => rows);
-  const deferredSendUpdate = vi.fn(async () => ({}));
+  // KAN-1119 — helpers now call updateMany (status-guarded on 'processing')
+  // and check `result.count === 1` to detect supersession races. Mock returns
+  // count=1 so happy-path tests assert successful update.
+  const deferredSendUpdate = vi.fn(async () => ({ count: 1 }));
   const decisionCreate = vi.fn(async () => ({ id: 'd-cron' }));
   // KAN-1046 — audit log mock for the new catch-path audit emission.
   const auditLogCreate = vi.fn(async () => ({}));
   const prisma = {
     $queryRaw,
     decision: { create: decisionCreate },
-    deferredSend: { update: deferredSendUpdate },
+    deferredSend: { updateMany: deferredSendUpdate },
     auditLog: { create: auditLogCreate },
   } as unknown as PrismaClient;
   return {
