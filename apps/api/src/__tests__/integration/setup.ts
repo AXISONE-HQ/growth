@@ -216,6 +216,48 @@ export async function createDecision(
 }
 
 /**
+ * KAN-1120 — Deterministic 1536-dim embedding fixture. The semantic values
+ * are intentionally meaningless: KAN-1120's test scope is storage + retrieval
+ * shape (pgvector ::vector(1536) cast round-trip), NOT semantic similarity.
+ *
+ * `Math.sin(i) / Math.sqrt(dims)` keeps |v| ≈ 1 without normalization
+ * gymnastics. Deterministic across runs so test assertions stay stable.
+ *
+ * Pass `dims` other than 1536 to deliberately trigger pgvector's dimension
+ * check (Test #2 in faq-entries-embed.test.ts uses 1535 to force a real
+ * pgvector rejection — no throw-injection needed).
+ */
+export function buildFakeEmbedding(dims: number = 1536): number[] {
+  return Array.from({ length: dims }, (_, i) => Math.sin(i) / Math.sqrt(dims));
+}
+
+/**
+ * KAN-1120 — FaqEntry fixture builder. Returns a `'queued'`-status row by
+ * default so callers can drive it through the full embed → chunk INSERT →
+ * status='ready' transition via the production `createFaqEntry` /
+ * `updateFaqEntry` paths.
+ */
+export async function buildFaqEntry(
+  prisma: PrismaClient,
+  args: {
+    tenantId: string;
+    question?: string;
+    answer?: string;
+    status?: 'queued' | 'embedding' | 'ready' | 'error';
+  },
+): Promise<{ id: string }> {
+  return prisma.faqEntry.create({
+    data: {
+      tenantId: args.tenantId,
+      question: args.question ?? `Integration test Q ${uniqueSuffix()}`,
+      answer: args.answer ?? `Integration test A ${uniqueSuffix()}`,
+      status: args.status ?? 'queued',
+    },
+    select: { id: true },
+  });
+}
+
+/**
  * KAN-1119 — DeferredSend fixture builder. Naming aligns with Phase 1
  * trace + 16th-memo-candidate convention (build* vs the create* used by
  * older KAN-1112 builders in this file; rename of legacy builders deferred
