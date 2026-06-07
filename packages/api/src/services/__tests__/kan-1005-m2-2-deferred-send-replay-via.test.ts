@@ -235,10 +235,24 @@ describe('KAN-1046 — published-false guard + audit-row-on-error', () => {
     // Row's outcome surfaces the publish failure
     expect(result.rowResults[0]!.outcome).toBe('error');
     expect(result.rowResults[0]!.error).toBe('engine_replay_publish_failed');
-    // Critically: deferredSend.update NEVER fired — the row stays `pending`
-    // so the next cron tick retries naturally. The pre-fix silent-mark-
-    // dispatched bug is now structurally impossible.
-    expect(state.deferredSendUpdate).not.toHaveBeenCalled();
+    // KAN-1119 — Critically: deferredSend.updateMany IS called exactly once,
+    // for `markRevertToPending` (status: 'processing' → 'pending'). Without
+    // this revert, the CTE atomic claim's pending→processing transition
+    // would leave publish-failed rows stuck in 'processing' (the next cron
+    // tick's WHERE filter matches only 'pending'). Pre-KAN-1119 this test
+    // asserted `not.toHaveBeenCalled()` — correct under the old SELECT-only
+    // claim semantic but wrong under the CTE atomic claim contract.
+    //
+    // KAN-1046's load-bearing invariant (row NEVER transitions to
+    // 'dispatched' on publish failure) is preserved: the markDispatched
+    // call path is still skipped; only the revert-to-pending fires.
+    expect(state.deferredSendUpdate).toHaveBeenCalledTimes(1);
+    const revertArgs = state.deferredSendUpdate.mock.calls[0]![0] as {
+      where: { id: string; status: string };
+      data: { status: string };
+    };
+    expect(revertArgs.where.status).toBe('processing');
+    expect(revertArgs.data.status).toBe('pending');
   });
 
   it('row processing throws → AuditLog row written with actionType=deferred_send_replay_failed', async () => {
