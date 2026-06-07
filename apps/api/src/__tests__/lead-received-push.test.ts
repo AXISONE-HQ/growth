@@ -1730,7 +1730,11 @@ describe("KAN-814 — supersession + persistence-on-defer", () => {
       data: { status: string; cancelReason: string };
     };
     expect(updateArgs.where.contactId).toBe(CONTACT_A);
-    expect(updateArgs.where.status).toBe("pending");
+    // KAN-1119 — supersession extended to catch in-flight 'processing' rows
+    // (CTE atomic claim transitions 'pending' → 'processing' at claim time;
+    // without IN-filter on both states, a fresh inbound mid-tick would miss
+    // in-flight claims).
+    expect(updateArgs.where.status).toEqual({ in: ["pending", "processing"] });
     expect(updateArgs.data.status).toBe("cancelled");
     expect(updateArgs.data.cancelReason).toBe("superseded_by_fresh_inbound");
     const supersededLine = logSpy.mock.calls

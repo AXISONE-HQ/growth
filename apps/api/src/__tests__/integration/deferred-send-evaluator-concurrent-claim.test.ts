@@ -92,7 +92,7 @@ describe('KAN-1119 — deferred-send-evaluator atomic CTE claim', () => {
           WITH locked AS (
             SELECT id FROM deferred_sends
             WHERE status = 'pending' AND defer_until <= NOW()
-              AND tenant_id = ${tenant.id}::uuid
+              AND tenant_id = ${tenant.id}
             ORDER BY defer_until ASC LIMIT 100
             FOR UPDATE SKIP LOCKED
           )
@@ -227,14 +227,14 @@ describe('KAN-1119 — deferred-send-evaluator atomic CTE claim', () => {
         const claimedA = await prisma.$queryRaw<{ id: string }[]>`
           SELECT id FROM deferred_sends
           WHERE status = 'pending' AND defer_until <= NOW()
-            AND tenant_id = ${tenant.id}::uuid
+            AND tenant_id = ${tenant.id}
           ORDER BY defer_until ASC LIMIT 10
           FOR UPDATE SKIP LOCKED
         `;
         const claimedB = await prisma.$queryRaw<{ id: string }[]>`
           SELECT id FROM deferred_sends
           WHERE status = 'pending' AND defer_until <= NOW()
-            AND tenant_id = ${tenant.id}::uuid
+            AND tenant_id = ${tenant.id}
           ORDER BY defer_until ASC LIMIT 10
           FOR UPDATE SKIP LOCKED
         `;
@@ -470,7 +470,7 @@ async function runClaim(
     WITH locked AS (
       SELECT id FROM deferred_sends
       WHERE status = 'pending' AND defer_until <= NOW()
-        AND tenant_id = ${tenantId}::uuid
+        AND tenant_id = ${tenantId}
       ORDER BY defer_until ASC LIMIT ${batchSize}
       FOR UPDATE SKIP LOCKED
     )
