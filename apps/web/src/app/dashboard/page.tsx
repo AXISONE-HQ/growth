@@ -646,7 +646,10 @@ export default function DashboardPage() {
           pipelinesData.map((p, idx) => {
             // KAN-1108 — color rotation per pipeline index (3-cycle).
             const colorDot = ['bg-indigo-500', 'bg-amber-500', 'bg-emerald-500'][idx % 3];
-            // Currency formatting; Phase 1 lock: USD only (Deal.currency default).
+            // Currency formatting; KAN-1132 audit (2026-06-07): USD-locked
+            // because Deal.currency defaults USD and no multi-currency tenant
+            // exists yet. When first multi-currency tenant onboards → see
+            // KAN-1138 (deferred per "don't build for hypothetical future").
             const valueFmt = `$${Math.round(p.pipelineValue).toLocaleString('en-US')}`;
             const confidenceFmt = p.avgConfidence == null ? '—' : `${Math.round(p.avgConfidence * 100)}%`;
             // Q4 — progress bar from existing targets[].

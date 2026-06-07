@@ -75,6 +75,18 @@ const CHANNEL_ICONS: Record<CampaignFirstAction['channel'], typeof Mail> = {
   whatsapp: MessageCircle,
 };
 
+/**
+ * USD-only formatter for campaign `historicalValueUsd` (the field name is
+ * self-documenting — the audience snapshot SUM is computed against
+ * `Order.grandTotal WHERE currency = 'USD'` per the audienceSnapshotCount
+ * schema comment). Whole-dollar precision (maximumFractionDigits: 0)
+ * matches the campaign-aggregate display intent.
+ *
+ * Intentionally NOT tenant-currency-aware: the upstream SQL aggregation
+ * is USD-filtered. Audited 2026-06-07 per KAN-1132 multi-currency epic —
+ * USD-lock is correct here. Migrating to MoneyDisplay/formatMoney would
+ * require upstream multi-currency aggregation work tracked separately.
+ */
 function formatUsd(n: number): string {
   return n.toLocaleString('en-US', {
     style: 'currency',

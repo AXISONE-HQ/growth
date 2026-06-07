@@ -28,6 +28,20 @@ import {
 } from '@/lib/api';
 import { SectionCard } from '@/components/ui/detail-page-shell';
 
+/**
+ * USD-only formatter for LLM billing cost display.
+ *
+ * Precision-aware: 4 decimals sub-cent ($0.0042), 3 decimals sub-dollar
+ * ($0.123), 2 decimals otherwise ($1.23). The precision tier matters for
+ * sub-cent cost visibility — collapsing to 2 decimals would render every
+ * small per-call cost as "$0.00" and lose the signal.
+ *
+ * Intentionally NOT tenant-currency-aware: LLM providers (OpenAI,
+ * Anthropic, Google) bill in USD regardless of tenant locale. Audited
+ * 2026-06-07 per KAN-1132 multi-currency epic — USD-lock is correct here.
+ * MoneyDisplay / formatMoney aren't substitutable because they force
+ * 2-decimal precision.
+ */
 function formatUsd(n: number): string {
   if (n === 0) return '$0.0000';
   if (n < 0.01) return `$${n.toFixed(4)}`;
