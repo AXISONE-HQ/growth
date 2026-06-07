@@ -1,26 +1,51 @@
 /**
  * KAN-814 — Deferred send evaluator.
+ * KAN-1119 — Atomic CTE claim + 'processing' intermediate state + status-
+ *            guarded mark helpers + publish-failure revert (sibling to
+ *            KAN-1046's engine-path discipline, now extended to action_send).
  *
  * Pure module. Cron worker (Cloud Scheduler → growth-api
  * `/internal/cron/deferred-send-evaluator`) calls `processPendingDeferredSends`
  * every 5 minutes. The evaluator:
  *
- *   1. Claims pending rows whose `defer_until <= NOW()` via
- *      `SELECT ... FOR UPDATE SKIP LOCKED LIMIT $batchSize` inside a
- *      transaction (concurrent-worker-safe).
+ *   1. KAN-1119: Atomically claims pending rows whose `defer_until <= NOW()`
+ *      via a CTE that SELECTs with `FOR UPDATE SKIP LOCKED` and UPDATEs
+ *      them to `status='processing'` in a single statement. Concurrent
+ *      workers' CTEs see 'processing' and skip — no double-claim.
  *   2. For each claimed row, re-evaluates Send Policy.
  *   3. On `allow` → writes the Decision row (KAN-815c shim pattern, deferred
  *      to re-dispatch time per spec) + dispatches via `publishActionSend` +
- *      marks row `dispatched`.
- *   4. On still-`defer` → increments attempts, advances `defer_until`. After
- *      `maxAttempts` retries (default 12 → ~24h with 2-hour cadence) →
- *      marks row `expired` with audit log entry.
+ *      marks row `dispatched` via status-guarded updateMany. On publish
+ *      failure → reverts 'processing' → 'pending' for next-tick retry
+ *      (KAN-1119 extending KAN-1046's discipline to action_send path).
+ *   4. On still-`defer` → increments attempts, advances `defer_until`,
+ *      reverts 'processing' → 'pending'. After `maxAttempts` retries
+ *      (default 12 → ~24h with 2-hour cadence) → marks row `expired`.
  *   5. On `deny` → marks row `cancelled` with `cancelReason='policy_now_denies'`
  *      (e.g., contact unsubscribed during the defer window).
  *
+ * Status state machine (KAN-1119):
+ *
+ *     pending  ──[CTE atomic claim]──▶  processing
+ *     processing ──[markDispatched]──▶  dispatched   (terminal)
+ *     processing ──[markExpired]────▶   expired      (terminal)
+ *     processing ──[markCancelled]──▶   cancelled    (terminal)
+ *     processing ──[reDefer]────────▶   pending      (loop with new defer_until)
+ *     processing ──[markRevertToPending]▶ pending    (publish-failure recovery)
+ *
+ * Race-window contract with KAN-814 supersession (fresh inbound on
+ * (deal, contact) cancels deferred rows): the evaluator's mark helpers
+ * status-guard on 'processing' via updateMany; the supersession matches
+ * `status IN ('pending', 'processing')`. Two outcomes:
+ *   - Supersession wins → mark* updateMany returns count=0 → publish skipped
+ *     (action_send path) or "superseded after publish" logged (action_decided
+ *     path where Pub/Sub fired pre-mark per KAN-1046 publish-flag ordering).
+ *   - Evaluator wins → terminal status reached before supersession runs →
+ *     supersession's IN-filter doesn't match → cancelledRows=0 (no-op).
+ *
  * Idempotency: each row's `id` is a natural anchor. Worker crash mid-process
- * is safe — the transaction rolls back the claim, leaving the row pending
- * for the next tick.
+ * is safe — the catch path in `processPendingDeferredSends` calls
+ * `markRevertToPending` so failed rows return to 'pending' for the next tick.
  *
  * Pure-module discipline: caller (the cron HTTP route) handles auth +
  * shape the trigger. This module accepts a PrismaClient + dependency-
@@ -33,6 +58,10 @@
  *     module; route handler does the wiring)
  *   - feedback_phase_2_wiring_decision_row_shim_for_legacy_publishactionsend
  *     (Decision row written DURING dispatch, not before)
+ *   - feedback_state_machine_extensions_must_enumerate_recovery_paths
+ *     (16th memo candidate banked from KAN-1119 — every state machine
+ *     extension must enumerate all recovery paths that previously
+ *     assumed rows retained their original state)
  */
 import type { PrismaClient } from '@prisma/client';
 
@@ -193,21 +222,41 @@ export async function processPendingDeferredSends(
     rowResults: [],
   };
 
-  // Claim due rows. SKIP LOCKED ensures concurrent workers each take a
-  // disjoint batch. We claim INSIDE a transaction; the read+update pattern
-  // marks the rows as "in progress" by virtue of being row-locked for the
-  // duration of the per-row processing transaction below.
+  // KAN-1119 — Atomic claim via CTE. The previous SELECT-only-with-
+  // FOR-UPDATE-SKIP-LOCKED implementation was concurrency-unsafe:
+  // `$queryRaw` runs each statement as a single auto-committed
+  // transaction, so the row locks acquired by `FOR UPDATE SKIP LOCKED`
+  // were released the moment the SELECT returned. A concurrent worker's
+  // SELECT would then see the same `status='pending'` rows and re-claim
+  // them, producing double-send when ticks overlap (high-load batches,
+  // Cloud Run autoscale, scheduler retries, operator-triggered ticks).
   //
-  // Two-stage processing: (1) claim ids in a quick read-only tx, (2)
-  // process each id in its own tx. Avoids holding a long lock if any
-  // single row's dispatch hangs (e.g., publishActionSend blocked).
+  // The CTE wraps SELECT + UPDATE in a single statement. Postgres holds
+  // the row locks for the entire CTE's duration, and the UPDATE
+  // transitions claimed rows from 'pending' to 'processing' BEFORE the
+  // lock releases. A concurrent worker's CTE re-SELECT then sees
+  // 'processing' (which the WHERE clause excludes) and skips. Mark-*
+  // helpers below status-guard on 'processing' as defense-in-depth
+  // (catches the supersession-mid-processing race; see KAN-814 +
+  // KAN-1119 race-window contract documented at processOneRow).
+  //
+  // Two-stage processing preserved: (1) claim in this CTE, (2) process
+  // each row in its own auto-committed update via the mark-* helpers.
+  // Avoids holding a long lock if dispatch hangs (publishActionSend
+  // blocked, Pub/Sub backpressure, etc.).
   const claimed = await prisma.$queryRaw<ClaimedRow[]>`
-    SELECT id, tenant_id, deal_id, contact_id, payload, defer_until, attempts, replay_via
-    FROM deferred_sends
-    WHERE status = 'pending' AND defer_until <= NOW()
-    ORDER BY defer_until ASC
-    LIMIT ${batchSize}
-    FOR UPDATE SKIP LOCKED
+    WITH locked AS (
+      SELECT id FROM deferred_sends
+      WHERE status = 'pending' AND defer_until <= NOW()
+      ORDER BY defer_until ASC
+      LIMIT ${batchSize}
+      FOR UPDATE SKIP LOCKED
+    )
+    UPDATE deferred_sends ds
+    SET status = 'processing', last_attempt_at = NOW()
+    FROM locked
+    WHERE ds.id = locked.id
+    RETURNING ds.id, ds.tenant_id, ds.deal_id, ds.contact_id, ds.payload, ds.defer_until, ds.attempts, ds.replay_via
   `;
 
   result.totalClaimed = claimed.length;
@@ -245,6 +294,18 @@ export async function processPendingDeferredSends(
         outcome: 'error',
         error: errMsg,
       });
+      // KAN-1119 — revert from 'processing' back to 'pending' so the next
+      // cron tick re-claims this row. Without this, the CTE atomic claim
+      // leaves errored rows stuck in 'processing' (the WHERE clause filters
+      // on 'pending' only). Preserves KAN-1046's "failed rows stay pending
+      // for next-tick retry" semantic now that claim is a state transition.
+      // Status-guarded so a supersession that cancelled the row mid-flight
+      // doesn't get clobbered back to 'pending'.
+      await markRevertToPending(prisma, row.id).catch((revertErr: unknown) => {
+        console.warn(
+          `[deferred-send-evaluator] revert-to-pending-failed id=${row.id} err=${(revertErr as Error)?.message ?? String(revertErr)}`,
+        );
+      });
       // KAN-1046 — surface the failure via AuditLog so silent
       // catch+retry loops are queryable post-hoc. Greppable via
       // actionType='deferred_send_replay_failed'. Best-effort —
@@ -270,8 +331,9 @@ export async function processPendingDeferredSends(
             `[deferred-send-evaluator] audit-emit-replay-failed-failed id=${row.id} err=${(auditErr as Error)?.message ?? String(auditErr)}`,
           );
         });
-      // Don't re-throw — process the rest of the batch. Failed rows stay
-      // pending and will be retried on the next cron tick.
+      // Don't re-throw — process the rest of the batch. Failed rows
+      // reverted to 'pending' (above) and will be retried on the next
+      // cron tick.
     }
   }
 
@@ -391,8 +453,18 @@ async function dispatchActionDecidedReplay(
   // caller (processPendingDeferredSends catch path) surfaces drift via
   // actionType='deferred_send_replay_failed'.
   if (!result.published) {
+    // KAN-1119 — revert from 'processing' → 'pending' so the next cron
+    // tick re-claims. Without this, the CTE atomic claim leaves the row
+    // stuck in 'processing' (next tick's WHERE filters on 'pending').
+    // Status-guarded inside markRevertToPending — supersession-cancelled
+    // rows aren't touched.
+    await markRevertToPending(prisma, row.id).catch((revertErr: unknown) => {
+      console.warn(
+        `[deferred-send-evaluator] engine-revert-to-pending-failed id=${row.id} err=${(revertErr as Error)?.message ?? String(revertErr)}`,
+      );
+    });
     console.error(
-      `[deferred-send-evaluator] engine-row-publish-failed id=${row.id} replayVia=action_decided attempts=${row.attempts + 1} — row stays pending`,
+      `[deferred-send-evaluator] engine-row-publish-failed id=${row.id} replayVia=action_decided attempts=${row.attempts + 1} — row reverted to pending`,
     );
     return {
       id: row.id,
@@ -401,7 +473,18 @@ async function dispatchActionDecidedReplay(
     };
   }
 
-  await markDispatched(prisma, row.id, row.attempts + 1);
+  const dispatched = await markDispatched(prisma, row.id, row.attempts + 1);
+  if (!dispatched.updated) {
+    // KAN-1119 race-window contract: supersession-cancelled the row between
+    // our publish and our terminal status update. Message already went out
+    // (Pub/Sub fired pre-markDispatched per the KAN-1046 publish-flag
+    // ordering). Row state is now 'cancelled' (set by supersession).
+    // Logging this rare branch so operators can correlate "dispatched
+    // outcome with no terminal status update" if it ever surfaces.
+    console.warn(
+      `[deferred-send-evaluator] engine-row-superseded-after-publish id=${row.id} pubsubMessageId=${result.messageId} — message already published`,
+    );
+  }
 
   console.log(
     `[deferred-send-evaluator] engine-row-dispatched id=${row.id} pubsubMessageId=${result.messageId} replayVia=action_decided attempts=${row.attempts + 1}`,
@@ -488,17 +571,49 @@ async function dispatchActionSendReplay(
   };
 
   const pubsubClient = opts.getPubSubClient();
-  const messageId = await opts.publishActionSend(pubsubClient, {
-    tenantId: row.tenant_id,
-    contactId: row.contact_id,
-    decisionId: decisionRow.id,
-    toEmail: leadPayload.contactEmail,
-    composed: composedWithUnsubscribe,
-    connectionId,
-    ...(replyTo ? { replyTo } : {}),
-  });
+  let messageId: string;
+  try {
+    messageId = await opts.publishActionSend(pubsubClient, {
+      tenantId: row.tenant_id,
+      contactId: row.contact_id,
+      decisionId: decisionRow.id,
+      toEmail: leadPayload.contactEmail,
+      composed: composedWithUnsubscribe,
+      connectionId,
+      ...(replyTo ? { replyTo } : {}),
+    });
+  } catch (publishErr) {
+    // KAN-1119 — sibling fix to KAN-1046's engine-path publish-error
+    // handling. Pre-KAN-1119 the action_send path had NO publish-error
+    // recovery — an exception from publishActionSend propagated up to
+    // the processPendingDeferredSends catch (which now calls revert),
+    // but only because of the catch-path safety net. Explicit revert
+    // here means a publish-failure logged at this site doesn't depend
+    // on the outer catch path semantics. Decision row was already
+    // written above; it will be re-written by the next cron-tick
+    // re-dispatch (KAN-815c shim accepts duplicate Decision rows as
+    // analytics-only; the dispatched message is what counts).
+    await markRevertToPending(prisma, row.id).catch((revertErr: unknown) => {
+      console.warn(
+        `[deferred-send-evaluator] action-send-revert-to-pending-failed id=${row.id} err=${(revertErr as Error)?.message ?? String(revertErr)}`,
+      );
+    });
+    console.error(
+      `[deferred-send-evaluator] action-send-publish-failed id=${row.id} attempts=${row.attempts + 1} — row reverted to pending; err=${(publishErr as Error)?.message ?? String(publishErr)}`,
+    );
+    throw publishErr;
+  }
 
-  await markDispatched(prisma, row.id, row.attempts + 1);
+  const dispatched = await markDispatched(prisma, row.id, row.attempts + 1);
+  if (!dispatched.updated) {
+    // KAN-1119 race-window contract: supersession-cancelled the row between
+    // our publish and our terminal status update. Message already went out.
+    // Row state is now 'cancelled' (set by supersession). Logged for
+    // operator correlation; not an error condition.
+    console.warn(
+      `[deferred-send-evaluator] action-send-row-superseded-after-publish id=${row.id} pubsubMessageId=${messageId} — message already published`,
+    );
+  }
 
   console.log(
     `[deferred-send-evaluator] row-dispatched id=${row.id} dealId=${row.deal_id} decisionId=${decisionRow.id} pubsubMessageId=${messageId} attempts=${row.attempts + 1}`,
@@ -516,19 +631,31 @@ async function dispatchActionSendReplay(
 // State transitions
 // ─────────────────────────────────────────────
 
+// KAN-1119 — All terminal/loop transitions status-guard on 'processing'. The
+// CTE atomic claim transitions 'pending' → 'processing'; helpers below only
+// match 'processing'-state rows. If a row was transitioned out of 'processing'
+// (e.g., supersession cancelled it mid-flight), `updateMany` returns count=0
+// and the caller learns via `{ updated: false }`. Callers then SKIP any
+// downstream side effects (Pub/Sub publish, Decision row write, etc.) since
+// the row is no longer ours to dispatch.
+//
+// reDefer transitions 'processing' → 'pending' (re-defer cycle); markDispatched /
+// markExpired / markCancelled are terminal transitions out of 'processing'.
+
 async function markDispatched(
   prisma: PrismaClient,
   id: string,
   attempts: number,
-): Promise<void> {
-  await (
+): Promise<{ updated: boolean }> {
+  const result = await (
     prisma as unknown as {
-      deferredSend: { update: (args: unknown) => Promise<unknown> };
+      deferredSend: { updateMany: (args: unknown) => Promise<{ count: number }> };
     }
-  ).deferredSend.update({
-    where: { id },
+  ).deferredSend.updateMany({
+    where: { id, status: 'processing' },
     data: { status: 'dispatched', attempts, lastAttemptAt: new Date() },
   });
+  return { updated: result.count === 1 };
 }
 
 async function reDefer(
@@ -536,47 +663,81 @@ async function reDefer(
   id: string,
   newDeferUntil: Date,
   newAttempts: number,
-): Promise<void> {
-  await (
+): Promise<{ updated: boolean }> {
+  const result = await (
     prisma as unknown as {
-      deferredSend: { update: (args: unknown) => Promise<unknown> };
+      deferredSend: { updateMany: (args: unknown) => Promise<{ count: number }> };
     }
-  ).deferredSend.update({
-    where: { id },
+  ).deferredSend.updateMany({
+    where: { id, status: 'processing' },
     data: {
+      status: 'pending',
       attempts: newAttempts,
       deferUntil: newDeferUntil,
       lastAttemptAt: new Date(),
     },
   });
+  return { updated: result.count === 1 };
 }
 
 async function markExpired(
   prisma: PrismaClient,
   id: string,
   attempts: number,
-): Promise<void> {
-  await (
+): Promise<{ updated: boolean }> {
+  const result = await (
     prisma as unknown as {
-      deferredSend: { update: (args: unknown) => Promise<unknown> };
+      deferredSend: { updateMany: (args: unknown) => Promise<{ count: number }> };
     }
-  ).deferredSend.update({
-    where: { id },
+  ).deferredSend.updateMany({
+    where: { id, status: 'processing' },
     data: { status: 'expired', attempts, lastAttemptAt: new Date() },
   });
+  return { updated: result.count === 1 };
 }
 
 async function markCancelled(
   prisma: PrismaClient,
   id: string,
   reason: string,
-): Promise<void> {
-  await (
+): Promise<{ updated: boolean }> {
+  const result = await (
     prisma as unknown as {
-      deferredSend: { update: (args: unknown) => Promise<unknown> };
+      deferredSend: { updateMany: (args: unknown) => Promise<{ count: number }> };
     }
-  ).deferredSend.update({
-    where: { id },
+  ).deferredSend.updateMany({
+    where: { id, status: 'processing' },
     data: { status: 'cancelled', cancelReason: reason, lastAttemptAt: new Date() },
   });
+  return { updated: result.count === 1 };
+}
+
+/**
+ * KAN-1119 — Revert a claimed row from 'processing' back to 'pending' so the
+ * next cron tick re-claims it. Used on publish-failure recovery paths
+ * (preserves KAN-1046's "leave the row pending for retry" semantic now that
+ * the CTE atomic claim transitions rows OUT of 'pending' at claim time).
+ *
+ * KAN-1046 originally fixed the engine-path dispatcher's silent-mark-dispatched-
+ * on-publish-failure bug. KAN-1119 extends the same discipline to the
+ * action_send path (which historically had no publish-error handling — a
+ * sibling gap surfaced during the KAN-1119 cascade discovery).
+ *
+ * Status-guarded on 'processing' so supersession-cancelled rows aren't
+ * accidentally reverted back to 'pending'.
+ */
+async function markRevertToPending(
+  prisma: PrismaClient,
+  id: string,
+): Promise<{ updated: boolean }> {
+  const result = await (
+    prisma as unknown as {
+      deferredSend: { updateMany: (args: unknown) => Promise<{ count: number }> };
+    }
+  ).deferredSend.updateMany({
+    where: { id, status: 'processing' },
+    // attempts NOT incremented — the claim wasn't a real send attempt.
+    data: { status: 'pending', lastAttemptAt: new Date() },
+  });
+  return { updated: result.count === 1 };
 }

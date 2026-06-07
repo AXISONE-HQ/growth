@@ -18,7 +18,7 @@
  *
  * DATABASE_URL is read from the env at module-load time (per vitest.config.integration.ts).
  */
-import { PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
 
 let _prisma: PrismaClient | null = null;
 
@@ -55,6 +55,46 @@ export async function withRollback<T>(fn: (tx: PrismaClient) => Promise<T>): Pro
     if (err !== ROLLBACK_SENTINEL) throw err;
   }
   return result as T;
+}
+
+/**
+ * KAN-1119 — Concurrency-test isolation helper. Sibling to `withRollback`.
+ *
+ * The transaction-rollback pattern can't be used for concurrent-claim tests
+ * because Prisma's $transaction ISOLATES the inner work — concurrent claims
+ * from "two workers" inside one rollback transaction would see each other's
+ * uncommitted state, masking the actual race semantics.
+ *
+ * `withCleanup` runs `fn` against the live database (committed writes) and
+ * runs `cleanup` in `finally` so artifacts don't pollute subsequent tests.
+ * Cleanup callback is responsible for deleting any fixture rows it created
+ * (typically via `prisma.deferredSend.deleteMany({ where: { tenantId } })`
+ * scoped to the tenant created in the test).
+ *
+ * Caller pattern:
+ *
+ *   await withCleanup(
+ *     async (prisma) => { ... fixture builders + test work ... },
+ *     async (prisma) => {
+ *       await prisma.deferredSend.deleteMany({ where: { tenantId } });
+ *       await prisma.contact.deleteMany({ where: { tenantId } });
+ *       await prisma.tenant.delete({ where: { id: tenantId } });
+ *     },
+ *   );
+ */
+export async function withCleanup<T>(
+  fn: (prisma: PrismaClient) => Promise<T>,
+  cleanup: (prisma: PrismaClient) => Promise<void>,
+): Promise<T> {
+  const prisma = getPrisma();
+  try {
+    return await fn(prisma);
+  } finally {
+    await cleanup(prisma).catch((err) => {
+      // Test cleanup failures shouldn't mask the actual test error; log + continue.
+      console.warn(`[withCleanup] cleanup failed: ${(err as Error)?.message ?? String(err)}`);
+    });
+  }
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -170,6 +210,43 @@ export async function createDecision(
       confidence: args.confidence,
       reasoning: 'integration-test',
       ...(args.createdAt ? { createdAt: args.createdAt } : {}),
+    },
+    select: { id: true },
+  });
+}
+
+/**
+ * KAN-1119 — DeferredSend fixture builder. Naming aligns with Phase 1
+ * trace + 16th-memo-candidate convention (build* vs the create* used by
+ * older KAN-1112 builders in this file; rename of legacy builders deferred
+ * to a separate cleanup ticket to keep KAN-1119 scope tight).
+ */
+export async function buildDeferredSend(
+  prisma: PrismaClient,
+  args: {
+    tenantId: string;
+    contactId: string;
+    dealId?: string | null;
+    status?: 'pending' | 'processing' | 'dispatched' | 'expired' | 'cancelled';
+    deferUntil?: Date;
+    deferReason?: string;
+    attempts?: number;
+    payload?: Record<string, unknown>;
+    replayVia?: 'action_send' | 'action_decided';
+  },
+): Promise<{ id: string }> {
+  return prisma.deferredSend.create({
+    data: {
+      tenantId: args.tenantId,
+      contactId: args.contactId,
+      dealId: args.dealId ?? null,
+      status: args.status ?? 'pending',
+      // Default: past defer_until so the cron CTE picks it up immediately.
+      deferUntil: args.deferUntil ?? new Date(Date.now() - 60_000),
+      deferReason: args.deferReason ?? 'integration-test',
+      attempts: args.attempts ?? 0,
+      payload: (args.payload ?? {}) as Prisma.InputJsonValue,
+      replayVia: args.replayVia ?? 'action_send',
     },
     select: { id: true },
   });

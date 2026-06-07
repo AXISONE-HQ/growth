@@ -1726,10 +1726,26 @@ export async function wirePhase2Consumers(
       select: { contactId: true },
     });
     if (dealForSupersession) {
+      // KAN-1119 — supersession catches both 'pending' AND 'processing'.
+      // The CTE atomic claim in deferred-send-evaluator transitions rows
+      // 'pending' → 'processing' at claim time; without including
+      // 'processing' here, a fresh inbound mid-tick would miss in-flight
+      // claims. Race-window contract:
+      //   - Supersession wins → mark* helpers in the evaluator see
+      //     status='cancelled' on their status-guarded updateMany → rowcount=0
+      //     → publish is skipped (action_send) or "superseded after publish"
+      //     is logged (action_decided where publish ran first per KAN-1046).
+      //   - Evaluator wins → row reaches 'dispatched'/'expired' before this
+      //     updateMany runs → status filter (pending|processing) doesn't
+      //     match → cancelledRows=0 → original supersession is a no-op.
       const cancelled = await (
         prisma as unknown as { deferredSend: { updateMany: (args: unknown) => Promise<{ count: number }> } }
       ).deferredSend.updateMany({
-        where: { dealId, contactId: dealForSupersession.contactId, status: 'pending' },
+        where: {
+          dealId,
+          contactId: dealForSupersession.contactId,
+          status: { in: ['pending', 'processing'] },
+        },
         data: { status: 'cancelled', cancelReason: 'superseded_by_fresh_inbound' },
       });
       if (cancelled.count > 0) {

@@ -1943,7 +1943,11 @@ model DeferredSend {
   payload       Json
   deferUntil    DateTime  @map("defer_until")
   deferReason   String    @map("defer_reason")
-  /// pending | dispatched | expired | cancelled
+  /// pending | processing | dispatched | expired | cancelled
+  /// KAN-1119: 'processing' is the in-flight claim state. CTE atomic claim
+  /// in deferred-send-evaluator transitions 'pending' → 'processing';
+  /// mark helpers status-guard on 'processing' for defense-in-depth against
+  /// the supersession-mid-processing race (see evaluator file header).
   status        String    @default("pending")
   attempts      Int       @default(0)
   lastAttemptAt DateTime? @map("last_attempt_at")
