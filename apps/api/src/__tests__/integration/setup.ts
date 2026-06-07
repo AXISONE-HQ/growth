@@ -197,6 +197,43 @@ export async function createDeal(
   });
 }
 
+/**
+ * KAN-1132 PR 2 — Order fixture builder. Minimal required fields:
+ * tenantId + contactId (FK) + orderNumber (no default). Money columns
+ * default to 0; tests that need specific Decimal values pass them in
+ * via overrides.
+ *
+ * Naming: `createOrder` matches the existing `createX` convention in this
+ * file (KAN-1124 cleanup will rename all → `buildX` in one pass; until
+ * then, follow precedent within the file rather than introduce
+ * mixed-naming locally).
+ */
+export async function createOrder(
+  prisma: PrismaClient,
+  args: {
+    tenantId: string;
+    contactId: string;
+    orderNumber?: string;
+    totalAmount?: number | string;
+    taxAmount?: number | string;
+    discountAmount?: number | string;
+    grandTotal?: number | string;
+  },
+): Promise<{ id: string }> {
+  return prisma.order.create({
+    data: {
+      tenantId: args.tenantId,
+      contactId: args.contactId,
+      orderNumber: args.orderNumber ?? `ORD-${uniqueSuffix()}`,
+      ...(args.totalAmount !== undefined ? { totalAmount: args.totalAmount } : {}),
+      ...(args.taxAmount !== undefined ? { taxAmount: args.taxAmount } : {}),
+      ...(args.discountAmount !== undefined ? { discountAmount: args.discountAmount } : {}),
+      ...(args.grandTotal !== undefined ? { grandTotal: args.grandTotal } : {}),
+    },
+    select: { id: true },
+  });
+}
+
 export async function createDecision(
   prisma: PrismaClient,
   args: { tenantId: string; contactId: string; confidence: number; createdAt?: Date },
