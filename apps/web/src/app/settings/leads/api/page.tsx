@@ -157,6 +157,11 @@ export default function LeadApiKeysPage() {
                   <TableCell>
                     <code className="font-mono text-xs text-muted-foreground">axone_live_{k.keyPrefix}…</code>
                   </TableCell>
+                  {/* USER-tz display: `createdAt` / `lastUsedAt` are DateTime instants
+                      — operator sees key-lifecycle timestamps in their browser locale,
+                      which is correct for "this happened at X" displays. KAN-943's
+                      off-by-one bug applies only to `@db.Date` sources, not instants.
+                      KAN-1131 PR 2 audit 2026-06-08. */}
                   <TableCell className="text-sm text-muted-foreground">{new Date(k.createdAt).toLocaleDateString()}</TableCell>
                   <TableCell className="text-sm text-muted-foreground">
                     {k.lastUsedAt ? new Date(k.lastUsedAt).toLocaleString() : <span className="text-xs">Never</span>}
@@ -202,6 +207,8 @@ export default function LeadApiKeysPage() {
                   <TableCell>
                     <code className="font-mono text-xs">axone_live_{k.keyPrefix}…</code>
                   </TableCell>
+                  {/* USER-tz display: `revokedAt` is a DateTime instant — same shape
+                      as the active-keys table above. KAN-1131 PR 2 audit 2026-06-08. */}
                   <TableCell className="text-sm">{k.revokedAt ? new Date(k.revokedAt).toLocaleString() : ""}</TableCell>
                 </TableRow>
               ))}

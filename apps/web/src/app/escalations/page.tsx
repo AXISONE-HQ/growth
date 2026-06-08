@@ -612,6 +612,11 @@ function DetailPanel({
               <Reply className="h-4 w-4" />
               Triggered by reply from {detail.triggerInbound.fromAddress || '(unknown sender)'}
               <span className="ml-auto text-caption opacity-75">
+                {/* USER-tz display: `occurredAt` is a DateTime instant — operator
+                    sees when the inbound arrived in their browser-local time, which
+                    is the right shape for "this happened at X" displays. KAN-943's
+                    off-by-one bug applies only to `@db.Date` sources, not instants.
+                    KAN-1131 PR 2 audit 2026-06-08. */}
                 {new Date(detail.triggerInbound.occurredAt).toLocaleString()}
               </span>
             </div>

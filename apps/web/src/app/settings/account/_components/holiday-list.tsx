@@ -34,10 +34,18 @@ function formatDate(iso: string): string {
   // Handle both "2026-12-25" and "2026-12-25T00:00:00.000Z" shapes.
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
+  // KAN-1131 PR 2 fix (2026-06-08) — Holiday.date is `@db.Date` (calendar
+  // day, stored as midnight UTC). Without `timeZone: 'UTC'` the rendered
+  // day shifts by the browser's UTC offset: in America/Toronto (UTC-5),
+  // "2026-12-25" was rendering as "December 24". Same bug class as KAN-943
+  // (KAN-cohort-3.5 detail pages, fixed via `fmt-date.ts`); this site was
+  // missed in the original sweep because the formatter is local to this
+  // component instead of going through the shared helper.
   return d.toLocaleDateString(undefined, {
     year: "numeric",
     month: "long",
     day: "numeric",
+    timeZone: "UTC",
   });
 }
 

@@ -825,6 +825,11 @@ export default function KnowledgeCenterPage() {
                       <FileText className="w-5 h-5 text-indigo-500" />
                       <div>
                         <p className="text-sm font-medium text-gray-900">{doc.name}</p>
+                        {/* USER-tz display: `uploadedAt` is a DateTime instant —
+                            operator sees upload timestamp in browser locale, correct
+                            for "this happened at X" displays. KAN-943's off-by-one
+                            bug applies only to `@db.Date` sources, not instants.
+                            KAN-1131 PR 2 audit 2026-06-08. */}
                         <p className="text-xs text-gray-400">{doc.type} · {(doc.sizeBytes / 1024).toFixed(0)} KB · Uploaded {new Date(doc.uploadedAt).toLocaleDateString()}</p>
                       </div>
                     </div>
@@ -1187,6 +1192,10 @@ export default function KnowledgeCenterPage() {
                       <span className="text-xs text-gray-400 flex items-center gap-1">
                         <MessageSquareWarning className="w-3 h-3" /> {obj.occurrences} mentions
                       </span>
+                      {/* USER-tz display: `lastSeen` is a DateTime instant — operator
+                          sees the last-seen timestamp in browser locale (short MMM d
+                          format). KAN-943's off-by-one bug applies only to `@db.Date`
+                          sources, not instants. KAN-1131 PR 2 audit 2026-06-08. */}
                       <span className="text-xs text-gray-400 flex items-center gap-1">
                         <Clock className="w-3 h-3" /> Last: {new Date(obj.lastSeen).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
                       </span>
@@ -1440,6 +1449,10 @@ export default function KnowledgeCenterPage() {
 
                     {/* Meta Info */}
                     <div className="flex items-center justify-between text-xs text-gray-400 pt-2">
+                      {/* USER-tz display: `firstSeen` / `lastSeen` are DateTime
+                          instants — operator sees full-date timestamps in browser
+                          locale. KAN-943's off-by-one bug applies only to `@db.Date`
+                          sources, not instants. KAN-1131 PR 2 audit 2026-06-08. */}
                       <div className="flex items-center gap-4">
                         <span>First seen: {new Date(obj.firstSeen).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}</span>
                         <span>Last seen: {new Date(obj.lastSeen).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}</span>

@@ -223,6 +223,11 @@ export default function LeadInboxSettingsPage() {
                   <TableCell>
                     <StatusCell status={e.status} reason={e.rejectionReason} />
                   </TableCell>
+                  {/* USER-tz display: `createdAt` is a DateTime instant — operator
+                      sees inbox-event timestamp in browser locale, correct for
+                      "this happened at X" displays. KAN-943's off-by-one bug applies
+                      only to `@db.Date` sources, not instants. KAN-1131 PR 2 audit
+                      2026-06-08. */}
                   <TableCell className="text-sm text-muted-foreground">
                     {new Date(e.createdAt).toLocaleString()}
                   </TableCell>
