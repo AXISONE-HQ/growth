@@ -401,6 +401,10 @@ function OpportunityCard({
             <p className="text-caption text-muted-foreground">
               Last launched
               {outcomes.lastLaunchedAt && (
+                /* USER-tz display: `lastLaunchedAt` is a DateTime instant — operator
+                   sees launch timestamp in browser locale, correct for "this happened
+                   at X" displays. KAN-943's off-by-one bug applies only to `@db.Date`
+                   sources, not instants. KAN-1131 PR 2 audit 2026-06-08. */
                 <span> · {new Date(outcomes.lastLaunchedAt).toLocaleString()}</span>
               )}
               :{' '}

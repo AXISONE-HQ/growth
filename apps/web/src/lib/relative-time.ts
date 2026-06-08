@@ -28,5 +28,9 @@ export function relativeTime(date: Date, now: Date = new Date()): string {
   if (hr < 24) return `${hr}h ago`;
   const days = Math.floor(hr / 24);
   if (days < 30) return `${days}d ago`;
+  // USER-tz display: the >30d fallback renders the input `Date` in browser
+  // locale. The input is always a DateTime instant (Engagement/Decision/Audit
+  // timestamps), never a `@db.Date` calendar day, so KAN-943's off-by-one bug
+  // class doesn't apply here. KAN-1131 PR 2 audit 2026-06-08.
   return date.toLocaleDateString();
 }

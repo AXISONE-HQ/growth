@@ -65,6 +65,10 @@ function formatBytes(bytes: number): string {
 
 function fmtDateTime(iso: string | null | undefined): string {
   if (!iso) return '—';
+  // USER-tz display: import-run timestamps (createdAt, completedAt, etc.) are
+  // DateTime instants — operator sees them in browser locale, correct for
+  // "this happened at X" displays. KAN-943's off-by-one bug applies only to
+  // `@db.Date` sources, not instants. KAN-1131 PR 2 audit 2026-06-08.
   return new Date(iso).toLocaleString();
 }
 

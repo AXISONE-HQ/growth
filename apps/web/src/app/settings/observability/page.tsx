@@ -234,6 +234,12 @@ export default function ObservabilityPage() {
                           <td className="px-1 py-2.5 text-caption text-foreground">
                             {idx === 0 ? (
                               <>
+                                {/* USER-tz display: `hour` is a DateTime instant (the
+                                    UTC top-of-hour bucket label) — operator sees the
+                                    bucket in their browser-local time, which matches
+                                    their day/night reading expectation. KAN-943's
+                                    off-by-one bug applies only to `@db.Date` sources.
+                                    KAN-1131 PR 2 audit 2026-06-08. */}
                                 <div>{new Date(hour).toLocaleString()}</div>
                                 <div className="text-micro text-muted-foreground">
                                   {relativeHour(hour)}
