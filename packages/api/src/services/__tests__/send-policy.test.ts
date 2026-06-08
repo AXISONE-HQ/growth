@@ -20,6 +20,7 @@ import {
   getTenantLocalHour,
   computeNextWindowOpen,
   resolveSendWindowHours,
+  resolveTenantTimezone,
   SendPolicyTenantNotFoundError,
 } from '../send-policy.js';
 
@@ -33,6 +34,13 @@ interface PrismaMockOpts {
   rateLimitCount?: number;
   /** Tenant for tenant.findUnique, or null. */
   tenant?: { id: string; settings: unknown } | null;
+  /**
+   * KAN-1131 PR 1 — AccountProfile.timeZone row returned by findFirst, or
+   * null. Default null matches PROD reality: the relation is OPTIONAL on
+   * Tenant; tenants that have not interacted with /settings/account have
+   * no AccountProfile row, so checkTimeOfDay falls back to settingsTz.
+   */
+  accountProfile?: { timeZone: string } | null;
 }
 
 function makePrismaMock(opts: PrismaMockOpts = {}) {
@@ -41,13 +49,21 @@ function makePrismaMock(opts: PrismaMockOpts = {}) {
   const findUniqueTenant = vi.fn(async () =>
     opts.tenant === undefined ? { id: TENANT_A, settings: {} } : opts.tenant,
   );
+  const findFirstAccountProfile = vi.fn(async () => opts.accountProfile ?? null);
 
   const prisma = {
     engagement: { findFirst: findFirstEngagement, count: countEngagement },
     tenant: { findUnique: findUniqueTenant },
+    accountProfile: { findFirst: findFirstAccountProfile },
   } as unknown as PrismaClient;
 
-  return { prisma, findFirstEngagement, countEngagement, findUniqueTenant };
+  return {
+    prisma,
+    findFirstEngagement,
+    countEngagement,
+    findUniqueTenant,
+    findFirstAccountProfile,
+  };
 }
 
 beforeEach(() => {
@@ -438,5 +454,63 @@ describe('resolveSendWindowHours — KAN-814 sub-cohort 0', () => {
     });
     const result = await evaluateSendPolicy(prisma, TENANT_A, CONTACT_A, { channel: 'email' });
     expect(result.type).toBe('allow');
+  });
+});
+
+// ─────────────────────────────────────────────
+// KAN-1131 PR 1 — Dual-source tenant timezone resolution
+// ─────────────────────────────────────────────
+
+describe('resolveTenantTimezone — KAN-1131 PR 1 dual-read', () => {
+  // Scenario 1 — both sources populated and match → no divergence log, returns the value.
+  it('both sources match → no warn, returns the agreed value', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const result = resolveTenantTimezone('America/Toronto', 'America/Toronto', TENANT_A);
+    expect(result).toBe('America/Toronto');
+    expect(warnSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  // Scenario 2 — both sources populated and disagree → warn logged, profileTz wins.
+  it('both sources differ → warn with send-policy-tz-divergence marker, profileTz wins', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const result = resolveTenantTimezone('America/New_York', 'America/Toronto', TENANT_A);
+    expect(result).toBe('America/New_York');
+    expect(warnSpy).toHaveBeenCalledOnce();
+    const logLine = warnSpy.mock.calls[0]![0] as string;
+    expect(logLine).toContain('send-policy-tz-divergence');
+    expect(logLine).toContain(`tenantId=${TENANT_A}`);
+    expect(logLine).toContain('profileTz=America/New_York');
+    expect(logLine).toContain('settingsTz=America/Toronto');
+    warnSpy.mockRestore();
+  });
+
+  // Scenario 3 — only profileTz exists (PROD path post-cutover) → no warn, returns profileTz.
+  it('only profileTz populated → no warn, returns profileTz', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const result = resolveTenantTimezone('Europe/Berlin', null, TENANT_A);
+    expect(result).toBe('Europe/Berlin');
+    expect(warnSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  // Scenario 4 — only settingsTz exists (PROD path pre-AccountProfile-write) → no warn,
+  // returns settingsTz. This is the LOAD-BEARING fallback during cutover: any tenant
+  // who has not yet interacted with /settings/account has accountProfile=null.
+  it('only settingsTz populated (no AccountProfile row) → no warn, returns settingsTz', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const result = resolveTenantTimezone(null, 'Asia/Tokyo', TENANT_A);
+    expect(result).toBe('Asia/Tokyo');
+    expect(warnSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  // Scenario 5 — neither populated → no warn, defensive UTC fallback.
+  it('neither source populated → no warn, returns UTC defensive fallback', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const result = resolveTenantTimezone(null, null, TENANT_A);
+    expect(result).toBe('UTC');
+    expect(warnSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
   });
 });
