@@ -36,8 +36,13 @@ import { complete as llmComplete } from './llm-client.js';
 // Types
 // ─────────────────────────────────────────────
 
+// KAN-1140 PR 0 — `email` renamed to `email_inbox` to align with the locked
+// canonical (ContactSourceEnum at packages/shared/src/enums.ts:80-91; KAN-1000
+// lock at audience-router.ts:329; published wire value at apps/connectors/
+// src/app.ts:80). The normalizer's `'email'` was the only outlier among 4
+// vocabularies for the same concept.
 export type NormalizerSource =
-  | 'email'
+  | 'email_inbox'
   | 'meta_lead_ads'
   | 'sms'
   | 'whatsapp'
@@ -61,7 +66,7 @@ export interface EmailPayload {
 }
 
 export type NormalizerInput =
-  | { source: 'email'; tenantId: string; payload: EmailPayload }
+  | { source: 'email_inbox'; tenantId: string; payload: EmailPayload }
   | { source: 'meta_lead_ads'; tenantId: string; payload: unknown }
   | { source: 'sms'; tenantId: string; payload: unknown }
   | { source: 'whatsapp'; tenantId: string; payload: unknown }
@@ -132,7 +137,7 @@ export class NotImplementedError extends Error {
  */
 export async function normalizeInbound(input: NormalizerInput): Promise<NormalizedLead> {
   switch (input.source) {
-    case 'email':
+    case 'email_inbox':
       return normalizeInboundEmail(input.tenantId, input.payload);
     case 'meta_lead_ads':
       throw new NotImplementedError(
@@ -171,7 +176,7 @@ export async function normalizeInboundEmail(
   const { extracted, confidence, error } = await runAIExtraction(tenantId, preParsed);
 
   return {
-    source: 'email',
+    source: 'email_inbox',
     preParsed,
     extracted,
     extractionConfidence: confidence,
@@ -194,7 +199,7 @@ export function preParseEmail(payload: EmailPayload): PreParsedLead {
   const bodyText = (payload.bodyPreview ?? '').trim() || null;
 
   return {
-    source: 'email',
+    source: 'email_inbox',
     senderEmail,
     senderNameGuess,
     subject,

@@ -61,7 +61,7 @@ describe('preParseEmail — Resend webhook payload extraction', () => {
 
     const result = preParseEmail(payload);
 
-    expect(result.source).toBe('email');
+    expect(result.source).toBe('email_inbox');
     expect(result.senderEmail).toBe('accounts@formspree.io');
     expect(result.senderNameGuess).toBeNull();
     expect(result.subject).toBe('New form submission from contact form');
@@ -146,7 +146,7 @@ describe('normalizeInboundEmail — AI extraction happy paths', () => {
       bodyPreview: "Hi team, I'm Maria from Acme Corp. Can we get a 30-min demo for our 8-person team next Tuesday? Thanks.",
     });
 
-    expect(result.source).toBe('email');
+    expect(result.source).toBe('email_inbox');
     expect(result.extractionConfidence).toBe('high');
     expect(result.extractionError).toBeNull();
     expect(result.extracted.firstName).toBe('Maria');
@@ -348,7 +348,7 @@ describe('normalizeInbound — source dispatch (V1 supports email only)', () => 
     );
 
     const result = await normalizeInbound({
-      source: 'email',
+      source: 'email_inbox',
       tenantId: TENANT_A,
       payload: {
         fromAddress: 'routed@example.com',
@@ -357,7 +357,7 @@ describe('normalizeInbound — source dispatch (V1 supports email only)', () => 
       },
     });
 
-    expect(result.source).toBe('email');
+    expect(result.source).toBe('email_inbox');
     expect(result.extracted.firstName).toBe('Routed');
   });
 
@@ -413,7 +413,7 @@ describe('normalizeInbound — end-to-end NormalizedLead shape', () => {
     );
 
     const result: NormalizedLead = await normalizeInbound({
-      source: 'email',
+      source: 'email_inbox',
       tenantId: TENANT_A,
       payload: {
         fromAddress: '"Alice Founder" <alice@startupxyz.com>',
@@ -425,9 +425,9 @@ describe('normalizeInbound — end-to-end NormalizedLead shape', () => {
 
     // Shape verification — every public field present and correctly typed
     expect(result).toMatchObject({
-      source: 'email',
+      source: 'email_inbox',
       preParsed: {
-        source: 'email',
+        source: 'email_inbox',
         senderEmail: 'alice@startupxyz.com',
         senderNameGuess: 'Alice Founder',
         subject: 'Enterprise pricing inquiry',
