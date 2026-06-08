@@ -22,9 +22,12 @@ vi.mock('../llm-client.js', () => ({
 import {
   normalizeInbound,
   normalizeInboundEmail,
+  normalizeInboundLeadApi,
   preParseEmail,
+  preParseLeadApi,
   NotImplementedError,
   type EmailPayload,
+  type LeadApiPayload,
   type NormalizedLead,
 } from '../lead-normalizer.js';
 
@@ -388,10 +391,22 @@ describe('normalizeInbound — source dispatch (V1 supports email only)', () => 
     ).rejects.toThrow(/KAN-803/);
   });
 
-  it('lead_api throws NotImplementedError', async () => {
-    await expect(
-      normalizeInbound({ source: 'lead_api', tenantId: TENANT_A, payload: {} }),
-    ).rejects.toThrow(NotImplementedError);
+  // KAN-1141 PR 0 — lead_api dispatcher case (previously threw
+  // NotImplementedError; now routes through normalizeInboundLeadApi).
+  it('lead_api source routes through normalizeInboundLeadApi successfully', async () => {
+    const result = await normalizeInbound({
+      source: 'lead_api',
+      tenantId: TENANT_A,
+      payload: {
+        email: 'caller@acme.com',
+        firstName: 'Alice',
+        lastName: 'Caller',
+      },
+    });
+    expect(result.source).toBe('lead_api');
+    expect(result.extractionConfidence).toBe('high');
+    expect(result.extractionError).toBeNull();
+    expect(result.extracted.firstName).toBe('Alice');
   });
 });
 
@@ -441,6 +456,94 @@ describe('normalizeInbound — end-to-end NormalizedLead shape', () => {
         phone: '+1-555-0142',
         intentSummary: 'Wants enterprise pricing for their growing team.',
         qualificationSignals: ['asking about pricing', 'enterprise tier', 'growth stage'],
+      },
+      extractionConfidence: 'high',
+      extractionError: null,
+    });
+  });
+});
+
+// ─────────────────────────────────────────────
+// KAN-1141 PR 0 — Lead-API pre-parser + normalizer (no LLM per Q3a(i))
+// ─────────────────────────────────────────────
+
+describe('preParseLeadApi — KAN-1141 PR 0', () => {
+  it('extracts email + senderNameGuess from full payload', () => {
+    const payload: LeadApiPayload = {
+      email: 'caller@acme.com',
+      firstName: 'Alice',
+      lastName: 'Caller',
+    };
+    const result = preParseLeadApi(payload);
+    expect(result.source).toBe('lead_api');
+    expect(result.senderEmail).toBe('caller@acme.com');
+    expect(result.senderNameGuess).toBe('Alice Caller');
+    expect(result.subject).toBeNull();
+    expect(result.bodyText).toBeNull();
+    expect(result.metadata.attachmentCount).toBe(0);
+  });
+
+  it('handles missing firstName/lastName → senderNameGuess: null', () => {
+    const payload: LeadApiPayload = { email: 'caller@acme.com' };
+    const result = preParseLeadApi(payload);
+    expect(result.senderEmail).toBe('caller@acme.com');
+    expect(result.senderNameGuess).toBeNull();
+  });
+
+  it('handles partial name (firstName only) → senderNameGuess uses what is present', () => {
+    const payload: LeadApiPayload = { email: 'caller@acme.com', firstName: 'Alice' };
+    const result = preParseLeadApi(payload);
+    expect(result.senderNameGuess).toBe('Alice');
+  });
+
+  it('preserves arbitrary metadata under rawApiMetadata on the intermediate shape', () => {
+    const payload: LeadApiPayload = {
+      email: 'caller@acme.com',
+      metadata: { campaign: 'spring-2026', referrer: 'partner-x' },
+    };
+    const result = preParseLeadApi(payload);
+    expect(result.metadata.rawApiMetadata).toEqual({
+      campaign: 'spring-2026',
+      referrer: 'partner-x',
+    });
+  });
+
+  it('lowercases the email + populates apiKeyTag on metadata when supplied', () => {
+    const payload: LeadApiPayload = {
+      email: 'Caller@ACME.com',
+      apiKeyTag: 'abc123def456',
+    };
+    const result = preParseLeadApi(payload);
+    expect(result.senderEmail).toBe('caller@acme.com');
+    expect(result.metadata.apiKeyTag).toBe('abc123def456');
+  });
+});
+
+describe('normalizeInboundLeadApi — KAN-1141 PR 0', () => {
+  it('produces a complete NormalizedLead with extractionConfidence=high (no LLM, structured data is source of truth)', async () => {
+    const result: NormalizedLead = await normalizeInboundLeadApi(TENANT_A, {
+      email: 'caller@acme.com',
+      firstName: 'Alice',
+      lastName: 'Caller',
+      metadata: { utm_source: 'partner' },
+    });
+
+    expect(result).toMatchObject({
+      source: 'lead_api',
+      preParsed: {
+        source: 'lead_api',
+        senderEmail: 'caller@acme.com',
+        senderNameGuess: 'Alice Caller',
+        subject: null,
+        bodyText: null,
+      },
+      extracted: {
+        firstName: 'Alice',
+        lastName: 'Caller',
+        companyName: null,
+        phone: null,
+        intentSummary: null,
+        qualificationSignals: [],
       },
       extractionConfidence: 'high',
       extractionError: null,

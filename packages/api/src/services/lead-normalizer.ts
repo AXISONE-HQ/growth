@@ -65,13 +65,36 @@ export interface EmailPayload {
   rawHeaders?: string | null;
 }
 
+/**
+ * KAN-1141 PR 0 — Lead-API caller payload shape.
+ *
+ * Direct REST inbound via POST /api/v1/leads (KAN-742). The API caller sends
+ * structured data; the normalizer's lead_api path is pure pre-parser (no LLM,
+ * per KAN-1140 Q3a(i)) — callers contracting to send structured data should
+ * not pay LLM latency/cost.
+ *
+ * `apiKeyTag` is threaded through from the route's authenticated API key
+ * prefix for forensic attribution at the wire layer.
+ */
+export interface LeadApiPayload {
+  email: string;
+  firstName?: string | null;
+  lastName?: string | null;
+  /** Arbitrary structured JSON from the API caller. Top-level keys may carry
+   *  convention fields (companyName / phone) but the shape is caller-defined. */
+  metadata?: Record<string, unknown>;
+  /** API key prefix (KAN-742 plaintext-indexed lookup field). Threaded
+   *  through for forensic posture/rate-limit attribution on the wire event. */
+  apiKeyTag?: string | null;
+}
+
 export type NormalizerInput =
   | { source: 'email_inbox'; tenantId: string; payload: EmailPayload }
   | { source: 'meta_lead_ads'; tenantId: string; payload: unknown }
   | { source: 'sms'; tenantId: string; payload: unknown }
   | { source: 'whatsapp'; tenantId: string; payload: unknown }
   | { source: 'voice'; tenantId: string; payload: unknown }
-  | { source: 'lead_api'; tenantId: string; payload: unknown };
+  | { source: 'lead_api'; tenantId: string; payload: LeadApiPayload };
 
 /**
  * Intermediate output of the per-source pre-parser. Stable structured form
@@ -132,13 +155,21 @@ export class NotImplementedError extends Error {
 // ─────────────────────────────────────────────
 
 /**
- * Source-aware dispatch. V1 supports 'email' only; non-email sources throw
- * NotImplementedError naming the future epic that will add them.
+ * Source-aware dispatch. V1 supports 'email_inbox' + 'lead_api'; the 4
+ * remaining non-email channels (meta_lead_ads / sms / whatsapp / voice)
+ * throw NotImplementedError naming the future epic that will add them.
+ *
+ * KAN-1141 PR 0 dispatcher framework (Q3 disposition (c) — defer registry):
+ * switch/case for now; revisit registry extraction when a 4th case lands
+ * (memo 26 — doctrine-driven LoC stays near naive; memo 32 — defer
+ * infrastructure until projected scale materializes).
  */
 export async function normalizeInbound(input: NormalizerInput): Promise<NormalizedLead> {
   switch (input.source) {
     case 'email_inbox':
       return normalizeInboundEmail(input.tenantId, input.payload);
+    case 'lead_api':
+      return normalizeInboundLeadApi(input.tenantId, input.payload);
     case 'meta_lead_ads':
       throw new NotImplementedError(
         'meta_lead_ads source not implemented in Phase 1 — see KAN-799 (Phase 4 connectors)',
@@ -154,10 +185,6 @@ export async function normalizeInbound(input: NormalizerInput): Promise<Normaliz
     case 'voice':
       throw new NotImplementedError(
         'voice source not implemented in Phase 1 — see KAN-803 (Phase 4 connectors)',
-      );
-    case 'lead_api':
-      throw new NotImplementedError(
-        'lead_api source not implemented in Phase 1 — see KAN-799+ (Phase 4 connectors)',
       );
   }
 }
@@ -208,6 +235,86 @@ export function preParseEmail(payload: EmailPayload): PreParsedLead {
       attachmentCount: payload.attachmentCount ?? 0,
       ...(payload.rawHeaders ? { rawHeaders: payload.rawHeaders } : {}),
     },
+  };
+}
+
+// ─────────────────────────────────────────────
+// Lead-API pre-parser + normalizer (KAN-1141 PR 0; no LLM per Q3a(i))
+// ─────────────────────────────────────────────
+
+/**
+ * KAN-1141 PR 0 — Lead-API pre-parser. Pure function — no IO, no LLM.
+ *
+ * The API caller sends structured data via POST /api/v1/leads. Top-level
+ * fields (email / firstName / lastName) map directly to the canonical
+ * `PreParsedLead` shape; the arbitrary `metadata` blob is preserved on the
+ * intermediate shape for the route's downstream `customFields` mapping
+ * (per Q5(a) silent-drop fix at the wire layer).
+ *
+ * `senderNameGuess` derives from firstName + lastName concatenation.
+ * `subject` / `bodyText` are intentionally null — Lead-API has no
+ * subject/body concept (structured data, not free text).
+ */
+export function preParseLeadApi(payload: LeadApiPayload): PreParsedLead {
+  const senderEmail = (payload.email ?? '').trim().toLowerCase();
+  const nameParts = [payload.firstName, payload.lastName].filter(
+    (s): s is string => typeof s === 'string' && s.trim().length > 0,
+  );
+  const senderNameGuess = nameParts.length > 0 ? nameParts.join(' ').trim() : null;
+
+  return {
+    source: 'lead_api',
+    senderEmail,
+    senderNameGuess,
+    subject: null,
+    bodyText: null,
+    metadata: {
+      attachmentCount: 0,
+      ...(payload.apiKeyTag ? { apiKeyTag: payload.apiKeyTag } : {}),
+      ...(payload.metadata ? { rawApiMetadata: payload.metadata } : {}),
+    },
+  };
+}
+
+/**
+ * KAN-1141 PR 0 — Lead-API source normalizer wrapper.
+ *
+ * Mirrors `normalizeInboundEmail` shape (pre-parser + return `NormalizedLead`)
+ * but skips the AI extraction step entirely. Per KAN-1140 Q3a(i): API callers
+ * contracting to send structured data should not pay LLM latency/cost. If a
+ * caller needs LLM extraction on API-submitted leads, file as an opt-in
+ * per-API-key flag separately.
+ *
+ * `extractionConfidence` is 'high' because the data IS the source of truth
+ * — no extraction happened, so nothing was inferred. `extracted` carries
+ * the direct payload values for firstName / lastName. Phone / companyName /
+ * intentSummary / qualificationSignals are left null/empty — callers wanting
+ * those should populate via `metadata` (which flows to wire `customFields`
+ * downstream).
+ *
+ * Failure mode (Q2 locked from KAN-1140): pure pre-parser; practically never
+ * throws. Defensive try/catch at the caller (lead-api route) catches any
+ * unexpected error path.
+ */
+export async function normalizeInboundLeadApi(
+  _tenantId: string,
+  payload: LeadApiPayload,
+): Promise<NormalizedLead> {
+  const preParsed = preParseLeadApi(payload);
+
+  return {
+    source: 'lead_api',
+    preParsed,
+    extracted: {
+      firstName: payload.firstName?.trim() || null,
+      lastName: payload.lastName?.trim() || null,
+      companyName: null,
+      phone: null,
+      intentSummary: null,
+      qualificationSignals: [],
+    },
+    extractionConfidence: 'high',
+    extractionError: null,
   };
 }
 
