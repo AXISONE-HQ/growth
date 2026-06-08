@@ -26,8 +26,12 @@
  *      Per-tenant override via `Tenant.settings.sendWindow.{start,end}` as
  *      "HH:MM" strings (KAN-814 sub-cohort 0). Malformed/missing fields
  *      fall back to the 9/21 defaults with a `send-policy-window-fallback`
- *      log line for monitoring. Timezone read from `Tenant.settings.timezone`
- *      (KAN-741 era), UTC fallback.
+ *      log line for monitoring. Timezone resolved via dual-source cascade
+ *      (KAN-1131 PR 1): `AccountProfile.timeZone` (typed source-of-truth,
+ *      KAN-852 Cohort 1) → `Tenant.settings.timezone` (legacy JSON,
+ *      KAN-741 era) → UTC. The Settings UI writes only to AccountProfile;
+ *      the JSON fallback retires after 14 days of zero divergence logs in
+ *      PROD (see `resolveTenantTimezone`).
  *
  * Caller (KAN-815 dispatch wrapper, which also wires sub-cohort b of this
  * epic) decides:
@@ -267,25 +271,36 @@ async function checkTimeOfDay(
   prisma: PrismaClient,
   tenantId: string,
 ): Promise<TimeOfDayResult> {
-  const tenant = await prisma.tenant.findUnique({
-    where: { id: tenantId },
-    select: { id: true, settings: true },
-  });
+  // KAN-1131 PR 1 — Dual-read timezone resolution. AccountProfile.timeZone
+  // is the typed source-of-truth (Settings UI writes here); Tenant.settings
+  // .timezone is the legacy JSON fallback (retiring after 14 days of zero
+  // divergence logs). The tenant fetch is still required for sendWindow
+  // resolution below, so adding accountProfile to the same Promise.all
+  // keeps perf flat (~sub-ms additional indexed lookup).
+  const [tenant, accountProfile] = await Promise.all([
+    prisma.tenant.findUnique({
+      where: { id: tenantId },
+      select: { id: true, settings: true },
+    }),
+    prisma.accountProfile.findFirst({
+      where: { tenantId },
+      select: { timeZone: true },
+    }),
+  ]);
   if (!tenant) {
     throw new SendPolicyTenantNotFoundError(`Tenant not found: ${tenantId}`);
   }
 
-  // Tenant.timezone field doesn't exist (per pre-flight). Read from
-  // Tenant.settings.timezone JSON path defensively; fall back to UTC.
   const settingsObj =
     tenant.settings && typeof tenant.settings === 'object' && !Array.isArray(tenant.settings)
       ? (tenant.settings as Record<string, unknown>)
       : {};
   const settingsTz =
-    typeof settingsObj.timezone === 'string' ? (settingsObj.timezone as string) : 'UTC';
+    typeof settingsObj.timezone === 'string' ? (settingsObj.timezone as string) : null;
+  const tz = resolveTenantTimezone(accountProfile?.timeZone ?? null, settingsTz, tenantId);
 
   const now = new Date();
-  const tenantLocalHour = getTenantLocalHour(now, settingsTz);
+  const tenantLocalHour = getTenantLocalHour(now, tz);
 
   // KAN-814 sub-cohort 0 — per-tenant send-window override. Reads
   // `Tenant.settings.sendWindow.{start, end}` as "HH:MM" strings and parses
@@ -293,12 +308,54 @@ async function checkTimeOfDay(
   // defaults with a `send-policy-window-fallback` log line so we can
   // monitor whether tenants are configuring this correctly.
   const { startHour, endHour } = resolveSendWindowHours(settingsObj, tenantId);
-  const windowDescription = `${startHour}:00-${endHour}:00 ${settingsTz}`;
+  const windowDescription = `${startHour}:00-${endHour}:00 ${tz}`;
 
   const inWindow = tenantLocalHour >= startHour && tenantLocalHour < endHour;
-  const nextWindowOpenAt = computeNextWindowOpen(now, tenantLocalHour, startHour, endHour, settingsTz);
+  const nextWindowOpenAt = computeNextWindowOpen(now, tenantLocalHour, startHour, endHour, tz);
 
   return { inWindow, windowDescription, nextWindowOpenAt };
+}
+
+/**
+ * KAN-1131 PR 1 — Dual-source tenant timezone resolution with discrepancy
+ * observability.
+ *
+ * Cascade:
+ *   1. profileTz  (`AccountProfile.timeZone`)     — typed SoT, KAN-852 Cohort 1
+ *   2. settingsTz (`Tenant.settings.timezone`)    — legacy JSON, KAN-741 era
+ *   3. 'UTC'                                       — final defensive fallback
+ *
+ * Pure function — callers do the Promise.all DB fetch (the existing
+ * `tenant.findUnique` in `checkTimeOfDay` is still required for sendWindow
+ * resolution, so the helper is fed the two values rather than re-querying).
+ *
+ * Divergence log: when BOTH sources are populated AND disagree, emit a
+ * `send-policy-tz-divergence` warn line. Cloud Logging observes this in
+ * the first 30 minutes post-deploy and continuously thereafter.
+ *
+ * Retirement gate: 14 days of zero `send-policy-tz-divergence` logs in PROD
+ * → follow-up PR removes the settingsTz path (see KAN-1131 PR 1 closing
+ * note for the follow-up ticket).
+ *
+ * Population reality (Step 0 finding): the `Tenant.accountProfile` relation
+ * is OPTIONAL — populated lazily via `/settings/account` tRPC upserts. Many
+ * tenants will have `accountProfile = null` and rely on the settingsTz
+ * fallback. The cascade handles this transparently without an error path.
+ *
+ * Exported for test introspection — sibling posture to `getTenantLocalHour`
+ * and `resolveSendWindowHours`.
+ */
+export function resolveTenantTimezone(
+  profileTz: string | null | undefined,
+  settingsTz: string | null | undefined,
+  tenantId: string,
+): string {
+  if (profileTz && settingsTz && profileTz !== settingsTz) {
+    console.warn(
+      `[send-policy] send-policy-tz-divergence tenantId=${tenantId} profileTz=${profileTz} settingsTz=${settingsTz} — AccountProfile.timeZone preferred per KAN-1131 Option B`,
+    );
+  }
+  return profileTz || settingsTz || 'UTC';
 }
 
 /**
