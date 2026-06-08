@@ -588,13 +588,27 @@ describe("KAN-954 — non-Formspree regression (parser is a no-op)", () => {
         source: undefined,
       }),
     );
-    // Event has no vendor/formSource/leadType/dealName/customFields
+    // Vendor-specific fields (vendor/formSource/leadType/dealName) preserved
+    // as undefined since no vendor parser fires for this direct-inbound shape
+    // — the KAN-954 "non-Formspree regression (parser is a no-op)" contract
+    // still holds.
+    //
+    // KAN-1140 PR 1 contract addition: format-detection metadata
+    // (_kan_1140_format + _kan_1140_confidence) is populated on every
+    // non-Formspree inbound for the Phase 3 confidence-escalation queue
+    // (per Q6 disposition (c) — schema-extension deferred; detection
+    // result stashed in customFields until Phase 3 lands). This direct
+    // inbound is plain-text/high since the body has no XML/HTML markers
+    // and no label:value lines to extract.
     const event = ctx.publishedEvents[0];
     expect(event.metadata.vendor).toBeUndefined();
     expect(event.metadata.formSource).toBeUndefined();
     expect(event.metadata.leadType).toBeUndefined();
     expect(event.metadata.dealName).toBeUndefined();
-    expect(event.metadata.customFields).toBeUndefined();
+    expect(event.metadata.customFields).toEqual({
+      _kan_1140_format: "plain-text",
+      _kan_1140_confidence: "high",
+    });
     // But bodyPreview IS populated from the fetched text — D5 win
     expect(event.metadata.bodyPreview).toContain("enterprise tier");
   });
