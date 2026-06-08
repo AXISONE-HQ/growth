@@ -53,6 +53,14 @@ import { buildSvixMiddleware, getSvixContext } from "../middleware/svix.js";
 import { fetchInboundEmailContent, type InboundEmailContent } from "../adapters/resend/inbound-fetch.js";
 import { detectAutoresponder } from "./autoresponder-filter.js";
 import { parseFormspreeEmail, isFormspreeSource } from "../parsers/formspree-email.js";
+// KAN-1140 Phase 1 PR 1 — Format detection + per-format pre-parsers.
+// Runs after Formspree check (vendor-specific path wins); detection result
+// is stashed in customFields (_kan_1140_format, _kan_1140_confidence) per
+// Q6 disposition (c) until Phase 3 confidence-escalation queue lands.
+import { detectEmailFormat } from "../parsers/format-detector.js";
+import { parseAdfEmail } from "../parsers/adf-parser.js";
+import { parseHtmlEmail } from "../parsers/html-email-parser.js";
+import { parsePlainTextEmail } from "../parsers/plain-text-email-parser.js";
 
 export const resendInboundWebhookApp = new Hono();
 
@@ -591,6 +599,58 @@ resendInboundWebhookApp.post(
     createdContactId: contact.id,
   });
 
+  // KAN-1140 Phase 1 PR 1 — Format-aware enrichment (skipped when Formspree
+  // path is already active; Formspree wins as the vendor-specific source).
+  // Detection result is stashed in customFields (_kan_1140_format,
+  // _kan_1140_confidence) per Q6 disposition (c) — wire schema extension
+  // deferred to Phase 3 when the confidence-escalation queue lands.
+  let formatEnrichment: {
+    vendor?: string;
+    leadType?: string;
+    dealName?: string;
+    customFields?: Record<string, string>;
+  } | null = null;
+  if (!formspreeParsed && fetchedContent) {
+    const detection = detectEmailFormat({
+      text: fetchedContent.text,
+      html: fetchedContent.html,
+    });
+    const baseCustomFields: Record<string, string> = {
+      _kan_1140_format: detection.format,
+      _kan_1140_confidence: detection.confidence,
+    };
+
+    if (detection.format === "adf" && fetchedContent.text) {
+      const adfResult = parseAdfEmail({ text: fetchedContent.text });
+      if (adfResult) {
+        formatEnrichment = {
+          vendor: "adf",
+          leadType: "auto_lead",
+          dealName: adfResult.dealNameSeed ?? undefined,
+          customFields: { ...baseCustomFields, ...adfResult.customFields },
+        };
+      } else {
+        formatEnrichment = { customFields: baseCustomFields };
+      }
+    } else if (
+      (detection.format === "html" || detection.format === "html-in-text") &&
+      (fetchedContent.html || fetchedContent.text)
+    ) {
+      const htmlBody = fetchedContent.html ?? fetchedContent.text ?? "";
+      const htmlResult = parseHtmlEmail({ html: htmlBody });
+      formatEnrichment = htmlResult
+        ? { customFields: { ...baseCustomFields, ...htmlResult.customFields } }
+        : { customFields: baseCustomFields };
+    } else if (detection.format === "plain-text" && fetchedContent.text) {
+      const plainResult = parsePlainTextEmail({ text: fetchedContent.text });
+      formatEnrichment = plainResult
+        ? { customFields: { ...baseCustomFields, ...plainResult.customFields } }
+        : { customFields: baseCustomFields };
+    } else {
+      formatEnrichment = { customFields: baseCustomFields };
+    }
+  }
+
   // M3-2.5b — propagate raw Resend Receiving headers so the consumer can
   // sidecar-write + correlation-lookup. Raw form (`<id@domain>`, References
   // space-separated) is preserved on the wire for forensic value; the
@@ -631,7 +691,17 @@ resendInboundWebhookApp.post(
             dealName: formspreeParsed.dealNameSeed,
             customFields: formspreeParsed.customFields,
           }
-        : {}),
+        : formatEnrichment
+          ? {
+              ...(formatEnrichment.vendor ? { vendor: formatEnrichment.vendor } : {}),
+              ...(formatEnrichment.leadType ? { leadType: formatEnrichment.leadType } : {}),
+              ...(formatEnrichment.dealName ? { dealName: formatEnrichment.dealName } : {}),
+              ...(formatEnrichment.customFields &&
+              Object.keys(formatEnrichment.customFields).length > 0
+                ? { customFields: formatEnrichment.customFields }
+                : {}),
+            }
+          : {}),
       ...(inboundHeaders ? { inboundHeaders } : {}),
       // KAN-1036 — per-decision reply correlation token from data.to
       // subaddress. NULL when the inbound's To: had no `+suffix`
