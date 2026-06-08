@@ -52,7 +52,15 @@ import { logger } from "../logger.js";
 import { buildSvixMiddleware, getSvixContext } from "../middleware/svix.js";
 import { fetchInboundEmailContent, type InboundEmailContent } from "../adapters/resend/inbound-fetch.js";
 import { detectAutoresponder } from "./autoresponder-filter.js";
-import { parseFormspreeEmail, isFormspreeSource } from "../parsers/formspree-email.js";
+// KAN-1140 Phase 1 PR 4 — Vendor detection via the plugin registry. The
+// webhook handler is vendor-agnostic; per-vendor detection + extraction
+// lives in vendor-handlers/*. Formspree is registered as the first live
+// handler; Tally/Typeform/Webflow stubs follow as templates.
+import {
+  vendorRegistry,
+  type VendorHandler,
+  type VendorExtraction,
+} from "../parsers/registry.js";
 // KAN-1140 Phase 1 PR 1 — Format detection + per-format pre-parsers.
 // Runs after Formspree check (vendor-specific path wins); detection result
 // is stashed in customFields (_kan_1140_format, _kan_1140_confidence) per
@@ -469,42 +477,45 @@ resendInboundWebhookApp.post(
     return c.text("OK", 200);
   }
 
-  // ── KAN-954 — Formspree parser hook. Runs only when From-domain is
-  // Formspree-shaped; for every other inbound (direct, normal email), the
-  // parser is a no-op and the original From-keyed identity flows through
-  // unchanged. Parser returns null on detection failure, malformed body,
-  // or missing senderEmail — null path also falls through to current
-  // (mis-attributed but flagged) behavior. NEVER drops a lead.
-  let formspreeParsed:
-    | ReturnType<typeof parseFormspreeEmail>
-    | null = null;
-  if (isFormspreeSource(fromParsed.email)) {
-    formspreeParsed = parseFormspreeEmail({
-      fromHeader: fromParsed.email,
-      subject,
-      text: fetchedContent?.text ?? null,
+  // ── KAN-954 / KAN-1140 PR 4 — Vendor-detection dispatch via the plugin
+  // registry. Every registered handler's detect() is consulted first-match-
+  // wins; on match, extract() returns the normalized VendorExtraction shape
+  // (uniform across vendors). Handlers return null on extraction failure —
+  // null path falls through to legacy From-keyed identity (mis-attributed
+  // but flagged). NEVER drops a lead.
+  let vendorMatch: VendorHandler | null = null;
+  let vendorExtraction: VendorExtraction | null = null;
+  const vendorDetectionPayload = {
+    fromHeader: fromParsed.email,
+    subject,
+    text: fetchedContent?.text ?? null,
+  };
+  vendorMatch = vendorRegistry.detect(vendorDetectionPayload);
+  if (vendorMatch) {
+    vendorExtraction = vendorMatch.extract({
+      ...vendorDetectionPayload,
       replyTo: fetchedContent?.replyTo ?? [],
     });
-    if (!formspreeParsed) {
+    if (!vendorExtraction) {
       logger.warn(
-        { resendEmailId, fromAddress, subject },
-        "[resend-inbound] formspree detection fired but parsing failed — falling back to mis-attributed Contact",
+        { resendEmailId, fromAddress, subject, vendor: vendorMatch.name },
+        "[resend-inbound] vendor detection fired but extraction failed — falling back to mis-attributed Contact",
       );
     }
   }
 
   // ── Contact upsert + audit + publish
-  // Identity selection: Formspree-parsed values when available; otherwise
+  // Identity selection: vendor-extracted values when available; otherwise
   // the legacy From-header values. Either path produces a Contact row + a
   // lead.received event — fallback is "mis-attributed but landed," never
   // dropped.
   const { firstName: legacyFirst, lastName: legacyLast } = splitDisplayName(fromParsed.name);
-  const identity = formspreeParsed
+  const identity = vendorExtraction
     ? {
-        email: formspreeParsed.senderEmail,
-        firstName: formspreeParsed.firstName,
-        lastName: formspreeParsed.lastName,
-        companyName: formspreeParsed.companyName,
+        email: vendorExtraction.senderEmail,
+        firstName: vendorExtraction.firstName ?? null,
+        lastName: vendorExtraction.lastName ?? null,
+        companyName: vendorExtraction.companyName ?? null,
         source: "web_form" as const,
       }
     : {
@@ -533,23 +544,24 @@ resendInboundWebhookApp.post(
   // posture: occasional dropped genuine reply degrades to today's pre-
   // filter behavior; under-filtering would waste inference + risk loops.
   //
-  // Skip entirely on Formspree-source inbound: form submissions are
+  // Skip entirely on ANY vendor-detected inbound: form submissions are
   // user-initiated form fills, NOT machine-generated email replies. The
-  // envelope From is `noreply@formspree.io` (vendor relay), which the
-  // sender-local-part denylist would false-positive on every single
-  // form submission. Even if a vendor relay carried autoresponder
+  // envelope From is the vendor's relay (e.g., `noreply@formspree.io`),
+  // which the sender-local-part denylist would false-positive on every
+  // single form submission. Even if a vendor relay carried autoresponder
   // headers/body, the engine consumes form_fill source events differently
-  // (Formspree → web_form path, not the contact-replied loop), so the
-  // filter is structurally irrelevant. KAN-954 form-vendor extensions
-  // (Tally/Typeform per parsers/formspree-email.ts:52) get the same
-  // skip — gate on the existing `isFormspreeSource` predicate so future
-  // vendors join automatically when their detection lands.
+  // (vendor → web_form path, not the contact-replied loop), so the filter
+  // is structurally irrelevant.
+  //
+  // KAN-1140 PR 4 — gate on the vendor registry's match result so any
+  // registered vendor (current: Formspree; future: Tally/Typeform/Webflow/
+  // etc.) joins this skip automatically.
   //
   // Audit row reuses the existing `safeWriteAuditRow` writer with new
   // status `rejected_autoresponder` (status union extended at L146); the
   // `rejectionReason` field carries the signal-specific tag for forensic
   // grep (`header:auto-submitted=...`, `subject-pattern`, etc.).
-  const autoresponderCheck = isFormspreeSource(fromParsed.email)
+  const autoresponderCheck = vendorMatch
     ? ({ filtered: false } as const)
     : detectAutoresponder({
         headers: fetchedContent?.headers ?? {},
@@ -599,18 +611,21 @@ resendInboundWebhookApp.post(
     createdContactId: contact.id,
   });
 
-  // KAN-1140 Phase 1 PR 1 — Format-aware enrichment (skipped when Formspree
-  // path is already active; Formspree wins as the vendor-specific source).
-  // Detection result is stashed in customFields (_kan_1140_format,
+  // KAN-1140 Phase 1 PR 1 — Format-aware enrichment (skipped when any
+  // vendor handler matched; vendor-specific extraction wins as the primary
+  // source). Detection result is stashed in customFields (_kan_1140_format,
   // _kan_1140_confidence) per Q6 disposition (c) — wire schema extension
   // deferred to Phase 3 when the confidence-escalation queue lands.
+  //
+  // KAN-1140 PR 4 — gate updated from `!formspreeParsed` to
+  // `!vendorExtraction` for vendor-agnostic precedence.
   let formatEnrichment: {
     vendor?: string;
     leadType?: string;
     dealName?: string;
     customFields?: Record<string, string>;
   } | null = null;
-  if (!formspreeParsed && fetchedContent) {
+  if (!vendorExtraction && fetchedContent) {
     const detection = detectEmailFormat({
       text: fetchedContent.text,
       html: fetchedContent.html,
@@ -681,15 +696,18 @@ resendInboundWebhookApp.post(
       subject: subject ?? undefined,
       bodyPreview: bodyPreview ?? undefined,
       attachmentCount,
-      // KAN-954 — optional vendor-attribution + deal-naming hints.
+      // KAN-954 / KAN-1140 PR 4 — optional vendor-attribution + deal-naming
+      // hints. Vendor path uses the normalized VendorExtraction shape
+      // (uniform across Formspree/Tally/Typeform/future); format-enrichment
+      // path (PR #304) populates only for non-vendor inbounds.
       // Pre-KAN-954 producers omit these; consumer falls back to defaults.
-      ...(formspreeParsed
+      ...(vendorExtraction
         ? {
-            vendor: "formspree" as const,
-            formSource: formspreeParsed.formSource ?? undefined,
-            leadType: formspreeParsed.leadType ?? undefined,
-            dealName: formspreeParsed.dealNameSeed,
-            customFields: formspreeParsed.customFields,
+            vendor: vendorExtraction.vendor,
+            formSource: vendorExtraction.formSource ?? undefined,
+            leadType: vendorExtraction.leadType ?? undefined,
+            dealName: vendorExtraction.dealName,
+            customFields: vendorExtraction.customFields,
           }
         : formatEnrichment
           ? {
