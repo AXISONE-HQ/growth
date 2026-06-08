@@ -5,7 +5,10 @@ Each memo documents a pattern, an anti-pattern, and forward discipline.
 
 **Index initialized 2026-06-06** via the memo banking sprint that landed
 13 new memos from the Cluster IV-B (yesterday) + Dashboard v2 (today)
-session work. Future PRs add their new memos to the appropriate section.
+session work. **Sprint #2 banked 2026-06-08** added 13 more memos from the
+KAN-1109/1116/1118/1119/1120 dead-code + cascade arc + the
+KAN-1131/1132 substrate-already-shipped arc. Future PRs add their new
+memos to the appropriate section.
 
 ## Phase 1 / Design discipline
 
@@ -17,6 +20,12 @@ session work. Future PRs add their new memos to the appropriate section.
 - [`feedback_phase_1_pivot_kan_786_to_kan_791_lifecycle_model`](memories/feedback_phase_1_pivot_kan_786_to_kan_791_lifecycle_model.md) — Pivot pattern when Phase 1 reveals a different lifecycle model than originally proposed
 - [`feedback_prd_assumed_infrastructure_check_kan_786`](memories/feedback_prd_assumed_infrastructure_check_kan_786.md) — PRDs assume infrastructure that may not exist; verify before Phase 1 locks
 - [`feedback_prd_path_systematic_error_apps_vs_packages`](memories/feedback_prd_path_systematic_error_apps_vs_packages.md) — Path errors in PRDs (apps/ vs packages/) compound across multiple Phase 1 traces
+- [`feedback_phase_1_enumeration_as_code_state_truthing`](memories/feedback_phase_1_enumeration_as_code_state_truthing.md) — Phase 1 enumeration's real value is truthing code state; surfaces dead + latent bugs together
+- [`feedback_grep_based_backlog_grooming_assumes_code_is_live`](memories/feedback_grep_based_backlog_grooming_assumes_code_is_live.md) — Grep audits over-scope; some matches are dead code; caller-check before backlog
+- [`feedback_audits_themselves_have_audit_gaps_re_audit_periodically`](memories/feedback_audits_themselves_have_audit_gaps_re_audit_periodically.md) — Audits are sampling; expect ~10% miss; periodically re-audit
+- [`feedback_phase_1_can_surface_substrate_already_shipped`](memories/feedback_phase_1_can_surface_substrate_already_shipped.md) — Phase 1 may reveal substrate already 80% shipped; reframe to consolidation
+- [`feedback_architectural_audits_must_search_capability_not_field_name`](memories/feedback_architectural_audits_must_search_capability_not_field_name.md) — Literal-grep audits miss sibling implementations; ask capability question
+- [`feedback_phase_2_step_0_reframes_substitution_to_documentation`](memories/feedback_phase_2_step_0_reframes_substitution_to_documentation.md) — Phase 2 Step 0 often reframes "substitute at N sites" to docs-only + 1 genuine fix
 
 ## Cascade / Typecheck discipline
 
@@ -26,6 +35,9 @@ session work. Future PRs add their new memos to the appropriate section.
 - [`feedback_apps_api_compiled_js_artifacts_mask_source_ts_during_vitest`](memories/feedback_apps_api_compiled_js_artifacts_mask_source_ts_during_vitest.md) — apps/api compiled .js artifacts are load-bearing for vitest; regen after .ts edits
 - [`feedback_cc_prompt_cross_rootdir_imports_must_be_pattern_conformant`](memories/feedback_cc_prompt_cross_rootdir_imports_must_be_pattern_conformant.md) — apps/api → packages/api imports require variable-specifier loader pattern (KAN-689 cohort)
 - [`feedback_shared_helper_prisma_surface_expansion_ripples_caller_test_mocks`](memories/feedback_shared_helper_prisma_surface_expansion_ripples_caller_test_mocks.md) — Expanding a shared helper's prisma surface ripples to all caller test mocks
+- [`feedback_dead_code_with_latent_schema_bugs_delete_dont_fix`](memories/feedback_dead_code_with_latent_schema_bugs_delete_dont_fix.md) — Dead code with schema-drift bugs → delete, don't mechanically fix
+- [`feedback_dead_code_hides_typecheck_errors_in_baseline`](memories/feedback_dead_code_hides_typecheck_errors_in_baseline.md) — Deleting dead code shrinks the typecheck baseline; periodic dead-file grep recovers hidden waste
+- [`feedback_prisma_transaction_client_lacks_transaction_method`](memories/feedback_prisma_transaction_client_lacks_transaction_method.md) — `Prisma.TransactionClient` has no `$transaction`; `as unknown as PrismaClient` cast masks the constraint
 
 ## Per-model / Schema discipline
 
@@ -42,6 +54,10 @@ session work. Future PRs add their new memos to the appropriate section.
 - [`feedback_main_baseline_must_include_new_files_for_comm_23`](memories/feedback_main_baseline_must_include_new_files_for_comm_23.md) — comm -23 baseline must include new files; `git checkout main -- <path>` is no-op for untracked
 - [`feedback_smoke_cleanup_pattern_depends_on_dispatch_path`](memories/feedback_smoke_cleanup_pattern_depends_on_dispatch_path.md) — Smoke cleanup variant (6/7/8/9-step) depends on engine chain's dispatch path
 - [`feedback_smoke_tenant_config_gaps_block_headline_outcomes`](memories/feedback_smoke_tenant_config_gaps_block_headline_outcomes.md) — Tenant config gaps can block headline smoke outcomes; pre-flight config audit
+- [`feedback_state_machine_extensions_must_enumerate_recovery_paths`](memories/feedback_state_machine_extensions_must_enumerate_recovery_paths.md) — State machine extensions must enumerate ALL failure paths + add recovery transition on each
+- [`feedback_memos_document_tests_enforce`](memories/feedback_memos_document_tests_enforce.md) — Memos record bug classes; tests enforce. Same author can repeat the bug class days after banking the memo
+- [`feedback_query_raw_unsafe_with_bind_params_is_safe`](memories/feedback_query_raw_unsafe_with_bind_params_is_safe.md) — `$queryRawUnsafe` with `$N` bind params is SAFE; the name lies. Audit interpolation pattern, not API name
+- [`feedback_vi_mock_does_not_intercept_cross_workspace_dynamic_imports`](memories/feedback_vi_mock_does_not_intercept_cross_workspace_dynamic_imports.md) — `vi.mock` doesn't reach across workspace boundaries for dynamic imports; use DI or `vi.importActual`
 
 ## Patterns / Architecture
 
@@ -88,5 +104,6 @@ When adding a new `feedback_*.md` memo:
 3. If no category fits, add a new section heading
 4. Update the "Index initialized" date if the index changes structure
 
-The catalog is comprehensive (all 49 memos) as of 2026-06-06. Subsequent
-PRs add their memos here so the catalog stays current.
+The catalog is comprehensive (all 49 memos) as of 2026-06-06. Sprint #2
+(2026-06-08) added 13 more memos → 62 total. Subsequent PRs add their
+memos here so the catalog stays current.
