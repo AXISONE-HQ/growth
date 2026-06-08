@@ -6,6 +6,7 @@ import { Hono } from 'hono';
 import { trpcServer } from '@hono/trpc-server';
 import { logger as pinoLogger } from './logger.js';
 import { registerAdapters } from './adapters/index.js';
+import { registerAllVendorHandlers } from './parsers/vendor-handlers/index.js';
 import { webhooksApp } from './webhooks/index.js';
 import { resendWebhookApp } from './webhooks/resend.js';
 import {
@@ -28,6 +29,10 @@ function getPrisma(): PrismaClient {
 
 export function buildApp(): Hono {
   registerAdapters();
+  // KAN-1140 Phase 1 PR 4 — register vendor parser handlers
+  // (Formspree + Tally/Typeform/Webflow stubs) into the vendorRegistry.
+  // Webhook handler at resend-inbound.ts dispatches via vendorRegistry.detect().
+  registerAllVendorHandlers();
 
   // KAN-741 — wire Lead Inbox webhook hooks with real Prisma + Pub/Sub
   // publisher. Test seam stays available via __setInboundHooksForTest.

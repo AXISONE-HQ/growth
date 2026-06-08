@@ -193,3 +193,50 @@ export function parseFormspreeEmail(input: FormspreeParseInput): FormspreeParseR
     leadType,
   };
 }
+
+// ─────────────────────────────────────────────
+// KAN-1140 Phase 1 PR 4 — VendorHandler adapter
+// ─────────────────────────────────────────────
+
+import type {
+  VendorDetectionInput,
+  VendorExtractionInput,
+  VendorExtraction,
+  VendorHandler,
+} from "./registry.js";
+
+/**
+ * Plugin-pattern adapter wrapping the legacy `isFormspreeSource` +
+ * `parseFormspreeEmail` exports. The webhook handler dispatches via
+ * `vendorRegistry.detect(payload)`; this handler self-identifies on
+ * Formspree-shaped From-domains.
+ *
+ * Legacy exports (`isFormspreeSource`, `parseFormspreeEmail`) are preserved
+ * for back-compat — older callers + existing tests continue to work.
+ */
+export const formspreeHandler: VendorHandler = {
+  name: "formspree",
+  detect(payload: VendorDetectionInput): boolean {
+    return isFormspreeSource(payload.fromHeader);
+  },
+  extract(payload: VendorExtractionInput): VendorExtraction | null {
+    const result = parseFormspreeEmail({
+      fromHeader: payload.fromHeader,
+      subject: payload.subject,
+      text: payload.text,
+      replyTo: payload.replyTo,
+    });
+    if (!result) return null;
+    return {
+      senderEmail: result.senderEmail,
+      firstName: result.firstName,
+      lastName: result.lastName,
+      companyName: result.companyName,
+      vendor: "formspree",
+      formSource: result.formSource,
+      leadType: result.leadType,
+      dealName: result.dealNameSeed,
+      customFields: result.customFields,
+    };
+  },
+};

@@ -36,6 +36,9 @@ import {
   type LeadInboxEventRow,
 } from "../resend-inbound.js";
 import type { LeadReceivedEvent } from "@growth/shared";
+// KAN-1140 Phase 1 PR 4 — registry bootstrap for tests
+import { vendorRegistry } from "../../parsers/registry.js";
+import { registerAllVendorHandlers } from "../../parsers/vendor-handlers/index.js";
 
 // ─────────────────────────────────────────────
 // svix verifier mock — bypass signature verification by injecting a verifier
@@ -114,6 +117,12 @@ beforeEach(() => {
   __setInboundHooksForTest(null);
   redisSetMock.mockClear();
   redisSetMock.mockResolvedValue("OK");
+  // KAN-1140 Phase 1 PR 4 — bootstrap the vendor registry for tests
+  // (production app calls registerAllVendorHandlers() from buildApp;
+  // tests use makeApp() which doesn't run that bootstrap, so we
+  // re-register per-test for isolation).
+  vendorRegistry.clear();
+  registerAllVendorHandlers();
 });
 
 describe("extractSlugFromTo", () => {
