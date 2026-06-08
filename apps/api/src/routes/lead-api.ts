@@ -28,6 +28,68 @@ import {
 import { checkRateLimit } from "../services/api-rate-limit.js";
 import { claimIdempotencyKey, recordIdempotencyResult } from "../services/api-idempotency.js";
 
+// KAN-1141 PR 0 — Normalizer module loaded via the cross-rootDir variable-
+// specifier loader pattern (KAN-689 era). Type-mirror declared locally so
+// apps/api tsc doesn't pull packages/api/src into its rootDir.
+interface NormalizerLeadApiModule {
+  normalizeInboundLeadApi: (
+    tenantId: string,
+    payload: {
+      email: string;
+      firstName?: string | null;
+      lastName?: string | null;
+      metadata?: Record<string, unknown>;
+      apiKeyTag?: string | null;
+    },
+  ) => Promise<{
+    source: string;
+    extracted: {
+      firstName: string | null;
+      lastName: string | null;
+      companyName: string | null;
+      phone: string | null;
+      intentSummary: string | null;
+      qualificationSignals: string[];
+    };
+    extractionConfidence: 'high' | 'medium' | 'low';
+    extractionError: string | null;
+  }>;
+}
+let _normalizerModule: NormalizerLeadApiModule | null = null;
+async function loadNormalizerModule(): Promise<NormalizerLeadApiModule> {
+  if (_normalizerModule) return _normalizerModule;
+  const spec = '../../../../packages/api/src/services/lead-normalizer.js';
+  _normalizerModule = (await import(spec)) as NormalizerLeadApiModule;
+  return _normalizerModule;
+}
+
+/** Test seam — inject mock normalizer. */
+export function __setNormalizerForTest(mod: NormalizerLeadApiModule | null): void {
+  _normalizerModule = mod;
+}
+
+/**
+ * KAN-1141 PR 0 Q5(a) FIX — Flatten arbitrary caller `metadata` (Record<string, unknown>)
+ * into the wire schema's `customFields: Record<string, string>` shape. Per-value
+ * stringify: string values pass through; everything else gets JSON.stringify'd.
+ *
+ * Pre-PR-0: this flattening did not exist. The route published `metadata.customerMetadata`
+ * (which is NOT a wire-schema field), and Zod's default .strip() silently dropped it
+ * during buildLeadReceivedEvent's parse step. Net effect: every PROD Lead-API caller's
+ * metadata payload was lost on the wire since KAN-742 shipped. PR 0 closes the bug.
+ */
+export function flattenMetadataToCustomFields(
+  metadata: Record<string, unknown> | undefined,
+): Record<string, string> | undefined {
+  if (!metadata) return undefined;
+  const entries = Object.entries(metadata).map(([k, v]) => [
+    k,
+    typeof v === 'string' ? v : JSON.stringify(v),
+  ] as const);
+  if (entries.length === 0) return undefined;
+  return Object.fromEntries(entries);
+}
+
 export const leadApiApp = new Hono();
 
 const LeadInputSchema = z.object({
@@ -143,10 +205,43 @@ leadApiApp.post("/", async (c) => {
     return c.json({ error: "Failed to record lead" }, 500);
   }
 
-  // ── 6. Emit lead.received event (drift-safe via @growth/shared)
+  // ── 6. KAN-1141 PR 0 — Run the lead-normalizer for symmetry with the
+  //    email path (KAN-742 V1 promise completion). Pure pre-parser; no LLM
+  //    per Q3a(i). If the normalizer throws (unlikely — pure function),
+  //    fall through with publish-raw posture per "AI is the operator,
+  //    humans are escalation" doctrine.
+  let normalizationFailure: string | null = null;
+  try {
+    const { normalizeInboundLeadApi } = await loadNormalizerModule();
+    await normalizeInboundLeadApi(auth.tenantId, {
+      email,
+      firstName: firstName ?? null,
+      lastName: lastName ?? null,
+      metadata,
+      apiKeyTag: auth.keyPrefix,
+    });
+  } catch (err) {
+    // Defensive — pure pre-parser shouldn't throw. Log + continue with raw
+    // event publish per locked failure-mode disposition (Q2).
+    normalizationFailure = (err as Error)?.message ?? String(err);
+    console.warn("[lead-api] normalizer threw (publishing raw event):", normalizationFailure);
+  }
+
+  // ── 7. Emit lead.received event (drift-safe via @growth/shared)
+  //
+  // KAN-1141 PR 0 Q5(a) FIX — caller metadata now flows via `customFields`
+  // (the wire schema's canonical field for caller-supplied data, present
+  // since KAN-741). Pre-PR-0 the route published `metadata.customerMetadata`
+  // which is NOT a wire-schema field — Zod's default .strip() silently
+  // dropped it. Latent bug: every PROD Lead-API caller's metadata has been
+  // lost on the wire since KAN-742 shipped. PR 0 closes the gap. Per-value
+  // stringify via `flattenMetadataToCustomFields` maps arbitrary JSON to
+  // the wire schema's Record<string, string> shape losslessly.
+  //
   // apiKeyTag = keyPrefix (already plaintext; the indexed lookup field).
   // Publishing keyPrefix lets downstream identify which key submitted each
   // lead — useful for forensic/audit. NEVER publishes the full plaintext key.
+  const customFields = flattenMetadataToCustomFields(metadata);
   const event = buildLeadReceivedEvent({
     eventId: `evt_${randomUUID()}`,
     tenantId: auth.tenantId,
@@ -155,7 +250,7 @@ leadApiApp.post("/", async (c) => {
     metadata: {
       apiKeyTag: auth.keyPrefix,
       attachmentCount: 0,
-      ...(metadata ? { customerMetadata: JSON.stringify(metadata).slice(0, 500) } : {}),
+      ...(customFields ? { customFields } : {}),
     },
   });
   try {
