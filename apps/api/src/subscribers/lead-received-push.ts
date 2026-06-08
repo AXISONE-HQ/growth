@@ -163,7 +163,7 @@ async function loadBootstrapModule(): Promise<BootstrapModule> {
 
 interface NormalizerModule {
   normalizeInbound: (input: {
-    source: 'email';
+    source: 'email_inbox';
     tenantId: string;
     payload: {
       fromAddress: string;
@@ -1393,7 +1393,7 @@ async function writeInboundEngagementForExistingDeal(
 ): Promise<void> {
   const { normalizeInbound } = await loadNormalizerModule();
   const normalized = await normalizeInbound({
-    source: 'email',
+    source: 'email_inbox',
     tenantId,
     payload: {
       fromAddress: event.metadata.fromAddress ?? '',
@@ -1506,7 +1506,7 @@ async function writePhase1Deal(
   // Deal + Engagement so the lead lands.
   const { normalizeInbound } = await loadNormalizerModule();
   const normalized = await normalizeInbound({
-    source: 'email',
+    source: 'email_inbox',
     tenantId,
     payload: {
       fromAddress: event.metadata.fromAddress ?? '',

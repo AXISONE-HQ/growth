@@ -262,7 +262,7 @@ function setupHappyPathMocks(opts: {
   });
   stageFindFirstMock.mockResolvedValue({ id: STAGE_INITIAL });
   normalizeInboundMock.mockResolvedValue({
-    source: "email",
+    source: "email_inbox",
     preParsed: {
       senderEmail: "test@example.com",
       senderNameGuess: null,
@@ -538,7 +538,7 @@ describe("KAN-793 — happy path (rule mode)", () => {
   it("KAN-839 — first-turn write persists bodyPreview to Engagement metadata", async () => {
     setupHappyPathMocks();
     normalizeInboundMock.mockResolvedValueOnce({
-      source: "email",
+      source: "email_inbox",
       preParsed: {
         senderEmail: "alice@acme.com",
         senderNameGuess: null,
