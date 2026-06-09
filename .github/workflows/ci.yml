@@ -138,6 +138,13 @@ jobs:
       - name: Generate Prisma Client
         run: npx prisma generate
         working-directory: packages/db
+      # KAN-1151 fix-forward — vitest integration tests import from @growth/shared
+      # at module-load time; package.json points main → dist/index.js which
+      # doesn't exist on cold checkout. Mirrors the Web Build job's pattern.
+      # Without this step, Vite raises "Failed to resolve entry for package
+      # @growth/shared" before any test runs.
+      - name: Build @growth/shared (workspace dependency)
+        run: npm run build --workspace=@growth/shared
       - name: Apply migrations to test DB
         run: npx prisma migrate deploy --schema packages/db/prisma/schema.prisma
       - name: Run integration tests
