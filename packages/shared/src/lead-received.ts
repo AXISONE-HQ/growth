@@ -149,6 +149,32 @@ export const LeadReceivedEventSchema = z.object({
      * `metadata.customFields` per Q8(a) mirror-format-pattern.
      */
     language: z.string().min(2).max(8).optional(),
+    /**
+     * KAN-1140 Phase 3 PR 6 — operator-corrected metadata propagated on the
+     * synthetic-republish path. The reclassify handler in
+     * `packages/api/src/services/recommendations.ts` stamps these values
+     * onto the wire for the immediate re-normalize (language → Haiku
+     * locale block; format/vendor → forensic forwarding to
+     * Engagement/Deal metadata). All optional + additive; pre-Phase-3
+     * producers omit.
+     */
+    parseCorrections: z
+      .object({
+        format: z.string().optional(),
+        language: z.string().optional(),
+        vendor: z.string().optional(),
+      })
+      .optional(),
+    /**
+     * KAN-1140 Phase 3 PR 6 — loop-guard. Set `true` on the synthetic
+     * LeadReceivedEvent the reclassify handler publishes after operator
+     * review. The consumer (`lead-received-push`) short-circuits its
+     * parse-confidence trigger check when this flag is present, so a
+     * republished event with the original low-confidence ordinals
+     * doesn't create a second escalation row. Absent on initial wire
+     * inbounds.
+     */
+    parseConfidenceOverride: z.boolean().optional(),
   }),
   receivedAt: z.string().datetime(),
 });

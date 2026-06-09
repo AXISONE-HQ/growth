@@ -114,6 +114,14 @@ export default function EscalationsPage() {
   const [dismissReason, setDismissReason] = useState('');
   // KAN-1006 — Load-more pagination (offset-based; the backend returns total)
   const [loadingMore, setLoadingMore] = useState(false);
+  // KAN-1140 Phase 3 PR 6 — reclassify form state for parse_confidence_review
+  // escalations. Three optional corrections; at least one must be supplied
+  // (backend enforces). Inline form mirrors the dismiss-mode pattern.
+  const [reclassifyMode, setReclassifyMode] = useState(false);
+  const [reclassifyFormat, setReclassifyFormat] = useState('');
+  const [reclassifyLanguage, setReclassifyLanguage] = useState('');
+  const [reclassifyVendor, setReclassifyVendor] = useState('');
+  const [reclassifyInFlight, setReclassifyInFlight] = useState(false);
 
   // Keyboard nav (j/k for prev/next, Enter to focus first item from header,
   // Escape to clear selection). Stored in a ref so handlers stay stable.
@@ -261,6 +269,39 @@ export default function EscalationsPage() {
     } catch (e) {
       setError((e as Error).message);
       void reload();
+    }
+  };
+
+  // KAN-1140 Phase 3 PR 6 — operator-corrected metadata submission.
+  // Calls recommendations.reclassify; backend stamps Contact.language /
+  // Deal.metadata.leadVendor + synthetic-republishes the original event
+  // with parseConfidenceOverride loop-guard. Empty form is a no-op
+  // (backend rejects with BAD_REQUEST; UI guards before calling).
+  const handleReclassify = async () => {
+    if (!detail) return;
+    const corrections = {
+      ...(reclassifyFormat.trim() ? { correctedFormat: reclassifyFormat.trim() } : {}),
+      ...(reclassifyLanguage.trim() ? { correctedLanguage: reclassifyLanguage.trim() } : {}),
+      ...(reclassifyVendor.trim() ? { correctedVendor: reclassifyVendor.trim() } : {}),
+    };
+    if (Object.keys(corrections).length === 0) {
+      setError('Reclassify requires at least one correction (format / language / vendor).');
+      return;
+    }
+    setReclassifyInFlight(true);
+    try {
+      await recommendationsApi.reclassify(detail.id, corrections);
+      // Reset form + close
+      setReclassifyMode(false);
+      setReclassifyFormat('');
+      setReclassifyLanguage('');
+      setReclassifyVendor('');
+      await reload();
+      setSelectedId(null);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setReclassifyInFlight(false);
     }
   };
 
@@ -484,6 +525,16 @@ export default function EscalationsPage() {
                       setDismissMode(false);
                       setDismissReason('');
                     }}
+                    reclassifyMode={reclassifyMode}
+                    reclassifyFormat={reclassifyFormat}
+                    reclassifyLanguage={reclassifyLanguage}
+                    reclassifyVendor={reclassifyVendor}
+                    reclassifyInFlight={reclassifyInFlight}
+                    setReclassifyMode={setReclassifyMode}
+                    setReclassifyFormat={setReclassifyFormat}
+                    setReclassifyLanguage={setReclassifyLanguage}
+                    setReclassifyVendor={setReclassifyVendor}
+                    onReclassifyConfirm={handleReclassify}
                   />
                 ) : null}
               </div>
@@ -515,6 +566,18 @@ function DetailPanel({
   onDismissReasonChange,
   onDismissConfirm,
   onDismissCancel,
+  // KAN-1140 Phase 3 PR 6 — reclassify form props for
+  // parse_confidence_review detail block.
+  reclassifyMode,
+  reclassifyFormat,
+  reclassifyLanguage,
+  reclassifyVendor,
+  reclassifyInFlight,
+  setReclassifyMode,
+  setReclassifyFormat,
+  setReclassifyLanguage,
+  setReclassifyVendor,
+  onReclassifyConfirm,
 }: {
   detail: RecommendationDetail;
   acceptInFlight: boolean;
@@ -531,6 +594,17 @@ function DetailPanel({
   onDismissReasonChange: (v: string) => void;
   onDismissConfirm: () => void;
   onDismissCancel: () => void;
+  // KAN-1140 Phase 3 PR 6
+  reclassifyMode: boolean;
+  reclassifyFormat: string;
+  reclassifyLanguage: string;
+  reclassifyVendor: string;
+  reclassifyInFlight: boolean;
+  setReclassifyMode: (v: boolean) => void;
+  setReclassifyFormat: (v: string) => void;
+  setReclassifyLanguage: (v: string) => void;
+  setReclassifyVendor: (v: string) => void;
+  onReclassifyConfirm: () => void;
 }) {
   const sev = severityBadge(detail.severity);
   const isOpen = detail.status === 'open';
@@ -658,6 +732,127 @@ function DetailPanel({
                 View contact →
               </Link>
             </div>
+          </div>
+        ) : null}
+
+        {/* KAN-1140 Phase 3 PR 6 — parse_confidence_review detail block.
+            Surfaces the per-layer confidence breakdown + a reclassify form
+            so operators can override the wire's detected values. The
+            backend's `recommendations.reclassify` stamps corrections to
+            Contact.language + Deal.metadata.leadVendor + synthetic-
+            republishes the original event with parseConfidenceOverride
+            loop-guard. Forensic-only (format) lands on Engagement.metadata
+            via the synthetic event re-write. */}
+        {detail.triggerType === 'parse_confidence_review' && detail.context ? (
+          <div className="mb-4 rounded-[var(--ds-radius-input)] border border-[var(--ds-amber-100)] bg-[var(--ds-amber-100)]/40 p-4">
+            <div className="mb-2 flex items-center gap-2 text-label text-[var(--ds-amber-700)]">
+              <AlertTriangle className="h-4 w-4" />
+              Parse confidence review
+            </div>
+            {(() => {
+              const breakdown = (detail.context as { parseConfidenceBreakdown?: Record<string, unknown> }).parseConfidenceBreakdown ?? {};
+              const fmt = String(breakdown.format ?? 'unknown');
+              const fmtConf = String(breakdown.formatConfidence ?? 'n/a');
+              const lng = String(breakdown.language ?? 'unknown');
+              const lngConf = String(breakdown.languageConfidence ?? 'n/a');
+              const extConf = String(breakdown.extractionConfidence ?? 'n/a');
+              const bodyPreview = String((detail.context as { bodyPreview?: unknown }).bodyPreview ?? '');
+              return (
+                <>
+                  <dl className="mb-3 grid grid-cols-2 gap-x-4 gap-y-1.5 text-caption">
+                    <dt className="text-muted-foreground">Detected format</dt>
+                    <dd className="font-mono text-foreground">{fmt} ({fmtConf})</dd>
+                    <dt className="text-muted-foreground">Detected language</dt>
+                    <dd className="font-mono text-foreground">{lng} ({lngConf})</dd>
+                    <dt className="text-muted-foreground">Haiku extraction</dt>
+                    <dd className="font-mono text-foreground">{extConf}</dd>
+                  </dl>
+                  {bodyPreview ? (
+                    <details className="mb-3">
+                      <summary className="cursor-pointer text-caption font-medium text-[var(--ds-amber-700)]">
+                        Body preview (first 500 chars)
+                      </summary>
+                      <pre className="mt-2 max-h-48 overflow-y-auto rounded bg-[var(--ds-surface-sunken)] p-2 text-caption font-mono whitespace-pre-wrap text-foreground">
+                        {bodyPreview}
+                      </pre>
+                    </details>
+                  ) : null}
+                </>
+              );
+            })()}
+            {reclassifyMode ? (
+              <div className="mt-3 space-y-2 rounded border border-[var(--ds-amber-700)] bg-background p-3">
+                <div className="text-label text-foreground">Correct the metadata</div>
+                <p className="text-caption text-muted-foreground">
+                  Stamp at least one field. Backend persists language to Contact + vendor to
+                  Deal, then re-runs the lead through the engine with the corrections applied.
+                </p>
+                <input
+                  type="text"
+                  placeholder="Format (e.g. adf, html, plain-text)"
+                  value={reclassifyFormat}
+                  onChange={(e) => setReclassifyFormat(e.target.value)}
+                  disabled={reclassifyInFlight}
+                  className="w-full rounded border border-[var(--ds-surface-sunken)] bg-background px-2 py-1 text-body"
+                />
+                <input
+                  type="text"
+                  placeholder="Language (ISO 639-1, e.g. en, fr, es)"
+                  value={reclassifyLanguage}
+                  onChange={(e) => setReclassifyLanguage(e.target.value)}
+                  disabled={reclassifyInFlight}
+                  className="w-full rounded border border-[var(--ds-surface-sunken)] bg-background px-2 py-1 text-body"
+                />
+                <input
+                  type="text"
+                  placeholder="Vendor (e.g. formspree, tally, typeform)"
+                  value={reclassifyVendor}
+                  onChange={(e) => setReclassifyVendor(e.target.value)}
+                  disabled={reclassifyInFlight}
+                  className="w-full rounded border border-[var(--ds-surface-sunken)] bg-background px-2 py-1 text-body"
+                />
+                <div className="flex gap-2">
+                  <Button
+                    variant="gradient"
+                    size="sm"
+                    onClick={onReclassifyConfirm}
+                    disabled={reclassifyInFlight}
+                  >
+                    {reclassifyInFlight ? (
+                      <>
+                        <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:hidden" />
+                        Submitting…
+                      </>
+                    ) : (
+                      'Submit corrections'
+                    )}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setReclassifyMode(false);
+                      setReclassifyFormat('');
+                      setReclassifyLanguage('');
+                      setReclassifyVendor('');
+                    }}
+                    disabled={reclassifyInFlight}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setReclassifyMode(true)}
+                disabled={!isOpen}
+              >
+                <Edit2 className="h-3.5 w-3.5" />
+                Reclassify metadata
+              </Button>
+            )}
           </div>
         ) : null}
 
