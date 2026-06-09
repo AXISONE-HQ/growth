@@ -30,7 +30,15 @@
  * + only pre-parser fields populated. Caller (KAN-793) decides whether to
  * write minimal Contact (email only) or skip per its own policy.
  */
+import { PrismaClient } from '@prisma/client';
+import {
+  deriveParseFingerprint,
+  type DetectedFormat,
+  PARSE_RULE_WRITABLE_FIELDS,
+} from '@growth/shared';
 import { complete as llmComplete } from './llm-client.js';
+import { getApplicableRules } from './parse-rule-service.js';
+import { executeRules, isAllFieldsCovered } from './parse-rule-executor.js';
 
 // ─────────────────────────────────────────────
 // Types
@@ -74,6 +82,22 @@ export interface EmailPayload {
    * Haiku defaults to English (current behavior).
    */
   locale?: string | null;
+  /**
+   * KAN-1140 Phase 3 PR 9b — Detected format threaded from the webhook
+   * upstream (`event.metadata.customFields._kan_1140_format`). Used to
+   * derive the ParseFingerprint structureHash for rule lookup. Absent
+   * → fingerprint derivation treats format as `'unknown'` and only
+   * matches null-structure fingerprints (rule execution falls through
+   * to Haiku-only path).
+   */
+  detectedFormat?: DetectedFormat | null;
+  /**
+   * KAN-1140 Phase 3 PR 9b — Structured vendor payload (e.g., Formspree
+   * customFields). When present, jsonPath extractors traverse this.
+   * Absent → jsonPath extractors return null (regex extractors against
+   * subject+bodyPreview still work).
+   */
+  structured?: Record<string, unknown> | null;
 }
 
 /**
@@ -183,11 +207,18 @@ export class NotImplementedError extends Error {
  * (memo 26 — doctrine-driven LoC stays near naive; memo 32 — defer
  * infrastructure until projected scale materializes).
  */
-export async function normalizeInbound(input: NormalizerInput): Promise<NormalizedLead> {
+export async function normalizeInbound(
+  input: NormalizerInput,
+  prisma: PrismaClient,
+): Promise<NormalizedLead> {
   switch (input.source) {
     case 'email_inbox':
-      return normalizeInboundEmail(input.tenantId, input.payload);
+      return normalizeInboundEmail(input.tenantId, input.payload, prisma);
     case 'lead_api':
+      // KAN-1140 Phase 3 PR 9b — Lead-API path bypasses rule execution.
+      // Q3a(i): structured API callers shouldn't pay LLM cost; symmetric
+      // discipline says they don't get rule execution either. Direct
+      // structured submission is the source of truth.
       return normalizeInboundLeadApi(input.tenantId, input.payload);
     case 'meta_lead_ads':
       throw new NotImplementedError(
@@ -209,17 +240,159 @@ export async function normalizeInbound(input: NormalizerInput): Promise<Normaliz
 }
 
 /**
- * Email source — runs the email pre-parser then the AI extraction step.
- * Exported separately for callers that already know the source is email
- * (e.g. tests, future per-source dispatch in KAN-793 if needed).
+ * Email source — runs the email pre-parser, optionally executes
+ * tenant-configurable parse rules (KAN-1140 Phase 3 PR 9b), then runs
+ * the AI extraction step (or short-circuits per Q7 lock).
+ *
+ * # PR 9b — Rule execution pipeline
+ *
+ * Between preParseEmail and runAIExtraction, executes tenant rules per
+ * the cascade scope (Q-ADD-4 lock) + most-specific-wins-per-field (Q2).
+ * Rule output merges with Haiku output via field-by-field priority:
+ * operatorCorrected > rule > Haiku > null (Q6).
+ *
+ * # Failure isolation invariants (Memo 32 family lock)
+ *
+ *   - Outer try/catch around the full rule-execution block: catastrophic
+ *     bugs in fingerprint lookup, getApplicableRules, or executeRules
+ *     fall through to Haiku-only path; lead always lands.
+ *   - Per-rule try/catch inside executeRules: individual rule failures
+ *     are logged + skipped; pipeline continues.
+ *   - Haiku error path (runAIExtraction try/catch) preserved unchanged:
+ *     LLM failure → confidence='low' + empty fields + lead lands.
+ *
+ * # Haiku short-circuit (Q-ADD-3 lock)
+ *
+ * Skip the Haiku call only when:
+ *   - All 5 rule-writable fields covered (PARSE_RULE_WRITABLE_FIELDS;
+ *     qualificationSignals NOT in allow-list → null on short-circuit
+ *     per Addendum B)
+ *   - Fingerprint exists AND has supportStatus === 'supported'
+ *
+ * Otherwise Haiku runs. This preserves Haiku's qualificationSignals
+ * + acts as defense-in-depth on the operator's "we handle this
+ * format" assertion.
  */
 export async function normalizeInboundEmail(
   tenantId: string,
   payload: EmailPayload,
+  prisma: PrismaClient,
 ): Promise<NormalizedLead> {
   const preParsed = preParseEmail(payload);
 
-  const { extracted, confidence, error } = await runAIExtraction(tenantId, preParsed);
+  // === KAN-1140 Phase 3 PR 9b — Rule execution block ===
+  let ruleOutput: Partial<Record<(typeof PARSE_RULE_WRITABLE_FIELDS)[number], string>> = {};
+  let fingerprint: {
+    id: string;
+    format: string;
+    vendor: string | null;
+    supportStatus: string;
+  } | null = null;
+
+  try {
+    // Q-ADD-FINGERPRINT-DERIVATION (α): re-derive in normalizer using the
+    // hoisted hash function from @growth/shared (PR 7). Lookup by the
+    // unique (tenantId, structureHash, senderDomainHash) shape.
+    const detectedFormat: DetectedFormat = payload.detectedFormat ?? 'unknown';
+    const hashes = deriveParseFingerprint({
+      format: detectedFormat,
+      body: payload.bodyPreview ?? '',
+      fromAddress: payload.fromAddress,
+    });
+    const ps = prisma as unknown as {
+      parseFingerprint: {
+        findFirst: (args: {
+          where: { tenantId: string; structureHash: string | null; senderDomainHash: string };
+          select: { id: true; format: true; vendor: true; supportStatus: true };
+        }) => Promise<
+          { id: string; format: string; vendor: string | null; supportStatus: string } | null
+        >;
+      };
+    };
+    fingerprint = await ps.parseFingerprint.findFirst({
+      where: {
+        tenantId,
+        structureHash: hashes.structureHash,
+        senderDomainHash: hashes.senderDomainHash,
+      },
+      select: { id: true, format: true, vendor: true, supportStatus: true },
+    });
+
+    // Cascade lookup. fingerprintId/format/vendor null when no match —
+    // global-scoped rules can still apply.
+    const rules = await getApplicableRules(prisma, {
+      tenantId,
+      fingerprintId: fingerprint?.id ?? null,
+      format: fingerprint?.format ?? null,
+      vendor: fingerprint?.vendor ?? null,
+    });
+
+    if (rules.length > 0) {
+      const result = await executeRules({
+        tenantId,
+        rules: rules.map((r) => ({
+          id: r.id,
+          tenantId: r.tenantId,
+          fingerprintId: r.fingerprintId,
+          format: r.format,
+          vendor: r.vendor,
+          body: r.body,
+          status: r.status,
+          createdAt: r.createdAt,
+        })),
+        payload: {
+          fromAddress: payload.fromAddress,
+          subject: payload.subject ?? null,
+          bodyPreview: payload.bodyPreview ?? null,
+          structured: payload.structured ?? null,
+        },
+      });
+      ruleOutput = result.output;
+      // Best-effort audit (5th inline writeAuditBestEffort — KAN-1150
+      // consolidation still deferred per Q12 lock).
+      await writeAuditBestEffort(prisma, tenantId, 'parse_rule.executed', {
+        fingerprintId: fingerprint?.id ?? null,
+        ruleCount: rules.length,
+        metrics: result.metrics,
+      });
+    }
+  } catch (err) {
+    // Outer catastrophic-failure isolation (Memo 32 family lock).
+    // Fingerprint lookup OR cascade lookup OR cross-tenant assertion
+    // throws land here. Lead still lands via Haiku-only path.
+    await writeAuditBestEffort(prisma, tenantId, 'parse_rule.executor_threw', {
+      err: err instanceof Error ? err.message : String(err),
+    });
+    ruleOutput = {};
+  }
+  // === END PR 9b rule execution block ===
+
+  // Haiku short-circuit decision (Q7 + Q-ADD-3 locks + Addendum B).
+  const shouldShortCircuit =
+    isAllFieldsCovered(ruleOutput) && fingerprint?.supportStatus === 'supported';
+
+  let haikuExtracted: ExtractedFields;
+  let confidence: ExtractionConfidence;
+  let error: string | null;
+
+  if (shouldShortCircuit) {
+    haikuExtracted = emptyExtractedFields();
+    confidence = 'high';
+    error = null;
+    await writeAuditBestEffort(prisma, tenantId, 'parse_rule.haiku_short_circuit', {
+      fingerprintId: fingerprint?.id ?? null,
+    });
+  } else {
+    const r = await runAIExtraction(tenantId, preParsed);
+    haikuExtracted = r.extracted;
+    confidence = r.confidence;
+    error = r.error;
+  }
+
+  // Field-by-field merge (Q6 + Addendum A — operatorCorrected forward-compat).
+  // KAN-1157 follow-up wires real operator-corrected source from PR 6
+  // reclassify metadata; PR 9b passes {} so rule > Haiku precedence.
+  const extracted = mergeExtractedFields({}, ruleOutput, haikuExtracted);
 
   return {
     source: 'email_inbox',
@@ -228,6 +401,75 @@ export async function normalizeInboundEmail(
     extractionConfidence: confidence,
     extractionError: error,
   };
+}
+
+/**
+ * KAN-1140 Phase 3 PR 9b — Field-by-field merge per Q6 lock.
+ *
+ *   operatorCorrected > rule > Haiku > null
+ *
+ * `qualificationSignals` is NOT in `PARSE_RULE_WRITABLE_FIELDS` (Addendum B);
+ * rule cannot contribute. Haiku owns it. On short-circuit, Haiku's
+ * value is empty (qualificationSignals: []) which preserves the
+ * "empty list, not null" invariant downstream consumers expect.
+ */
+function mergeExtractedFields(
+  operatorCorrected: Partial<ExtractedFields>,
+  ruleOutput: Partial<Record<(typeof PARSE_RULE_WRITABLE_FIELDS)[number], string>>,
+  haikuOutput: ExtractedFields,
+): ExtractedFields {
+  return {
+    firstName:
+      operatorCorrected.firstName ?? ruleOutput.firstName ?? haikuOutput.firstName ?? null,
+    lastName:
+      operatorCorrected.lastName ?? ruleOutput.lastName ?? haikuOutput.lastName ?? null,
+    companyName:
+      operatorCorrected.companyName ?? ruleOutput.companyName ?? haikuOutput.companyName ?? null,
+    phone: operatorCorrected.phone ?? ruleOutput.phone ?? haikuOutput.phone ?? null,
+    intentSummary:
+      operatorCorrected.intentSummary ??
+      ruleOutput.intentSummary ??
+      haikuOutput.intentSummary ??
+      null,
+    // qualificationSignals: Haiku-only (NOT rule-writable per allow-list).
+    qualificationSignals: operatorCorrected.qualificationSignals ?? haikuOutput.qualificationSignals,
+  };
+}
+
+/**
+ * KAN-1140 Phase 3 PR 9b — Best-effort audit row writer.
+ *
+ * 5th inline copy of the helper (KAN-1150 consolidation deferred per
+ * Q12 lock — file the 5th instance in PR 9b close report as the
+ * "consolidation should be next refactor sprint" trigger).
+ *
+ * Mirrors `recommendations.ts:writeAuditBestEffort` 4-arg shape (no
+ * actor parameter — system-level audit; actor='system:parse-rule-executor'
+ * hardcoded). 4-arg variant because the call sites here all use the
+ * same system actor; surface symmetry with the 5-arg variant in
+ * parse-fingerprint-aggregator/parse-rule-service is deliberately
+ * sacrificed for callsite simplicity.
+ */
+async function writeAuditBestEffort(
+  prisma: PrismaClient,
+  tenantId: string,
+  actionType: string,
+  payload: Record<string, unknown>,
+): Promise<void> {
+  try {
+    await (prisma as unknown as {
+      auditLog: { create: (args: { data: Record<string, unknown> }) => Promise<unknown> };
+    }).auditLog.create({
+      data: {
+        tenantId,
+        actor: 'system:parse-rule-executor',
+        actionType,
+        payload,
+      },
+    });
+  } catch (err) {
+    console.error(`[lead-normalizer] auditLog write failed for ${actionType}:`, err);
+  }
 }
 
 // ─────────────────────────────────────────────
