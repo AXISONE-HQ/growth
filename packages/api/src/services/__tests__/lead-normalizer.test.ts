@@ -550,3 +550,120 @@ describe('normalizeInboundLeadApi — KAN-1141 PR 0', () => {
     });
   });
 });
+
+// ─────────────────────────────────────────────
+// KAN-1140 Phase 2 — locale-aware multilingual Haiku prompt
+// ─────────────────────────────────────────────
+//
+// Q5(b) single multilingual prompt with locale instruction: when an
+// `EmailPayload.locale` is threaded through (from the webhook's resolved
+// language), `runAIExtraction()` injects a `## Email language` block into
+// the userPrompt and the prompt header instructs Haiku to emit
+// `intentSummary` + `qualificationSignals` in that locale.
+
+describe('preParseEmail — KAN-1140 Phase 2 locale pass-through', () => {
+  it('propagates EmailPayload.locale onto PreParsedLead.locale verbatim', () => {
+    const result = preParseEmail({
+      fromAddress: 'maria@acmecorp.com',
+      subject: 'Demo',
+      bodyPreview: 'demo body',
+      attachmentCount: 0,
+      locale: 'fr',
+    });
+    expect(result.locale).toBe('fr');
+  });
+
+  it('normalizes whitespace-only locale to null (empty string is meaningless to prompt)', () => {
+    const result = preParseEmail({
+      fromAddress: 'a@b.com',
+      subject: 'x',
+      bodyPreview: 'x',
+      locale: '   ',
+    });
+    expect(result.locale).toBeNull();
+  });
+
+  it('defaults locale to null when EmailPayload omits the field (legacy callers)', () => {
+    const result = preParseEmail({
+      fromAddress: 'a@b.com',
+      subject: 'x',
+      bodyPreview: 'x',
+    });
+    expect(result.locale).toBeNull();
+  });
+});
+
+describe('normalizeInboundEmail — KAN-1140 Phase 2 locale-aware prompt', () => {
+  it('injects "## Email language\\n${locale}" block into userPrompt when locale is present', async () => {
+    mockLLMResponse(
+      JSON.stringify({
+        firstName: 'Marie',
+        lastName: 'Dupont',
+        companyName: 'Acme SARL',
+        phone: null,
+        intentSummary: 'Souhaite une démonstration produit.',
+        qualificationSignals: ['demande de démonstration'],
+      }),
+    );
+
+    await normalizeInboundEmail(TENANT_A, {
+      fromAddress: '"Marie Dupont" <marie@acme.fr>',
+      subject: 'Demande de démonstration',
+      bodyPreview: 'Bonjour, je souhaiterais voir une démonstration produit.',
+      locale: 'fr',
+    });
+
+    expect(llmCompleteMock).toHaveBeenCalledTimes(1);
+    const callArgs = llmCompleteMock.mock.calls[0]![0] as Record<string, unknown>;
+    const userPrompt = callArgs.userPrompt as string;
+    expect(userPrompt).toContain('## Email language\nfr');
+  });
+
+  it('omits the locale block entirely when EmailPayload.locale is null (English-default)', async () => {
+    mockLLMResponse(
+      JSON.stringify({
+        firstName: 'John',
+        lastName: 'Smith',
+        companyName: null,
+        phone: null,
+        intentSummary: 'Asking about pricing.',
+        qualificationSignals: ['asking about pricing'],
+      }),
+    );
+
+    await normalizeInboundEmail(TENANT_A, {
+      fromAddress: 'john@example.com',
+      subject: 'Pricing',
+      bodyPreview: 'How much does it cost?',
+      // no locale field
+    });
+
+    const callArgs = llmCompleteMock.mock.calls[0]![0] as Record<string, unknown>;
+    const userPrompt = callArgs.userPrompt as string;
+    expect(userPrompt).not.toContain('## Email language');
+  });
+
+  it('handles non-default locale (es) — verifies the block is verbatim from PreParsedLead.locale', async () => {
+    mockLLMResponse(
+      JSON.stringify({
+        firstName: 'Carlos',
+        lastName: 'Garcia',
+        companyName: 'Hispano S.A.',
+        phone: null,
+        intentSummary: 'Pregunta sobre precios empresariales.',
+        qualificationSignals: ['preguntando precios'],
+      }),
+    );
+
+    await normalizeInboundEmail(TENANT_A, {
+      fromAddress: '"Carlos Garcia" <carlos@hispano.es>',
+      subject: 'Consulta de precios',
+      bodyPreview: 'Hola, me interesa conocer los precios de su nivel empresarial.',
+      locale: 'es',
+    });
+
+    const callArgs = llmCompleteMock.mock.calls[0]![0] as Record<string, unknown>;
+    const userPrompt = callArgs.userPrompt as string;
+    expect(userPrompt).toContain('## Email language\nes');
+  });
+});

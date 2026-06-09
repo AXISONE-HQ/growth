@@ -1,0 +1,37 @@
+-- KAN-1140 Phase 2 — Contact body language persistence column.
+--
+-- Single additive nullable column. PURELY additive; zero data migration;
+-- existing rows carry NULL until next inbound lead (re)populates via the
+-- `lead-received-push` subscriber. Operator-set / pre-existing values are
+-- preserved on subsequent leads (consumer's update-path skips when
+-- `language IS NOT NULL`).
+--
+-- # Lock Q4(c') + Q6/Q10 (Phase 2 build, 2026-06-08)
+--
+-- Stored as ISO 639-1 (`en` / `fr` / `es` / ...). Source is the RESOLVED
+-- language from `resolveLanguage()` in
+-- `apps/connectors/src/parsers/language-detector.ts` (Q4(c') hierarchy:
+-- high confidence → detected; medium + detected ∈ supportedLanguages →
+-- detected; else → AccountProfile.defaultLanguage → 'en').
+--
+-- Consumer read path (`lead-normalizer` Haiku prompt locale block) falls
+-- back to `AccountProfile.defaultLanguage` → `'en'` when this column is
+-- null — the column being unset is NOT load-bearing for cognitive output;
+-- it's a contact-pinned cache so subsequent normalize() calls don't re-do
+-- detection on each inbound.
+--
+-- # Migration discipline carry (KAN-1080 fix-forward lesson)
+--
+-- Per `feedback_schema_prisma_changes_need_explicit_migrate_dev_step`:
+-- this migration file IS the source of truth. CI's deploy-api workflow
+-- runs `npx prisma migrate deploy` (KAN-709 v4 pattern); the migration
+-- applies on first post-merge deploy. Local dev DB unavailable so this
+-- file was authored manually following the established shape of
+-- `20260604200000_kan_1093_cluster_iv_b_pr_i_persona_foundation`. The
+-- `prisma migrate dev --create-only` step that would have generated this
+-- file is substituted by hand-authored SQL — the SQL surface is small
+-- enough (single ADD COLUMN, nullable, no default) that hand-auth is
+-- defensible.
+
+-- AlterTable
+ALTER TABLE "contacts" ADD COLUMN "language" TEXT;

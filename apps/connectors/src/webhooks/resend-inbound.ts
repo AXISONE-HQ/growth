@@ -69,6 +69,15 @@ import { detectEmailFormat } from "../parsers/format-detector.js";
 import { parseAdfEmail } from "../parsers/adf-parser.js";
 import { parseHtmlEmail } from "../parsers/html-email-parser.js";
 import { parsePlainTextEmail } from "../parsers/plain-text-email-parser.js";
+// KAN-1140 Phase 2 — Email body language detection. Runs after vendor +
+// format dispatch (independent of either path; detected on the same
+// fetched plain-text body). Q4(c') hierarchy in `resolveLanguage()`
+// honors `tenant.supportedLanguages` so medium-confidence false positives
+// don't override operator intent. Resolved value flows on
+// `LeadReceivedEvent.metadata.language`; detected + confidence stash on
+// `metadata.customFields._kan_1140_language_detected/_confidence` per
+// Q8(a) mirror-format-pattern (forensic trail).
+import { detectLanguage, resolveLanguage } from "../parsers/language-detector.js";
 
 export const resendInboundWebhookApp = new Hono();
 
@@ -122,7 +131,21 @@ interface ResendInboundPayload {
 // ─────────────────────────────────────────────
 
 export interface InboundHandlerHooks {
-  resolveTenantBySlug: (slug: string) => Promise<{ id: string; inboxDkimStrict: boolean } | null>;
+  /**
+   * KAN-1140 Phase 2 — return shape extended with `defaultLanguage` +
+   * `supportedLanguages` so the webhook can run franc-min detection + Q4(c')
+   * fallback against tenant intent without an extra DB roundtrip. Sourced from
+   * `AccountProfile` (1:1 with Tenant via `tenantId`); production impl joins
+   * via Prisma `select`. Tests stub these directly.
+   */
+  resolveTenantBySlug: (
+    slug: string,
+  ) => Promise<{
+    id: string;
+    inboxDkimStrict: boolean;
+    defaultLanguage: string;
+    supportedLanguages: string[];
+  } | null>;
   /**
    * KAN-954 — extended with optional `companyName` + `source` so
    * Formspree-parsed leads can write firstName/lastName/companyName/source.
@@ -666,6 +689,38 @@ resendInboundWebhookApp.post(
     }
   }
 
+  // KAN-1140 Phase 2 — Email body language detection. Runs against the
+  // plain-text body (preferred over HTML markup; format-detector pre-
+  // parsers strip HTML to text before this point). The Q4(c') hierarchy
+  // honors tenant.supportedLanguages so a medium-confidence false-positive
+  // French on an English-speaking-customer tenant doesn't override
+  // operator intent. Both detected + confidence go in customFields
+  // (forensic), while the RESOLVED value lives on metadata.language for
+  // typed consumer reads (lead-received-push → Contact.language;
+  // lead-normalizer → Haiku prompt locale block).
+  //
+  // Skipped when fetchedContent is null (Resend Receiving fetch
+  // unreachable). Consumer falls back to AccountProfile.defaultLanguage
+  // when metadata.language is absent.
+  let resolvedLanguage: string | null = null;
+  let languageCustomFields: Record<string, string> = {};
+  if (fetchedContent) {
+    const sourceText = fetchedContent.text ?? fetchedContent.html ?? null;
+    const detection = detectLanguage(sourceText);
+    resolvedLanguage = resolveLanguage(
+      detection,
+      tenant.supportedLanguages,
+      tenant.defaultLanguage,
+    );
+    languageCustomFields = {
+      _kan_1140_language: resolvedLanguage,
+      _kan_1140_language_confidence: detection?.confidence ?? "low",
+      ...(detection?.language
+        ? { _kan_1140_language_detected: detection.language }
+        : {}),
+    };
+  }
+
   // M3-2.5b — propagate raw Resend Receiving headers so the consumer can
   // sidecar-write + correlation-lookup. Raw form (`<id@domain>`, References
   // space-separated) is preserved on the wire for forensic value; the
@@ -701,25 +756,41 @@ resendInboundWebhookApp.post(
       // (uniform across Formspree/Tally/Typeform/future); format-enrichment
       // path (PR #304) populates only for non-vendor inbounds.
       // Pre-KAN-954 producers omit these; consumer falls back to defaults.
+      // KAN-1140 Phase 2 — language customFields merge into whichever
+      // upstream path populates customFields (vendor wins precedence;
+      // format-enrichment otherwise; bare when neither). Forensic
+      // trail co-locates with the other _kan_1140_* keys.
       ...(vendorExtraction
         ? {
             vendor: vendorExtraction.vendor,
             formSource: vendorExtraction.formSource ?? undefined,
             leadType: vendorExtraction.leadType ?? undefined,
             dealName: vendorExtraction.dealName,
-            customFields: vendorExtraction.customFields,
+            customFields: {
+              ...vendorExtraction.customFields,
+              ...languageCustomFields,
+            },
           }
         : formatEnrichment
           ? {
               ...(formatEnrichment.vendor ? { vendor: formatEnrichment.vendor } : {}),
               ...(formatEnrichment.leadType ? { leadType: formatEnrichment.leadType } : {}),
               ...(formatEnrichment.dealName ? { dealName: formatEnrichment.dealName } : {}),
-              ...(formatEnrichment.customFields &&
-              Object.keys(formatEnrichment.customFields).length > 0
-                ? { customFields: formatEnrichment.customFields }
+              ...((formatEnrichment.customFields &&
+                Object.keys(formatEnrichment.customFields).length > 0) ||
+              Object.keys(languageCustomFields).length > 0
+                ? {
+                    customFields: {
+                      ...(formatEnrichment.customFields ?? {}),
+                      ...languageCustomFields,
+                    },
+                  }
                 : {}),
             }
-          : {}),
+          : Object.keys(languageCustomFields).length > 0
+            ? { customFields: { ...languageCustomFields } }
+            : {}),
+      ...(resolvedLanguage ? { language: resolvedLanguage } : {}),
       ...(inboundHeaders ? { inboundHeaders } : {}),
       // KAN-1036 — per-decision reply correlation token from data.to
       // subaddress. NULL when the inbound's To: had no `+suffix`

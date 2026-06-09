@@ -135,6 +135,20 @@ export const LeadReceivedEventSchema = z.object({
      * omit; consumer falls back to today's orphan-engagement behavior.
      */
     replyToken: z.string().regex(/^[0-9a-f]{16}$/).optional(),
+    /**
+     * KAN-1140 Phase 2 — Resolved language for downstream consumers
+     * (`lead-received-push` populates `Contact.language`; `lead-normalizer`
+     * conditions the multilingual Haiku prompt). RESOLVED value (post
+     * Q4(c') hierarchy), not raw franc-min detection — see
+     * `resolveLanguage()` in `apps/connectors/src/parsers/language-detector.ts`.
+     *
+     * Stored as ISO 639-1 (`en` / `fr` / `es` / ...). Producer omits when
+     * `fetchedContent` is null (Resend Receiving fetch unreachable) — the
+     * consumer falls back to `Tenant.AccountProfile.defaultLanguage` →
+     * `"en"` cleanly. The forensic trail (detected + confidence) lives in
+     * `metadata.customFields` per Q8(a) mirror-format-pattern.
+     */
+    language: z.string().min(2).max(8).optional(),
   }),
   receivedAt: z.string().datetime(),
 });
