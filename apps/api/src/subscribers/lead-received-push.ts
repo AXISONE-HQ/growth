@@ -171,20 +171,34 @@ async function loadBootstrapModule(): Promise<BootstrapModule> {
 }
 
 interface NormalizerModule {
-  normalizeInbound: (input: {
-    source: 'email_inbox';
-    tenantId: string;
-    payload: {
-      fromAddress: string;
-      subject?: string | null;
-      bodyPreview?: string | null;
-      attachmentCount?: number;
-      // KAN-1140 Phase 2 — resolved locale (ISO 639-1) threaded into the
-      // multilingual Haiku prompt block. Mirrors EmailPayload.locale in
-      // packages/api/src/services/lead-normalizer.ts.
-      locale?: string | null;
-    };
-  }) => Promise<{
+  normalizeInbound: (
+    input: {
+      source: 'email_inbox';
+      tenantId: string;
+      payload: {
+        fromAddress: string;
+        subject?: string | null;
+        bodyPreview?: string | null;
+        attachmentCount?: number;
+        // KAN-1140 Phase 2 — resolved locale (ISO 639-1) threaded into the
+        // multilingual Haiku prompt block. Mirrors EmailPayload.locale in
+        // packages/api/src/services/lead-normalizer.ts.
+        locale?: string | null;
+        // KAN-1140 Phase 3 PR 9b — detected format for parse-rule cascade
+        // fingerprint lookup. Optional; absent → fingerprint lookup uses
+        // 'unknown' (only null-structure fingerprints match).
+        detectedFormat?: 'adf' | 'html' | 'html-in-text' | 'plain-text' | 'unknown' | null;
+        // KAN-1140 Phase 3 PR 9b — structured vendor payload for jsonPath
+        // extractors; absent → jsonPath rules return null but regex rules
+        // against subject+bodyPreview still work.
+        structured?: Record<string, unknown> | null;
+      };
+    },
+    // KAN-1140 Phase 3 PR 9b — Prisma injection. Required (not optional)
+    // because the normalizer's rule lookup is a real DB hit; making it
+    // optional would silently disable rule execution on misuse.
+    prisma: unknown,
+  ) => Promise<{
     source: string;
     preParsed: { senderEmail: string; senderNameGuess: string | null; subject: string | null; bodyText: string | null };
     extracted: {
@@ -1577,20 +1591,34 @@ async function writeInboundEngagementForExistingDeal(
   dealId: string,
 ): Promise<void> {
   const { normalizeInbound } = await loadNormalizerModule();
-  const normalized = await normalizeInbound({
-    source: 'email_inbox',
-    tenantId,
-    payload: {
-      fromAddress: event.metadata.fromAddress ?? '',
-      subject: event.metadata.subject ?? null,
-      bodyPreview: event.metadata.bodyPreview ?? null,
-      attachmentCount: event.metadata.attachmentCount,
-      // KAN-1140 Phase 2 — thread resolved locale into the normalizer's
-      // Haiku prompt block (Q5(b) single multilingual prompt). Optional
-      // on metadata; undefined → English-default behavior.
-      locale: event.metadata.language ?? null,
+  const normalized = await normalizeInbound(
+    {
+      source: 'email_inbox',
+      tenantId,
+      payload: {
+        fromAddress: event.metadata.fromAddress ?? '',
+        subject: event.metadata.subject ?? null,
+        bodyPreview: event.metadata.bodyPreview ?? null,
+        attachmentCount: event.metadata.attachmentCount,
+        // KAN-1140 Phase 2 — thread resolved locale into the normalizer's
+        // Haiku prompt block (Q5(b) single multilingual prompt). Optional
+        // on metadata; undefined → English-default behavior.
+        locale: event.metadata.language ?? null,
+        // KAN-1140 Phase 3 PR 9b — thread detected format for rule cascade
+        // fingerprint lookup. Webhook stashes detection result on
+        // metadata.customFields._kan_1140_format (DetectedFormat).
+        detectedFormat:
+          (event.metadata.customFields?.['_kan_1140_format'] as
+            | 'adf'
+            | 'html'
+            | 'html-in-text'
+            | 'plain-text'
+            | 'unknown'
+            | undefined) ?? null,
+      },
     },
-  });
+    prisma,
+  );
 
   const { logEngagement } = await loadEngagementModule();
 
@@ -1702,20 +1730,34 @@ async function writePhase1Deal(
   // design — extractionConfidence='low' on LLM error; we still write the
   // Deal + Engagement so the lead lands.
   const { normalizeInbound } = await loadNormalizerModule();
-  const normalized = await normalizeInbound({
-    source: 'email_inbox',
-    tenantId,
-    payload: {
-      fromAddress: event.metadata.fromAddress ?? '',
-      subject: event.metadata.subject ?? null,
-      bodyPreview: event.metadata.bodyPreview ?? null,
-      attachmentCount: event.metadata.attachmentCount,
-      // KAN-1140 Phase 2 — thread resolved locale into the normalizer's
-      // Haiku prompt block (Q5(b) single multilingual prompt). Optional
-      // on metadata; undefined → English-default behavior.
-      locale: event.metadata.language ?? null,
+  const normalized = await normalizeInbound(
+    {
+      source: 'email_inbox',
+      tenantId,
+      payload: {
+        fromAddress: event.metadata.fromAddress ?? '',
+        subject: event.metadata.subject ?? null,
+        bodyPreview: event.metadata.bodyPreview ?? null,
+        attachmentCount: event.metadata.attachmentCount,
+        // KAN-1140 Phase 2 — thread resolved locale into the normalizer's
+        // Haiku prompt block (Q5(b) single multilingual prompt). Optional
+        // on metadata; undefined → English-default behavior.
+        locale: event.metadata.language ?? null,
+        // KAN-1140 Phase 3 PR 9b — thread detected format for rule cascade
+        // fingerprint lookup. Webhook stashes detection result on
+        // metadata.customFields._kan_1140_format (DetectedFormat).
+        detectedFormat:
+          (event.metadata.customFields?.['_kan_1140_format'] as
+            | 'adf'
+            | 'html'
+            | 'html-in-text'
+            | 'plain-text'
+            | 'unknown'
+            | undefined) ?? null,
+      },
     },
-  });
+    prisma,
+  );
 
   const { logEngagement } = await loadEngagementModule();
 

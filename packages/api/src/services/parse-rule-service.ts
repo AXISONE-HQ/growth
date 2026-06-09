@@ -94,6 +94,26 @@ export interface GetParseRuleDetailInput {
   ruleId: string;
 }
 
+/**
+ * KAN-1140 Phase 3 PR 9b — Cascade lookup input. Returns rules whose
+ * scope cascade matches the provided fingerprint context. Used by
+ * `lead-normalizer` to fetch applicable rules at runtime.
+ *
+ * Cascade semantics (Q-ADD-4 lock):
+ *   - rule.fingerprintId match OR null = applies
+ *   - rule.format match OR null = applies
+ *   - rule.vendor match OR null = applies
+ *
+ * Rules filtered to `status='active'` (Q8 lock — operators must
+ * explicitly activate rules; PR 9b's create defaults to 'pending').
+ */
+export interface GetApplicableRulesInput {
+  tenantId: string;
+  fingerprintId: string | null;
+  format: string | null;
+  vendor: string | null;
+}
+
 export interface RestoreParseRuleInput {
   tenantId: string;
   userId: string;
@@ -330,6 +350,60 @@ export async function deleteParseRule(
 // ─────────────────────────────────────────────
 // List
 // ─────────────────────────────────────────────
+
+/**
+ * KAN-1140 Phase 3 PR 9b — Cascade lookup for runtime rule execution.
+ *
+ * Single SQL query implementing the Q-ADD-4 nullable composite scope
+ * discriminator: returns rules whose scope cascade matches the inbound
+ * context. Application-layer (parse-rule-executor.ts) then selects the
+ * most-specific per-field winner via specificity score + createdAt
+ * tie-breaker.
+ *
+ * # Cascade semantics
+ *
+ *   - `fingerprintId = $1 OR fingerprintId IS NULL`
+ *   - `format = $2 OR format IS NULL`
+ *   - `vendor = $3 OR vendor IS NULL`
+ *
+ * AND'd together. A rule whose fingerprintId/format/vendor are all null
+ * is a global tenant rule and matches every inbound.
+ *
+ * # Defense
+ *
+ *   - `tenantId` filter on every query (multi-tenant rule leakage defense)
+ *   - `status = 'active'` gate (Q8 lock — operators must explicitly
+ *     activate rules; pending/disabled rules never fire)
+ *   - `LIMIT 100` matches `MAX_RULES_PER_TENANT` from `@growth/shared`;
+ *     defense against per-tenant performance DoS via thousands of rules
+ *
+ * # Performance
+ *
+ * No cache for PR 9b (Q3 lock). DB hit per inbound is ~5-10ms typical;
+ * negligible vs Haiku 200-500ms. Defer to KAN-1155 if performance signal
+ * emerges at scale (e.g., 100+ inbounds/sec/tenant).
+ */
+export async function getApplicableRules(
+  prisma: PrismaClient,
+  input: GetApplicableRulesInput,
+): Promise<ParseRuleRow[]> {
+  const ps = prisma as unknown as PrismaSurface;
+  const rows = await ps.parseRule.findMany({
+    where: {
+      tenantId: input.tenantId,
+      status: "active",
+      AND: [
+        { OR: [{ fingerprintId: input.fingerprintId }, { fingerprintId: null }] },
+        { OR: [{ format: input.format }, { format: null }] },
+        { OR: [{ vendor: input.vendor }, { vendor: null }] },
+      ],
+    } as unknown as Record<string, unknown>,
+    orderBy: { createdAt: "asc" },
+    take: 100,
+    skip: 0,
+  });
+  return rows;
+}
 
 export async function listParseRules(
   prisma: PrismaClient,
