@@ -38,11 +38,36 @@ export function buildApp(): Hono {
   // publisher. Test seam stays available via __setInboundHooksForTest.
   setInboundHooks({
     resolveTenantBySlug: async (slug) => {
-      const t = await (getPrisma() as unknown as { tenant: { findUnique: (a: unknown) => Promise<{ id: string; inboxDkimStrict: boolean } | null> } }).tenant.findUnique({
+      // KAN-1140 Phase 2 — join AccountProfile for defaultLanguage +
+      // supportedLanguages. Mirrors pipeline-proposer.ts:127-138 pattern
+      // (1:1 by AccountProfile.tenantId @unique). Profile may be absent on
+      // brand-new tenants; fall back to ["en"] / "en" so downstream
+      // resolveLanguage() still honors a sane Q4(c') hierarchy.
+      const t = await (getPrisma() as unknown as {
+        tenant: {
+          findUnique: (a: unknown) => Promise<{
+            id: string;
+            inboxDkimStrict: boolean;
+            accountProfile: { defaultLanguage: string; supportedLanguages: string[] } | null;
+          } | null>;
+        };
+      }).tenant.findUnique({
         where: { inboxSlug: slug },
-        select: { id: true, inboxDkimStrict: true },
+        select: {
+          id: true,
+          inboxDkimStrict: true,
+          accountProfile: {
+            select: { defaultLanguage: true, supportedLanguages: true },
+          },
+        },
       });
-      return t;
+      if (!t) return null;
+      return {
+        id: t.id,
+        inboxDkimStrict: t.inboxDkimStrict,
+        defaultLanguage: t.accountProfile?.defaultLanguage ?? 'en',
+        supportedLanguages: t.accountProfile?.supportedLanguages ?? ['en'],
+      };
     },
     upsertContactFromEmail: async ({ tenantId, email, firstName, lastName, companyName, source }) => {
       // Upsert: find by tenantId+email, create if absent. Match is on

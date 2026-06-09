@@ -64,7 +64,16 @@ const TENANT_B = "22222222-2222-2222-2222-222222222222";
 interface CapturedRow extends LeadInboxEventRow {}
 
 function makeHooks(opts: {
-  resolvedTenant?: { id: string; inboxDkimStrict: boolean } | null;
+  // KAN-1140 Phase 2 — `defaultLanguage` + `supportedLanguages` are
+  // optional at the call-site; helper defaults to ("en", ["en"]) so legacy
+  // call-sites (`{ id, inboxDkimStrict }`) keep working. Tests that need to
+  // assert locale-specific routing pass the fields explicitly.
+  resolvedTenant?: {
+    id: string;
+    inboxDkimStrict: boolean;
+    defaultLanguage?: string;
+    supportedLanguages?: string[];
+  } | null;
   existingContactId?: string | null;
 } = {}) {
   const auditRows: CapturedRow[] = [];
@@ -76,7 +85,16 @@ function makeHooks(opts: {
     publishedEvents,
     getCreatedContactCount: () => createdContacts,
     hooks: {
-      resolveTenantBySlug: vi.fn(async () => opts.resolvedTenant ?? null),
+      resolveTenantBySlug: vi.fn(async () =>
+        opts.resolvedTenant
+          ? {
+              id: opts.resolvedTenant.id,
+              inboxDkimStrict: opts.resolvedTenant.inboxDkimStrict,
+              defaultLanguage: opts.resolvedTenant.defaultLanguage ?? "en",
+              supportedLanguages: opts.resolvedTenant.supportedLanguages ?? ["en"],
+            }
+          : null,
+      ),
       upsertContactFromEmail: vi.fn(async () => {
         if (opts.existingContactId) return { id: opts.existingContactId };
         createdContacts++;
@@ -614,10 +632,17 @@ describe("KAN-954 — non-Formspree regression (parser is a no-op)", () => {
     expect(event.metadata.formSource).toBeUndefined();
     expect(event.metadata.leadType).toBeUndefined();
     expect(event.metadata.dealName).toBeUndefined();
-    expect(event.metadata.customFields).toEqual({
-      _kan_1140_format: "plain-text",
-      _kan_1140_confidence: "high",
-    });
+    // KAN-1140 Phase 2 contract addition: language detection runs on every
+    // non-vendor inbound. franc-min misclassifies the short body here, so
+    // the specific resolved language is incidental to what THIS test
+    // verifies — just assert the format-detection contract is preserved
+    // and that the language fields are populated (audit-trail discipline).
+    expect(event.metadata.customFields?._kan_1140_format).toBe("plain-text");
+    expect(event.metadata.customFields?._kan_1140_confidence).toBe("high");
+    expect(event.metadata.customFields?._kan_1140_language).toBeDefined();
+    expect(event.metadata.customFields?._kan_1140_language_confidence).toMatch(
+      /^(high|medium|low)$/,
+    );
     // But bodyPreview IS populated from the fetched text — D5 win
     expect(event.metadata.bodyPreview).toContain("enterprise tier");
   });
@@ -794,5 +819,208 @@ describe("KAN-1037-PR2 — autoresponder filter integration", () => {
     expect(ctx.auditRows[0].rejectionReason).toBeNull();
     expect(ctx.publishedEvents).toHaveLength(1);
     expect(ctx.publishedEvents[0].source).toBe("email_inbox");
+  });
+});
+
+// ─────────────────────────────────────────────
+// KAN-1140 Phase 2 — language detection + Q4(c') fallback integration
+// ─────────────────────────────────────────────
+//
+// Webhook-level coverage of the language-detector + resolveLanguage wedge.
+// Module-level coverage of those functions lives in
+// `parsers/__tests__/language-detector.test.ts`; here we verify the
+// integration thins through the webhook → event → metadata.language path
+// for the Contact.language persistence consumers + the lead-normalizer
+// prompt block.
+
+const EN_BODY =
+  "Hi team, I would like to learn about your enterprise pricing tier. " +
+  "We are evaluating several vendors and would appreciate a demo this week. " +
+  "Please let me know what times work for your sales team. Thanks!";
+const FR_BODY =
+  "Bonjour, je souhaiterais obtenir des informations sur votre offre tarifaire " +
+  "entreprise. Nous évaluons plusieurs prestataires et aimerions assister à une " +
+  "démonstration cette semaine. Merci de me communiquer vos disponibilités.";
+
+describe("KAN-1140 Phase 2 — language detection integration", () => {
+  it("English body + en-only tenant → metadata.language=en + customFields._kan_1140_language=en", async () => {
+    const ctx = makeHooks({
+      resolvedTenant: {
+        id: TENANT_A,
+        inboxDkimStrict: true,
+        defaultLanguage: "en",
+        supportedLanguages: ["en"],
+      },
+    });
+    const hooks = {
+      ...ctx.hooks,
+      fetchEmailContent: vi.fn(async () => ({
+        text: EN_BODY,
+        html: null,
+        replyTo: [],
+        headers: {},
+        messageId: null,
+      })),
+    };
+    __setInboundHooksForTest(hooks);
+
+    const app = makeApp();
+    const res = await app.request("/webhooks/resend-inbound", {
+      method: "POST",
+      body: JSON.stringify(validInboundPayload),
+    });
+
+    expect(res.status).toBe(200);
+    expect(ctx.publishedEvents).toHaveLength(1);
+    const event = ctx.publishedEvents[0];
+    expect(event.metadata.language).toBe("en");
+    expect(event.metadata.customFields?._kan_1140_language).toBe("en");
+    expect(event.metadata.customFields?._kan_1140_language_detected).toBe("en");
+    expect(event.metadata.customFields?._kan_1140_language_confidence).toMatch(
+      /^(high|medium)$/,
+    );
+  });
+
+  it("French body + multi-locale tenant → resolved=fr (operator declared fr supported)", async () => {
+    const ctx = makeHooks({
+      resolvedTenant: {
+        id: TENANT_A,
+        inboxDkimStrict: true,
+        defaultLanguage: "en",
+        supportedLanguages: ["en", "fr"],
+      },
+    });
+    const hooks = {
+      ...ctx.hooks,
+      fetchEmailContent: vi.fn(async () => ({
+        text: FR_BODY,
+        html: null,
+        replyTo: [],
+        headers: {},
+        messageId: null,
+      })),
+    };
+    __setInboundHooksForTest(hooks);
+
+    const app = makeApp();
+    const res = await app.request("/webhooks/resend-inbound", {
+      method: "POST",
+      body: JSON.stringify(validInboundPayload),
+    });
+
+    expect(res.status).toBe(200);
+    const event = ctx.publishedEvents[0];
+    expect(event.metadata.language).toBe("fr");
+    expect(event.metadata.customFields?._kan_1140_language).toBe("fr");
+    expect(event.metadata.customFields?._kan_1140_language_detected).toBe("fr");
+  });
+
+  it("HIGH-confidence French body + en-only tenant → resolved=fr (doctrine: HIGH overrides supportedLanguages)", async () => {
+    // Q4(c') doctrine rule 1: HIGH-confidence detection is trusted
+    // OVER operator-declared supportedLanguages, on the rationale that
+    // a clear-signal foreign-language inbound represents real-world data
+    // the operator's intent didn't anticipate. The medium-confidence path
+    // honors supportedLanguages (rule 2); HIGH does not (rule 1).
+    //
+    // Operator forensics: customFields preserve BOTH detected and
+    // resolved so the operator can audit divergence-from-intent.
+    const ctx = makeHooks({
+      resolvedTenant: {
+        id: TENANT_A,
+        inboxDkimStrict: true,
+        defaultLanguage: "en",
+        supportedLanguages: ["en"],
+      },
+    });
+    const hooks = {
+      ...ctx.hooks,
+      fetchEmailContent: vi.fn(async () => ({
+        text: FR_BODY,
+        html: null,
+        replyTo: [],
+        headers: {},
+        messageId: null,
+      })),
+    };
+    __setInboundHooksForTest(hooks);
+
+    const app = makeApp();
+    const res = await app.request("/webhooks/resend-inbound", {
+      method: "POST",
+      body: JSON.stringify(validInboundPayload),
+    });
+
+    expect(res.status).toBe(200);
+    const event = ctx.publishedEvents[0];
+    // HIGH confidence FR overrides en-only supportedLanguages
+    expect(event.metadata.customFields?._kan_1140_language_confidence).toBe(
+      "high",
+    );
+    expect(event.metadata.language).toBe("fr");
+    expect(event.metadata.customFields?._kan_1140_language).toBe("fr");
+    expect(event.metadata.customFields?._kan_1140_language_detected).toBe("fr");
+  });
+
+  it("Resend Receiving fetch unreachable (fetchEmailContent → null) → no metadata.language; no _kan_1140_language*", async () => {
+    const ctx = makeHooks({
+      resolvedTenant: {
+        id: TENANT_A,
+        inboxDkimStrict: true,
+        defaultLanguage: "en",
+        supportedLanguages: ["en"],
+      },
+    });
+    const hooks = {
+      ...ctx.hooks,
+      fetchEmailContent: vi.fn(async () => null),
+    };
+    __setInboundHooksForTest(hooks);
+
+    const app = makeApp();
+    const res = await app.request("/webhooks/resend-inbound", {
+      method: "POST",
+      body: JSON.stringify(validInboundPayload),
+    });
+
+    expect(res.status).toBe(200);
+    const event = ctx.publishedEvents[0];
+    expect(event.metadata.language).toBeUndefined();
+    expect(event.metadata.customFields?._kan_1140_language).toBeUndefined();
+  });
+
+  it("Brand-new tenant (resolveTenantBySlug defaults) → defaults to en/['en'] and resolves to en", async () => {
+    // Sanity-check the production-impl defaults: app.ts:resolveTenantBySlug
+    // falls back to defaultLanguage='en' / supportedLanguages=['en'] when
+    // AccountProfile is absent. This test exercises the helper's default
+    // branch (resolvedTenant carries no defaultLanguage / supportedLanguages).
+    const ctx = makeHooks({
+      resolvedTenant: {
+        id: TENANT_A,
+        inboxDkimStrict: true,
+        // defaultLanguage + supportedLanguages omitted → helper supplies
+        // ("en", ["en"]) — mirrors production AccountProfile-absent path.
+      },
+    });
+    const hooks = {
+      ...ctx.hooks,
+      fetchEmailContent: vi.fn(async () => ({
+        text: EN_BODY,
+        html: null,
+        replyTo: [],
+        headers: {},
+        messageId: null,
+      })),
+    };
+    __setInboundHooksForTest(hooks);
+
+    const app = makeApp();
+    const res = await app.request("/webhooks/resend-inbound", {
+      method: "POST",
+      body: JSON.stringify(validInboundPayload),
+    });
+
+    expect(res.status).toBe(200);
+    const event = ctx.publishedEvents[0];
+    expect(event.metadata.language).toBe("en");
   });
 });

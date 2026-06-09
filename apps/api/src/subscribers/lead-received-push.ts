@@ -170,6 +170,10 @@ interface NormalizerModule {
       subject?: string | null;
       bodyPreview?: string | null;
       attachmentCount?: number;
+      // KAN-1140 Phase 2 — resolved locale (ISO 639-1) threaded into the
+      // multilingual Haiku prompt block. Mirrors EmailPayload.locale in
+      // packages/api/src/services/lead-normalizer.ts.
+      locale?: string | null;
     };
   }) => Promise<{
     source: string;
@@ -749,15 +753,44 @@ leadReceivedPushApp.post('/lead-received', async (c) => {
   }
 
   // Load Contact for tenantId (producer created it pre-publish).
+  // KAN-1140 Phase 2 — `language` selected so the persistence step below
+  // can guard on "first-lead" (NULL) vs "preserve existing" (operator-set
+  // or prior-lead-set) semantics without a second roundtrip.
   const contact = await prisma.contact.findUnique({
     where: { id: event.contactId },
-    select: { id: true, tenantId: true },
+    select: { id: true, tenantId: true, language: true },
   });
   if (!contact) {
     console.error(
       `[lead-received-push] contact not found eventId=${event.eventId} contactId=${event.contactId} — ack+drop (producer invariant violation; redelivery cannot recover)`,
     );
     return c.text('ok', 200);
+  }
+
+  // KAN-1140 Phase 2 — Persist resolved language on first lead receipt.
+  // Source: `event.metadata.language` is the RESOLVED locale from the
+  // webhook's `resolveLanguage()` (Q4(c') hierarchy honors tenant's
+  // supportedLanguages + defaultLanguage). Preserve existing values to
+  // avoid overwriting operator-set language or a prior lead's resolved
+  // value — the discovery-locale invariant is "set once on first contact".
+  // Producer omits metadata.language when Resend Receiving fetch was
+  // unreachable; downstream consumers (lead-normalizer) fall back to
+  // `AccountProfile.defaultLanguage` when both event.metadata.language
+  // AND contact.language are null.
+  if (event.metadata.language && !contact.language) {
+    try {
+      await prisma.contact.update({
+        where: { id: contact.id },
+        data: { language: event.metadata.language },
+      });
+      console.log(
+        `[lead-received-push] kan-1140-contact-language-set contactId=${contact.id} language=${event.metadata.language}`,
+      );
+    } catch (err) {
+      console.warn(
+        `[lead-received-push] kan-1140-contact-language-set-failed contactId=${contact.id} language=${event.metadata.language} — non-fatal, downstream falls back to AccountProfile.defaultLanguage; err=${(err as Error)?.message ?? String(err)}`,
+      );
+    }
   }
 
   try {
@@ -1400,6 +1433,10 @@ async function writeInboundEngagementForExistingDeal(
       subject: event.metadata.subject ?? null,
       bodyPreview: event.metadata.bodyPreview ?? null,
       attachmentCount: event.metadata.attachmentCount,
+      // KAN-1140 Phase 2 — thread resolved locale into the normalizer's
+      // Haiku prompt block (Q5(b) single multilingual prompt). Optional
+      // on metadata; undefined → English-default behavior.
+      locale: event.metadata.language ?? null,
     },
   });
 
@@ -1513,6 +1550,10 @@ async function writePhase1Deal(
       subject: event.metadata.subject ?? null,
       bodyPreview: event.metadata.bodyPreview ?? null,
       attachmentCount: event.metadata.attachmentCount,
+      // KAN-1140 Phase 2 — thread resolved locale into the normalizer's
+      // Haiku prompt block (Q5(b) single multilingual prompt). Optional
+      // on metadata; undefined → English-default behavior.
+      locale: event.metadata.language ?? null,
     },
   });
 

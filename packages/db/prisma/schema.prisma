@@ -326,6 +326,14 @@ model Contact {
   postalCode        String?        @map("postal_code")
   /// ISO 3166-1 alpha-2.
   country           String?
+  /// KAN-1140 Phase 2 — ISO 639-1 (`en` / `fr` / `es` / ...). Populated by
+  /// `lead-received-push` on first lead receipt from the resolved language
+  /// in `LeadReceivedEvent.metadata.language` (post Q4(c') hierarchy).
+  /// Operator-set / pre-existing values are preserved on subsequent leads.
+  /// Read by the lead-normalizer to condition the multilingual Haiku prompt.
+  /// Nullable: pre-KAN-1140 contacts + leads where Resend Receiving fetch
+  /// was unreachable fall back to `AccountProfile.defaultLanguage` at read.
+  language          String?
   // KAN-700 + KAN-791: pipeline-aware lead state.
   // currentPipelineId + currentStageId DEPRECATED in Phase 1 (read-shim during
   // transition); drop in Phase 2 cleanup once readers migrate to Deal-side

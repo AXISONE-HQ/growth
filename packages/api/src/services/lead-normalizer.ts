@@ -63,6 +63,17 @@ export interface EmailPayload {
   /** Optional raw header string for future expansion (Resend doesn't surface
    *  full headers in the webhook payload yet; placeholder for Track A v2). */
   rawHeaders?: string | null;
+  /**
+   * KAN-1140 Phase 2 — Resolved language (ISO 639-1, e.g. `en` / `fr` /
+   * `es`). Threaded from the inbound producer (webhook calls
+   * `resolveLanguage()` with tenant supportedLanguages/defaultLanguage,
+   * stashes on `LeadReceivedEvent.metadata.language`; consumer pulls into
+   * this payload). Drives a Q5(b) single-multilingual-prompt locale block
+   * in `runAIExtraction()`: when present the Haiku is asked to emit
+   * `intentSummary` + `qualificationSignals` in this language. Absent →
+   * Haiku defaults to English (current behavior).
+   */
+  locale?: string | null;
 }
 
 /**
@@ -107,6 +118,14 @@ export interface PreParsedLead {
   senderNameGuess: string | null;
   subject: string | null;
   bodyText: string | null;
+  /**
+   * KAN-1140 Phase 2 — Optional resolved language (ISO 639-1). When set,
+   * `runAIExtraction()` injects a `## Email language` block into the
+   * Haiku userPrompt and asks the model to emit natural-language fields
+   * in this locale. lead_api path leaves this undefined (structured
+   * caller; no body-text to detect against).
+   */
+  locale?: string | null;
   metadata: Record<string, unknown>;
 }
 
@@ -224,6 +243,10 @@ export function preParseEmail(payload: EmailPayload): PreParsedLead {
   const { senderEmail, senderNameGuess } = parseFromAddress(fromRaw);
   const subject = (payload.subject ?? '').trim() || null;
   const bodyText = (payload.bodyPreview ?? '').trim() || null;
+  // KAN-1140 Phase 2 — pass-through resolved locale. Normalize trim +
+  // empty-string-to-null so the runAIExtraction prompt block is gated on
+  // a meaningful value.
+  const locale = payload.locale?.trim() || null;
 
   return {
     source: 'email_inbox',
@@ -231,6 +254,7 @@ export function preParseEmail(payload: EmailPayload): PreParsedLead {
     senderNameGuess,
     subject,
     bodyText,
+    locale,
     metadata: {
       attachmentCount: payload.attachmentCount ?? 0,
       ...(payload.rawHeaders ? { rawHeaders: payload.rawHeaders } : {}),
@@ -365,7 +389,8 @@ Rules:
 - intentSummary: ≤140 chars, 1 sentence. Capture WHAT they want (pricing, demo, complaint, etc.).
 - qualificationSignals: short tags like "asking about pricing", "demo request", "complaint", "enterprise tier", "urgent". 0-5 items. Empty array if no clear signals.
 - Free-webmail domains (gmail.com, hotmail.com, outlook.com, yahoo.com, icloud.com, etc.) → companyName = null
-- Be conservative: prefer null over guessing. Wrong data is worse than missing data.`;
+- Be conservative: prefer null over guessing. Wrong data is worse than missing data.
+- KAN-1140 Phase 2 — If an "Email language" section is present below, emit \`intentSummary\` and \`qualificationSignals\` in that language. The structural fields (firstName/lastName/companyName/phone) stay as written in the source. If no language section is present, default to English.`;
 
 interface RawExtraction {
   firstName?: unknown;
@@ -384,9 +409,16 @@ async function runAIExtraction(
   confidence: ExtractionConfidence;
   error: string | null;
 }> {
+  // KAN-1140 Phase 2 — locale block: present only when the producer
+  // resolved a language (webhook detection + Q4(c') hierarchy). Absence is
+  // the legacy English-default path.
+  const localeBlock = preParsed.locale
+    ? `## Email language\n${preParsed.locale}\n\n`
+    : '';
+
   const userPrompt = `${EXTRACTION_PROMPT_HEADER}
 
-## Sender
+${localeBlock}## Sender
 - email: ${preParsed.senderEmail}
 - displayName: ${preParsed.senderNameGuess ?? '(not provided)'}
 
