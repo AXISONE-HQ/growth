@@ -43,6 +43,13 @@ export * from "./email-headers.js";
 // eliminates algorithm-drift risk across workspaces (single source of
 // truth for the dedup hash).
 export * from "./parse-fingerprint.js";
+// KAN-1140 Phase 3 PR 9a — tenant parser customization rule schema +
+// safety validators. Memo 37 hoist: apps/api tRPC validator + packages/api
+// lifecycle service (this PR) + PR 9b lead-normalizer rule executor all
+// import from this single source. Algorithm drift across workspaces would
+// silently bypass safety locks (Q1 + Q3 + Q10); single source eliminates
+// the class.
+export * from "./parse-rule.js";
 export * from "./agentic-tool-schemas.js";
 export * from "./action-types.js";
 export * from "./lead-received.js";

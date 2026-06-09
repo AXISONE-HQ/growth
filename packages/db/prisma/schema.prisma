@@ -189,6 +189,9 @@ model Tenant {
   // Each unique (structureHash, senderDomainHash) inbound pattern collapses
   // to one row with occurrenceCount; bounded LRU samples on related table.
   parseFingerprints ParseFingerprint[]
+  // KAN-1140 Phase 3 PR 9a — tenant-configurable parsing rules. Substrate
+  // only in 9a (no executor); PR 9b wires execution in lead-normalizer.
+  parseRules ParseRule[]
 
   @@map("tenants")
 }
@@ -3259,6 +3262,10 @@ model ParseFingerprint {
 
   tenant  Tenant                   @relation(fields: [tenantId], references: [id])
   samples ParseFingerprintSample[]
+  // KAN-1140 Phase 3 PR 9a — tenant-configurable parsing rules optionally
+  // attached to this fingerprint. SetNull on rule's FK so fingerprint
+  // delete doesn't cascade-drop rules; rule remains with broader scope.
+  parseRules ParseRule[]
 
   @@unique([tenantId, structureHash, senderDomainHash])
   @@index([tenantId, lastSeenAt])
@@ -3289,4 +3296,108 @@ model ParseFingerprintSample {
 
   @@index([fingerprintId, capturedAt])
   @@map("parse_fingerprint_samples")
+}
+
+// KAN-1140 Phase 3 PR 9a — Tenant-configurable parsing rules (SUBSTRATE).
+//
+// PR 9a ships substrate only: schema, lifecycle service, tRPC procedures,
+// safety validators. Rules cannot fire until PR 9b's executor lands in
+// lead-normalizer.ts; no operator UI until PR 9c. tRPC procedures exist
+// but are unreachable from the operator-facing surface in 9a.
+//
+// SECURITY LOCKS (immovable per Senior PO Phase 1 directive):
+//   - Declarative-only rules (JSON path + regex + named transforms; NO
+//     operator-supplied code execution)
+//   - NO sandbox execution model (pure data operations)
+//   - Mandatory limits: per-tenant rule count cap; ReDoS-safe regex
+//     validation; path-traversal-safe JSON path whitelist; writable-field
+//     allow-list; failure isolation invariant
+//
+// Cascade scope (Q2 lock): rule applies when (fingerprintId match) OR
+// (fingerprintId null AND format match) OR (...). Nullable composite
+// discriminator per Q-ADD-4 lock — single SQL query, application-layer
+// specificity sort. Most-specific wins per field.
+//
+// Versioning (Q7 lock): hybrid — audit log captures full history;
+// ParseRuleVersion retains ONE previous version per rule for one-click
+// rollback. Updating a rule snapshots the current body to ParseRuleVersion
+// (upsert on @unique ruleId), then writes the new body to ParseRule. Restore
+// promotes the snapshot back + re-snapshots the displaced body.
+//
+// supportStatus coupling (Q-ADD-3 lock): decoupled at data layer. A rule
+// can attach to any fingerprint regardless of supportStatus; pending /
+// suggested / supported / unsupported all accept rule attachment. The
+// "supported fingerprints with rules attached short-circuit Haiku" semantic
+// is enforced at PR 9b execution time, NOT here.
+model ParseRule {
+  id            String   @id @default(uuid())
+  tenantId      String   @map("tenant_id")
+  /// Cascade scope: soft FK; rule applies when inbound matches this
+  /// fingerprint. Null = rule doesn't scope by fingerprint (broader scope
+  /// via format/vendor or global). onDelete: SetNull preserves the rule
+  /// with broader scope if its fingerprint is deleted.
+  fingerprintId String?  @map("fingerprint_id")
+  /// Cascade scope: rule applies when format matches. Null = rule doesn't
+  /// scope by format (cascades to broader scope).
+  format        String?
+  /// Cascade scope: rule applies when vendor matches. Null = rule doesn't
+  /// scope by vendor.
+  vendor        String?
+  /// Rule definition body. Validated against
+  /// packages/shared/src/parse-rule.ts ParseRuleBodySchema (Zod) at
+  /// create-time AND at execution-time (PR 9b; defense-in-depth).
+  body          Json
+  /// Human-readable label for the rule (operator-facing).
+  label         String
+  /// Rule lifecycle: `pending | active | disabled`
+  ///   - `pending`  — initial state; PR 9a creates rules in this state
+  ///                  because no executor exists yet
+  ///   - `active`   — operator-activated; PR 9b executor evaluates active
+  ///                  rules during pre-Haiku normalization
+  ///   - `disabled` — operator-paused; rule body retained but not evaluated
+  /// Convention follows ParseFingerprint.supportStatus + Action.status —
+  /// String column with documented vocabulary, NOT a Prisma enum type.
+  status        String   @default("pending")
+  /// Firebase UID of the operator who created the rule.
+  createdBy     String   @map("created_by")
+  /// Firebase UID of the operator who last updated the rule.
+  updatedBy     String   @map("updated_by")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  tenant      Tenant            @relation(fields: [tenantId], references: [id])
+  fingerprint ParseFingerprint? @relation(fields: [fingerprintId], references: [id], onDelete: SetNull)
+  // One previous version retained per rule (@unique ruleId on ParseRuleVersion).
+  version     ParseRuleVersion?
+
+  @@index([tenantId, fingerprintId])
+  @@index([tenantId, format, vendor])
+  @@map("parse_rules")
+}
+
+// KAN-1140 Phase 3 PR 9a — ONE previous version per ParseRule (Q7 lock).
+//
+// @unique ruleId means each rule has at most one snapshot. Updates upsert
+// the current body into this table BEFORE writing the new body to ParseRule.
+// Restore reads this row, promotes it back into ParseRule, and re-snapshots
+// the displaced body (so restoring is itself an audit-trackable + reversible
+// action).
+//
+// onDelete: Cascade is correct: if a rule is deleted, its single retained
+// snapshot is no longer reachable from any operator surface; the audit log
+// still carries the historical mutations.
+model ParseRuleVersion {
+  id         String   @id @default(uuid())
+  ruleId     String   @unique @map("rule_id")
+  tenantId   String   @map("tenant_id")
+  body       Json
+  label      String
+  status     String
+  archivedAt DateTime @default(now()) @map("archived_at")
+  archivedBy String   @map("archived_by")
+
+  rule ParseRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@map("parse_rule_versions")
 }
