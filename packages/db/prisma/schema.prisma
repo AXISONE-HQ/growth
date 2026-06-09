@@ -185,6 +185,10 @@ model Tenant {
   // M3-1 Sub-Objective Framework MVP — tenant-scoped discovery state.
   // RESTRICT delete: tenant deletion should never silently drop gap-state.
   subObjectiveGapStates ContactSubObjectiveGapState[]
+  // KAN-1140 Phase 3 PR 7 — per-tenant parse-fingerprint aggregation rows.
+  // Each unique (structureHash, senderDomainHash) inbound pattern collapses
+  // to one row with occurrenceCount; bounded LRU samples on related table.
+  parseFingerprints ParseFingerprint[]
 
   @@map("tenants")
 }
@@ -3183,4 +3187,80 @@ model ContactSubObjectiveGapState {
   @@index([tenantId, contactId], map: "contact_sub_objective_gap_state_tenant_contact_idx")
   @@index([tenantId, subObjectiveKey, state], map: "contact_sub_objective_gap_state_tenant_key_state_idx")
   @@map("contact_sub_objective_gap_state")
+}
+
+// ─────────────────────────────────────────────
+// KAN-1140 Phase 3 PR 7 — New-format discovery + learning capture
+// ─────────────────────────────────────────────
+//
+// ParseFingerprint: aggregation row, one per unique
+// (tenantId, structureHash, senderDomainHash) tuple. Webhook UPSERTs on
+// every lead.received; occurrence_count increments on collisions.
+// escalation_count / reclassify_count are PR 6 hook signals — surfaces the
+// "this pattern keeps failing" + "operator confirmed this pattern" insights.
+//
+// Storage: tiny per row (~256 bytes); indexes on (tenantId, lastSeenAt) +
+// (tenantId, occurrenceCount) match the Tier 2 KAN-1086 "audit_log composite
+// indexes pre-optimize aggregation" pattern.
+//
+// Q-ADD-3 lock: UPSERT path uses raw SQL ON CONFLICT (Prisma's upsert
+// doesn't atomic-increment); real-Postgres integration test required per
+// `query_raw_sql_syntax_validation_must_execute_not_mock` memo.
+model ParseFingerprint {
+  id                 String   @id @default(uuid())
+  tenantId           String   @map("tenant_id")
+  /// Null on 'unknown' format (insufficient signal); set on HTML/ADF
+  /// (tag-tree hash) and plain-text (label-token hash).
+  structureHash      String?  @map("structure_hash")
+  senderDomainHash   String   @map("sender_domain_hash")
+  /// Null off plain-text; equal to structureHash on plain-text. Surfaces
+  /// the "label inventory" view independently for operator queries.
+  labelTokenHash     String?  @map("label_token_hash")
+  format             String
+  language           String?
+  vendor             String?
+  formatConfidence   String   @map("format_confidence")
+  languageConfidence String?  @map("language_confidence")
+  occurrenceCount    Int      @default(1) @map("occurrence_count")
+  /// KAN-1140 PR 6 hook — count of matching inbounds that ALSO created a
+  /// parse_confidence_review escalation. Surfaces low-confidence recurring
+  /// patterns ("we keep failing on this one — should we train a parser?").
+  escalationCount    Int      @default(0) @map("escalation_count")
+  /// KAN-1140 PR 6 hook — count of matching inbounds where an operator
+  /// reclassified the metadata. Marks operator-confirmed pattern — these
+  /// are the highest-priority training candidates for PR 8 / KAN-1147.
+  reclassifyCount    Int      @default(0) @map("reclassify_count")
+  firstSeenAt        DateTime @default(now()) @map("first_seen_at")
+  lastSeenAt         DateTime @default(now()) @map("last_seen_at")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  tenant  Tenant                   @relation(fields: [tenantId], references: [id])
+  samples ParseFingerprintSample[]
+
+  @@unique([tenantId, structureHash, senderDomainHash])
+  @@index([tenantId, lastSeenAt])
+  @@index([tenantId, occurrenceCount])
+  @@map("parse_fingerprints")
+}
+
+// ParseFingerprintSample: bounded LRU (5 samples per fingerprint) of
+// representative bodies for the operator drawer + future training input.
+// 4KB bodyPreview cap matches the audit_log Tier 2 query-perf budget.
+// On insert in the production hook, oldest sample (by captured_at) is
+// pruned when count would exceed 5 — single CTE per writeParseFingerprint
+// invocation (atomic with the new insert).
+model ParseFingerprintSample {
+  id            String   @id @default(uuid())
+  fingerprintId String   @map("fingerprint_id")
+  resendEmailId String?  @map("resend_email_id")
+  bodyPreview   String   @map("body_preview")
+  senderDomain  String   @map("sender_domain")
+  customFields  Json     @default("{}") @map("custom_fields")
+  capturedAt    DateTime @default(now()) @map("captured_at")
+
+  fingerprint ParseFingerprint @relation(fields: [fingerprintId], references: [id], onDelete: Cascade)
+
+  @@index([fingerprintId, capturedAt])
+  @@map("parse_fingerprint_samples")
 }

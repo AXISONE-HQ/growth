@@ -78,6 +78,15 @@ import { parsePlainTextEmail } from "../parsers/plain-text-email-parser.js";
 // `metadata.customFields._kan_1140_language_detected/_confidence` per
 // Q8(a) mirror-format-pattern (forensic trail).
 import { detectLanguage, resolveLanguage } from "../parsers/language-detector.js";
+// KAN-1140 Phase 3 PR 7 — parse-fingerprint derivation lives in
+// @growth/shared (hoist for cross-workspace algorithm uniformity per
+// Phase 2 Step 7 Senior PO lock). Webhook captures every lead.received
+// via `writeParseFingerprint` hook on Q-ADD-1 webhook-location lock.
+import {
+  deriveParseFingerprint,
+  normalizeSenderAddress,
+  type DetectedFormat,
+} from "@growth/shared";
 
 export const resendInboundWebhookApp = new Hono();
 
@@ -171,6 +180,48 @@ export interface InboundHandlerHooks {
    * `../adapters/resend/inbound-fetch.js`.
    */
   fetchEmailContent?: (emailId: string) => Promise<InboundEmailContent | null>;
+  /**
+   * KAN-1140 Phase 3 PR 7 — parse-fingerprint capture hook (Q-ADD-2 lock).
+   *
+   * Stamps an UPSERT on `parse_fingerprints` (atomic occurrence_count
+   * increment via Postgres `ON CONFLICT`) + a sample row on
+   * `parse_fingerprint_samples` with 5-LRU prune (atomic CTE). Both
+   * operations are best-effort per Q-ADD-5 — caller (webhook) wraps
+   * the invocation in try/catch and swallows failures so a fingerprint-
+   * write outage NEVER drops a lead.
+   *
+   * Optional in this interface so the test seam can stub the hook
+   * absent (default `__setInboundHooksForTest` mocks don't include it
+   * until the test exercises the capture surface). Production wiring
+   * in `apps/connectors/src/app.ts` always provides it.
+   */
+  writeParseFingerprint?: (input: ParseFingerprintWriteInput) => Promise<void>;
+}
+
+/**
+ * KAN-1140 Phase 3 PR 7 — writeParseFingerprint payload shape.
+ *
+ * `fingerprint.bodyForSample` is the FULL fetchedContent.text — the
+ * production hook caps to 4KB on the sample row write. Webhook passes
+ * uncapped so the test seam can assert the cap is applied at the hook
+ * layer (not the call site).
+ */
+export interface ParseFingerprintWriteInput {
+  tenantId: string;
+  structureHash: string | null;
+  senderDomainHash: string;
+  labelTokenHash: string | null;
+  format: string;
+  language: string | null;
+  vendor: string | null;
+  formatConfidence: string;
+  languageConfidence: string | null;
+  resendEmailId: string | null;
+  /** Full body — hook caps at 4KB on write. */
+  bodyForSample: string;
+  /** Pre-normalized sender domain (matches the hashed value's plaintext source). */
+  senderDomain: string;
+  customFields: Record<string, unknown>;
 }
 
 export interface LeadInboxEventRow {
@@ -642,17 +693,26 @@ resendInboundWebhookApp.post(
   //
   // KAN-1140 PR 4 — gate updated from `!formspreeParsed` to
   // `!vendorExtraction` for vendor-agnostic precedence.
+  // KAN-1140 Phase 3 PR 7 — hoisted format snapshot for the parse-
+  // fingerprint capture block below. Defaults to `unknown` for
+  // vendor-extracted inbounds (where format-detector doesn't run);
+  // overwritten inside the !vendorExtraction branch to the real
+  // detected format.
   let formatEnrichment: {
     vendor?: string;
     leadType?: string;
     dealName?: string;
     customFields?: Record<string, string>;
   } | null = null;
+  let detectedFormatForFingerprint: string = 'unknown';
+  let formatConfidenceForFingerprint: string = 'low';
   if (!vendorExtraction && fetchedContent) {
     const detection = detectEmailFormat({
       text: fetchedContent.text,
       html: fetchedContent.html,
     });
+    detectedFormatForFingerprint = detection.format;
+    formatConfidenceForFingerprint = detection.confidence;
     const baseCustomFields: Record<string, string> = {
       _kan_1140_format: detection.format,
       _kan_1140_confidence: detection.confidence,
@@ -704,6 +764,7 @@ resendInboundWebhookApp.post(
   // when metadata.language is absent.
   let resolvedLanguage: string | null = null;
   let languageCustomFields: Record<string, string> = {};
+  let resolvedLanguageConfidence: string | null = null;
   if (fetchedContent) {
     const sourceText = fetchedContent.text ?? fetchedContent.html ?? null;
     const detection = detectLanguage(sourceText);
@@ -712,14 +773,74 @@ resendInboundWebhookApp.post(
       tenant.supportedLanguages,
       tenant.defaultLanguage,
     );
+    resolvedLanguageConfidence = detection?.confidence ?? "low";
     languageCustomFields = {
       _kan_1140_language: resolvedLanguage,
-      _kan_1140_language_confidence: detection?.confidence ?? "low",
+      _kan_1140_language_confidence: resolvedLanguageConfidence,
       ...(detection?.language
         ? { _kan_1140_language_detected: detection.language }
         : {}),
     };
   }
+
+  // ─────────────────────────────────────────────
+  // KAN-1140 Phase 3 PR 7 — Parse fingerprint capture (Q-ADD-1 lock).
+  // ─────────────────────────────────────────────
+  // Runs on every lead.received (Q4 lock; not just escalated subset).
+  // Webhook-location capture (Q-ADD-1) is load-bearing: this is the
+  // only point with full-body fidelity (fetchedContent.text uncapped)
+  // for label-token extraction on plain-text forms.
+  //
+  // Failure mode: swallow + log (Q-ADD-5 best-effort discipline; lead
+  // must land even if fingerprint write fails). Mirrors safeWriteAuditRow.
+  //
+  // Skipped when fetchedContent is null (Resend Receiving fetch
+  // unreachable) — no body to fingerprint against.
+  const fingerprintHook = getHooks().writeParseFingerprint;
+  if (fetchedContent && fingerprintHook) {
+    try {
+      const bodyForHash = fetchedContent.text ?? fetchedContent.html ?? "";
+      const fp = deriveParseFingerprint({
+        format: detectedFormatForFingerprint as DetectedFormat,
+        body: bodyForHash,
+        fromAddress: fromParsed.email,
+      });
+      // Compose the customFields snapshot — same shape the wire event
+      // will carry (vendorExtraction.customFields OR formatEnrichment.customFields)
+      // PLUS the _kan_1140_language* keys language detection just stamped.
+      const vendorOrFormatCF: Record<string, string> = vendorExtraction
+        ? { ...(vendorExtraction.customFields ?? {}) }
+        : { ...(formatEnrichment?.customFields ?? {}) };
+      const captureCustomFields = {
+        ...vendorOrFormatCF,
+        ...languageCustomFields,
+      };
+      await fingerprintHook({
+        tenantId: tenant.id,
+        structureHash: fp.structureHash,
+        senderDomainHash: fp.senderDomainHash,
+        labelTokenHash: fp.labelTokenHash,
+        format: detectedFormatForFingerprint,
+        language: resolvedLanguage,
+        vendor: vendorExtraction?.vendor ?? null,
+        formatConfidence: formatConfidenceForFingerprint,
+        languageConfidence: resolvedLanguageConfidence,
+        resendEmailId,
+        bodyForSample: bodyForHash,
+        senderDomain: normalizeSenderAddress(fromParsed.email),
+        customFields: captureCustomFields,
+      });
+    } catch (err) {
+      // Q-ADD-5: swallow + log. Lead lands regardless.
+      logger.warn(
+        { err, resendEmailId },
+        "[resend-inbound] kan-1140-pr-7-fingerprint-capture-failed",
+      );
+    }
+  }
+  // ─────────────────────────────────────────────
+  // END KAN-1140 Phase 3 PR 7 capture
+  // ─────────────────────────────────────────────
 
   // M3-2.5b — propagate raw Resend Receiving headers so the consumer can
   // sidecar-write + correlation-lookup. Raw form (`<id@domain>`, References

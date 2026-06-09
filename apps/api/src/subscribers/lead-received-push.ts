@@ -90,6 +90,10 @@ import {
   deriveParseConfidenceVerdict,
   type Confidence,
 } from './_helpers/parse-confidence-trigger.js';
+// KAN-1140 Phase 3 PR 7 — fingerprint-recompute on escalation insert so
+// the matching parse_fingerprint row's escalation_count increments. Hash
+// lives in @growth/shared (cross-workspace single source of truth).
+import { deriveParseFingerprint, type DetectedFormat } from '@growth/shared';
 
 // KAN-828 fix-forward — Brain Service + Message Shaper need redis + openai
 // clients injected so the Knowledge Layer retrieval (retrieveRelevantChunks)
@@ -982,6 +986,36 @@ leadReceivedPushApp.post('/lead-received', async (c) => {
             console.log(
               `[lead-received-push] kan-1140-parse-confidence-escalation-created eventId=${event.eventId} tenantId=${event.tenantId} dealId=${dealId} reasons="${verdict.reasons.join('; ')}"`,
             );
+
+            // KAN-1140 Phase 3 PR 7 — increment escalation_count on the
+            // matching parse_fingerprint row. Recompute the hash from the
+            // wire event (same algorithm the webhook used at capture
+            // time) so we land on the row whose occurrence_count was
+            // bumped on this inbound's capture. Failure is best-effort
+            // (Q-ADD-5 discipline cousin) — escalation already exists;
+            // operator queue is the load-bearing artifact.
+            try {
+              const formatForHash =
+                (event.metadata.customFields?.['_kan_1140_format'] as DetectedFormat | undefined) ??
+                'unknown';
+              const bodyForHash = event.metadata.bodyPreview ?? '';
+              const fp = deriveParseFingerprint({
+                format: formatForHash,
+                body: bodyForHash,
+                fromAddress: event.metadata.fromAddress ?? '',
+              });
+              await prisma.$executeRaw`
+                UPDATE parse_fingerprints
+                SET escalation_count = escalation_count + 1, updated_at = NOW()
+                WHERE tenant_id = ${event.tenantId}
+                  AND structure_hash IS NOT DISTINCT FROM ${fp.structureHash}
+                  AND sender_domain_hash = ${fp.senderDomainHash}
+              `;
+            } catch (err) {
+              console.warn(
+                `[lead-received-push] kan-1140-pr-7-escalation-count-increment-failed eventId=${event.eventId} err=${(err as Error)?.message ?? String(err)}`,
+              );
+            }
           } catch (err) {
             // Create-failure is non-fatal — the lead has already landed
             // (Deal + Engagement committed). Log and fall through to

@@ -1939,6 +1939,76 @@ async function loadCognitiveMetricsModule(): Promise<CognitiveMetricsModule> {
 // Phase 1 Lock 4: super-admin only — cross-tenant aggregate view is forensic
 // observability, not operator-facing UX.
 // Phase 1 Lock B (Anchor 5): tenantId is OPTIONAL — null means cross-tenant.
+// ============================================================================
+// PARSER PATTERNS ROUTER (KAN-1140 Phase 3 PR 7 — new-format discovery)
+// ============================================================================
+// Variable-specifier dynamic import per KAN-689; mirrors loadAuditLogModule.
+// Lives in packages/api/src/services/parse-fingerprint-aggregator.ts.
+//
+// protectedProcedure gate (Q-ADD-4 lock): operator-grade tenant-scoped
+// authority. Fingerprints are per-tenant operational data — every
+// operator within a tenant can see THEIR tenant's fingerprints. Distinct
+// from cognitiveMetrics (adminProcedure / super-admin only) because that
+// surface aggregates cross-tenant; this one strictly does not.
+interface ParseFingerprintsModule {
+  listParseFingerprints: (
+    prisma: unknown,
+    input: {
+      tenantId: string;
+      sortBy: 'lastSeenAt' | 'occurrenceCount' | 'escalationCount';
+      limit: number;
+      offset: number;
+      formatFilter?: string;
+      languageFilter?: string;
+      vendorFilter?: string;
+      showOnlyWithEscalations?: boolean;
+    },
+  ) => Promise<unknown>;
+  getParseFingerprintDetail: (
+    prisma: unknown,
+    input: { tenantId: string; fingerprintId: string },
+  ) => Promise<unknown>;
+}
+let _parseFingerprintsModule: ParseFingerprintsModule | null = null;
+async function loadParseFingerprintsModule(): Promise<ParseFingerprintsModule> {
+  if (_parseFingerprintsModule) return _parseFingerprintsModule;
+  const spec = "../../../packages/api/src/services/parse-fingerprint-aggregator.js";
+  _parseFingerprintsModule = (await import(spec)) as ParseFingerprintsModule;
+  return _parseFingerprintsModule;
+}
+
+const parserPatternsRouter = router({
+  list: protectedProcedure
+    .input(
+      z.object({
+        sortBy: z.enum(['lastSeenAt', 'occurrenceCount', 'escalationCount']).default('lastSeenAt'),
+        limit: z.number().int().min(1).max(100).default(50),
+        offset: z.number().int().min(0).default(0),
+        formatFilter: z.string().optional(),
+        languageFilter: z.string().optional(),
+        vendorFilter: z.string().optional(),
+        showOnlyWithEscalations: z.boolean().default(false),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      const { listParseFingerprints } = await loadParseFingerprintsModule();
+      return listParseFingerprints(ctx.prisma, {
+        tenantId: ctx.tenantId,
+        ...input,
+      });
+    }),
+
+  getDetail: protectedProcedure
+    .input(z.object({ fingerprintId: z.string().uuid() }))
+    .query(async ({ ctx, input }) => {
+      const { getParseFingerprintDetail } = await loadParseFingerprintsModule();
+      return getParseFingerprintDetail(ctx.prisma, {
+        tenantId: ctx.tenantId,
+        fingerprintId: input.fingerprintId,
+      });
+    }),
+});
+
 const cognitiveMetricsRouter = router({
   getMetrics: adminProcedure
     .input(
@@ -7108,6 +7178,9 @@ export const appRouter = router({
   subObjectives: subObjectivesRouter,
   // KAN-1086 — Tier 2 cognitive-quality aggregate metrics (super-admin only).
   cognitiveMetrics: cognitiveMetricsRouter,
+  // KAN-1140 Phase 3 PR 7 — parse-fingerprint aggregation (tenant-scoped;
+  // every operator sees their own tenant's parser patterns).
+  parserPatterns: parserPatternsRouter,
 });
 
 export type AppRouter = typeof appRouter;

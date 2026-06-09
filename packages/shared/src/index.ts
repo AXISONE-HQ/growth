@@ -37,6 +37,12 @@ export * from "./scenario-types.js";
 export * from "./email-providers.js";
 // M3-2.5b Inbound Reply Correlation — RFC 5322 Message-ID/References normalization, shared between webhook publish + consumer lookup.
 export * from "./email-headers.js";
+// KAN-1140 Phase 3 PR 7 — parse-fingerprint hash derivation, shared
+// between webhook capture (apps/connectors), consumer escalation hook
+// (apps/api), and reclassify service (packages/api). Hoist to shared
+// eliminates algorithm-drift risk across workspaces (single source of
+// truth for the dedup hash).
+export * from "./parse-fingerprint.js";
 export * from "./agentic-tool-schemas.js";
 export * from "./action-types.js";
 export * from "./lead-received.js";
