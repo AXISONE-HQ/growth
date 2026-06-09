@@ -23,6 +23,8 @@ import {
   // KAN-855 — Account Page Cohort 2 (logo upload)
   LogoUploadInputSchema,
   LogoFinalizeInputSchema,
+  // KAN-1140 PR 9a — tenant parser customization rule schema
+  ParseRuleBodySchema,
 } from "@growth/shared";
 // KAN-852 — Account Page publisher + flag. Cross-rootDir static imports
 // trigger TS6059 (KAN-689 cohort), so we use the variable-specifier
@@ -2065,6 +2067,169 @@ const parserPatternsRouter = router({
         tenantId: ctx.tenantId,
         userId: ctx.firebaseUser?.uid ?? "unknown",
         fingerprintId: input.fingerprintId,
+      });
+    }),
+});
+
+// KAN-1140 Phase 3 PR 9a — Tenant parser customization rule substrate.
+//
+// Variable-specifier dynamic-import per KAN-689 cohort discipline
+// (cross-rootDir static imports trigger TS6059). Mirrors the
+// parseFingerprintsModule pattern at line ~1987.
+//
+// PR 9a ships substrate only — these procedures are unreachable from the
+// operator-facing surface (no UI in 9a). PR 9b adds the rule executor;
+// PR 9c adds the Settings → Parse Rules sub-tab.
+interface ParseRulesModule {
+  createParseRule: (
+    prisma: unknown,
+    input: {
+      tenantId: string;
+      userId: string;
+      label: string;
+      body: unknown;
+      fingerprintId?: string;
+      format?: string;
+      vendor?: string;
+    },
+  ) => Promise<{ id: string }>;
+  updateParseRule: (
+    prisma: unknown,
+    input: {
+      tenantId: string;
+      userId: string;
+      ruleId: string;
+      label?: string;
+      body?: unknown;
+      status?: "pending" | "active" | "disabled";
+    },
+  ) => Promise<{ id: string }>;
+  deleteParseRule: (
+    prisma: unknown,
+    input: { tenantId: string; userId: string; ruleId: string },
+  ) => Promise<{ id: string }>;
+  listParseRules: (
+    prisma: unknown,
+    input: {
+      tenantId: string;
+      fingerprintId?: string;
+      format?: string;
+      vendor?: string;
+      statusFilter?: "pending" | "active" | "disabled";
+      limit?: number;
+      offset?: number;
+    },
+  ) => Promise<unknown>;
+  getParseRuleDetail: (
+    prisma: unknown,
+    input: { tenantId: string; ruleId: string },
+  ) => Promise<unknown>;
+  restoreParseRulePreviousVersion: (
+    prisma: unknown,
+    input: { tenantId: string; userId: string; ruleId: string },
+  ) => Promise<{ id: string }>;
+}
+let _parseRulesModule: ParseRulesModule | null = null;
+async function loadParseRulesModule(): Promise<ParseRulesModule> {
+  if (_parseRulesModule) return _parseRulesModule;
+  const spec = "../../../packages/api/src/services/parse-rule-service.js";
+  _parseRulesModule = (await import(spec)) as ParseRulesModule;
+  return _parseRulesModule;
+}
+
+const parseRulesRouter = router({
+  create: protectedProcedure
+    .input(
+      z.object({
+        label: z.string().min(1).max(100),
+        body: ParseRuleBodySchema,
+        fingerprintId: z.string().uuid().optional(),
+        format: z.string().optional(),
+        vendor: z.string().optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const { createParseRule } = await loadParseRulesModule();
+      return createParseRule(ctx.prisma, {
+        tenantId: ctx.tenantId,
+        userId: ctx.firebaseUser?.uid ?? "unknown",
+        label: input.label,
+        body: input.body,
+        fingerprintId: input.fingerprintId,
+        format: input.format,
+        vendor: input.vendor,
+      });
+    }),
+
+  update: protectedProcedure
+    .input(
+      z.object({
+        ruleId: z.string().uuid(),
+        label: z.string().min(1).max(100).optional(),
+        body: ParseRuleBodySchema.optional(),
+        status: z.enum(["pending", "active", "disabled"]).optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const { updateParseRule } = await loadParseRulesModule();
+      return updateParseRule(ctx.prisma, {
+        tenantId: ctx.tenantId,
+        userId: ctx.firebaseUser?.uid ?? "unknown",
+        ruleId: input.ruleId,
+        label: input.label,
+        body: input.body,
+        status: input.status,
+      });
+    }),
+
+  delete: protectedProcedure
+    .input(z.object({ ruleId: z.string().uuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const { deleteParseRule } = await loadParseRulesModule();
+      return deleteParseRule(ctx.prisma, {
+        tenantId: ctx.tenantId,
+        userId: ctx.firebaseUser?.uid ?? "unknown",
+        ruleId: input.ruleId,
+      });
+    }),
+
+  list: protectedProcedure
+    .input(
+      z.object({
+        fingerprintId: z.string().uuid().optional(),
+        format: z.string().optional(),
+        vendor: z.string().optional(),
+        statusFilter: z.enum(["pending", "active", "disabled"]).optional(),
+        limit: z.number().int().min(1).max(100).default(50),
+        offset: z.number().int().min(0).default(0),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      const { listParseRules } = await loadParseRulesModule();
+      return listParseRules(ctx.prisma, {
+        tenantId: ctx.tenantId,
+        ...input,
+      });
+    }),
+
+  getDetail: protectedProcedure
+    .input(z.object({ ruleId: z.string().uuid() }))
+    .query(async ({ ctx, input }) => {
+      const { getParseRuleDetail } = await loadParseRulesModule();
+      return getParseRuleDetail(ctx.prisma, {
+        tenantId: ctx.tenantId,
+        ruleId: input.ruleId,
+      });
+    }),
+
+  restorePreviousVersion: protectedProcedure
+    .input(z.object({ ruleId: z.string().uuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const { restoreParseRulePreviousVersion } = await loadParseRulesModule();
+      return restoreParseRulePreviousVersion(ctx.prisma, {
+        tenantId: ctx.tenantId,
+        userId: ctx.firebaseUser?.uid ?? "unknown",
+        ruleId: input.ruleId,
       });
     }),
 });
@@ -7241,6 +7406,12 @@ export const appRouter = router({
   // KAN-1140 Phase 3 PR 7 — parse-fingerprint aggregation (tenant-scoped;
   // every operator sees their own tenant's parser patterns).
   parserPatterns: parserPatternsRouter,
+  // KAN-1140 Phase 3 PR 9a — tenant parser customization rule substrate.
+  // PR 9a ships substrate only; rules cannot fire until PR 9b's executor
+  // lands in lead-normalizer.ts; no operator UI until PR 9c. Procedures
+  // exist + are tenant-scoped via protectedProcedure but are unreachable
+  // from the operator-facing surface in 9a.
+  parseRules: parseRulesRouter,
 });
 
 export type AppRouter = typeof appRouter;
