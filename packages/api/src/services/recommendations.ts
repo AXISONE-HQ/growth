@@ -40,6 +40,10 @@ import {
 // default kind='pending') and (b) to REJECT accept/modify on samples
 // (the double-dispatch guard).
 import { SAMPLED_TRIGGER_TYPE } from '@growth/shared';
+// KAN-1140 Phase 3 PR 6 — reclassify path publishes synthetic LeadReceivedEvent
+// to the same topic the webhook uses; the consumer's existing handler picks it
+// up (with parseConfidenceOverride loop-guard set).
+import { LEAD_RECEIVED_TOPIC, LeadReceivedEventSchema } from '@growth/shared';
 
 // ─────────────────────────────────────────────
 // Input shapes — keep zod-equivalent here so tests can import without zod
@@ -98,6 +102,20 @@ export interface AcceptInput {
 export interface ModifyInput {
   id: string;
   suggestedAction: string;
+}
+
+/**
+ * KAN-1140 Phase 3 PR 6 — operator-corrected metadata for
+ * parse_confidence_review escalations. All fields optional; at least one
+ * must be supplied (handler asserts). Empty corrections are no-ops; the
+ * loop-guard + synthetic-republish still runs so Brain can wake up on
+ * the post-review event.
+ */
+export interface ReclassifyInput {
+  id: string;
+  correctedFormat?: string;
+  correctedLanguage?: string;
+  correctedVendor?: string;
 }
 
 export interface DismissInput {
@@ -657,4 +675,221 @@ export async function dismissRecommendation(
   });
 
   return { id: updated.id, status: updated.status };
+}
+
+/**
+ * KAN-1140 Phase 3 PR 6 — operator-corrected metadata path for
+ * `parse_confidence_review` escalations.
+ *
+ * Flow:
+ *  1. Load escalation + assert `triggerType === 'parse_confidence_review'`
+ *     and status is non-terminal (open or claimed).
+ *  2. Stamp persistence targets:
+ *       - `correctedLanguage` → `Contact.language` (FORCE-overwrite —
+ *         bypasses the consumer-side "preserve existing" guard at
+ *         `lead-received-push.ts`. Operator-explicit; intent overrides
+ *         prior auto-set).
+ *       - `correctedVendor` → `Deal.metadata.leadVendor` (merge into
+ *         existing jsonb; preserves siblings like `formSource` / `leadType`).
+ *       - `correctedFormat` → forensic-only; lands on Engagement.metadata
+ *         via the consumer's re-write of the synthetic event (NOT updated
+ *         here; the synthetic-republish path is what gives us a fresh
+ *         Engagement row with the corrected forensic stamp).
+ *  3. Reconstruct the LeadReceivedEvent from
+ *     `escalation.context.originalWirePayload` (stashed at insert time
+ *     in `lead-received-push.ts` per the Q4 corrected-metadata persistence
+ *     lock). Overlay:
+ *       - `metadata.parseConfidenceOverride: true` (loop-guard — consumer
+ *         skips the parse-confidence trigger on this event).
+ *       - `metadata.parseCorrections: { format?, language?, vendor? }`
+ *         (forensic forwarding; consumer lands on Engagement.metadata).
+ *       - `metadata.language: correctedLanguage` (overwrites the wire
+ *         value so lead-normalizer's locale block sees the corrected
+ *         locale on the immediate re-normalize).
+ *       - `metadata.vendor: correctedVendor` (overwrites for first-turn
+ *         path; consumer's `writePhase1Deal` at L1614 lands on
+ *         `Deal.metadata.leadVendor`).
+ *  4. Publish the synthetic event to `lead.received` Pub/Sub.
+ *  5. Mark escalation `resolved` + write audit log entry.
+ *
+ * Errors are categorized:
+ *   - NOT_FOUND / BAD_REQUEST → bubble up to tRPC.
+ *   - Publish failure → bubble up (operator can retry; escalation stays
+ *     open). NOT swallowed because the operator clicked Reclassify and
+ *     expects either success or a clear error.
+ */
+export async function reclassifyRecommendation(
+  ctx: MutationContext,
+  input: ReclassifyInput,
+) {
+  const before = await loadEscalation(ctx.prisma, ctx.tenantId, input.id);
+
+  if (before.triggerType !== 'parse_confidence_review') {
+    throw new TRPCError({
+      code: 'BAD_REQUEST',
+      message:
+        `Reclassify is only valid for parse_confidence_review escalations; ` +
+        `this escalation has triggerType=${before.triggerType}.`,
+    });
+  }
+
+  if (before.status === 'resolved' || before.status === 'dismissed') {
+    throw new TRPCError({
+      code: 'BAD_REQUEST',
+      message: `Recommendation already ${before.status}`,
+    });
+  }
+
+  // At least one correction must be supplied — empty reclassify is a
+  // no-op that should be done via accept (which is the "extraction was
+  // right, just go" path).
+  if (
+    !input.correctedFormat &&
+    !input.correctedLanguage &&
+    !input.correctedVendor
+  ) {
+    throw new TRPCError({
+      code: 'BAD_REQUEST',
+      message:
+        'Reclassify requires at least one of correctedFormat / correctedLanguage / correctedVendor. ' +
+        'Use accept if the original extraction was correct.',
+    });
+  }
+
+  // Extract the stashed wire payload — load-bearing for the synthetic-
+  // republish step. Per the Q4 lock, lead-received-push.ts stashes the
+  // full event on `escalation.context.originalWirePayload` so we can
+  // reconstruct losslessly.
+  const ctxBlob = (before.context ?? {}) as {
+    originalWirePayload?: unknown;
+    dealId?: string;
+    contactId?: string;
+  };
+  const originalWirePayload = ctxBlob.originalWirePayload;
+  if (!originalWirePayload) {
+    throw new TRPCError({
+      code: 'INTERNAL_SERVER_ERROR',
+      message:
+        'Escalation context is missing originalWirePayload — cannot reconstruct synthetic event. ' +
+        'This escalation may predate KAN-1140 Phase 3 PR 6.',
+    });
+  }
+
+  // Stamp persistence targets BEFORE publishing the synthetic event so
+  // the consumer can observe the corrected state on re-read if needed.
+  // Language: force-overwrite the consumer-side "preserve existing"
+  // guard — operator-explicit intent.
+  if (input.correctedLanguage) {
+    await ctx.prisma.contact.update({
+      where: { id: before.contactId },
+      data: { language: input.correctedLanguage },
+    });
+  }
+
+  // Vendor: merge into Deal.metadata jsonb (preserves siblings).
+  // dealId is captured in escalation.context at insert time.
+  if (input.correctedVendor && ctxBlob.dealId) {
+    const deal = await ctx.prisma.deal.findFirst({
+      where: { id: ctxBlob.dealId, tenantId: ctx.tenantId },
+      select: { metadata: true },
+    });
+    if (deal) {
+      const existingMetadata =
+        (deal.metadata as Record<string, unknown> | null) ?? {};
+      await ctx.prisma.deal.update({
+        where: { id: ctxBlob.dealId },
+        data: {
+          metadata: {
+            ...existingMetadata,
+            leadVendor: input.correctedVendor,
+          } as never,
+        },
+      });
+    }
+  }
+
+  // Reconstruct + parse the synthetic event. Re-parsing through
+  // LeadReceivedEventSchema catches any drift between the stashed
+  // payload's shape and the current schema (defense-in-depth — schema
+  // additions like KAN-1140 Phase 2 PR #306's `language` were optional,
+  // so old stashes still parse cleanly; this guards future breaking
+  // additions).
+  const parsed = LeadReceivedEventSchema.safeParse(originalWirePayload);
+  if (!parsed.success) {
+    throw new TRPCError({
+      code: 'INTERNAL_SERVER_ERROR',
+      message: `Stashed originalWirePayload no longer parses against current LeadReceivedEventSchema: ${parsed.error.message}`,
+    });
+  }
+  const syntheticEvent = {
+    ...parsed.data,
+    metadata: {
+      ...parsed.data.metadata,
+      // Loop-guard — consumer's parse-confidence check short-circuits.
+      parseConfidenceOverride: true,
+      // Forensic forwarding — consumer lands on Engagement.metadata
+      // (first-turn path writes the new Engagement row with these
+      // values; multi-turn path doesn't re-trigger here per Q-ADD-1
+      // first-turn-only scope).
+      parseCorrections: {
+        ...(input.correctedFormat ? { format: input.correctedFormat } : {}),
+        ...(input.correctedLanguage ? { language: input.correctedLanguage } : {}),
+        ...(input.correctedVendor ? { vendor: input.correctedVendor } : {}),
+      },
+      // Overwrite wire values so the consumer's immediate re-normalize
+      // sees the corrected locale (lead-normalizer's locale block in
+      // packages/api/src/services/lead-normalizer.ts:415-417) and the
+      // first-turn Deal write picks up the corrected vendor at
+      // lead-received-push.ts:L1614.
+      ...(input.correctedLanguage ? { language: input.correctedLanguage } : {}),
+      ...(input.correctedVendor ? { vendor: input.correctedVendor } : {}),
+    },
+  };
+
+  // Publish — failure bubbles up so operator can retry.
+  if (!ctx.pubsubClient) {
+    throw new TRPCError({
+      code: 'INTERNAL_SERVER_ERROR',
+      message: 'pubsubClient missing on reclassify — cannot publish synthetic event.',
+    });
+  }
+  const messageId = await ctx.pubsubClient.publish(
+    LEAD_RECEIVED_TOPIC,
+    Buffer.from(JSON.stringify(syntheticEvent)),
+    {
+      eventType: 'lead.received',
+      version: '1.0',
+      source: 'kan_1140_phase_3_pr_6_reclassify',
+    },
+  );
+
+  // Mark escalation resolved AFTER publish succeeds.
+  const updated = await ctx.prisma.escalation.update({
+    where: { id: before.id },
+    data: {
+      status: 'resolved',
+      resolvedBy: ctx.actor,
+      resolvedAt: new Date(),
+    },
+  });
+
+  await writeAuditBestEffort(ctx.prisma, ctx.tenantId, ctx.actor, 'recommendation.reclassify', {
+    escalationId: before.id,
+    beforeStatus: before.status,
+    afterStatus: 'resolved',
+    corrections: {
+      ...(input.correctedFormat ? { format: input.correctedFormat } : {}),
+      ...(input.correctedLanguage ? { language: input.correctedLanguage } : {}),
+      ...(input.correctedVendor ? { vendor: input.correctedVendor } : {}),
+    },
+    syntheticEventId: syntheticEvent.eventId,
+    pubsubMessageId: messageId,
+  });
+
+  return {
+    id: updated.id,
+    status: updated.status,
+    syntheticEventId: syntheticEvent.eventId,
+    pubsubMessageId: messageId,
+  };
 }

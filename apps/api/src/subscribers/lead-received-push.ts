@@ -85,6 +85,11 @@ import {
 import { prisma } from '../prisma.js';
 import { verifyPubsubOidc } from '../lib/oidc-pubsub-verify.js';
 import { getRedisClient } from '../services/redis-client.js';
+// KAN-1140 Phase 3 PR 6 — per-layer parse-confidence-trigger derivation.
+import {
+  deriveParseConfidenceVerdict,
+  type Confidence,
+} from './_helpers/parse-confidence-trigger.js';
 
 // KAN-828 fix-forward — Brain Service + Message Shaper need redis + openai
 // clients injected so the Knowledge Layer retrieval (retrieveRelevantChunks)
@@ -815,6 +820,11 @@ leadReceivedPushApp.post('/lead-received', async (c) => {
     });
 
     let dealId: string | null = null;
+    // KAN-1140 Phase 3 PR 6 — captured ONLY on the first-turn path
+    // (writePhase1Deal sets it). Multi-turn path leaves this null; the
+    // first-turn-only gate on the parse-confidence trigger uses the
+    // non-null state as the "is first-turn" signal (Q-ADD-1 lock).
+    let firstTurnExtractionConfidence: Confidence | null = null;
 
     if (existingOpenDeals.length > 0) {
       // ── Multi-turn case: reuse existing open Deal ──
@@ -859,9 +869,17 @@ leadReceivedPushApp.post('/lead-received', async (c) => {
         case 'rule':
         case 'ai_fallback':
         case 'default_pipeline':
-        case 'objective_primary':
-          dealId = await writePhase1Deal(event, contact.tenantId, assignment);
+        case 'objective_primary': {
+          // KAN-1140 Phase 3 PR 6 — destructure the richer return shape
+          // (writePhase1Deal now surfaces extractionConfidence for the
+          // parse-confidence trigger downstream).
+          const phase1Result = await writePhase1Deal(event, contact.tenantId, assignment);
+          if (phase1Result) {
+            dealId = phase1Result.dealId;
+            firstTurnExtractionConfidence = phase1Result.extractionConfidence;
+          }
           break;
+        }
         case 'escalated':
         case 'unassigned':
           // Phase 1 posture: ambiguous/escalated routing produces
@@ -887,6 +905,106 @@ leadReceivedPushApp.post('/lead-received', async (c) => {
     // committed; failing the response would trigger Pub/Sub redelivery
     // and potentially double-write the Engagement).
     if (dealId) {
+      // ─────────────────────────────────────────────
+      // KAN-1140 Phase 3 PR 6 — Parse-confidence escalation gate.
+      // ─────────────────────────────────────────────
+      // Three independent confidence ordinals live on the wire (format
+      // from PR #304, language from PR #306, Haiku extraction from
+      // KAN-792). Per Q1 lock: if ANY layer returns 'low', escalate to
+      // operator review instead of dispatching to Brain on a weak
+      // signal. The Deal + Engagement are already committed by this
+      // point — operator sees the lead in the Recommendations queue.
+      //
+      // Q-ADD-1 lock: first-turn ONLY. Multi-turn inbounds skip the
+      // check (`firstTurnExtractionConfidence === null`) — they
+      // already have a clean (Contact, Deal) identity from the first
+      // turn; mid-conversation parse-corrections are out of scope
+      // (filed as KAN-1146 follow-up).
+      //
+      // Loop-guard (Senior PO addendum): synthetic-republish from
+      // `recommendations.reclassify` sets
+      // `metadata.parseConfidenceOverride: true` so the consumer can
+      // distinguish a republished event from the original wire
+      // inbound. The flag short-circuits this check; no second
+      // escalation row is created on republish.
+      if (
+        firstTurnExtractionConfidence !== null &&
+        event.metadata.parseConfidenceOverride !== true
+      ) {
+        const formatConfidence = event.metadata.customFields?.[
+          '_kan_1140_confidence'
+        ] as Confidence | undefined;
+        const languageConfidence = event.metadata.customFields?.[
+          '_kan_1140_language_confidence'
+        ] as Confidence | undefined;
+        const verdict = deriveParseConfidenceVerdict({
+          formatConfidence,
+          languageConfidence,
+          extractionConfidence: firstTurnExtractionConfidence,
+        });
+        if (verdict.shouldEscalate) {
+          try {
+            await prisma.escalation.create({
+              data: {
+                tenantId: event.tenantId,
+                contactId: event.contactId,
+                decisionId: null,
+                severity: 'medium',
+                triggerType: 'parse_confidence_review',
+                triggerReason: verdict.reasons.join('; '),
+                aiSuggestion: null,
+                originalAction: undefined,
+                status: 'open',
+                context: {
+                  source: 'kan_1140_phase_3_pr_6_parse_confidence',
+                  eventId: event.eventId,
+                  dealId,
+                  contactId: event.contactId,
+                  parseConfidenceBreakdown: {
+                    format: event.metadata.customFields?.['_kan_1140_format'] ?? null,
+                    formatConfidence: formatConfidence ?? null,
+                    language: event.metadata.customFields?.['_kan_1140_language'] ?? null,
+                    languageConfidence: languageConfidence ?? null,
+                    extractionConfidence: firstTurnExtractionConfidence,
+                  },
+                  bodyPreview: (event.metadata.bodyPreview ?? '').slice(0, 500),
+                  // KAN-1140 Phase 3 PR 6 — full original wire payload
+                  // stashed for the reclassify handler's synthetic-
+                  // republish. Cost: ~2-5KB per row at ~5-20
+                  // escalations/day = ~100KB/day; negligible.
+                  // Lossless reconstruction is load-bearing — the
+                  // alternative (rebuild from LeadInboxEvent) is lossy
+                  // for customFields.
+                  originalWirePayload: event,
+                } as object,
+              },
+            });
+            console.log(
+              `[lead-received-push] kan-1140-parse-confidence-escalation-created eventId=${event.eventId} tenantId=${event.tenantId} dealId=${dealId} reasons="${verdict.reasons.join('; ')}"`,
+            );
+          } catch (err) {
+            // Create-failure is non-fatal — the lead has already landed
+            // (Deal + Engagement committed). Log and fall through to
+            // Brain so the consumer doesn't double-NACK on an
+            // escalation-table outage.
+            console.warn(
+              `[lead-received-push] kan-1140-parse-confidence-escalation-create-failed eventId=${event.eventId} err=${(err as Error)?.message ?? String(err)} — proceeding to Brain`,
+            );
+          }
+          // SHORT-CIRCUIT on success path: skip Brain. Operator's
+          // accept/reclassify/dismiss flow takes over via
+          // recommendations.{accept,reclassify,dismiss}.
+          return c.text('ok', 200);
+        }
+      } else if (event.metadata.parseConfidenceOverride === true) {
+        console.log(
+          `[lead-received-push] kan-1140-parse-confidence-override eventId=${event.eventId} tenantId=${event.tenantId} dealId=${dealId} — synthetic-republish from reclassify; skipping confidence check`,
+        );
+      }
+      // ─────────────────────────────────────────────
+      // END KAN-1140 Phase 3 PR 6 block
+      // ─────────────────────────────────────────────
+
       // KAN-1052 — construct the latestInbound context from the just-
       // received lead.received event so the engine prompt's `## Latest
       // inbound` section + Stop-condition guidance render on the FIRST
@@ -1506,11 +1624,19 @@ async function writeInboundEngagementForExistingDeal(
 // Deal + DealStageHistory + Engagement write — KAN-793
 // ─────────────────────────────────────────────
 
+/**
+ * KAN-1140 Phase 3 PR 6 — return shape extended from `string | null` to
+ * `{ dealId, extractionConfidence } | null`. The caller (main handler at
+ * L965-ish) needs the Haiku extraction confidence to feed the per-layer
+ * parse-confidence trigger (the other two ordinals — format + language —
+ * are already on `event.metadata.customFields`). Returning here avoids a
+ * second Engagement.metadata read after writePhase1Deal commits.
+ */
 async function writePhase1Deal(
   event: z.infer<typeof LeadReceivedEventSchema>,
   tenantId: string,
   assignment: { mode: string; pipelineId?: string; stageId?: string | null },
-): Promise<string | null> {
+): Promise<{ dealId: string; extractionConfidence: Confidence } | null> {
   const pipelineId = assignment.pipelineId;
   if (!pipelineId) {
     // Should not reach here — caller filtered modes that always include
@@ -1676,7 +1802,9 @@ async function writePhase1Deal(
     outcome: correlationOutcome,
   });
 
-  return dealId;
+  // KAN-1140 Phase 3 PR 6 — `extractionConfidence` from the just-run
+  // normalize feeds the caller's per-layer parse-confidence trigger.
+  return { dealId, extractionConfidence: normalized.extractionConfidence };
 }
 
 // ─────────────────────────────────────────────

@@ -3133,3 +3133,245 @@ describe('KAN-1083 — engine_guardrail.deflected audit row on send_follow_up di
     expect(guardrailAudits).toHaveLength(0);
   });
 });
+
+// ─────────────────────────────────────────────────────────────
+// KAN-1140 Phase 3 PR 6 — Parse-confidence-trigger integration tests.
+// ─────────────────────────────────────────────────────────────
+//
+// Coverage matrix (matches Phase 2 spec Step 3 tests):
+//   1. All high → wirePhase2Consumers runs; NO escalation created
+//   2. format=low → escalation created; Brain skipped (short-circuit)
+//   3. language=low → escalation created
+//   4. Haiku=low → escalation created
+//   5. All three low → single escalation with all 3 reasons
+//   6. Loop-guard (Senior PO addendum, MANDATORY): override flag set →
+//      Brain runs; NO escalation created
+//   7. Multi-turn (existingOpenDeals.length > 0) + low confidence → NO
+//      escalation (Q-ADD-1 first-turn-only gate)
+//
+// Setup notes:
+//   - normalize mock's extractionConfidence drives the Haiku layer
+//   - event.metadata.customFields._kan_1140_* drives format + language
+//   - dealFindManyMock returns [] by default (first-turn path)
+//   - escalationCreateMock returns { id: 'esc_engine_proposed_a' } by default
+
+describe('KAN-1140 Phase 3 PR 6 — parse-confidence escalation trigger', () => {
+  function buildPayloadWithConfidence(opts: {
+    formatConfidence?: 'high' | 'medium' | 'low';
+    languageConfidence?: 'high' | 'medium' | 'low';
+    parseConfidenceOverride?: boolean;
+  } = {}) {
+    const customFields: Record<string, string> = {};
+    if (opts.formatConfidence) customFields._kan_1140_format = 'plain-text';
+    if (opts.formatConfidence) customFields._kan_1140_confidence = opts.formatConfidence;
+    if (opts.languageConfidence) customFields._kan_1140_language = 'en';
+    if (opts.languageConfidence) customFields._kan_1140_language_confidence = opts.languageConfidence;
+    return buildPushEnvelope({
+      metadata: {
+        fromAddress: 'test@example.com',
+        attachmentCount: 0,
+        bodyPreview: 'short body preview text',
+        ...(Object.keys(customFields).length > 0 ? { customFields } : {}),
+        ...(opts.parseConfidenceOverride ? { parseConfidenceOverride: true } : {}),
+      },
+    });
+  }
+
+  function setExtractionConfidence(level: 'high' | 'medium' | 'low') {
+    normalizeInboundMock.mockResolvedValueOnce({
+      source: 'email_inbox',
+      preParsed: {
+        senderEmail: 'test@example.com',
+        senderNameGuess: null,
+        subject: 'Inquiry',
+        bodyText: 'short body',
+      },
+      extracted: {
+        firstName: null,
+        lastName: null,
+        companyName: null,
+        phone: null,
+        intentSummary: 'Asking about pricing',
+        qualificationSignals: ['pricing'],
+      },
+      extractionConfidence: level,
+      extractionError: null,
+    });
+  }
+
+  it('all-high → wirePhase2Consumers runs; NO escalation', async () => {
+    setupHappyPathMocks();
+    setExtractionConfidence('high');
+    escalationCreateMock.mockClear();
+
+    const res = await postEnvelope(
+      buildPayloadWithConfidence({
+        formatConfidence: 'high',
+        languageConfidence: 'high',
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(escalationCreateMock).not.toHaveBeenCalled();
+    // Brain wakes up (the default brain mock returns wait_for_response)
+    expect(evaluateDealStateMock).toHaveBeenCalled();
+  });
+
+  it('format=low only → escalation created with format reason; Brain skipped', async () => {
+    setupHappyPathMocks();
+    setExtractionConfidence('high');
+    escalationCreateMock.mockClear();
+    evaluateDealStateMock.mockClear();
+
+    const res = await postEnvelope(
+      buildPayloadWithConfidence({
+        formatConfidence: 'low',
+        languageConfidence: 'high',
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(escalationCreateMock).toHaveBeenCalledTimes(1);
+    const args = escalationCreateMock.mock.calls[0]![0] as {
+      data: { triggerType: string; triggerReason: string; context: Record<string, unknown> };
+    };
+    expect(args.data.triggerType).toBe('parse_confidence_review');
+    expect(args.data.triggerReason).toContain('format detection LOW');
+    expect(args.data.triggerReason).not.toContain('language detection LOW');
+    expect(args.data.triggerReason).not.toContain('Haiku extraction LOW');
+    // Brain MUST NOT have fired (short-circuit).
+    expect(evaluateDealStateMock).not.toHaveBeenCalled();
+  });
+
+  it('language=low only → escalation created with language reason', async () => {
+    setupHappyPathMocks();
+    setExtractionConfidence('high');
+    escalationCreateMock.mockClear();
+    evaluateDealStateMock.mockClear();
+
+    const res = await postEnvelope(
+      buildPayloadWithConfidence({
+        formatConfidence: 'high',
+        languageConfidence: 'low',
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(escalationCreateMock).toHaveBeenCalledTimes(1);
+    const args = escalationCreateMock.mock.calls[0]![0] as {
+      data: { triggerReason: string };
+    };
+    expect(args.data.triggerReason).toContain('language detection LOW');
+    expect(evaluateDealStateMock).not.toHaveBeenCalled();
+  });
+
+  it('Haiku=low only → escalation created with Haiku reason', async () => {
+    setupHappyPathMocks();
+    setExtractionConfidence('low');
+    escalationCreateMock.mockClear();
+    evaluateDealStateMock.mockClear();
+
+    const res = await postEnvelope(
+      buildPayloadWithConfidence({
+        formatConfidence: 'high',
+        languageConfidence: 'high',
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(escalationCreateMock).toHaveBeenCalledTimes(1);
+    const args = escalationCreateMock.mock.calls[0]![0] as {
+      data: { triggerReason: string };
+    };
+    expect(args.data.triggerReason).toContain('Haiku extraction LOW');
+    expect(evaluateDealStateMock).not.toHaveBeenCalled();
+  });
+
+  it('all-three-low → SINGLE escalation with all 3 reasons + originalWirePayload stashed', async () => {
+    setupHappyPathMocks();
+    setExtractionConfidence('low');
+    escalationCreateMock.mockClear();
+    evaluateDealStateMock.mockClear();
+
+    const res = await postEnvelope(
+      buildPayloadWithConfidence({
+        formatConfidence: 'low',
+        languageConfidence: 'low',
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(escalationCreateMock).toHaveBeenCalledTimes(1);
+    const args = escalationCreateMock.mock.calls[0]![0] as {
+      data: {
+        triggerReason: string;
+        context: {
+          parseConfidenceBreakdown: Record<string, unknown>;
+          originalWirePayload: unknown;
+        };
+      };
+    };
+    expect(args.data.triggerReason).toContain('format detection LOW');
+    expect(args.data.triggerReason).toContain('language detection LOW');
+    expect(args.data.triggerReason).toContain('Haiku extraction LOW');
+    // originalWirePayload stashed for the reclassify handler's
+    // synthetic-republish.
+    expect(args.data.context.originalWirePayload).toBeDefined();
+    // parseConfidenceBreakdown captures the per-layer state.
+    expect(args.data.context.parseConfidenceBreakdown).toMatchObject({
+      formatConfidence: 'low',
+      languageConfidence: 'low',
+      extractionConfidence: 'low',
+    });
+    expect(evaluateDealStateMock).not.toHaveBeenCalled();
+  });
+
+  // ── MANDATORY LOOP-GUARD test (Senior PO addendum) ──
+  it('parseConfidenceOverride=true + low confidence → Brain runs; NO escalation (loop-guard)', async () => {
+    setupHappyPathMocks();
+    setExtractionConfidence('low');
+    escalationCreateMock.mockClear();
+    evaluateDealStateMock.mockClear();
+
+    const res = await postEnvelope(
+      buildPayloadWithConfidence({
+        formatConfidence: 'low',
+        languageConfidence: 'low',
+        parseConfidenceOverride: true,
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    // Loop-guard short-circuits the confidence check.
+    expect(escalationCreateMock).not.toHaveBeenCalled();
+    // Brain MUST have fired (override path proceeds to wirePhase2Consumers).
+    expect(evaluateDealStateMock).toHaveBeenCalled();
+  });
+
+  it('multi-turn + low confidence → NO escalation (Q-ADD-1 first-turn-only gate)', async () => {
+    setupHappyPathMocks();
+    // Override default to multi-turn shape.
+    dealFindManyMock.mockResolvedValueOnce([
+      {
+        id: DEAL_A,
+        currentStage: { id: STAGE_INITIAL, name: 'Initial', outcomeType: 'open' },
+      },
+    ]);
+    setExtractionConfidence('low');
+    escalationCreateMock.mockClear();
+    evaluateDealStateMock.mockClear();
+
+    const res = await postEnvelope(
+      buildPayloadWithConfidence({
+        formatConfidence: 'low',
+        languageConfidence: 'low',
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    // First-turn-only gate: multi-turn path doesn't even check confidence.
+    expect(escalationCreateMock).not.toHaveBeenCalled();
+    // Brain still fires on multi-turn.
+    expect(evaluateDealStateMock).toHaveBeenCalled();
+  });
+});

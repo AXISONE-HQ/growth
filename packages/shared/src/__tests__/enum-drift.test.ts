@@ -323,6 +323,39 @@ describe("LeadReceivedEvent schema regression (KAN-741)", () => {
     ).toThrow();
   });
 
+  // ── KAN-1140 Phase 3 PR 6 — parseCorrections + parseConfidenceOverride
+  // (additive + optional; backs the synthetic-republish path from
+  // recommendations.reclassify) ──
+  it("KAN-1140 Phase 3 PR 6 — accepts payload WITHOUT parseCorrections/parseConfidenceOverride (back-compat)", () => {
+    const parsed = LeadReceivedEventSchema.parse(CANONICAL_SAMPLES[0].payload);
+    expect(parsed.metadata.parseCorrections).toBeUndefined();
+    expect(parsed.metadata.parseConfidenceOverride).toBeUndefined();
+  });
+
+  it("KAN-1140 Phase 3 PR 6 — round-trips parseCorrections + parseConfidenceOverride through Pub/Sub JSON", () => {
+    const payload = {
+      ...CANONICAL_SAMPLES[0].payload,
+      metadata: {
+        ...CANONICAL_SAMPLES[0].payload.metadata,
+        parseCorrections: {
+          format: "adf",
+          language: "fr",
+          vendor: "formspree",
+        },
+        parseConfidenceOverride: true,
+      },
+    };
+    const wire = Buffer.from(JSON.stringify(payload), "utf8").toString("base64");
+    const decoded = JSON.parse(Buffer.from(wire, "base64").toString("utf8"));
+    const parsed = LeadReceivedEventSchema.parse(decoded);
+    expect(parsed.metadata.parseCorrections).toEqual({
+      format: "adf",
+      language: "fr",
+      vendor: "formspree",
+    });
+    expect(parsed.metadata.parseConfidenceOverride).toBe(true);
+  });
+
   // §0.2 — Pub/Sub serialize/deserialize round-trip.
   it("KAN-1036 §0.2 — replyToken round-trips through Pub/Sub JSON serialization", () => {
     const tok = "deadbeefcafe1234";

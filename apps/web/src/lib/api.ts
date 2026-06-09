@@ -1786,6 +1786,23 @@ export const recommendationsApi = {
       'recommendations.dismiss',
       { id, reason },
     ),
+  // KAN-1140 Phase 3 PR 6 — operator-corrected metadata path for
+  // parse_confidence_review escalations. At least one of the corrected
+  // fields must be supplied; the backend validates + synthetic-republishes.
+  reclassify: (
+    id: string,
+    corrections: {
+      correctedFormat?: string;
+      correctedLanguage?: string;
+      correctedVendor?: string;
+    },
+  ) =>
+    trpcMutation<{
+      id: string;
+      status: string;
+      syntheticEventId: string;
+      pubsubMessageId: string;
+    }>('recommendations.reclassify', { id, ...corrections }),
 };
 
 /* ── Import Jobs API (KAN-896 — Cohort 2.1a) ──────────────────────────

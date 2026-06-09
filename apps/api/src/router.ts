@@ -1695,6 +1695,27 @@ interface RecsModule {
     ctx: { prisma: unknown; tenantId: string; actor: string },
     input: { id: string; reason: string },
   ) => Promise<unknown>;
+  // KAN-1140 Phase 3 PR 6 — operator-corrected metadata for
+  // parse_confidence_review escalations. Stamp Contact.language /
+  // Deal.metadata.leadVendor, then synthetic-republish the original
+  // lead.received event so the consumer re-normalizes with the
+  // corrected locale + lands the corrections on Engagement/Deal
+  // metadata. Loop-guard: synthetic event carries
+  // `parseConfidenceOverride: true`.
+  reclassifyRecommendation: (
+    ctx: {
+      prisma: unknown;
+      tenantId: string;
+      actor: string;
+      pubsubClient?: unknown | null;
+    },
+    input: {
+      id: string;
+      correctedFormat?: string;
+      correctedLanguage?: string;
+      correctedVendor?: string;
+    },
+  ) => Promise<unknown>;
 }
 let _recsModule: RecsModule | null = null;
 async function loadRecsModule(): Promise<RecsModule> {
@@ -1797,6 +1818,37 @@ const recommendationsRouter = router({
           prisma: ctx.prisma,
           tenantId: ctx.tenantId,
           actor: ctx.firebaseUser?.uid ?? "unknown",
+        },
+        input,
+      );
+    }),
+
+  // KAN-1140 Phase 3 PR 6 — operator-corrected metadata path for
+  // parse_confidence_review escalations. Stamps corrected language/
+  // vendor onto Contact/Deal then republishes the original wire
+  // event with `parseConfidenceOverride: true` (loop-guard) so the
+  // consumer's existing flow re-normalizes with the corrected
+  // locale + lands forensics on Engagement/Deal metadata.
+  reclassify: adminProcedure
+    .input(
+      z.object({
+        id: z.string().uuid(),
+        correctedFormat: z.string().min(1).max(50).optional(),
+        // ISO 639-1 (`en`/`fr`/`es`/...). Tight bound mirrors the
+        // wire schema's `language` field (min 2, max 8).
+        correctedLanguage: z.string().min(2).max(8).optional(),
+        correctedVendor: z.string().min(1).max(50).optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const { reclassifyRecommendation } = await loadRecsModule();
+      const { getPubSubClient } = await loadPubSubLib();
+      return reclassifyRecommendation(
+        {
+          prisma: ctx.prisma,
+          tenantId: ctx.tenantId,
+          actor: ctx.firebaseUser?.uid ?? "unknown",
+          pubsubClient: getPubSubClient(),
         },
         input,
       );
