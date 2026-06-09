@@ -136,6 +136,46 @@ export function extractLabelTokens(body: string): string[] {
 }
 
 /**
+ * KAN-1140 Phase 3 PR 8 — Auto-suggest predicate.
+ *
+ * Hoisted to @growth/shared per Memo 37 (cross-workspace algorithm hoist
+ * eliminates byte-stability drift class). Three call sites need to agree
+ * on this predicate byte-for-byte:
+ *
+ *   1. apps/connectors/src/app.ts — webhook hook runs the predicate
+ *      after every UPSERT to evaluate auto-promotion pending → suggested
+ *   2. apps/api/src/__tests__/integration/parse-fingerprint-write-path.test.ts
+ *      — integration test helper mirrors production 1:1 against real
+ *      Postgres so regressions surface as failures
+ *   3. (Future) KAN-1147 cron poller — may re-evaluate the predicate on
+ *      a schedule independent of inbound write traffic
+ *
+ * If the predicate drifted across these sites, fingerprint promotion
+ * semantics would diverge silently. Single source of truth eliminates
+ * the class.
+ *
+ * Q3 lock (KAN-1140 PR 8 Phase 1):
+ *   - pending AND (count >= 5 AND format_confidence = 'high') → suggest
+ *   - pending AND reclassify_count >= 1 → suggest
+ *   - any other state → no-op (Q-ADD-2 lock: gate on === 'pending',
+ *     NOT !== 'supported', to defend against re-suggesting `unsupported`)
+ */
+export interface AutoSuggestInput {
+  supportStatus: string;
+  occurrenceCount: number;
+  formatConfidence: string;
+  reclassifyCount: number;
+}
+
+export function shouldAutoSuggest(row: AutoSuggestInput): boolean {
+  return (
+    row.supportStatus === "pending" &&
+    ((row.occurrenceCount >= 5 && row.formatConfidence === "high") ||
+      row.reclassifyCount >= 1)
+  );
+}
+
+/**
  * Derive the layered hash trio for an inbound. See file-level comment
  * for algorithm details. `format` MUST be the format-detector's output
  * (NOT operator-corrected — fingerprints capture wire reality).

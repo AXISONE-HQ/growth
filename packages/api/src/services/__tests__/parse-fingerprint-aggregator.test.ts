@@ -11,7 +11,11 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   listParseFingerprints,
   getParseFingerprintDetail,
+  markFingerprintSupported,
+  markFingerprintUnsupported,
+  unmarkFingerprint,
   type SortBy,
+  type SupportStatus,
 } from "../parse-fingerprint-aggregator.js";
 
 const TENANT_A = "11111111-1111-1111-1111-111111111111";
@@ -32,6 +36,10 @@ interface FakeFingerprint {
   occurrenceCount: number;
   escalationCount: number;
   reclassifyCount: number;
+  // KAN-1140 PR 8 — capability announcement state.
+  supportStatus: SupportStatus;
+  suggestedAt: Date | null;
+  supportedAt: Date | null;
   firstSeenAt: Date;
   lastSeenAt: Date;
   samples: Array<{
@@ -59,6 +67,9 @@ function makeFingerprint(overrides: Partial<FakeFingerprint> = {}): FakeFingerpr
     occurrenceCount: 5,
     escalationCount: 0,
     reclassifyCount: 0,
+    supportStatus: "pending",
+    suggestedAt: null,
+    supportedAt: null,
     firstSeenAt: new Date("2026-06-01T10:00:00Z"),
     lastSeenAt: new Date("2026-06-09T13:00:00Z"),
     samples: [],
@@ -70,7 +81,7 @@ function makePrisma(rows: FakeFingerprint[]) {
   return {
     parseFingerprint: {
       findMany: vi.fn(async ({ where, orderBy, take, skip }: {
-        where: { tenantId: string; format?: string; language?: string; vendor?: string; escalationCount?: { gt: number } };
+        where: { tenantId: string; format?: string; language?: string; vendor?: string; escalationCount?: { gt: number }; supportStatus?: string };
         orderBy: Record<string, "asc" | "desc">;
         take: number;
         skip: number;
@@ -83,7 +94,9 @@ function makePrisma(rows: FakeFingerprint[]) {
             (!where.vendor || r.vendor === where.vendor) &&
             // Use typeof check — `gt: 0` is falsy under `!where.escalationCount?.gt`
             (typeof where.escalationCount?.gt !== "number" ||
-              r.escalationCount > where.escalationCount.gt),
+              r.escalationCount > where.escalationCount.gt) &&
+            // KAN-1140 PR 8 — status filter
+            (!where.supportStatus || r.supportStatus === where.supportStatus),
         );
         const [field, dir] = Object.entries(orderBy)[0]!;
         const sorted = filtered.sort((a, b) => {
@@ -94,19 +107,26 @@ function makePrisma(rows: FakeFingerprint[]) {
         });
         return sorted.slice(skip, skip + take);
       }),
-      count: vi.fn(async ({ where }: { where: { tenantId: string; format?: string; escalationCount?: { gt: number } } }) =>
+      count: vi.fn(async ({ where }: { where: { tenantId: string; format?: string; escalationCount?: { gt: number }; supportStatus?: string } }) =>
         rows.filter(
           (r) =>
             r.tenantId === where.tenantId &&
             (!where.format || r.format === where.format) &&
             (typeof where.escalationCount?.gt !== "number" ||
-              r.escalationCount > where.escalationCount.gt),
+              r.escalationCount > where.escalationCount.gt) &&
+            (!where.supportStatus || r.supportStatus === where.supportStatus),
         ).length,
       ),
       findFirst: vi.fn(async ({ where }: { where: { id: string; tenantId: string } }) => {
         const r = rows.find((row) => row.id === where.id && row.tenantId === where.tenantId);
         return r ?? null;
       }),
+    },
+    // KAN-1140 PR 8 — capture executeRaw calls so mutation tests can assert.
+    // Returns 1 on success (row updated); 0 on guard miss.
+    $executeRaw: vi.fn(async (..._args: unknown[]) => 1),
+    auditLog: {
+      create: vi.fn(async () => ({ id: "audit_a" })),
     },
   };
 }
@@ -395,4 +415,238 @@ describe("listParseFingerprints — sortBy enum is exhaustive", () => {
       expect(result.items).toBeDefined();
     },
   );
+});
+
+// ─────────────────────────────────────────────────────────────
+// KAN-1140 Phase 3 PR 8 — capability announcement tests
+// ─────────────────────────────────────────────────────────────
+
+describe("listParseFingerprints — statusFilter", () => {
+  it("statusFilter='supported' returns only supported rows", async () => {
+    const rows = [
+      makeFingerprint({ id: "fp_p", supportStatus: "pending" }),
+      makeFingerprint({ id: "fp_su", supportStatus: "supported" }),
+      makeFingerprint({ id: "fp_sg", supportStatus: "suggested" }),
+    ];
+    const prisma = makePrisma(rows);
+    const result = await listParseFingerprints(prisma as never, {
+      tenantId: TENANT_A,
+      sortBy: "lastSeenAt",
+      limit: 10,
+      offset: 0,
+      statusFilter: "supported",
+    });
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]!.id).toBe("fp_su");
+  });
+
+  it("statusFilter undefined returns all rows (no filter)", async () => {
+    const rows = [
+      makeFingerprint({ id: "fp_p", supportStatus: "pending" }),
+      makeFingerprint({ id: "fp_su", supportStatus: "supported" }),
+    ];
+    const prisma = makePrisma(rows);
+    const result = await listParseFingerprints(prisma as never, {
+      tenantId: TENANT_A,
+      sortBy: "lastSeenAt",
+      limit: 10,
+      offset: 0,
+    });
+    expect(result.items).toHaveLength(2);
+  });
+
+  it("statusFilter respects tenant isolation", async () => {
+    const OTHER = "22222222-2222-2222-2222-222222222222";
+    const rows = [
+      makeFingerprint({ id: "fp_mine", tenantId: TENANT_A, supportStatus: "supported" }),
+      makeFingerprint({ id: "fp_theirs", tenantId: OTHER, supportStatus: "supported" }),
+    ];
+    const prisma = makePrisma(rows);
+    const result = await listParseFingerprints(prisma as never, {
+      tenantId: TENANT_A,
+      sortBy: "lastSeenAt",
+      limit: 10,
+      offset: 0,
+      statusFilter: "supported",
+    });
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]!.id).toBe("fp_mine");
+  });
+
+  it("each item surfaces supportStatus + timestamps", async () => {
+    const rows = [
+      makeFingerprint({
+        supportStatus: "supported",
+        suggestedAt: new Date("2026-06-08T10:00:00Z"),
+        supportedAt: new Date("2026-06-09T13:00:00Z"),
+      }),
+    ];
+    const prisma = makePrisma(rows);
+    const result = await listParseFingerprints(prisma as never, {
+      tenantId: TENANT_A,
+      sortBy: "lastSeenAt",
+      limit: 10,
+      offset: 0,
+    });
+    expect(result.items[0]!.supportStatus).toBe("supported");
+    expect(result.items[0]!.suggestedAt).toMatch(/^2026-06-08T10:00:00/);
+    expect(result.items[0]!.supportedAt).toMatch(/^2026-06-09T13:00:00/);
+  });
+});
+
+const ACTOR = "uid-fred";
+
+describe("markFingerprintSupported", () => {
+  it("pending → supported (audit row written)", async () => {
+    const rows = [makeFingerprint({ id: FP_AAA, supportStatus: "pending" })];
+    const prisma = makePrisma(rows);
+    const result = await markFingerprintSupported(prisma as never, {
+      tenantId: TENANT_A,
+      userId: ACTOR,
+      fingerprintId: FP_AAA,
+    });
+    expect(result.supportStatus).toBe("supported");
+    expect(result.previousStatus).toBe("pending");
+    const audit = (prisma as unknown as { auditLog: { create: { mock: { calls: Array<[{ data: Record<string, unknown> }]> } } } })
+      .auditLog.create.mock.calls;
+    expect(audit).toHaveLength(1);
+    expect(audit[0]![0].data.actionType).toBe("parse_fingerprint.marked_supported");
+  });
+
+  it("suggested → supported (audit captures previousStatus)", async () => {
+    const rows = [makeFingerprint({ id: FP_AAA, supportStatus: "suggested" })];
+    const prisma = makePrisma(rows);
+    const result = await markFingerprintSupported(prisma as never, {
+      tenantId: TENANT_A,
+      userId: ACTOR,
+      fingerprintId: FP_AAA,
+    });
+    expect(result.previousStatus).toBe("suggested");
+    const audit = (prisma as unknown as { auditLog: { create: { mock: { calls: Array<[{ data: { payload: Record<string, unknown> } }]> } } } })
+      .auditLog.create.mock.calls;
+    expect((audit[0]![0].data.payload as { previousStatus: string }).previousStatus).toBe("suggested");
+  });
+
+  it("unsupported → supported (operator changes mind)", async () => {
+    const rows = [makeFingerprint({ id: FP_AAA, supportStatus: "unsupported" })];
+    const prisma = makePrisma(rows);
+    const result = await markFingerprintSupported(prisma as never, {
+      tenantId: TENANT_A,
+      userId: ACTOR,
+      fingerprintId: FP_AAA,
+    });
+    expect(result.previousStatus).toBe("unsupported");
+  });
+
+  it("wrong tenantId → throws NOT_FOUND", async () => {
+    const rows = [makeFingerprint({ id: FP_AAA, supportStatus: "pending" })];
+    const prisma = makePrisma(rows);
+    const OTHER = "22222222-2222-2222-2222-222222222222";
+    await expect(
+      markFingerprintSupported(prisma as never, {
+        tenantId: OTHER,
+        userId: ACTOR,
+        fingerprintId: FP_AAA,
+      }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+
+  it("already supported → throws BAD_REQUEST when guarded UPDATE returns 0", async () => {
+    const rows = [makeFingerprint({ id: FP_AAA, supportStatus: "supported" })];
+    const prisma = makePrisma(rows);
+    // Force the guarded UPDATE to return 0 (no row matched the IN-clause)
+    (prisma as unknown as { $executeRaw: { mockResolvedValueOnce: (v: number) => void } })
+      .$executeRaw.mockResolvedValueOnce(0);
+    await expect(
+      markFingerprintSupported(prisma as never, {
+        tenantId: TENANT_A,
+        userId: ACTOR,
+        fingerprintId: FP_AAA,
+      }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
+});
+
+describe("markFingerprintUnsupported", () => {
+  it("pending → unsupported (audit row written)", async () => {
+    const rows = [makeFingerprint({ id: FP_AAA, supportStatus: "pending" })];
+    const prisma = makePrisma(rows);
+    const result = await markFingerprintUnsupported(prisma as never, {
+      tenantId: TENANT_A,
+      userId: ACTOR,
+      fingerprintId: FP_AAA,
+    });
+    expect(result.supportStatus).toBe("unsupported");
+    expect(result.previousStatus).toBe("pending");
+    const audit = (prisma as unknown as { auditLog: { create: { mock: { calls: Array<[{ data: Record<string, unknown> }]> } } } })
+      .auditLog.create.mock.calls;
+    expect(audit[0]![0].data.actionType).toBe("parse_fingerprint.marked_unsupported");
+  });
+
+  it("suggested → unsupported (operator-explicit rejection)", async () => {
+    const rows = [makeFingerprint({ id: FP_AAA, supportStatus: "suggested" })];
+    const prisma = makePrisma(rows);
+    const result = await markFingerprintUnsupported(prisma as never, {
+      tenantId: TENANT_A,
+      userId: ACTOR,
+      fingerprintId: FP_AAA,
+    });
+    expect(result.previousStatus).toBe("suggested");
+  });
+
+  it("wrong tenantId → throws NOT_FOUND", async () => {
+    const rows = [makeFingerprint({ id: FP_AAA, supportStatus: "suggested" })];
+    const prisma = makePrisma(rows);
+    const OTHER = "22222222-2222-2222-2222-222222222222";
+    await expect(
+      markFingerprintUnsupported(prisma as never, {
+        tenantId: OTHER,
+        userId: ACTOR,
+        fingerprintId: FP_AAA,
+      }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+});
+
+describe("unmarkFingerprint", () => {
+  it("supported → pending (clears suggestedAt/supportedAt/supportedBy)", async () => {
+    const rows = [makeFingerprint({ id: FP_AAA, supportStatus: "supported" })];
+    const prisma = makePrisma(rows);
+    const result = await unmarkFingerprint(prisma as never, {
+      tenantId: TENANT_A,
+      userId: ACTOR,
+      fingerprintId: FP_AAA,
+    });
+    expect(result.supportStatus).toBe("pending");
+    expect(result.previousStatus).toBe("supported");
+    const audit = (prisma as unknown as { auditLog: { create: { mock: { calls: Array<[{ data: Record<string, unknown> }]> } } } })
+      .auditLog.create.mock.calls;
+    expect(audit[0]![0].data.actionType).toBe("parse_fingerprint.unmarked");
+  });
+
+  it("unsupported → pending (re-arms auto-suggest)", async () => {
+    const rows = [makeFingerprint({ id: FP_AAA, supportStatus: "unsupported" })];
+    const prisma = makePrisma(rows);
+    const result = await unmarkFingerprint(prisma as never, {
+      tenantId: TENANT_A,
+      userId: ACTOR,
+      fingerprintId: FP_AAA,
+    });
+    expect(result.supportStatus).toBe("pending");
+    expect(result.previousStatus).toBe("unsupported");
+  });
+
+  it("pending → ALREADY pending (guarded UPDATE returns 0; throws BAD_REQUEST)", async () => {
+    const rows = [makeFingerprint({ id: FP_AAA, supportStatus: "pending" })];
+    const prisma = makePrisma(rows);
+    (prisma as unknown as { $executeRaw: { mockResolvedValueOnce: (v: number) => void } })
+      .$executeRaw.mockResolvedValueOnce(0);
+    await expect(
+      unmarkFingerprint(prisma as never, {
+        tenantId: TENANT_A,
+        userId: ACTOR,
+        fingerprintId: FP_AAA,
+      }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
 });

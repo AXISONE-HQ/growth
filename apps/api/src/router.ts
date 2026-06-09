@@ -1962,11 +1962,26 @@ interface ParseFingerprintsModule {
       languageFilter?: string;
       vendorFilter?: string;
       showOnlyWithEscalations?: boolean;
+      // KAN-1140 PR 8 — capability announcement status filter
+      statusFilter?: 'pending' | 'suggested' | 'supported' | 'unsupported';
     },
   ) => Promise<unknown>;
   getParseFingerprintDetail: (
     prisma: unknown,
     input: { tenantId: string; fingerprintId: string },
+  ) => Promise<unknown>;
+  // KAN-1140 PR 8 — capability announcement mutations
+  markFingerprintSupported: (
+    prisma: unknown,
+    input: { tenantId: string; userId: string; fingerprintId: string },
+  ) => Promise<unknown>;
+  markFingerprintUnsupported: (
+    prisma: unknown,
+    input: { tenantId: string; userId: string; fingerprintId: string },
+  ) => Promise<unknown>;
+  unmarkFingerprint: (
+    prisma: unknown,
+    input: { tenantId: string; userId: string; fingerprintId: string },
   ) => Promise<unknown>;
 }
 let _parseFingerprintsModule: ParseFingerprintsModule | null = null;
@@ -1988,6 +2003,9 @@ const parserPatternsRouter = router({
         languageFilter: z.string().optional(),
         vendorFilter: z.string().optional(),
         showOnlyWithEscalations: z.boolean().default(false),
+        // KAN-1140 PR 8 — capability announcement status filter for the
+        // Settings UI affordance.
+        statusFilter: z.enum(['pending', 'suggested', 'supported', 'unsupported']).optional(),
       }),
     )
     .query(async ({ ctx, input }) => {
@@ -2004,6 +2022,48 @@ const parserPatternsRouter = router({
       const { getParseFingerprintDetail } = await loadParseFingerprintsModule();
       return getParseFingerprintDetail(ctx.prisma, {
         tenantId: ctx.tenantId,
+        fingerprintId: input.fingerprintId,
+      });
+    }),
+
+  // KAN-1140 Phase 3 PR 8 — capability announcement mutations.
+  //
+  // protectedProcedure (tenant-scoped operator authority); ctx.tenantId
+  // gates the row + audit log. userId from ctx.firebaseUser?.uid lands
+  // on the supported_by column (operator forensic trail).
+  //
+  // BAD_REQUEST on transitions from a state the mutation can't accept
+  // (e.g., mark-as-supported on an already-supported row). NOT_FOUND on
+  // wrong tenant OR unknown fingerprintId — minimal info-leak.
+  markSupported: protectedProcedure
+    .input(z.object({ fingerprintId: z.string().uuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const { markFingerprintSupported } = await loadParseFingerprintsModule();
+      return markFingerprintSupported(ctx.prisma, {
+        tenantId: ctx.tenantId,
+        userId: ctx.firebaseUser?.uid ?? "unknown",
+        fingerprintId: input.fingerprintId,
+      });
+    }),
+
+  markUnsupported: protectedProcedure
+    .input(z.object({ fingerprintId: z.string().uuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const { markFingerprintUnsupported } = await loadParseFingerprintsModule();
+      return markFingerprintUnsupported(ctx.prisma, {
+        tenantId: ctx.tenantId,
+        userId: ctx.firebaseUser?.uid ?? "unknown",
+        fingerprintId: input.fingerprintId,
+      });
+    }),
+
+  unmark: protectedProcedure
+    .input(z.object({ fingerprintId: z.string().uuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const { unmarkFingerprint } = await loadParseFingerprintsModule();
+      return unmarkFingerprint(ctx.prisma, {
+        tenantId: ctx.tenantId,
+        userId: ctx.firebaseUser?.uid ?? "unknown",
         fingerprintId: input.fingerprintId,
       });
     }),

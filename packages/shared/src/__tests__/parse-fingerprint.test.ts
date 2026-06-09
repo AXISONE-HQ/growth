@@ -14,6 +14,7 @@ import {
   extractLabelTokens,
   extractTagTreeForHash,
   normalizeSenderAddress,
+  shouldAutoSuggest,
 } from "../parse-fingerprint.js";
 
 describe("normalizeSenderAddress", () => {
@@ -261,5 +262,88 @@ describe("deriveParseFingerprint — golden-hash regression locks", () => {
     expect(fp.senderDomainHash).toBe(
       "091e136d1b40ecb56333f77624c0146da42d83daa3a9fa48b3dd570878415058",
     );
+  });
+});
+
+describe("shouldAutoSuggest — KAN-1140 PR 8 auto-suggest predicate", () => {
+  // Per Memo 37: this predicate is the cross-workspace single source of
+  // truth between webhook hook + integration test + future KAN-1147 cron.
+  // Tests lock the truth table; refactors that change semantics fail loud.
+
+  it("pending + occurrenceCount >= 5 + formatConfidence='high' → true", () => {
+    expect(
+      shouldAutoSuggest({
+        supportStatus: "pending",
+        occurrenceCount: 5,
+        formatConfidence: "high",
+        reclassifyCount: 0,
+      }),
+    ).toBe(true);
+  });
+
+  it("pending + reclassifyCount >= 1 → true (operator-behavioral signal)", () => {
+    expect(
+      shouldAutoSuggest({
+        supportStatus: "pending",
+        occurrenceCount: 1,
+        formatConfidence: "medium",
+        reclassifyCount: 1,
+      }),
+    ).toBe(true);
+  });
+
+  it("pending + occurrenceCount < 5 + reclassifyCount = 0 → false (under threshold)", () => {
+    expect(
+      shouldAutoSuggest({
+        supportStatus: "pending",
+        occurrenceCount: 4,
+        formatConfidence: "high",
+        reclassifyCount: 0,
+      }),
+    ).toBe(false);
+  });
+
+  it("pending + occurrenceCount >= 5 + formatConfidence='medium' → false (low confidence)", () => {
+    expect(
+      shouldAutoSuggest({
+        supportStatus: "pending",
+        occurrenceCount: 100,
+        formatConfidence: "medium",
+        reclassifyCount: 0,
+      }),
+    ).toBe(false);
+  });
+
+  it("supported → false (predicate gates on === 'pending', Q-ADD-2 lock)", () => {
+    expect(
+      shouldAutoSuggest({
+        supportStatus: "supported",
+        occurrenceCount: 100,
+        formatConfidence: "high",
+        reclassifyCount: 10,
+      }),
+    ).toBe(false);
+  });
+
+  it("unsupported → false (defends against operator-rejected re-suggestion)", () => {
+    expect(
+      shouldAutoSuggest({
+        supportStatus: "unsupported",
+        occurrenceCount: 100,
+        formatConfidence: "high",
+        reclassifyCount: 10,
+      }),
+    ).toBe(false);
+  });
+
+  it("suggested → false (already in target state; no-op)", () => {
+    expect(
+      shouldAutoSuggest({
+        supportStatus: "suggested",
+        occurrenceCount: 100,
+        formatConfidence: "high",
+        reclassifyCount: 5,
+      }),
+    ).toBe(false);
   });
 });

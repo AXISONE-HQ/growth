@@ -15,6 +15,12 @@ import {
   defaultPublishLeadReceived,
 } from './webhooks/resend-inbound.js';
 import { PrismaClient } from '@prisma/client';
+// KAN-1140 Phase 3 PR 8 — auto-suggest predicate. Hoisted to
+// @growth/shared per Memo 37 (cross-workspace algorithm hoist
+// eliminates byte-stability drift). Same hoist destination as the
+// PR 7 deriveParseFingerprint hash algorithm — keeps all
+// parse-fingerprint utilities in one module.
+import { shouldAutoSuggest } from '@growth/shared';
 import { actionSendPushApp } from './subscribers/action-send-push.js';
 import { unsubscribeApp } from './routes/unsubscribe.js';
 import { buildOidcMiddleware } from './middleware/oidc.js';
@@ -203,6 +209,90 @@ export function buildApp(): Hono {
             LIMIT 5
           )
       `;
+
+      // KAN-1140 Phase 3 PR 8 — Auto-suggest promotion (Q3 lock).
+      //
+      // Read just-updated row back; evaluate the composite predicate:
+      //   (occurrence_count >= 5 AND format_confidence = 'high')
+      //   OR reclassify_count >= 1
+      //
+      // If both the predicate AND the status guard (Q-ADD-2: gate on
+      // === 'pending', NOT !== 'supported') hold, run a gated UPDATE
+      // that preserves concurrency safety per the Q-ADD-3 addendum:
+      // the `AND support_status = 'pending'` clause makes the UPDATE
+      // a no-op on rows another inbound just promoted, so the audit
+      // log only fires on the actual transition. Best-effort: any
+      // failure here MUST NOT fail the webhook (the inbound has
+      // already landed via the UPSERT + sample writes above).
+      const row = await prismaTyped.$queryRaw<Array<{
+        support_status: string;
+        occurrence_count: number;
+        format_confidence: string;
+        reclassify_count: number;
+        format: string;
+        language: string | null;
+        vendor: string | null;
+        structure_hash: string | null;
+      }>>`
+        SELECT support_status, occurrence_count, format_confidence,
+               reclassify_count, format, language, vendor, structure_hash
+        FROM parse_fingerprints
+        WHERE id = ${fingerprintId}
+      `;
+      const fp = row[0];
+      // KAN-1140 PR 8 — predicate hoisted to @growth/shared per Memo 37.
+      // Snake_case DB columns mapped to the canonical camelCase shape.
+      if (
+        fp &&
+        shouldAutoSuggest({
+          supportStatus: fp.support_status,
+          occurrenceCount: fp.occurrence_count,
+          formatConfidence: fp.format_confidence,
+          reclassifyCount: fp.reclassify_count,
+        })
+      ) {
+        try {
+          const promotion = await prismaTyped.$queryRaw<Array<{ id: string }>>`
+            UPDATE parse_fingerprints
+            SET support_status = 'suggested',
+                suggested_at = NOW(),
+                updated_at = NOW()
+            WHERE id = ${fingerprintId}
+              AND support_status = 'pending'
+            RETURNING id
+          `;
+          if (promotion.length > 0) {
+            // Audit ONLY on actual transition. The concurrent-promotion
+            // race resolves cleanly: only the winning UPDATE returns a
+            // row; the other returns empty and skips the audit.
+            await (getPrisma() as unknown as { auditLog: { create: (args: unknown) => Promise<unknown> } })
+              .auditLog.create({
+                data: {
+                  tenantId: input.tenantId,
+                  actor: 'system',
+                  actionType: 'parse_fingerprint.auto_suggested',
+                  payload: {
+                    fingerprintId,
+                    previousStatus: 'pending',
+                    newStatus: 'suggested',
+                    signature: {
+                      format: fp.format,
+                      language: fp.language,
+                      vendor: fp.vendor,
+                      structureHashPreview: fp.structure_hash?.slice(0, 16) ?? null,
+                    },
+                  },
+                },
+              })
+              .catch(() => {
+                // Best-effort audit; lead lands regardless.
+              });
+          }
+        } catch {
+          // Auto-suggest failure is non-fatal — lead has already landed.
+          // Next inbound matching this signature will retry the predicate.
+        }
+      }
     },
   });
 

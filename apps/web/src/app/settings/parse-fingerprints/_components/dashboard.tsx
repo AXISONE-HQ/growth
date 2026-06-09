@@ -17,6 +17,7 @@ import {
   parserPatternsApi,
   type ParseFingerprintListItem,
   type ParseFingerprintDetail,
+  type ParseFingerprintSupportStatus,
 } from '@/lib/api';
 
 type SortBy = 'lastSeenAt' | 'occurrenceCount' | 'escalationCount';
@@ -28,6 +29,42 @@ const SORT_LABELS: Record<SortBy, string> = {
 };
 
 const SORT_OPTIONS: SortBy[] = ['lastSeenAt', 'occurrenceCount', 'escalationCount'];
+
+// KAN-1140 Phase 3 PR 8 — capability announcement status filter values.
+type StatusFilter = ParseFingerprintSupportStatus | 'all';
+
+const STATUS_LABELS: Record<StatusFilter, string> = {
+  all: 'All statuses',
+  pending: 'Pending',
+  suggested: 'Suggested',
+  supported: 'Supported',
+  unsupported: 'Unsupported',
+};
+
+const STATUS_OPTIONS: StatusFilter[] = [
+  'all',
+  'pending',
+  'suggested',
+  'supported',
+  'unsupported',
+];
+
+// Simple status badge — color codes by capability state.
+function StatusBadge({ status }: { status: ParseFingerprintSupportStatus }) {
+  const colors: Record<ParseFingerprintSupportStatus, string> = {
+    pending: 'bg-gray-100 text-gray-700',
+    suggested: 'bg-amber-100 text-amber-800',
+    supported: 'bg-green-100 text-green-800',
+    unsupported: 'bg-red-100 text-red-700',
+  };
+  return (
+    <span
+      className={`inline-block rounded px-1.5 py-0.5 text-xs font-medium ${colors[status]}`}
+    >
+      {status}
+    </span>
+  );
+}
 
 function formatRelative(iso: string): string {
   const ms = Date.now() - new Date(iso).getTime();
@@ -49,9 +86,15 @@ export function ParserPatternsDashboard(): React.ReactElement {
   const [languageFilter, setLanguageFilter] = React.useState<string>('');
   const [vendorFilter, setVendorFilter] = React.useState<string>('');
   const [showOnlyWithEscalations, setShowOnlyWithEscalations] = React.useState<boolean>(false);
+  const [statusFilter, setStatusFilter] = React.useState<StatusFilter>('all');
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
   const [detail, setDetail] = React.useState<ParseFingerprintDetail | null>(null);
   const [detailLoading, setDetailLoading] = React.useState<boolean>(false);
+  // KAN-1140 PR 8 — supported-count for the summary card.
+  const [supportedCount, setSupportedCount] = React.useState<number>(0);
+  // KAN-1140 PR 8 — mark-as-X mutation in-flight indicator + error scoped
+  // to the detail drawer so list interactions stay snappy.
+  const [mutationInFlight, setMutationInFlight] = React.useState<boolean>(false);
 
   const reload = React.useCallback(async () => {
     try {
@@ -64,6 +107,7 @@ export function ParserPatternsDashboard(): React.ReactElement {
         languageFilter: languageFilter || undefined,
         vendorFilter: vendorFilter || undefined,
         showOnlyWithEscalations,
+        statusFilter: statusFilter === 'all' ? undefined : statusFilter,
       });
       setItems(result.items);
       setTotal(result.total);
@@ -72,7 +116,53 @@ export function ParserPatternsDashboard(): React.ReactElement {
       setItems([]);
       setTotal(0);
     }
-  }, [sortBy, formatFilter, languageFilter, vendorFilter, showOnlyWithEscalations]);
+    // KAN-1140 PR 8 — second list call scoped to supported only for the
+    // summary card count. Could be a dedicated count endpoint; using list
+    // with limit=1 keeps the surface narrow.
+    try {
+      const supportedResult = await parserPatternsApi.list({
+        limit: 1,
+        offset: 0,
+        statusFilter: 'supported',
+      });
+      setSupportedCount(supportedResult.total);
+    } catch {
+      // Summary count is non-critical; silent fail.
+    }
+  }, [sortBy, formatFilter, languageFilter, vendorFilter, showOnlyWithEscalations, statusFilter]);
+
+  // KAN-1140 PR 8 — operator action handlers (mark-as-supported / unsupported / unmark).
+  const handleMark = React.useCallback(
+    async (action: 'supported' | 'unsupported' | 'pending') => {
+      if (!detail) return;
+      const confirmed =
+        action === 'supported'
+          ? window.confirm(
+              `Mark this pattern as supported?\n\nFormat: ${detail.format}\nLanguage: ${detail.language ?? '(none)'}\nVendor: ${detail.vendor ?? '(none)'}\n\n"Supported" means: you confirm this is an inbound pattern your tenant handles cleanly. The pattern stays visible but won't trigger any future auto-suggestion.`,
+            )
+          : true;
+      if (!confirmed) return;
+      setMutationInFlight(true);
+      try {
+        if (action === 'supported') {
+          await parserPatternsApi.markSupported(detail.id);
+        } else if (action === 'unsupported') {
+          await parserPatternsApi.markUnsupported(detail.id);
+        } else {
+          await parserPatternsApi.unmark(detail.id);
+        }
+        await reload();
+        // Re-fetch detail to surface the new status in the drawer.
+        const updated = await parserPatternsApi.getDetail(detail.id);
+        setDetail(updated);
+      } catch (e) {
+        setError((e as Error).message);
+      } finally {
+        setMutationInFlight(false);
+      }
+    },
+    [detail, reload],
+  );
 
   React.useEffect(() => {
     void reload();
@@ -115,6 +205,20 @@ export function ParserPatternsDashboard(): React.ReactElement {
           {total > 0 ? ` (${total} unique patterns)` : null}
         </p>
       </header>
+
+      {/* KAN-1140 PR 8 — Summary card: "you handle N formats automatically" */}
+      {supportedCount > 0 ? (
+        <div
+          className="rounded border px-3 py-2 text-sm"
+          style={{
+            background: 'var(--ds-success-soft, #f0fdf4)',
+            color: 'var(--ds-success-text, #166534)',
+          }}
+        >
+          ✓ You handle <strong>{supportedCount}</strong> {supportedCount === 1 ? 'format' : 'formats'}{' '}
+          automatically. (Operator-confirmed supported patterns.)
+        </div>
+      ) : null}
 
       {error ? (
         <div
@@ -171,6 +275,21 @@ export function ParserPatternsDashboard(): React.ReactElement {
           />
           Only patterns with escalations
         </label>
+        {/* KAN-1140 PR 8 — capability announcement status filter */}
+        <label className="flex items-center gap-1 text-sm">
+          Status
+          <select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
+            className="rounded border px-2 py-1 text-sm"
+          >
+            {STATUS_OPTIONS.map((opt) => (
+              <option key={opt} value={opt}>
+                {STATUS_LABELS[opt]}
+              </option>
+            ))}
+          </select>
+        </label>
       </div>
 
       <div className="flex gap-4">
@@ -181,6 +300,7 @@ export function ParserPatternsDashboard(): React.ReactElement {
                 <th className="px-2 py-1">Format</th>
                 <th className="px-2 py-1">Language</th>
                 <th className="px-2 py-1">Vendor</th>
+                <th className="px-2 py-1">Status</th>
                 <th className="px-2 py-1 text-right">Seen</th>
                 <th className="px-2 py-1 text-right">Escalations</th>
                 <th className="px-2 py-1 text-right">Reclassified</th>
@@ -190,7 +310,7 @@ export function ParserPatternsDashboard(): React.ReactElement {
             <tbody>
               {list.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-2 py-4 text-center" style={{ color: 'var(--ds-ink-secondary)' }}>
+                  <td colSpan={8} className="px-2 py-4 text-center" style={{ color: 'var(--ds-ink-secondary)' }}>
                     No parser patterns yet. Patterns appear after the first
                     inbound lead lands through the webhook.
                   </td>
@@ -207,6 +327,9 @@ export function ParserPatternsDashboard(): React.ReactElement {
                     <td className="px-2 py-1 font-mono">{fp.format}</td>
                     <td className="px-2 py-1 font-mono">{fp.language ?? '—'}</td>
                     <td className="px-2 py-1 font-mono">{fp.vendor ?? '—'}</td>
+                    <td className="px-2 py-1">
+                      <StatusBadge status={fp.supportStatus} />
+                    </td>
                     <td className="px-2 py-1 text-right">{fp.occurrenceCount}</td>
                     <td className="px-2 py-1 text-right">{fp.escalationCount}</td>
                     <td className="px-2 py-1 text-right">{fp.reclassifyCount}</td>
@@ -234,6 +357,56 @@ export function ParserPatternsDashboard(): React.ReactElement {
               <p style={{ color: 'var(--ds-ink-secondary)' }}>Loading…</p>
             ) : detail ? (
               <div className="space-y-3">
+                {/* KAN-1140 PR 8 — Status + capability announcement controls */}
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-medium">Status:</span>
+                  <StatusBadge status={detail.supportStatus} />
+                  {detail.supportedAt ? (
+                    <span className="text-xs" style={{ color: 'var(--ds-ink-secondary)' }}>
+                      confirmed {formatRelative(detail.supportedAt)}
+                    </span>
+                  ) : detail.suggestedAt ? (
+                    <span className="text-xs" style={{ color: 'var(--ds-ink-secondary)' }}>
+                      suggested {formatRelative(detail.suggestedAt)}
+                    </span>
+                  ) : null}
+                </div>
+                <div className="flex flex-wrap gap-1">
+                  {(detail.supportStatus === 'pending' ||
+                    detail.supportStatus === 'suggested' ||
+                    detail.supportStatus === 'unsupported') && (
+                    <button
+                      type="button"
+                      disabled={mutationInFlight}
+                      onClick={() => handleMark('supported')}
+                      className="rounded border border-green-700 px-2 py-0.5 text-xs text-green-800 hover:bg-green-50 disabled:opacity-50"
+                    >
+                      Mark as supported
+                    </button>
+                  )}
+                  {(detail.supportStatus === 'pending' ||
+                    detail.supportStatus === 'suggested') && (
+                    <button
+                      type="button"
+                      disabled={mutationInFlight}
+                      onClick={() => handleMark('unsupported')}
+                      className="rounded border border-red-700 px-2 py-0.5 text-xs text-red-700 hover:bg-red-50 disabled:opacity-50"
+                    >
+                      Mark as unsupported
+                    </button>
+                  )}
+                  {(detail.supportStatus === 'supported' ||
+                    detail.supportStatus === 'unsupported') && (
+                    <button
+                      type="button"
+                      disabled={mutationInFlight}
+                      onClick={() => handleMark('pending')}
+                      className="rounded border px-2 py-0.5 text-xs hover:bg-gray-50 disabled:opacity-50"
+                    >
+                      Unmark (revert to pending)
+                    </button>
+                  )}
+                </div>
                 <div>
                   <div className="text-xs font-medium">Hashes (operator forensics)</div>
                   <dl className="grid grid-cols-2 gap-x-2 gap-y-0.5 text-xs">
