@@ -1805,6 +1805,61 @@ export const recommendationsApi = {
     }>('recommendations.reclassify', { id, ...corrections }),
 };
 
+/* ── Parser Patterns API (KAN-1140 Phase 3 PR 7) ────────────────────
+ * Per-tenant parse-fingerprint aggregation surface. Settings sub-tab
+ * at /settings/parse-fingerprints consumes these. protectedProcedure-
+ * gated at the backend (Q-ADD-4 lock: operator-grade, NOT super-admin).
+ */
+export interface ParseFingerprintListItem {
+  id: string;
+  format: string;
+  language: string | null;
+  vendor: string | null;
+  formatConfidence: string;
+  languageConfidence: string | null;
+  occurrenceCount: number;
+  escalationCount: number;
+  reclassifyCount: number;
+  firstSeenAt: string;
+  lastSeenAt: string;
+}
+
+export interface ParseFingerprintSample {
+  id: string;
+  resendEmailId: string | null;
+  bodyPreview: string;
+  senderDomain: string;
+  customFields: Record<string, unknown>;
+  capturedAt: string;
+}
+
+export interface ParseFingerprintDetail extends ParseFingerprintListItem {
+  structureHash: string | null;
+  senderDomainHash: string;
+  labelTokenHash: string | null;
+  samples: ParseFingerprintSample[];
+}
+
+export const parserPatternsApi = {
+  list: (input?: {
+    sortBy?: 'lastSeenAt' | 'occurrenceCount' | 'escalationCount';
+    limit?: number;
+    offset?: number;
+    formatFilter?: string;
+    languageFilter?: string;
+    vendorFilter?: string;
+    showOnlyWithEscalations?: boolean;
+  }) =>
+    trpcQuery<{
+      items: ParseFingerprintListItem[];
+      total: number;
+      limit: number;
+      offset: number;
+    }>('parserPatterns.list', input ?? {}),
+  getDetail: (fingerprintId: string) =>
+    trpcQuery<ParseFingerprintDetail | null>('parserPatterns.getDetail', { fingerprintId }),
+};
+
 /* ── Import Jobs API (KAN-896 — Cohort 2.1a) ──────────────────────────
  * Backend: apps/api/src/router.ts → importJobsRouter, delegates to
  * packages/api/src/services/import-jobs-router.ts.

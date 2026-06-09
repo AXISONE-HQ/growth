@@ -132,6 +132,78 @@ export function buildApp(): Hono {
       });
     },
     publishLeadReceived: defaultPublishLeadReceived,
+    // KAN-1140 Phase 3 PR 7 — parse-fingerprint capture: atomic UPSERT
+    // on (tenant_id, structure_hash, sender_domain_hash) UNIQUE +
+    // 5-LRU sample insert via CTE (single roundtrip).
+    //
+    // Q-ADD-3 lock: raw SQL ON CONFLICT path — Prisma's upsert can't
+    // atomic-increment occurrence_count (read-modify-write race);
+    // Postgres ON CONFLICT DO UPDATE preserves the increment under
+    // concurrent inbounds for the same signature.
+    //
+    // The 4KB body cap is applied here (NOT at the call site) so the
+    // hook's contract is the single source of cap truth. Webhook passes
+    // uncapped body; hook truncates to 4KB.
+    writeParseFingerprint: async (input) => {
+      const prismaTyped = getPrisma() as unknown as {
+        $queryRaw: <T>(strings: TemplateStringsArray, ...values: unknown[]) => Promise<T>;
+        $executeRaw: (strings: TemplateStringsArray, ...values: unknown[]) => Promise<number>;
+      };
+      const upsertResult = await prismaTyped.$queryRaw<Array<{ id: string }>>`
+        INSERT INTO parse_fingerprints (
+          id, tenant_id, structure_hash, sender_domain_hash, label_token_hash,
+          format, language, vendor, format_confidence, language_confidence,
+          occurrence_count, escalation_count, reclassify_count,
+          first_seen_at, last_seen_at, created_at, updated_at
+        )
+        VALUES (
+          gen_random_uuid(), ${input.tenantId}, ${input.structureHash},
+          ${input.senderDomainHash}, ${input.labelTokenHash},
+          ${input.format}, ${input.language}, ${input.vendor},
+          ${input.formatConfidence}, ${input.languageConfidence},
+          1, 0, 0, NOW(), NOW(), NOW(), NOW()
+        )
+        ON CONFLICT (tenant_id, structure_hash, sender_domain_hash)
+        DO UPDATE SET
+          occurrence_count = parse_fingerprints.occurrence_count + 1,
+          last_seen_at = NOW(),
+          language = COALESCE(EXCLUDED.language, parse_fingerprints.language),
+          vendor = COALESCE(EXCLUDED.vendor, parse_fingerprints.vendor),
+          label_token_hash = COALESCE(EXCLUDED.label_token_hash, parse_fingerprints.label_token_hash),
+          updated_at = NOW()
+        RETURNING id
+      `;
+      const fingerprintId = upsertResult[0]?.id;
+      if (!fingerprintId) return; // defensive — RETURNING always yields a row
+
+      // 4KB cap per Q8 storage budget.
+      const bodyCapped = input.bodyForSample.slice(0, 4096);
+      const customFieldsJson = JSON.stringify(input.customFields ?? {});
+      // Insert the new sample, then prune to 5 LRU by captured_at DESC.
+      // Two-statement form because Postgres CTEs that mix DML on the
+      // same table can hit "tuple to be locked was already modified"
+      // races; serial statements are cleaner.
+      await prismaTyped.$executeRaw`
+        INSERT INTO parse_fingerprint_samples (
+          id, fingerprint_id, resend_email_id, body_preview,
+          sender_domain, custom_fields, captured_at
+        )
+        VALUES (
+          gen_random_uuid(), ${fingerprintId}, ${input.resendEmailId},
+          ${bodyCapped}, ${input.senderDomain}, ${customFieldsJson}::jsonb, NOW()
+        )
+      `;
+      await prismaTyped.$executeRaw`
+        DELETE FROM parse_fingerprint_samples
+        WHERE fingerprint_id = ${fingerprintId}
+          AND id NOT IN (
+            SELECT id FROM parse_fingerprint_samples
+            WHERE fingerprint_id = ${fingerprintId}
+            ORDER BY captured_at DESC
+            LIMIT 5
+          )
+      `;
+    },
   });
 
   const app = new Hono();

@@ -44,6 +44,10 @@ import { SAMPLED_TRIGGER_TYPE } from '@growth/shared';
 // to the same topic the webhook uses; the consumer's existing handler picks it
 // up (with parseConfidenceOverride loop-guard set).
 import { LEAD_RECEIVED_TOPIC, LeadReceivedEventSchema } from '@growth/shared';
+// KAN-1140 Phase 3 PR 7 — fingerprint-recompute on operator-reclassify so
+// the matching parse_fingerprint row's reclassify_count increments. Hash
+// algorithm lives in @growth/shared (cross-workspace single source of truth).
+import { deriveParseFingerprint, type DetectedFormat } from '@growth/shared';
 
 // ─────────────────────────────────────────────
 // Input shapes — keep zod-equivalent here so tests can import without zod
@@ -885,6 +889,38 @@ export async function reclassifyRecommendation(
     syntheticEventId: syntheticEvent.eventId,
     pubsubMessageId: messageId,
   });
+
+  // KAN-1140 Phase 3 PR 7 — increment reclassify_count on the matching
+  // parse_fingerprint row. Recompute the hash from the stashed
+  // originalWirePayload (Phase 2 PR 6 stash) so we land on the row
+  // whose escalation_count was bumped on the original inbound's PR 6
+  // escalation insert.
+  //
+  // Best-effort per Q-ADD-5: failure here doesn't unwind the synthetic
+  // publish + escalation resolution. Operator's reclassify took effect;
+  // the analytics signal is the only thing that misses.
+  try {
+    const orig = parsed.data;
+    const formatForHash =
+      (orig.metadata.customFields?.['_kan_1140_format'] as DetectedFormat | undefined) ??
+      'unknown';
+    const fp = deriveParseFingerprint({
+      format: formatForHash,
+      body: orig.metadata.bodyPreview ?? '',
+      fromAddress: orig.metadata.fromAddress ?? '',
+    });
+    await ctx.prisma.$executeRaw`
+      UPDATE parse_fingerprints
+      SET reclassify_count = reclassify_count + 1, updated_at = NOW()
+      WHERE tenant_id = ${ctx.tenantId}
+        AND structure_hash IS NOT DISTINCT FROM ${fp.structureHash}
+        AND sender_domain_hash = ${fp.senderDomainHash}
+    `;
+  } catch (err) {
+    console.warn(
+      `[recommendations.reclassify] kan-1140-pr-7-reclassify-count-increment-failed escalationId=${before.id} err=${(err as Error)?.message ?? String(err)}`,
+    );
+  }
 
   return {
     id: updated.id,
