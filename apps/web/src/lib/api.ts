@@ -1810,6 +1810,13 @@ export const recommendationsApi = {
  * at /settings/parse-fingerprints consumes these. protectedProcedure-
  * gated at the backend (Q-ADD-4 lock: operator-grade, NOT super-admin).
  */
+/** KAN-1140 Phase 3 PR 8 — capability announcement status. */
+export type ParseFingerprintSupportStatus =
+  | 'pending'
+  | 'suggested'
+  | 'supported'
+  | 'unsupported';
+
 export interface ParseFingerprintListItem {
   id: string;
   format: string;
@@ -1820,6 +1827,10 @@ export interface ParseFingerprintListItem {
   occurrenceCount: number;
   escalationCount: number;
   reclassifyCount: number;
+  /** KAN-1140 PR 8 — capability announcement state. */
+  supportStatus: ParseFingerprintSupportStatus;
+  suggestedAt: string | null;
+  supportedAt: string | null;
   firstSeenAt: string;
   lastSeenAt: string;
 }
@@ -1838,6 +1849,8 @@ export interface ParseFingerprintDetail extends ParseFingerprintListItem {
   senderDomainHash: string;
   labelTokenHash: string | null;
   samples: ParseFingerprintSample[];
+  // supportStatus + suggestedAt + supportedAt inherit from
+  // ParseFingerprintListItem; no additional fields here.
 }
 
 export const parserPatternsApi = {
@@ -1849,6 +1862,8 @@ export const parserPatternsApi = {
     languageFilter?: string;
     vendorFilter?: string;
     showOnlyWithEscalations?: boolean;
+    // KAN-1140 PR 8 — capability announcement status filter
+    statusFilter?: ParseFingerprintSupportStatus;
   }) =>
     trpcQuery<{
       items: ParseFingerprintListItem[];
@@ -1858,6 +1873,25 @@ export const parserPatternsApi = {
     }>('parserPatterns.list', input ?? {}),
   getDetail: (fingerprintId: string) =>
     trpcQuery<ParseFingerprintDetail | null>('parserPatterns.getDetail', { fingerprintId }),
+  // KAN-1140 PR 8 — capability announcement mutations.
+  markSupported: (fingerprintId: string) =>
+    trpcMutation<{
+      id: string;
+      supportStatus: 'supported';
+      previousStatus: ParseFingerprintSupportStatus;
+    }>('parserPatterns.markSupported', { fingerprintId }),
+  markUnsupported: (fingerprintId: string) =>
+    trpcMutation<{
+      id: string;
+      supportStatus: 'unsupported';
+      previousStatus: ParseFingerprintSupportStatus;
+    }>('parserPatterns.markUnsupported', { fingerprintId }),
+  unmark: (fingerprintId: string) =>
+    trpcMutation<{
+      id: string;
+      supportStatus: 'pending';
+      previousStatus: ParseFingerprintSupportStatus;
+    }>('parserPatterns.unmark', { fingerprintId }),
 };
 
 /* ── Import Jobs API (KAN-896 — Cohort 2.1a) ──────────────────────────

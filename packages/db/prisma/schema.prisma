@@ -3221,6 +3221,26 @@ model ParseFingerprint {
   vendor             String?
   formatConfidence   String   @map("format_confidence")
   languageConfidence String?  @map("language_confidence")
+  /// KAN-1140 PR 8 — capability announcement state machine.
+  /// Vocabulary: `pending | suggested | supported | unsupported`
+  ///   - `pending`     — initial state; auto-suggest predicate may promote
+  ///   - `suggested`   — auto-promoted on threshold (Q3 lock); operator
+  ///                     confirms or rejects
+  ///   - `supported`   — operator-confirmed; pattern is "we handle this";
+  ///                     stamps `supportedAt` + `supportedBy`
+  ///   - `unsupported` — operator-rejected; defends against future
+  ///                     auto-re-suggestion (predicate gates on `=== 'pending'`)
+  /// Convention follows `Action.status` and `DeferredSend.status` — String
+  /// column with documented vocabulary, NOT a Prisma enum type.
+  supportStatus      String   @default("pending") @map("support_status")
+  /// KAN-1140 PR 8 — set on auto-promotion from pending → suggested.
+  /// Doubles as the "since when has this been suggested" anchor for
+  /// KAN-1147 (operator notification on lingering-suggested patterns).
+  suggestedAt        DateTime? @map("suggested_at")
+  /// KAN-1140 PR 8 — operator-confirmed timestamp. Null off `supported`.
+  supportedAt        DateTime? @map("supported_at")
+  /// KAN-1140 PR 8 — Firebase UID of operator who confirmed. Null off `supported`.
+  supportedBy        String?  @map("supported_by")
   occurrenceCount    Int      @default(1) @map("occurrence_count")
   /// KAN-1140 PR 6 hook — count of matching inbounds that ALSO created a
   /// parse_confidence_review escalation. Surfaces low-confidence recurring
@@ -3229,6 +3249,8 @@ model ParseFingerprint {
   /// KAN-1140 PR 6 hook — count of matching inbounds where an operator
   /// reclassified the metadata. Marks operator-confirmed pattern — these
   /// are the highest-priority training candidates for PR 8 / KAN-1147.
+  /// NOTE: PR 8 reads this column in its auto-suggest predicate (Q3 lock:
+  /// reclassifyCount >= 1 → suggest).
   reclassifyCount    Int      @default(0) @map("reclassify_count")
   firstSeenAt        DateTime @default(now()) @map("first_seen_at")
   lastSeenAt         DateTime @default(now()) @map("last_seen_at")
@@ -3241,6 +3263,10 @@ model ParseFingerprint {
   @@unique([tenantId, structureHash, senderDomainHash])
   @@index([tenantId, lastSeenAt])
   @@index([tenantId, occurrenceCount])
+  /// KAN-1140 PR 8 — Settings UI status filter ("show only supported /
+  /// suggested / pending / unsupported") + auto-suggest predicate's
+  /// `WHERE support_status = 'pending'` short-circuit on PROD-scale tenants.
+  @@index([tenantId, supportStatus])
   @@map("parse_fingerprints")
 }
 

@@ -19,6 +19,7 @@
  *   npx vitest run --config apps/connectors/vitest.config.integration.ts
  */
 import { describe, expect, it } from "vitest";
+import { shouldAutoSuggest } from "@growth/shared";
 import { createTenant, withRollback } from "./setup.js";
 
 /**
@@ -100,6 +101,62 @@ async function writeFingerprint(
         LIMIT 5
       )
   `;
+
+  // KAN-1140 Phase 3 PR 8 — Auto-suggest predicate inlined to mirror the
+  // production hook 1:1 (apps/connectors/src/app.ts:writeParseFingerprint).
+  // Same discipline as the rest of this file: if production drifts from
+  // this code, the test fails first.
+  const fpRow = await tx.$queryRaw<Array<{
+    support_status: string;
+    occurrence_count: number;
+    format_confidence: string;
+    reclassify_count: number;
+  }>>`
+    SELECT support_status, occurrence_count, format_confidence, reclassify_count
+    FROM parse_fingerprints
+    WHERE id = ${fingerprintId}
+  `;
+  const row = fpRow[0];
+  // KAN-1140 PR 8 — predicate hoisted to @growth/shared per Memo 37.
+  // Single source of truth across production hook (apps/connectors/src/app.ts),
+  // this integration test, and (future) KAN-1147 cron poller.
+  if (
+    row &&
+    shouldAutoSuggest({
+      supportStatus: row.support_status,
+      occurrenceCount: row.occurrence_count,
+      formatConfidence: row.format_confidence,
+      reclassifyCount: row.reclassify_count,
+    })
+  ) {
+    const promotion = await tx.$queryRaw<Array<{ id: string }>>`
+      UPDATE parse_fingerprints
+      SET support_status = 'suggested',
+          suggested_at = NOW(),
+          updated_at = NOW()
+      WHERE id = ${fingerprintId}
+        AND support_status = 'pending'
+      RETURNING id
+    `;
+    if (promotion.length > 0) {
+      // TODO(KAN-1150): Audit row INSERT here is a separate drift class
+      // from the predicate (covered by Memo 37 hoist above). Production
+      // uses prisma.auditLog.create with a richer payload; this test
+      // helper uses raw SQL with a minimal payload. Both paths agree on
+      // actionType + tenantId + actor; payload schema may drift silently.
+      // Consolidate via writeAuditBestEffort helper when KAN-1150 hoists
+      // it out of recommendations.ts + parse-fingerprint-aggregator.ts.
+      await tx.$executeRaw`
+        INSERT INTO audit_log (id, tenant_id, actor, action_type, payload, created_at)
+        VALUES (
+          gen_random_uuid(), ${input.tenantId}, 'system',
+          'parse_fingerprint.auto_suggested',
+          '{"trigger":"test"}'::jsonb,
+          NOW()
+        )
+      `;
+    }
+  }
   return { id: fingerprintId };
 }
 
@@ -311,6 +368,122 @@ describe("parse-fingerprint write path — real Postgres", () => {
       }).parseFingerprint.findUnique({ where: { id: idB } });
       expect(rowA!.occurrenceCount).toBe(3); // 1 + 2 increments
       expect(rowB!.occurrenceCount).toBe(1); // untouched
+    });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// KAN-1140 Phase 3 PR 8 — capability announcement auto-suggest
+// ─────────────────────────────────────────────────────────────
+//
+// Tests the inlined auto-suggest predicate runs against real Postgres
+// after each writeFingerprint call. Same mirror-PROD discipline as PR 7.
+
+describe("parse-fingerprint auto-suggest — real Postgres", () => {
+  it("threshold: 5th occurrence at format_confidence='high' flips pending → suggested", async () => {
+    await withRollback(async (tx) => {
+      const { id: tenantId } = await createTenant(tx);
+      const input = makeInput({ tenantId });
+      // First 4 inbounds: still pending (occurrence_count = 1..4)
+      for (let i = 0; i < 4; i++) {
+        await writeFingerprint(tx as never, input);
+      }
+      const after4 = await (tx as unknown as {
+        parseFingerprint: {
+          findFirst: (args: unknown) => Promise<{ supportStatus: string; occurrenceCount: number } | null>;
+        };
+      }).parseFingerprint.findFirst({
+        where: { tenantId },
+        select: { supportStatus: true, occurrenceCount: true },
+      });
+      expect(after4!.occurrenceCount).toBe(4);
+      expect(after4!.supportStatus).toBe("pending");
+      // 5th inbound: predicate fires, suggested
+      await writeFingerprint(tx as never, input);
+      const after5 = await (tx as unknown as {
+        parseFingerprint: {
+          findFirst: (args: unknown) => Promise<{ supportStatus: string; suggestedAt: Date | null } | null>;
+        };
+      }).parseFingerprint.findFirst({
+        where: { tenantId },
+        select: { supportStatus: true, suggestedAt: true },
+      });
+      expect(after5!.supportStatus).toBe("suggested");
+      expect(after5!.suggestedAt).toBeInstanceOf(Date);
+    });
+  });
+
+  it("operator-supported respected — subsequent inbound does NOT revert (gates on === 'pending')", async () => {
+    await withRollback(async (tx) => {
+      const { id: tenantId } = await createTenant(tx);
+      const input = makeInput({ tenantId });
+      // Seed at supported via direct UPDATE (bypasses the auto-suggest path).
+      const { id: fingerprintId } = await writeFingerprint(tx as never, input);
+      await (tx as unknown as { $executeRaw: (s: TemplateStringsArray, ...v: unknown[]) => Promise<number> })
+        .$executeRaw`
+          UPDATE parse_fingerprints
+          SET support_status = 'supported', supported_at = NOW(), supported_by = 'uid-op',
+              updated_at = NOW()
+          WHERE id = ${fingerprintId}
+        `;
+      // Subsequent inbounds: predicate guard skips because status !== 'pending'.
+      for (let i = 0; i < 10; i++) {
+        await writeFingerprint(tx as never, input);
+      }
+      const after = await (tx as unknown as {
+        parseFingerprint: {
+          findFirst: (args: unknown) => Promise<{ supportStatus: string } | null>;
+        };
+      }).parseFingerprint.findFirst({
+        where: { id: fingerprintId },
+        select: { supportStatus: true },
+      });
+      expect(after!.supportStatus).toBe("supported");
+    });
+  });
+
+  it("unsupported respected — subsequent inbound does NOT re-suggest (gates on === 'pending')", async () => {
+    await withRollback(async (tx) => {
+      const { id: tenantId } = await createTenant(tx);
+      const input = makeInput({ tenantId });
+      const { id: fingerprintId } = await writeFingerprint(tx as never, input);
+      await (tx as unknown as { $executeRaw: (s: TemplateStringsArray, ...v: unknown[]) => Promise<number> })
+        .$executeRaw`
+          UPDATE parse_fingerprints
+          SET support_status = 'unsupported', updated_at = NOW()
+          WHERE id = ${fingerprintId}
+        `;
+      for (let i = 0; i < 10; i++) {
+        await writeFingerprint(tx as never, input);
+      }
+      const after = await (tx as unknown as {
+        parseFingerprint: {
+          findFirst: (args: unknown) => Promise<{ supportStatus: string } | null>;
+        };
+      }).parseFingerprint.findFirst({
+        where: { id: fingerprintId },
+        select: { supportStatus: true },
+      });
+      expect(after!.supportStatus).toBe("unsupported");
+    });
+  });
+
+  it("audit row created on successful auto-promotion", async () => {
+    await withRollback(async (tx) => {
+      const { id: tenantId } = await createTenant(tx);
+      const input = makeInput({ tenantId });
+      // 5 inbounds → triggers auto-suggest on the 5th.
+      for (let i = 0; i < 5; i++) {
+        await writeFingerprint(tx as never, input);
+      }
+      const audits = await (tx as unknown as {
+        auditLog: {
+          findMany: (args: unknown) => Promise<Array<{ actionType: string }>>;
+        };
+      }).auditLog.findMany({
+        where: { tenantId, actionType: "parse_fingerprint.auto_suggested" },
+      });
+      expect(audits).toHaveLength(1);
     });
   });
 });

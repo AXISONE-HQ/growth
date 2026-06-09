@@ -11,9 +11,17 @@
  * fingerprints are tenant-scoped operational data per Q9 lock; cross-
  * tenant aggregation is deferred to KAN-1148 follow-up.
  */
+import { TRPCError } from "@trpc/server";
 import type { PrismaClient } from "@prisma/client";
 
 export type SortBy = "lastSeenAt" | "occurrenceCount" | "escalationCount";
+
+/**
+ * KAN-1140 Phase 3 PR 8 — capability announcement status vocabulary.
+ * String column on the DB side (Q2 codebase-convention pin: NOT a Prisma
+ * enum); typed at the service surface so consumers stay type-safe.
+ */
+export type SupportStatus = "pending" | "suggested" | "supported" | "unsupported";
 
 export interface ListParseFingerprintsInput {
   tenantId: string;
@@ -24,6 +32,9 @@ export interface ListParseFingerprintsInput {
   languageFilter?: string;
   vendorFilter?: string;
   showOnlyWithEscalations?: boolean;
+  /** KAN-1140 PR 8 — status filter for the "show only supported / suggested
+   *  / pending / unsupported" Settings UI affordance. */
+  statusFilter?: SupportStatus;
 }
 
 export interface ParseFingerprintRow {
@@ -36,6 +47,10 @@ export interface ParseFingerprintRow {
   occurrenceCount: number;
   escalationCount: number;
   reclassifyCount: number;
+  /** KAN-1140 PR 8 — capability announcement state. */
+  supportStatus: SupportStatus;
+  suggestedAt: string | null;
+  supportedAt: string | null;
   firstSeenAt: string;
   lastSeenAt: string;
 }
@@ -94,6 +109,7 @@ export async function listParseFingerprints(
     ...(input.languageFilter ? { language: input.languageFilter } : {}),
     ...(input.vendorFilter ? { vendor: input.vendorFilter } : {}),
     ...(input.showOnlyWithEscalations ? { escalationCount: { gt: 0 } } : {}),
+    ...(input.statusFilter ? { supportStatus: input.statusFilter } : {}),
   };
 
   const orderField = SORT_BY_TO_ORDER_BY[input.sortBy];
@@ -110,6 +126,9 @@ export async function listParseFingerprints(
           occurrenceCount: number;
           escalationCount: number;
           reclassifyCount: number;
+          supportStatus: string;
+          suggestedAt: Date | null;
+          supportedAt: Date | null;
           firstSeenAt: Date;
           lastSeenAt: Date;
         }>>;
@@ -129,6 +148,9 @@ export async function listParseFingerprints(
         occurrenceCount: true,
         escalationCount: true,
         reclassifyCount: true,
+        supportStatus: true,
+        suggestedAt: true,
+        supportedAt: true,
         firstSeenAt: true,
         lastSeenAt: true,
       },
@@ -149,6 +171,9 @@ export async function listParseFingerprints(
       occurrenceCount: r.occurrenceCount,
       escalationCount: r.escalationCount,
       reclassifyCount: r.reclassifyCount,
+      supportStatus: r.supportStatus as SupportStatus,
+      suggestedAt: r.suggestedAt?.toISOString() ?? null,
+      supportedAt: r.supportedAt?.toISOString() ?? null,
       firstSeenAt: r.firstSeenAt.toISOString(),
       lastSeenAt: r.lastSeenAt.toISOString(),
     })),
@@ -181,6 +206,9 @@ export async function getParseFingerprintDetail(
         occurrenceCount: number;
         escalationCount: number;
         reclassifyCount: number;
+        supportStatus: string;
+        suggestedAt: Date | null;
+        supportedAt: Date | null;
         firstSeenAt: Date;
         lastSeenAt: Date;
         samples: Array<{
@@ -226,6 +254,9 @@ export async function getParseFingerprintDetail(
     occurrenceCount: row.occurrenceCount,
     escalationCount: row.escalationCount,
     reclassifyCount: row.reclassifyCount,
+    supportStatus: row.supportStatus as SupportStatus,
+    suggestedAt: row.suggestedAt?.toISOString() ?? null,
+    supportedAt: row.supportedAt?.toISOString() ?? null,
     firstSeenAt: row.firstSeenAt.toISOString(),
     lastSeenAt: row.lastSeenAt.toISOString(),
     samples: row.samples.map((s) => ({
@@ -237,4 +268,213 @@ export async function getParseFingerprintDetail(
       capturedAt: s.capturedAt.toISOString(),
     })),
   };
+}
+
+// ─────────────────────────────────────────────────────────────────
+// KAN-1140 Phase 3 PR 8 — capability announcement mutations
+// ─────────────────────────────────────────────────────────────────
+//
+// Three operator-facing transitions:
+//
+//   markFingerprintSupported   — pending|suggested|unsupported → supported
+//   markFingerprintUnsupported — pending|suggested → unsupported (defends
+//                                against auto-re-suggest; predicate gates
+//                                on === 'pending' per Q-ADD-2 lock)
+//   unmarkFingerprint          — supported|unsupported → pending (re-arms
+//                                auto-suggest; clears supportedAt/By)
+//
+// All three use raw SQL gated UPDATEs (`WHERE tenant_id = ? AND id = ?
+// AND support_status IN (...)`) for atomic transition + tenant isolation
+// + protection against accepting an unintended state. Cross-tenant access
+// or already-in-target-state lookups → TRPCError NOT_FOUND (does not
+// distinguish "wrong tenant" from "wrong state" — minimal info-leak).
+//
+// Audit log is best-effort (mirrors recommendations.ts:writeAuditBestEffort);
+// the mutation succeeds even if the audit row write fails. The audit row
+// captures `{ previousStatus, newStatus, fingerprintId, actor }`.
+
+async function writeAuditBestEffort(
+  prisma: PrismaClient,
+  tenantId: string,
+  actor: string,
+  actionType: string,
+  payload: Record<string, unknown>,
+): Promise<void> {
+  try {
+    await (prisma as unknown as { auditLog: { create: (args: unknown) => Promise<unknown> } })
+      .auditLog.create({
+        data: { tenantId, actor, actionType, payload },
+      });
+  } catch (err) {
+    // Best-effort — never fail the mutation on audit-log write failure.
+    console.error(`[parse-fingerprint-aggregator] auditLog write failed for ${actionType}:`, err);
+  }
+}
+
+export async function markFingerprintSupported(
+  prisma: PrismaClient,
+  input: { tenantId: string; userId: string; fingerprintId: string },
+): Promise<{ id: string; supportStatus: SupportStatus; previousStatus: SupportStatus }> {
+  // Two-phase: read previous status, then gated UPDATE. The read is
+  // outside a transaction; concurrent ops could change the row between
+  // SELECT and UPDATE, but the gated UPDATE's `IN (...)` clause is the
+  // authoritative tenant-isolated atomic guard. Worst case: previousStatus
+  // is one transition stale in the audit log; not a correctness issue.
+  const before = await (prisma as unknown as {
+    parseFingerprint: {
+      findFirst: (args: unknown) => Promise<{ supportStatus: string } | null>;
+    };
+  }).parseFingerprint.findFirst({
+    where: { id: input.fingerprintId, tenantId: input.tenantId },
+    select: { supportStatus: true },
+  });
+  if (!before) {
+    throw new TRPCError({
+      code: "NOT_FOUND",
+      message: "Parse fingerprint not found",
+    });
+  }
+  const previousStatus = before.supportStatus as SupportStatus;
+  const updated = await (prisma as unknown as {
+    $executeRaw: (strings: TemplateStringsArray, ...values: unknown[]) => Promise<number>;
+  }).$executeRaw`
+    UPDATE parse_fingerprints
+    SET support_status = 'supported',
+        supported_at = NOW(),
+        supported_by = ${input.userId},
+        updated_at = NOW()
+    WHERE id = ${input.fingerprintId}
+      AND tenant_id = ${input.tenantId}
+      AND support_status IN ('pending', 'suggested', 'unsupported')
+  `;
+  if (updated === 0) {
+    // Either already supported or another transition raced us (extremely
+    // unlikely — operator clicks happen once). Either way: no-op from the
+    // operator's perspective; surface as BAD_REQUEST so the UI clarifies.
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: `Cannot mark as supported from status='${previousStatus}'`,
+    });
+  }
+  await writeAuditBestEffort(
+    prisma,
+    input.tenantId,
+    input.userId,
+    "parse_fingerprint.marked_supported",
+    {
+      fingerprintId: input.fingerprintId,
+      previousStatus,
+      newStatus: "supported",
+    },
+  );
+  return { id: input.fingerprintId, supportStatus: "supported", previousStatus };
+}
+
+export async function markFingerprintUnsupported(
+  prisma: PrismaClient,
+  input: { tenantId: string; userId: string; fingerprintId: string },
+): Promise<{ id: string; supportStatus: SupportStatus; previousStatus: SupportStatus }> {
+  const before = await (prisma as unknown as {
+    parseFingerprint: {
+      findFirst: (args: unknown) => Promise<{ supportStatus: string } | null>;
+    };
+  }).parseFingerprint.findFirst({
+    where: { id: input.fingerprintId, tenantId: input.tenantId },
+    select: { supportStatus: true },
+  });
+  if (!before) {
+    throw new TRPCError({
+      code: "NOT_FOUND",
+      message: "Parse fingerprint not found",
+    });
+  }
+  const previousStatus = before.supportStatus as SupportStatus;
+  // Note: clears supportedAt + supportedBy on the transition from
+  // 'supported' (operator decided this pattern is actually NOT something
+  // they handle). suggestedAt is preserved as forensic anchor.
+  const updated = await (prisma as unknown as {
+    $executeRaw: (strings: TemplateStringsArray, ...values: unknown[]) => Promise<number>;
+  }).$executeRaw`
+    UPDATE parse_fingerprints
+    SET support_status = 'unsupported',
+        supported_at = NULL,
+        supported_by = NULL,
+        updated_at = NOW()
+    WHERE id = ${input.fingerprintId}
+      AND tenant_id = ${input.tenantId}
+      AND support_status IN ('pending', 'suggested', 'supported')
+  `;
+  if (updated === 0) {
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: `Cannot mark as unsupported from status='${previousStatus}'`,
+    });
+  }
+  await writeAuditBestEffort(
+    prisma,
+    input.tenantId,
+    input.userId,
+    "parse_fingerprint.marked_unsupported",
+    {
+      fingerprintId: input.fingerprintId,
+      previousStatus,
+      newStatus: "unsupported",
+    },
+  );
+  return { id: input.fingerprintId, supportStatus: "unsupported", previousStatus };
+}
+
+export async function unmarkFingerprint(
+  prisma: PrismaClient,
+  input: { tenantId: string; userId: string; fingerprintId: string },
+): Promise<{ id: string; supportStatus: SupportStatus; previousStatus: SupportStatus }> {
+  const before = await (prisma as unknown as {
+    parseFingerprint: {
+      findFirst: (args: unknown) => Promise<{ supportStatus: string } | null>;
+    };
+  }).parseFingerprint.findFirst({
+    where: { id: input.fingerprintId, tenantId: input.tenantId },
+    select: { supportStatus: true },
+  });
+  if (!before) {
+    throw new TRPCError({
+      code: "NOT_FOUND",
+      message: "Parse fingerprint not found",
+    });
+  }
+  const previousStatus = before.supportStatus as SupportStatus;
+  // Unmark from `supported` OR `unsupported` → `pending`. Re-arms the
+  // auto-suggest predicate on next inbound. Clears suggestedAt /
+  // supportedAt / supportedBy completely (operator reset).
+  const updated = await (prisma as unknown as {
+    $executeRaw: (strings: TemplateStringsArray, ...values: unknown[]) => Promise<number>;
+  }).$executeRaw`
+    UPDATE parse_fingerprints
+    SET support_status = 'pending',
+        suggested_at = NULL,
+        supported_at = NULL,
+        supported_by = NULL,
+        updated_at = NOW()
+    WHERE id = ${input.fingerprintId}
+      AND tenant_id = ${input.tenantId}
+      AND support_status IN ('suggested', 'supported', 'unsupported')
+  `;
+  if (updated === 0) {
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: `Cannot unmark from status='${previousStatus}'`,
+    });
+  }
+  await writeAuditBestEffort(
+    prisma,
+    input.tenantId,
+    input.userId,
+    "parse_fingerprint.unmarked",
+    {
+      fingerprintId: input.fingerprintId,
+      previousStatus,
+      newStatus: "pending",
+    },
+  );
+  return { id: input.fingerprintId, supportStatus: "pending", previousStatus };
 }
