@@ -228,23 +228,120 @@ export function validatePipelineForm(input: PipelineFormInput): ValidationResult
   return { valid: errors.length === 0, errors };
 }
 
-export function canDeletePipeline(input: {
-  activeLeadCount: number;
-  stageHistoryCount: number;
-}): { canDelete: boolean; reason: string | null } {
-  if (input.activeLeadCount > 0) {
-    return {
-      canDelete: false,
-      reason: `Cannot delete pipeline: ${input.activeLeadCount} lead(s) currently assigned. Move leads to another pipeline first.`,
-    };
+/**
+ * KAN-1169 — Pipeline deletability check (replaces KAN-702 canDeletePipeline).
+ *
+ * Reads Deal.pipelineId (canonical per KAN-700+791) instead of the deprecated
+ * Contact.currentPipelineId that the prior helper used. Surfaces three signals
+ * that the procedure branches on:
+ *
+ *   - `blockReason`: hard-block paths that no reassignment can resolve
+ *     - 'last_pipeline': tenant has 1 active pipeline; deleting leaves inbounds nowhere to land
+ *     - 'default_assignment': pipeline is `Tenant.defaultAssignmentPipelineId`
+ *   - `dealCount`: total deals on the pipeline (terminal + active per
+ *     Q-ADD-TERMINAL-DEAL-EXCLUSION lock — count ALL deals)
+ *   - `destinationCandidates`: count of OTHER active pipelines (operator must
+ *     have a destination if dealCount > 0)
+ *   - `hasStageHistory`: TRUE if any DealStageHistory row references this
+ *     pipeline's stages. Per Phase 2 architectural escalation (Option C),
+ *     `DealStageHistory.toStageId Restrict` would block Stage cascade-delete;
+ *     the audit_log NEVER deleted precedent (sibling to KAN-1083 Op D memo)
+ *     extends to DealStageHistory. The procedure soft-archives (isActive=false)
+ *     instead of hard-deleting when hasStageHistory is true.
+ *
+ * Async + Prisma-dependent — unit tests exercise the procedure (Step 8) rather
+ * than this helper directly. Integration test (Step 9) verifies the real
+ * Postgres FK behavior.
+ */
+export async function checkPipelineDeletability(
+  prisma: unknown,
+  tenantId: string,
+  pipelineId: string,
+): Promise<{
+  blockReason: 'last_pipeline' | 'default_assignment' | null;
+  dealCount: number;
+  destinationCandidates: number;
+  hasStageHistory: boolean;
+}> {
+  const p = prisma as {
+    pipeline: { count: (args: unknown) => Promise<number> };
+    tenant: { findUnique: (args: unknown) => Promise<{ defaultAssignmentPipelineId: string | null } | null> };
+    deal: { count: (args: unknown) => Promise<number> };
+    dealStageHistory: { count: (args: unknown) => Promise<number> };
+  };
+
+  // Block-if-last-pipeline (Q6 lock: isActive=true count === 1).
+  const activePipelineCount = await p.pipeline.count({
+    where: { tenantId, isActive: true },
+  });
+  if (activePipelineCount === 1) {
+    return { blockReason: 'last_pipeline', dealCount: 0, destinationCandidates: 0, hasStageHistory: false };
   }
-  if (input.stageHistoryCount > 0) {
-    return {
-      canDelete: false,
-      reason: `Cannot delete pipeline: ${input.stageHistoryCount} stage transition(s) in audit history. Archive instead (toggle isActive=false).`,
-    };
+
+  // Block-if-default-assignment (Q-ADD-DEFAULT-PIPELINE-CASCADE: block hard
+  // vs auto-null pointer; Phase 1 lean = block to preserve operator visibility).
+  const tenant = await p.tenant.findUnique({
+    where: { id: tenantId },
+    select: { defaultAssignmentPipelineId: true },
+  });
+  if (tenant?.defaultAssignmentPipelineId === pipelineId) {
+    return { blockReason: 'default_assignment', dealCount: 0, destinationCandidates: 0, hasStageHistory: false };
   }
-  return { canDelete: true, reason: null };
+
+  // Count deals (ALL — terminal_won/terminal_lost included per Q-ADD-TERMINAL-DEAL-EXCLUSION lock).
+  const dealCount = await p.deal.count({
+    where: { tenantId, pipelineId },
+  });
+
+  // Count destination candidates (other isActive=true pipelines per Q-ADD-INACTIVE-DESTINATION lock).
+  const destinationCandidates = await p.pipeline.count({
+    where: { tenantId, isActive: true, id: { not: pipelineId } },
+  });
+
+  // KAN-1169 Phase 2 Option C — detect stage history that would block Stage
+  // cascade-delete (DealStageHistory.toStageId has onDelete: Restrict). If
+  // present, the procedure soft-archives instead of hard-deleting; deal-scoped
+  // historical retrospective ("how did Deal X arrive at its current stage?")
+  // stays intact per the audit_log NEVER deleted precedent.
+  const stageHistoryCount = await p.dealStageHistory.count({
+    where: {
+      OR: [
+        { fromStage: { pipelineId } },
+        { toStage: { pipelineId } },
+      ],
+    },
+  });
+
+  return {
+    blockReason: null,
+    dealCount,
+    destinationCandidates,
+    hasStageHistory: stageHistoryCount > 0,
+  };
+}
+
+/**
+ * KAN-1169 — 6th inline copy of writeAuditBestEffort (KAN-1150 P2
+ * consolidation pressure: parse-rule-service, sub-objective-gap-tracker,
+ * parse-fingerprint-aggregator, lead-normalizer, recommendations, + this
+ * one). Best-effort: audit failure never blocks the destructive operation.
+ */
+async function writePipelineAuditBestEffort(
+  prisma: unknown,
+  tenantId: string,
+  actor: string,
+  actionType: string,
+  payload: Record<string, unknown>,
+): Promise<void> {
+  try {
+    await (prisma as {
+      auditLog: { create: (args: unknown) => Promise<unknown> };
+    }).auditLog.create({
+      data: { tenantId, actor, actionType, payload },
+    });
+  } catch (err) {
+    console.error(`[pipelines.delete] auditLog write failed for ${actionType}:`, err);
+  }
 }
 
 export function canDeleteStage(input: {
@@ -5224,32 +5321,233 @@ const pipelinesRouter = router({
       });
     }),
 
-  delete: adminProcedure
-    .input(z.object({ id: z.string().uuid() }))
-    .mutation(async ({ ctx, input }) => {
-      const pipeline: any = await (ctx.prisma as any).pipeline?.findFirst({
-        where: { id: input.id, tenantId: ctx.tenantId },
-        select: { id: true, contacts: { select: { id: true } } },
-      });
-      if (!pipeline) {
+  /**
+   * KAN-1169 — Pre-delete inspection query. UI calls this on Delete-button
+   * click to drive the ReassignmentModal copy:
+   *   - blockReason set → modal shows block-with-reason banner (no destination picker)
+   *   - dealCount === 0 + hasStageHistory === false → simple "Delete X?" confirm
+   *   - dealCount === 0 + hasStageHistory === true → "Archive X — preserves history"
+   *   - dealCount > 0 → reassignment picker over `destinations`
+   */
+  previewDelete: protectedProcedure
+    .input(z.object({ pipelineId: z.string().uuid() }))
+    .query(async ({ ctx, input }) => {
+      const prisma = ctx.prisma as any;
+      const source: { id: string; name: string } | null =
+        (await prisma.pipeline?.findFirst({
+          where: { id: input.pipelineId, tenantId: ctx.tenantId },
+          select: { id: true, name: true },
+        })) ?? null;
+      if (!source) {
         throw new TRPCError({ code: "NOT_FOUND", message: "Pipeline not found in this tenant" });
       }
-      // KAN-793: stage-transition audit moved to DealStageHistory (deal-scoped
-      // per KAN-791). Same semantic — count audit-trail transitions whose
-      // destination Stage belongs to this Pipeline.
-      const stageHistoryCount: number =
-        (await (ctx.prisma as any).dealStageHistory?.count({
-          where: { toStage: { pipelineId: input.id } },
-        })) ?? 0;
-      const decision = canDeletePipeline({
-        activeLeadCount: pipeline.contacts?.length ?? 0,
-        stageHistoryCount,
-      });
-      if (!decision.canDelete) {
-        throw new TRPCError({ code: "PRECONDITION_FAILED", message: decision.reason ?? "Cannot delete pipeline" });
+
+      const check = await checkPipelineDeletability(
+        ctx.prisma,
+        ctx.tenantId,
+        input.pipelineId,
+      );
+
+      // Pull destination candidates (other active pipelines with their initial
+      // stage name surfaced) so the modal can render "they'll land at [stage]"
+      // per Q2 lock.
+      const candidates: Array<{ id: string; name: string; stages: Array<{ id: string; name: string; isInitial: boolean }> }> =
+        check.destinationCandidates > 0
+          ? await prisma.pipeline.findMany({
+              where: { tenantId: ctx.tenantId, isActive: true, id: { not: input.pipelineId } },
+              orderBy: [{ order: 'asc' }, { createdAt: 'asc' }],
+              select: {
+                id: true,
+                name: true,
+                stages: {
+                  where: { isInitial: true },
+                  select: { id: true, name: true, isInitial: true },
+                  take: 1,
+                },
+              },
+            })
+          : [];
+
+      return {
+        source,
+        blockReason: check.blockReason,
+        dealCount: check.dealCount,
+        hasStageHistory: check.hasStageHistory,
+        destinations: candidates
+          .map((c) => ({
+            id: c.id,
+            name: c.name,
+            initialStageId: c.stages[0]?.id ?? null,
+            initialStageName: c.stages[0]?.name ?? null,
+          }))
+          // Destinations missing an initial stage can't accept reassigned deals;
+          // filter to actionable candidates only.
+          .filter((d) => d.initialStageId !== null),
+      };
+    }),
+
+  /**
+   * KAN-1169 — Pipeline delete with reassignment + soft-archive when history
+   * exists (Option C — see Phase 2 architectural escalation).
+   *
+   * Three audit actionTypes distinguish the outcome paths:
+   *   - `pipeline.deleted_empty`: hard delete (zero deals + zero history)
+   *   - `pipeline.archived_empty`: soft archive (zero deals but has history)
+   *   - `pipeline.archived_with_reassign`: deals reassigned + soft archive
+   *
+   * Hard-block paths (BLOCK before any mutation):
+   *   - `last_pipeline`: tenant's only active pipeline
+   *   - `default_assignment`: tenant's `defaultAssignmentPipelineId` target
+   *
+   * Reassignment semantics:
+   *   - destination must be isActive=true + same tenant + not source
+   *   - destination must have an isInitial=true stage configured
+   *   - all source deals land at destination's initial stage with
+   *     refreshed enteredStageAt = now() (Q-ADD-DEAL-STAGE-MAPPING lock)
+   *   - terminal_won/terminal_lost deals are moved too (Q-ADD-TERMINAL-DEAL-EXCLUSION lock)
+   */
+  delete: adminProcedure
+    .input(
+      z.object({
+        pipelineId: z.string().uuid(),
+        reassignTo: z.string().uuid().nullable().optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const prisma = ctx.prisma as any;
+      const source: { id: string; name: string } | null =
+        (await prisma.pipeline?.findFirst({
+          where: { id: input.pipelineId, tenantId: ctx.tenantId },
+          select: { id: true, name: true },
+        })) ?? null;
+      if (!source) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Pipeline not found in this tenant" });
       }
-      await (ctx.prisma as any).pipeline?.delete({ where: { id: input.id } });
-      return { id: input.id };
+
+      const check = await checkPipelineDeletability(
+        ctx.prisma,
+        ctx.tenantId,
+        input.pipelineId,
+      );
+
+      if (check.blockReason === 'last_pipeline') {
+        throw new TRPCError({
+          code: "PRECONDITION_FAILED",
+          message: `Cannot delete "${source.name}" — it's your tenant's only active pipeline. Create another pipeline first.`,
+        });
+      }
+      if (check.blockReason === 'default_assignment') {
+        throw new TRPCError({
+          code: "PRECONDITION_FAILED",
+          message: `Cannot delete "${source.name}" — it's the tenant's default-assignment pipeline. Change the default-assignment in Tenant Settings first.`,
+        });
+      }
+
+      // Non-empty pipeline requires reassignTo (operator must pick destination).
+      if (check.dealCount > 0 && !input.reassignTo) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: `Pipeline "${source.name}" has ${check.dealCount} deals. Provide reassignTo destination.`,
+        });
+      }
+
+      // Resolve destination + its initial stage if reassigning.
+      let dest: { id: string; name: string } | null = null;
+      let destInitialStage: { id: string; name: string } | null = null;
+      if (input.reassignTo) {
+        if (input.reassignTo === input.pipelineId) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Cannot reassign deals to the pipeline being deleted." });
+        }
+        dest =
+          (await prisma.pipeline?.findFirst({
+            where: { id: input.reassignTo, tenantId: ctx.tenantId, isActive: true },
+            select: { id: true, name: true },
+          })) ?? null;
+        if (!dest) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "Destination pipeline not found or inactive." });
+        }
+        destInitialStage =
+          (await prisma.stage?.findFirst({
+            where: { pipelineId: dest.id, isInitial: true },
+            select: { id: true, name: true },
+          })) ?? null;
+        if (!destInitialStage) {
+          throw new TRPCError({
+            code: "PRECONDITION_FAILED",
+            message: `Destination pipeline "${dest.name}" has no initial stage configured.`,
+          });
+        }
+      }
+
+      // Option C — soft-archive when stage history exists (preserves
+      // deal-scoped retrospective audit trail per the audit_log NEVER
+      // deleted precedent + DealStageHistory.toStageId Restrict schema intent).
+      const shouldArchive = check.hasStageHistory;
+
+      // Atomic transaction (Q4 mandatory): reassign deals (if any) + delete-or-archive
+      // pipeline. Either all succeed or all roll back.
+      const transactionOps: unknown[] = [];
+      if (input.reassignTo && destInitialStage) {
+        transactionOps.push(
+          prisma.deal.updateMany({
+            where: { tenantId: ctx.tenantId, pipelineId: input.pipelineId },
+            data: {
+              pipelineId: input.reassignTo,
+              currentStageId: destInitialStage.id,
+              enteredStageAt: new Date(),
+            },
+          }),
+        );
+      }
+      if (shouldArchive) {
+        transactionOps.push(
+          prisma.pipeline.update({
+            where: { id: input.pipelineId },
+            data: { isActive: false },
+          }),
+        );
+      } else {
+        transactionOps.push(
+          prisma.pipeline.delete({ where: { id: input.pipelineId } }),
+        );
+      }
+      await prisma.$transaction(transactionOps);
+
+      // Audit (best-effort; consistent with parse arc convention — KAN-1150
+      // P2 consolidation pressure: this is the 6th inline copy).
+      let actionType: string;
+      if (!shouldArchive && check.dealCount === 0) {
+        actionType = 'pipeline.deleted_empty';
+      } else if (shouldArchive && check.dealCount === 0) {
+        actionType = 'pipeline.archived_empty';
+      } else {
+        actionType = 'pipeline.archived_with_reassign';
+      }
+
+      await writePipelineAuditBestEffort(
+        ctx.prisma,
+        ctx.tenantId,
+        ctx.firebaseUser?.uid ?? 'unknown',
+        actionType,
+        {
+          sourceId: source.id,
+          sourceLabel: source.name,
+          destinationId: dest?.id ?? null,
+          destinationLabel: dest?.name ?? null,
+          destinationInitialStageId: destInitialStage?.id ?? null,
+          destinationInitialStageLabel: destInitialStage?.name ?? null,
+          dealCount: check.dealCount,
+          hasStageHistory: check.hasStageHistory,
+          softArchived: shouldArchive,
+        },
+      );
+
+      return {
+        id: input.pipelineId,
+        outcome: actionType,
+        dealCount: check.dealCount,
+        softArchived: shouldArchive,
+      };
     }),
 });
 

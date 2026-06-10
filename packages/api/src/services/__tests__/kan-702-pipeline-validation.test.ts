@@ -11,15 +11,18 @@
  *   - validateStages: priority/order rules, isInitial constraint, name uniqueness, empty list
  *   - validatePipelineForm: name required + length + objective enum + delegates to validateStages
  *   - normalizeStageOrders: contiguous 0..N-1 sequence
- *   - canDeletePipeline: lead-count safety + stage-history safety
  *   - canDeleteStage: lead-count safety + only-initial-stage protection
+ *
+ * KAN-1169 — canDeletePipeline removed; replaced by async checkPipelineDeletability
+ * (Prisma-dependent; covered by procedure-level tests in
+ * apps/api/src/__tests__/kan-1169-pipeline-delete.test.ts + the real-Postgres
+ * integration suite).
  */
 import { describe, it, expect } from 'vitest';
 import {
   validateStages,
   validatePipelineForm,
   normalizeStageOrders,
-  canDeletePipeline,
   canDeleteStage,
   type StageInput,
 } from '../../../../../apps/api/src/router.js';
@@ -188,35 +191,20 @@ describe('normalizeStageOrders', () => {
 });
 
 // ─────────────────────────────────────────────
-// canDeletePipeline
+// canDeletePipeline (REMOVED — KAN-1169)
 // ─────────────────────────────────────────────
-
-describe('canDeletePipeline', () => {
-  it('refuses when leads are still assigned', () => {
-    const r = canDeletePipeline({ activeLeadCount: 5, stageHistoryCount: 0 });
-    expect(r.canDelete).toBe(false);
-    expect(r.reason).toMatch(/5 lead\(s\) currently assigned/);
-  });
-
-  it('refuses when stage history exists (audit trail loss prevention)', () => {
-    const r = canDeletePipeline({ activeLeadCount: 0, stageHistoryCount: 3 });
-    expect(r.canDelete).toBe(false);
-    expect(r.reason).toMatch(/3 stage transition\(s\) in audit history/);
-    expect(r.reason).toMatch(/Archive instead/);
-  });
-
-  it('allows deletion when both counts are zero', () => {
-    const r = canDeletePipeline({ activeLeadCount: 0, stageHistoryCount: 0 });
-    expect(r.canDelete).toBe(true);
-    expect(r.reason).toBeNull();
-  });
-
-  it('lead-count message takes precedence over history-count message when both > 0', () => {
-    const r = canDeletePipeline({ activeLeadCount: 2, stageHistoryCount: 5 });
-    expect(r.canDelete).toBe(false);
-    expect(r.reason).toMatch(/2 lead\(s\)/);
-  });
-});
+// The pure helper canDeletePipeline shipped in KAN-702 PR A was replaced by
+// the async checkPipelineDeletability (Prisma-dependent) in KAN-1169. The
+// pipelines.delete procedure now branches on:
+//   - blockReason: 'last_pipeline' | 'default_assignment' | null
+//   - dealCount: total deals (terminal_won/terminal_lost included)
+//   - destinationCandidates: count of other active pipelines
+//   - hasStageHistory: TRUE if DealStageHistory references source's stages
+//     → procedure soft-archives (isActive=false) instead of hard delete
+//       to honor the audit_log NEVER deleted precedent + DealStageHistory.toStageId
+//       Restrict schema intent.
+// Coverage: see apps/api/src/__tests__/kan-1169-pipeline-delete.test.ts
+// (12 procedure scenarios) + the real-Postgres integration test.
 
 // ─────────────────────────────────────────────
 // canDeleteStage
