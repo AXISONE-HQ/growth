@@ -389,6 +389,12 @@ describe("KAN-1140 PR 9b — parse-rule-execution integration (KAN-1112)", () =>
   //   - + quantifier + final '!' literal that never matches against "a"-only input.
   //   - Star-height = 1 (single + on the group) → safe-regex2 ACCEPTS.
   //   - Polynomial (~O(n^4)) backtracking → predictable scaling.
+  //   - **Always returns NULL on "a"-only input** — by design. The engine
+  //     exhausts the alternation+repetition search space looking for the
+  //     '!' terminator, eats CPU time, and returns no match. This is the
+  //     correct ReDoS demonstration: CPU consumed, no output written.
+  //     Tests assert on EXECUTION metrics (rulesEvaluated, fieldsWritten,
+  //     pipelineBudgetExceeded) — NOT on slow-rule output presence.
   //
   //   Input "a".repeat(25) → ~108ms mean local; over per-rule 50ms envelope.
   //   Input "a".repeat(26) → ~200ms mean local; 2 rules guaranteed to
@@ -493,15 +499,20 @@ describe("KAN-1140 PR 9b — parse-rule-execution integration (KAN-1112)", () =>
         payload,
       });
 
-      // Slow rule produced output (group 0 = full backtrack match; non-empty).
-      expect(typeof result.output.firstName).toBe("string");
-      expect((result.output.firstName ?? "").length).toBeGreaterThan(0);
-      // Fast rule produced output.
+      // The slow regex catastrophically backtracks searching for the '!'
+      // terminator (which isn't in the input) and returns null (NO MATCH).
+      // This is the correct empirical ReDoS demonstration — exhaustive
+      // backtracking eats time WITHOUT producing output. The executor
+      // observes: rule ran, no match, no output written.
+      expect(result.output.firstName).toBeUndefined();
+      // Fast rule produced output — proves the cascade CONTINUED past the
+      // slow rule's no-match return.
       expect(result.output.lastName).toBe("Fred");
       // Total budget NOT exceeded (~108ms + ~0ms = ~108ms < 250ms).
       expect(result.metrics.pipelineBudgetExceeded).toBe(false);
-      // Both rules ran to completion.
+      // Both rules ran to completion (slow returned null; fast matched).
       expect(result.metrics.rulesEvaluated).toBe(2);
+      expect(result.metrics.fieldsWritten).toBe(1);
     });
   });
 
@@ -553,13 +564,15 @@ describe("KAN-1140 PR 9b — parse-rule-execution integration (KAN-1112)", () =>
         payload,
       });
 
-      // The runtime ReDoS defense fired.
+      // The runtime ReDoS defense fired — the load-bearing assertion.
       expect(result.metrics.pipelineBudgetExceeded).toBe(true);
       // At least one cascade field was skipped vs total rules.
       expect(result.metrics.rulesEvaluated).toBeLessThan(3);
-      // First slow rule completed before budget check fired.
-      expect(typeof result.output.firstName).toBe("string");
-      expect((result.output.firstName ?? "").length).toBeGreaterThan(0);
+      // Slow rules produce NO output (regex catastrophically backtracks
+      // searching for '!' that isn't in input → null return). The slow
+      // rules consumed CPU time, triggering budget exhaustion. This is
+      // the correct empirical ReDoS demonstration. fieldsWritten stays 0.
+      expect(result.metrics.fieldsWritten).toBe(0);
       // Note: we don't assert WHICH fields are skipped — that depends on
       // exact CI timing. We assert the COUNT relationship (Q-ADD-TIMING).
     });
