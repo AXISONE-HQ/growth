@@ -720,6 +720,13 @@ export interface LeadInboxEventRow {
   attachmentCount: number;
   createdContactId: string | null;
   createdAt: string;
+  /**
+   * KAN-1140 PR 11 — true = first email from this sender (Contact created
+   * within 5s of this event); false = reply (Contact predates the inbound
+   * by > 5s); null = non-accepted status OR Contact lookup miss. Computed
+   * server-side via Contact.createdAt vs LeadInboxEvent.createdAt.
+   */
+  isNewLead: boolean | null;
 }
 
 /* ── Tenant API Keys (KAN-742) ──────────────────────────

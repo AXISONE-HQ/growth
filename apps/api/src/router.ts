@@ -5611,6 +5611,27 @@ const inboxRouter = router({
   // status filter optional. KAN-741 ships this endpoint; the frontend
   // events table is deferrable to Sprint 4 if LoC tightens (per defer
   // order in PR description).
+  //
+  // KAN-1140 PR 11 — `isNewLead` per-row derivation via Contact JOIN.
+  // Reply = the Contact existed BEFORE this LeadInboxEvent landed.
+  // Implementation: JOIN Contact by `createdContactId` (the Contact PK
+  // the webhook upserted for this event); compare `Contact.createdAt`
+  // vs `LeadInboxEvent.createdAt` with 5s tolerance.
+  //
+  // Why JOIN on Contact.id (not Contact.email):
+  //   1. Contact.email is nullable + non-unique per tenant; multiple
+  //      Contacts may share an email
+  //   2. `createdContactId` is the exact PK the webhook upserted —
+  //      no ambiguity about which Contact row to compare
+  //   3. PK JOIN is the most efficient query shape
+  //
+  // 5s tolerance rationale:
+  //   - Webhook flow: upsert Contact → write LeadInboxEvent within
+  //     the same handler (~50-200ms typical)
+  //   - 5s absorbs DB clock skew, replication lag, process scheduling
+  //   - Edge case: Contact created via non-inbox path (CRM import,
+  //     lead-API, manual) within 5s of inbound — misclassifies as
+  //     new-lead. Low probability + UX-only severity.
   listRecentEvents: protectedProcedure
     .input(z.object({
       limit: z.number().int().min(1).max(200).default(50),
@@ -5627,21 +5648,88 @@ const inboxRouter = router({
           take: input.limit,
           skip: input.offset,
         })) ?? [];
-      return rows.map((r) => ({
-        id: r.id,
-        inboxAddress: r.inboxAddress,
-        fromAddress: r.fromAddress,
-        subject: r.subject,
-        status: r.status,
-        rejectionReason: r.rejectionReason,
-        spfPass: r.spfPass,
-        dkimPass: r.dkimPass,
-        attachmentCount: r.attachmentCount,
-        createdContactId: r.createdContactId,
-        createdAt: r.createdAt.toISOString(),
-      }));
+
+      // KAN-1140 PR 11: bulk-fetch Contacts referenced by accepted events.
+      // Only `status === 'accepted'` rows get a Type badge (Q-ADD-OOO lock);
+      // rejected_autoresponder + rejected_* surface via the status column.
+      const contactIds = rows
+        .filter((r) => r.status === "accepted" && r.createdContactId)
+        .map((r) => r.createdContactId as string);
+      const contactCreatedAtById = new Map<string, Date>();
+      if (contactIds.length > 0) {
+        const contacts: Array<{ id: string; createdAt: Date }> =
+          (await (ctx.prisma as any).contact?.findMany({
+            where: { id: { in: contactIds }, tenantId: ctx.tenantId },
+            select: { id: true, createdAt: true },
+          })) ?? [];
+        for (const c of contacts) {
+          contactCreatedAtById.set(c.id, c.createdAt);
+        }
+      }
+
+      return rows.map((r) => {
+        const isNewLead = deriveIsNewLead({
+          status: r.status,
+          createdContactId: r.createdContactId,
+          eventCreatedAt: r.createdAt,
+          contactCreatedAt:
+            r.createdContactId && contactCreatedAtById.has(r.createdContactId)
+              ? (contactCreatedAtById.get(r.createdContactId) as Date)
+              : null,
+        });
+        return {
+          id: r.id,
+          inboxAddress: r.inboxAddress,
+          fromAddress: r.fromAddress,
+          subject: r.subject,
+          status: r.status,
+          rejectionReason: r.rejectionReason,
+          spfPass: r.spfPass,
+          dkimPass: r.dkimPass,
+          attachmentCount: r.attachmentCount,
+          createdContactId: r.createdContactId,
+          createdAt: r.createdAt.toISOString(),
+          isNewLead,
+        };
+      });
     }),
 });
+
+/**
+ * KAN-1140 PR 11 — Reply vs new-lead derivation.
+ *
+ * Pure function (no IO) extracted from `inbox.listRecentEvents` for unit
+ * testability. Returns:
+ *   - `true`  if the Contact was created within 5s of this LeadInboxEvent
+ *             (new lead — Contact was upserted-and-created by this inbound)
+ *   - `false` if the Contact predates the event by > 5s
+ *             (reply — Contact already existed when this inbound landed)
+ *   - `null`  for non-accepted statuses OR when Contact lookup missed
+ *             (rejection rows don't get a Type badge; null Contact happens
+ *             on data-loss races — defensive null surface)
+ *
+ * 5s tolerance absorbs DB clock skew + replication lag for the
+ * webhook-upserts-Contact-then-writes-LeadInboxEvent flow.
+ *
+ * Edge case: a Contact created via non-inbox path (CRM import, lead-API,
+ * manual) within 5s of an inbound from the same sender would misclassify
+ * as new-lead. Low probability + UX-only severity.
+ */
+export const ISNEWLEAD_TOLERANCE_MS_PR11 = 5_000;
+export function deriveIsNewLead(input: {
+  status: string;
+  createdContactId: string | null;
+  eventCreatedAt: Date;
+  contactCreatedAt: Date | null;
+}): boolean | null {
+  if (input.status !== "accepted") return null;
+  if (!input.createdContactId) return null;
+  if (!input.contactCreatedAt) return null;
+  return (
+    input.contactCreatedAt.getTime() >=
+    input.eventCreatedAt.getTime() - ISNEWLEAD_TOLERANCE_MS_PR11
+  );
+}
 
 // KAN-745 PR B — observability router (admin-only). Service files live in
 // packages/api/src/services/observability/ and are loaded via variable-

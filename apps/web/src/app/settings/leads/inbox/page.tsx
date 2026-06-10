@@ -24,12 +24,23 @@ import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { inboxApi, type InboxAddressInfo, type LeadInboxEventRow } from "@/lib/api";
 
+// KAN-1140 PR 11 — Type filter for the events table.
+type TypeFilter = "all" | "new_lead" | "reply";
+const TYPE_FILTER_LABELS: Record<TypeFilter, string> = {
+  all: "All",
+  new_lead: "New leads",
+  reply: "Replies",
+};
+const TYPE_FILTER_ORDER: TypeFilter[] = ["all", "new_lead", "reply"];
+
 export default function LeadInboxSettingsPage() {
   const [info, setInfo] = useState<InboxAddressInfo | null>(null);
   const [events, setEvents] = useState<LeadInboxEventRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<"regenerate" | "dkim" | null>(null);
   const [copied, setCopied] = useState(false);
+  // KAN-1140 PR 11 — application-layer filter; no server roundtrip on chip click.
+  const [typeFilter, setTypeFilter] = useState<TypeFilter>("all");
 
   const reload = useCallback(async () => {
     try {
@@ -204,40 +215,110 @@ export default function LeadInboxSettingsPage() {
             No inbox events yet. Forward an email to your address above to see it appear here.
           </CardContent>
         ) : (
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>From</TableHead>
-                <TableHead>Subject</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead>Received</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {events.map((e) => (
-                <TableRow key={e.id}>
-                  <TableCell className="max-w-[200px] truncate text-sm">{e.fromAddress}</TableCell>
-                  <TableCell className="max-w-[300px] truncate text-sm">
-                    {e.subject ?? <span className="text-muted-foreground">(no subject)</span>}
-                  </TableCell>
-                  <TableCell>
-                    <StatusCell status={e.status} reason={e.rejectionReason} />
-                  </TableCell>
-                  {/* USER-tz display: `createdAt` is a DateTime instant — operator
-                      sees inbox-event timestamp in browser locale, correct for
-                      "this happened at X" displays. KAN-943's off-by-one bug applies
-                      only to `@db.Date` sources, not instants. KAN-1131 PR 2 audit
-                      2026-06-08. */}
-                  <TableCell className="text-sm text-muted-foreground">
-                    {new Date(e.createdAt).toLocaleString()}
-                  </TableCell>
-                </TableRow>
+          <>
+            {/* KAN-1140 PR 11 — Type filter chips. Application-layer filter;
+                no server roundtrip. Mirrors parse-fingerprints dashboard
+                STATUS_OPTIONS pattern. */}
+            <div className="flex items-center gap-2 border-b px-6 pb-3">
+              <span className="text-xs text-muted-foreground">Type:</span>
+              {TYPE_FILTER_ORDER.map((opt) => (
+                <button
+                  key={opt}
+                  type="button"
+                  onClick={() => setTypeFilter(opt)}
+                  className={
+                    typeFilter === opt
+                      ? "rounded-full bg-primary px-3 py-1 text-xs font-medium text-primary-foreground"
+                      : "rounded-full border px-3 py-1 text-xs font-medium text-muted-foreground hover:bg-muted"
+                  }
+                >
+                  {TYPE_FILTER_LABELS[opt]}
+                </button>
               ))}
-            </TableBody>
-          </Table>
+            </div>
+            {(() => {
+              const filtered = events.filter((e) => {
+                if (typeFilter === "all") return true;
+                if (typeFilter === "new_lead") return e.isNewLead === true;
+                if (typeFilter === "reply") return e.isNewLead === false;
+                return true;
+              });
+              if (filtered.length === 0) {
+                return (
+                  <CardContent className="py-8 text-center text-sm text-muted-foreground">
+                    {typeFilter === "new_lead"
+                      ? "No new leads in this view."
+                      : "No replies in this view."}
+                  </CardContent>
+                );
+              }
+              return (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>From</TableHead>
+                      <TableHead>Subject</TableHead>
+                      <TableHead>Status</TableHead>
+                      {/* KAN-1140 PR 11 — Type column distinguishes new-lead vs reply. */}
+                      <TableHead>Type</TableHead>
+                      <TableHead>Received</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {filtered.map((e) => (
+                      <TableRow key={e.id}>
+                        <TableCell className="max-w-[200px] truncate text-sm">{e.fromAddress}</TableCell>
+                        <TableCell className="max-w-[300px] truncate text-sm">
+                          {e.subject ?? <span className="text-muted-foreground">(no subject)</span>}
+                        </TableCell>
+                        <TableCell>
+                          <StatusCell status={e.status} reason={e.rejectionReason} />
+                        </TableCell>
+                        <TableCell>
+                          <TypeBadge isNewLead={e.isNewLead} />
+                        </TableCell>
+                        {/* USER-tz display: `createdAt` is a DateTime instant — operator
+                            sees inbox-event timestamp in browser locale, correct for
+                            "this happened at X" displays. KAN-943's off-by-one bug applies
+                            only to `@db.Date` sources, not instants. KAN-1131 PR 2 audit
+                            2026-06-08. */}
+                        <TableCell className="text-sm text-muted-foreground">
+                          {new Date(e.createdAt).toLocaleString()}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              );
+            })()}
+          </>
         )}
       </Card>
     </div>
+  );
+}
+
+/**
+ * KAN-1140 PR 11 — Type badge: distinguishes new-lead from reply at a glance.
+ * Color coding matches PR 8 StatusBadge inline-styled span pattern; green
+ * (positive/new) vs blue (neutral/continuing); muted dash for non-accepted
+ * rows (status column already conveys the rejection reason).
+ */
+function TypeBadge({ isNewLead }: { isNewLead: boolean | null }) {
+  if (isNewLead === null) {
+    return <span className="text-sm text-muted-foreground">—</span>;
+  }
+  if (isNewLead) {
+    return (
+      <span className="inline-block rounded px-1.5 py-0.5 text-xs font-medium text-emerald-800 bg-emerald-100">
+        New lead
+      </span>
+    );
+  }
+  return (
+    <span className="inline-block rounded px-1.5 py-0.5 text-xs font-medium text-blue-800 bg-blue-100">
+      Reply
+    </span>
   );
 }
 
