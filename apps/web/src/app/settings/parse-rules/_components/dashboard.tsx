@@ -9,8 +9,18 @@
  *
  * State management: plain controlled state (Q9 lock; matches parse-arc
  * Settings sibling convention).
+ *
+ * # KAN-1166 fix-forward — URL param reading lives HERE, not in page.tsx
+ *
+ * `useSearchParams` was originally in page.tsx but caused a redirect-to-
+ * home regression on initial load. In Next.js 14.2, `useSearchParams`
+ * returns `null` during prerender; `.get()` on null throws and corrupts
+ * the page render. Moving the hook into this dashboard component —
+ * which mounts AFTER the page-level auth gate passes — sidesteps the
+ * prerender-null window entirely.
  */
 import * as React from 'react';
+import { useSearchParams } from 'next/navigation';
 import {
   parseRulesApi,
   type ParseRuleRow,
@@ -66,15 +76,17 @@ function describeScope(rule: { fingerprintId: string | null; format: string | nu
   return 'Global (all inbounds)';
 }
 
-export function ParseRulesDashboard({
-  createForFingerprintId,
-  createForFormat,
-  createForVendor,
-}: {
-  createForFingerprintId: string | null;
-  createForFormat: string | null;
-  createForVendor: string | null;
-}): React.ReactElement {
+export function ParseRulesDashboard(): React.ReactElement {
+  // Q-ADD-INLINE-CROSS-LINK — read URL query params from parse-fingerprints
+  // cross-link. Hook lives in this component (which mounts AFTER the page
+  // auth gate) to avoid Next.js 14.2 prerender-null window. searchParams
+  // can be null during initial prerender; guard with optional chaining +
+  // null-coalesce.
+  const searchParams = useSearchParams();
+  const createForFingerprintId = searchParams?.get('createForFingerprint') ?? null;
+  const createForFormat = searchParams?.get('format') ?? null;
+  const createForVendor = searchParams?.get('vendor') ?? null;
+
   const [rules, setRules] = React.useState<ParseRuleRow[] | null>(null);
   const [statusFilter, setStatusFilter] = React.useState<StatusFilter>('all');
   const [selectedDetail, setSelectedDetail] = React.useState<ParseRuleDetail | null>(null);
