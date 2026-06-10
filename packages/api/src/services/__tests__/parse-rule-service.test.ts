@@ -22,6 +22,8 @@ import {
   listParseRules,
   getParseRuleDetail,
   restoreParseRulePreviousVersion,
+  activateParseRule,
+  deactivateParseRule,
 } from "../parse-rule-service.js";
 
 interface FakeRule {
@@ -529,3 +531,107 @@ describe("KAN-1140 PR 9a — getParseRuleDetail + restoreParseRulePreviousVersio
     ).rejects.toMatchObject({ code: "BAD_REQUEST" });
   });
 });
+
+describe("KAN-1140 PR 9c — activateParseRule", () => {
+  let state: FakePrismaState;
+  let ruleId: string;
+  beforeEach(async () => {
+    state = emptyState();
+    const prisma = makePrisma(state) as never;
+    const { id } = await createParseRule(prisma, {
+      tenantId: "t1",
+      userId: "u1",
+      label: "test rule",
+      body: validBody,
+    });
+    ruleId = id;
+  });
+
+  it("pending → active; writes audit row; returns status", async () => {
+    const prisma = makePrisma(state) as never;
+    const result = await activateParseRule(prisma, { tenantId: "t1", userId: "u1", ruleId });
+    expect(result.status).toBe("active");
+    expect(state.rules[0].status).toBe("active");
+    const audit = state.audit.find((a) => a.actionType === "parse_rule.activated");
+    expect(audit).toBeDefined();
+    expect(audit?.payload.fromStatus).toBe("pending");
+  });
+
+  it("disabled → active", async () => {
+    state.rules[0].status = "disabled";
+    const prisma = makePrisma(state) as never;
+    const result = await activateParseRule(prisma, { tenantId: "t1", userId: "u1", ruleId });
+    expect(result.status).toBe("active");
+  });
+
+  it("already active → idempotent no-op (no audit)", async () => {
+    state.rules[0].status = "active";
+    const beforeAuditCount = state.audit.length;
+    const prisma = makePrisma(state) as never;
+    const result = await activateParseRule(prisma, { tenantId: "t1", userId: "u1", ruleId });
+    expect(result.status).toBe("active");
+    expect(state.audit.length).toBe(beforeAuditCount); // no new audit row
+  });
+
+  it("REJECTS wrong tenant (NOT_FOUND)", async () => {
+    const prisma = makePrisma(state) as never;
+    await expect(
+      activateParseRule(prisma, { tenantId: "t-other", userId: "u1", ruleId }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+});
+
+describe("KAN-1140 PR 9c — deactivateParseRule", () => {
+  let state: FakePrismaState;
+  let ruleId: string;
+  beforeEach(async () => {
+    state = emptyState();
+    const prisma = makePrisma(state) as never;
+    const { id } = await createParseRule(prisma, {
+      tenantId: "t1",
+      userId: "u1",
+      label: "test rule",
+      body: validBody,
+    });
+    ruleId = id;
+    state.rules[0].status = "active";
+  });
+
+  it("active → disabled; writes audit row", async () => {
+    const prisma = makePrisma(state) as never;
+    const result = await deactivateParseRule(prisma, { tenantId: "t1", userId: "u1", ruleId });
+    expect(result.status).toBe("disabled");
+    expect(state.rules[0].status).toBe("disabled");
+    const audit = state.audit.find((a) => a.actionType === "parse_rule.deactivated");
+    expect(audit).toBeDefined();
+  });
+
+  it("REJECTS pending → throws BAD_REQUEST (not active)", async () => {
+    state.rules[0].status = "pending";
+    const prisma = makePrisma(state) as never;
+    await expect(
+      deactivateParseRule(prisma, { tenantId: "t1", userId: "u1", ruleId }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
+
+  it("REJECTS disabled → throws BAD_REQUEST (already off)", async () => {
+    state.rules[0].status = "disabled";
+    const prisma = makePrisma(state) as never;
+    await expect(
+      deactivateParseRule(prisma, { tenantId: "t1", userId: "u1", ruleId }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
+
+  it("REJECTS wrong tenant (NOT_FOUND)", async () => {
+    const prisma = makePrisma(state) as never;
+    await expect(
+      deactivateParseRule(prisma, { tenantId: "t-other", userId: "u1", ruleId }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+});
+
+// Note: testRuleAgainstSample tests deferred — the function uses dynamic
+// import of parse-rule-executor + Prisma reads for sample lookup, which
+// requires more mock surface than the existing FakePrismaState provides.
+// Integration coverage via the in-UI sample test panel + a follow-up
+// extension of FakePrismaState (KAN-1165) for unit isolation.

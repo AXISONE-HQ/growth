@@ -2128,6 +2128,38 @@ interface ParseRulesModule {
     prisma: unknown,
     input: { tenantId: string; userId: string; ruleId: string },
   ) => Promise<{ id: string }>;
+  // KAN-1140 PR 9c — Status lifecycle + sample testing.
+  activateParseRule: (
+    prisma: unknown,
+    input: { tenantId: string; userId: string; ruleId: string },
+  ) => Promise<{ id: string; status: string }>;
+  deactivateParseRule: (
+    prisma: unknown,
+    input: { tenantId: string; userId: string; ruleId: string },
+  ) => Promise<{ id: string; status: string }>;
+  testRuleAgainstSample: (
+    prisma: unknown,
+    input: {
+      tenantId: string;
+      userId: string;
+      ruleBody: unknown;
+      sampleSource: "stored" | "paste" | "recent";
+      sampleId?: string;
+      rawBody?: string;
+      rawStructured?: Record<string, unknown>;
+      fromAddress?: string;
+    },
+  ) => Promise<{
+    output: Record<string, string>;
+    metrics: {
+      rulesEvaluated: number;
+      fieldsWritten: number;
+      rulesThrown: number;
+      rulesTimedOut: number;
+      pipelineBudgetExceeded: boolean;
+      totalDurationMs: number;
+    };
+  }>;
 }
 let _parseRulesModule: ParseRulesModule | null = null;
 async function loadParseRulesModule(): Promise<ParseRulesModule> {
@@ -2230,6 +2262,61 @@ const parseRulesRouter = router({
         tenantId: ctx.tenantId,
         userId: ctx.firebaseUser?.uid ?? "unknown",
         ruleId: input.ruleId,
+      });
+    }),
+
+  // KAN-1140 PR 9c — Status lifecycle: activate / deactivate.
+  // KAN-1158 (P1) empirically verified the runtime budget mechanism in CI
+  // before activate shipped; rules with status='active' fire on every
+  // matching inbound starting immediately.
+  activate: protectedProcedure
+    .input(z.object({ ruleId: z.string().uuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const { activateParseRule } = await loadParseRulesModule();
+      return activateParseRule(ctx.prisma, {
+        tenantId: ctx.tenantId,
+        userId: ctx.firebaseUser?.uid ?? "unknown",
+        ruleId: input.ruleId,
+      });
+    }),
+
+  deactivate: protectedProcedure
+    .input(z.object({ ruleId: z.string().uuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const { deactivateParseRule } = await loadParseRulesModule();
+      return deactivateParseRule(ctx.prisma, {
+        tenantId: ctx.tenantId,
+        userId: ctx.firebaseUser?.uid ?? "unknown",
+        ruleId: input.ruleId,
+      });
+    }),
+
+  // KAN-1140 PR 9c — Sample testing (Q-ADD-TEST-AGAINST-DRAFT lock).
+  // Accepts ruleBody as input (form state, not a saved rule). Calls the
+  // existing executor (Memo 37 single source of truth); returns
+  // ExtractedFields output + execution metrics for the authoring UI.
+  testAgainstSample: protectedProcedure
+    .input(
+      z.object({
+        ruleBody: z.unknown(),
+        sampleSource: z.enum(["stored", "paste", "recent"]),
+        sampleId: z.string().uuid().optional(),
+        rawBody: z.string().max(8000).optional(),
+        rawStructured: z.record(z.unknown()).optional(),
+        fromAddress: z.string().optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const { testRuleAgainstSample } = await loadParseRulesModule();
+      return testRuleAgainstSample(ctx.prisma, {
+        tenantId: ctx.tenantId,
+        userId: ctx.firebaseUser?.uid ?? "unknown",
+        ruleBody: input.ruleBody,
+        sampleSource: input.sampleSource,
+        sampleId: input.sampleId,
+        rawBody: input.rawBody,
+        rawStructured: input.rawStructured,
+        fromAddress: input.fromAddress,
       });
     }),
 });
@@ -5692,6 +5779,29 @@ const inboxRouter = router({
           isNewLead,
         };
       });
+    }),
+
+  // KAN-1140 PR 9c — On-demand body fetch for sample testing in the rule
+  // authoring UI. NOT included in listRecentEvents wire shape (security:
+  // bodyPreview is sensitive; surfaced only when operator explicitly picks
+  // a specific event in the Sample Test panel).
+  getEventBody: protectedProcedure
+    .input(z.object({ id: z.string().uuid() }))
+    .query(async ({ ctx, input }) => {
+      const event: { id: string; bodyPreview: string | null; fromAddress: string; subject: string | null } | null =
+        (await (ctx.prisma as any).leadInboxEvent?.findFirst({
+          where: { id: input.id, tenantId: ctx.tenantId },
+          select: { id: true, bodyPreview: true, fromAddress: true, subject: true },
+        })) ?? null;
+      if (!event) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Inbox event not found in tenant scope." });
+      }
+      return {
+        id: event.id,
+        bodyPreview: event.bodyPreview,
+        fromAddress: event.fromAddress,
+        subject: event.subject,
+      };
     }),
 });
 
