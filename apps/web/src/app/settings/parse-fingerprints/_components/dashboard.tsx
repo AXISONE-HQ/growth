@@ -406,6 +406,15 @@ export function ParserPatternsDashboard(): React.ReactElement {
                       Unmark (revert to pending)
                     </button>
                   )}
+                  {/* KAN-1140 PR 9c — Q-ADD-INLINE-CROSS-LINK: operator
+                      can author a tenant-scoped rule starting from this
+                      fingerprint's context (fingerprintId pre-filled). */}
+                  <a
+                    href={`/settings/parse-rules?createForFingerprint=${detail.id}&format=${encodeURIComponent(detail.format ?? '')}&vendor=${encodeURIComponent(detail.vendor ?? '')}`}
+                    className="rounded border border-blue-500 px-2 py-0.5 text-xs text-blue-700 hover:bg-blue-50"
+                  >
+                    Create rule for this pattern →
+                  </a>
                 </div>
                 <div>
                   <div className="text-xs font-medium">Hashes (operator forensics)</div>

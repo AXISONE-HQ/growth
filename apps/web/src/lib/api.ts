@@ -1901,6 +1901,156 @@ export const parserPatternsApi = {
     }>('parserPatterns.unmark', { fingerprintId }),
 };
 
+/* ── KAN-1140 PR 9c — Parse Rules API ────────────────────────────────
+ * Operator-facing API for tenant-configurable parsing rules.
+ *
+ * PR 9a shipped server-side substrate (schema + service + tRPC); PR 9b
+ * shipped the runtime executor; KAN-1158 empirically verified the budget
+ * mechanism. PR 9c is the FIRST client-side wiring of `parseRules`.
+ *
+ * # Wire types
+ *
+ * `ParseRuleStatus`     — pending | active | disabled (PR 9a schema vocab)
+ * `ParseRuleScope`      — null/null/null = global; non-null fields constrain
+ *                         the cascade scope per Q-ADD-4 lock
+ * `ParseRuleRow`        — list/detail row shape
+ * `ParseRuleDetail`     — includes previousVersion (Q7 hybrid versioning)
+ * `ParseRuleTestResult` — executor output + metrics
+ *
+ * # Q-ADD-CLIENT-WIRING (PR 9c)
+ *
+ * Full wrapper layer added from scratch — PR 9a + 9b shipped server-only
+ * by design (operator surface gated behind UI).
+ */
+export type ParseRuleStatus = 'pending' | 'active' | 'disabled';
+
+export interface ParseRuleScope {
+  fingerprintId: string | null;
+  format: string | null;
+  vendor: string | null;
+}
+
+export interface ParseRuleExtractorJsonPath {
+  type: 'jsonPath';
+  path: string;
+  transforms?: string[];
+}
+
+export interface ParseRuleExtractorRegex {
+  type: 'regex';
+  pattern: string;
+  captureGroup: number;
+  transforms?: string[];
+}
+
+export type ParseRuleExtractor = ParseRuleExtractorJsonPath | ParseRuleExtractorRegex;
+
+export interface ParseRuleFieldExtractor {
+  field: 'firstName' | 'lastName' | 'companyName' | 'phone' | 'intentSummary';
+  extractor: ParseRuleExtractor;
+}
+
+export interface ParseRuleBody {
+  extractors: ParseRuleFieldExtractor[];
+}
+
+export interface ParseRuleRow {
+  id: string;
+  tenantId: string;
+  fingerprintId: string | null;
+  format: string | null;
+  vendor: string | null;
+  label: string;
+  status: ParseRuleStatus;
+  body: ParseRuleBody;
+  createdBy: string;
+  updatedBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ParseRulePreviousVersion {
+  body: ParseRuleBody;
+  label: string;
+  status: ParseRuleStatus;
+  archivedAt: string;
+  archivedBy: string;
+}
+
+export interface ParseRuleDetail extends ParseRuleRow {
+  previousVersion: ParseRulePreviousVersion | null;
+}
+
+export interface ParseRuleTestResult {
+  output: Partial<Record<ParseRuleFieldExtractor['field'], string>>;
+  metrics: {
+    rulesEvaluated: number;
+    fieldsWritten: number;
+    rulesThrown: number;
+    rulesTimedOut: number;
+    pipelineBudgetExceeded: boolean;
+    totalDurationMs: number;
+  };
+}
+
+export const parseRulesApi = {
+  list: (input?: {
+    fingerprintId?: string;
+    format?: string;
+    vendor?: string;
+    statusFilter?: ParseRuleStatus;
+    limit?: number;
+    offset?: number;
+  }) => trpcQuery<{ rows: ParseRuleRow[] }>('parseRules.list', input ?? {}),
+  getDetail: (ruleId: string) =>
+    trpcQuery<ParseRuleDetail>('parseRules.getDetail', { ruleId }),
+  create: (input: {
+    label: string;
+    body: ParseRuleBody;
+    fingerprintId?: string;
+    format?: string;
+    vendor?: string;
+  }) => trpcMutation<{ id: string }>('parseRules.create', input),
+  update: (input: {
+    ruleId: string;
+    label?: string;
+    body?: ParseRuleBody;
+    status?: ParseRuleStatus;
+  }) => trpcMutation<{ id: string }>('parseRules.update', input),
+  delete: (ruleId: string) =>
+    trpcMutation<{ id: string }>('parseRules.delete', { ruleId }),
+  restorePreviousVersion: (ruleId: string) =>
+    trpcMutation<{ id: string }>('parseRules.restorePreviousVersion', { ruleId }),
+  activate: (ruleId: string) =>
+    trpcMutation<{ id: string; status: ParseRuleStatus }>('parseRules.activate', { ruleId }),
+  deactivate: (ruleId: string) =>
+    trpcMutation<{ id: string; status: ParseRuleStatus }>('parseRules.deactivate', { ruleId }),
+  testAgainstSample: (input: {
+    ruleBody: ParseRuleBody;
+    sampleSource: 'stored' | 'paste' | 'recent';
+    sampleId?: string;
+    rawBody?: string;
+    rawStructured?: Record<string, unknown>;
+    fromAddress?: string;
+  }) => trpcMutation<ParseRuleTestResult>('parseRules.testAgainstSample', input),
+};
+
+/**
+ * KAN-1140 PR 9c — Lead Inbox event body on-demand fetch.
+ * Used by parse-rules SampleTestPanel "recent inbound" picker. Body is
+ * NOT included in `inboxApi.listRecentEvents` for security (bodyPreview
+ * sensitive); surfaced only when operator explicitly picks one event.
+ */
+export const inboxBodyApi = {
+  getEventBody: (id: string) =>
+    trpcQuery<{
+      id: string;
+      bodyPreview: string | null;
+      fromAddress: string;
+      subject: string | null;
+    }>('inbox.getEventBody', { id }),
+};
+
 /* ── Import Jobs API (KAN-896 — Cohort 2.1a) ──────────────────────────
  * Backend: apps/api/src/router.ts → importJobsRouter, delegates to
  * packages/api/src/services/import-jobs-router.ts.

@@ -519,6 +519,273 @@ export async function restoreParseRulePreviousVersion(
 }
 
 // ─────────────────────────────────────────────
+// KAN-1140 PR 9c — Status lifecycle transitions
+// ─────────────────────────────────────────────
+
+export interface StatusTransitionInput {
+  tenantId: string;
+  userId: string;
+  ruleId: string;
+}
+
+/**
+ * KAN-1140 PR 9c — Activate a rule.
+ *
+ * Allowed transitions:
+ *   - `pending` → `active`
+ *   - `disabled` → `active`
+ *
+ * Idempotent: re-activating an already-`active` rule returns the rule
+ * row without throwing (no audit entry on no-op).
+ *
+ * KAN-1158 dependency: this procedure is the operator surface that
+ * actually causes a rule to fire on subsequent inbounds. KAN-1158 (P1)
+ * empirically verified the budget mechanism in CI before this affordance
+ * shipped.
+ */
+export async function activateParseRule(
+  prisma: PrismaClient,
+  input: StatusTransitionInput,
+): Promise<{ id: string; status: string }> {
+  const ps = prisma as unknown as PrismaSurface;
+  const current = await ps.parseRule.findFirst({
+    where: { id: input.ruleId, tenantId: input.tenantId },
+  });
+  if (!current) {
+    throw new TRPCError({ code: "NOT_FOUND", message: "Rule not found in tenant scope." });
+  }
+  if (current.status === "active") {
+    // Idempotent no-op; no state change, no audit entry.
+    return { id: current.id, status: current.status };
+  }
+  await ps.parseRule.update({
+    where: { id: input.ruleId },
+    data: { status: "active", updatedBy: input.userId },
+  });
+  await writeAuditBestEffort(prisma, input.tenantId, input.userId, "parse_rule.activated", {
+    ruleId: input.ruleId,
+    fromStatus: current.status,
+  });
+  return { id: input.ruleId, status: "active" };
+}
+
+/**
+ * KAN-1140 PR 9c — Deactivate a rule.
+ *
+ * Allowed transition: `active` → `disabled`. Throws BAD_REQUEST on any
+ * other current status — `pending` rules should be deleted instead;
+ * `disabled` is the terminal "off" state and a no-op deactivation would
+ * surface as a confusing operator outcome.
+ */
+export async function deactivateParseRule(
+  prisma: PrismaClient,
+  input: StatusTransitionInput,
+): Promise<{ id: string; status: string }> {
+  const ps = prisma as unknown as PrismaSurface;
+  const current = await ps.parseRule.findFirst({
+    where: { id: input.ruleId, tenantId: input.tenantId },
+  });
+  if (!current) {
+    throw new TRPCError({ code: "NOT_FOUND", message: "Rule not found in tenant scope." });
+  }
+  if (current.status !== "active") {
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: `Cannot deactivate rule with status='${current.status}'. Only active rules can be deactivated; delete pending rules instead.`,
+    });
+  }
+  await ps.parseRule.update({
+    where: { id: input.ruleId },
+    data: { status: "disabled", updatedBy: input.userId },
+  });
+  await writeAuditBestEffort(prisma, input.tenantId, input.userId, "parse_rule.deactivated", {
+    ruleId: input.ruleId,
+    fromStatus: current.status,
+  });
+  return { id: input.ruleId, status: "disabled" };
+}
+
+// ─────────────────────────────────────────────
+// KAN-1140 PR 9c — Sample testing (Memo 37: executor is single source of truth)
+// ─────────────────────────────────────────────
+
+export interface TestRuleAgainstSampleInput {
+  tenantId: string;
+  userId: string;
+  /** FORM-STATE rule body (Q-ADD-TEST-AGAINST-DRAFT); not a DB rule ID.
+   *  Validated via ParseRuleBodySchema (defense-in-depth — tRPC also validates). */
+  ruleBody: unknown;
+  sampleSource: "stored" | "paste" | "recent";
+  sampleId?: string;
+  rawBody?: string;
+  rawStructured?: Record<string, unknown>;
+  fromAddress?: string;
+}
+
+export interface TestRuleAgainstSampleResult {
+  output: Record<string, string>;
+  metrics: {
+    rulesEvaluated: number;
+    fieldsWritten: number;
+    rulesThrown: number;
+    rulesTimedOut: number;
+    pipelineBudgetExceeded: boolean;
+    totalDurationMs: number;
+  };
+}
+
+/**
+ * KAN-1140 PR 9c — Test a rule body against a sample without saving.
+ *
+ * # Memo 37 single source of truth
+ *
+ * Calls the existing `executeRules` from `parse-rule-executor.ts` — the
+ * SAME execution path that fires on every inbound in PR 9b. Operators
+ * authoring rules see exactly what the runtime would extract; no UI-side
+ * re-implementation of extraction logic.
+ *
+ * # Sample sources
+ *
+ *   - `stored`: pick a `ParseFingerprintSample` (PR 7 substrate); use its
+ *     `bodyPreview` + `customFields` + synthetic `noreply@${senderDomain}`
+ *     for the executor payload
+ *   - `paste`: operator-supplied raw body + optional structured payload +
+ *     optional fromAddress
+ *   - `recent`: pick a `LeadInboxEvent`; pull bodyPreview via on-demand
+ *     server lookup (the input only carries the event ID)
+ *
+ * # Q-ADD-TEST-AGAINST-DRAFT lock
+ *
+ * `ruleBody` is the FORM STATE, not a saved DB body. Operators iterate
+ * on extractor patterns without save→test→edit cycles. The procedure
+ * synthesizes an ephemeral `ExecutableRule` object stamped with the
+ * caller's `tenantId` so the executor's cross-tenant assertion passes.
+ *
+ * # Audit
+ *
+ * Emits `parse_rule.tested` audit row with sample source + result
+ * metrics. Operator forensic trail.
+ */
+export async function testRuleAgainstSample(
+  prisma: PrismaClient,
+  input: TestRuleAgainstSampleInput,
+): Promise<TestRuleAgainstSampleResult> {
+  // Defense-in-depth: re-validate rule body (the tRPC procedure also
+  // validates at the wire layer).
+  ParseRuleBodySchema.parse(input.ruleBody);
+
+  // Resolve sample → executor payload.
+  let bodyText = "";
+  let structured: Record<string, unknown> | undefined = undefined;
+  let fromAddress = "noreply@test.invalid";
+
+  const ps = prisma as unknown as PrismaSurface & {
+    parseFingerprintSample: {
+      findFirst: (args: {
+        where: { id: string };
+        include?: { fingerprint?: { select: { tenantId: true } } };
+      }) => Promise<{
+        id: string;
+        bodyPreview: string;
+        senderDomain: string;
+        customFields: unknown;
+        fingerprint?: { tenantId: string };
+      } | null>;
+    };
+    leadInboxEvent: {
+      findFirst: (args: {
+        where: { id: string; tenantId: string };
+        select: { bodyPreview: true; fromAddress: true };
+      }) => Promise<{ bodyPreview: string | null; fromAddress: string } | null>;
+    };
+  };
+
+  if (input.sampleSource === "stored") {
+    if (!input.sampleId) {
+      throw new TRPCError({
+        code: "BAD_REQUEST",
+        message: "sampleId required for stored sample source.",
+      });
+    }
+    const sample = await ps.parseFingerprintSample.findFirst({
+      where: { id: input.sampleId },
+      include: { fingerprint: { select: { tenantId: true } } },
+    });
+    if (!sample || sample.fingerprint?.tenantId !== input.tenantId) {
+      throw new TRPCError({ code: "NOT_FOUND", message: "Sample not found in tenant scope." });
+    }
+    bodyText = sample.bodyPreview;
+    structured =
+      sample.customFields && typeof sample.customFields === "object"
+        ? (sample.customFields as Record<string, unknown>)
+        : undefined;
+    fromAddress = `noreply@${sample.senderDomain}`;
+  } else if (input.sampleSource === "paste") {
+    if (!input.rawBody) {
+      throw new TRPCError({
+        code: "BAD_REQUEST",
+        message: "rawBody required for paste sample source.",
+      });
+    }
+    bodyText = input.rawBody;
+    structured = input.rawStructured;
+    fromAddress = input.fromAddress ?? fromAddress;
+  } else {
+    // recent
+    if (!input.sampleId) {
+      throw new TRPCError({
+        code: "BAD_REQUEST",
+        message: "sampleId (LeadInboxEvent.id) required for recent sample source.",
+      });
+    }
+    const event = await ps.leadInboxEvent.findFirst({
+      where: { id: input.sampleId, tenantId: input.tenantId },
+      select: { bodyPreview: true, fromAddress: true },
+    });
+    if (!event) {
+      throw new TRPCError({
+        code: "NOT_FOUND",
+        message: "Recent inbound event not found in tenant scope.",
+      });
+    }
+    bodyText = event.bodyPreview ?? "";
+    fromAddress = event.fromAddress;
+  }
+
+  // Synthesize an ephemeral ExecutableRule. Stamps tenantId so the
+  // executor's cross-tenant assertion (PR 9b defense-in-depth) passes.
+  const syntheticRule = {
+    id: "test-synthetic-rule",
+    tenantId: input.tenantId,
+    fingerprintId: null,
+    format: null,
+    vendor: null,
+    body: input.ruleBody,
+    status: "active",
+    createdAt: new Date(),
+  };
+
+  // Memo 37 — call the existing executor; no re-implementation.
+  const { executeRules } = await import("./parse-rule-executor.js");
+  const result = await executeRules({
+    tenantId: input.tenantId,
+    rules: [syntheticRule],
+    payload: { fromAddress, subject: null, bodyPreview: bodyText, structured },
+  });
+
+  await writeAuditBestEffort(prisma, input.tenantId, input.userId, "parse_rule.tested", {
+    sampleSource: input.sampleSource,
+    sampleId: input.sampleId ?? null,
+    metrics: result.metrics,
+  });
+
+  return {
+    output: result.output as Record<string, string>,
+    metrics: result.metrics,
+  };
+}
+
+// ─────────────────────────────────────────────
 // writeAuditBestEffort (4th inline; KAN-1150 consolidation queued)
 // ─────────────────────────────────────────────
 
