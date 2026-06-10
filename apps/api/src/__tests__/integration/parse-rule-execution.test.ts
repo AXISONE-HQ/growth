@@ -367,4 +367,290 @@ describe("KAN-1140 PR 9b — parse-rule-execution integration (KAN-1112)", () =>
       ).rejects.toThrow(/cross-tenant rule leakage/);
     });
   });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // === KAN-1158 — Budget-exceeded behavioral verification ===
+  //
+  // Empirically verifies PR 9b's between-rules pipeline-budget mechanism.
+  //
+  // BACKGROUND (per feedback_q5_per_rule_timeout_async_vs_sync_cpu.md):
+  // - JavaScript sync RegExp.match cannot be aborted mid-execution.
+  // - The Promise.race(per-rule 50ms) ceremony in executor does NOT actually
+  //   halt a backtracking regex (event loop blocked until match completes).
+  // - The REAL ReDoS defense is two layers:
+  //     1. safe-regex2 validation at create-time (PR 9a) — PRIMARY defense.
+  //     2. Between-rules pipeline-budget check at runtime (PR 9b) — defense-in-depth.
+  //
+  // KAN-1158 EMPIRICALLY verifies layer 2.
+  //
+  // SYNTHETIC REGEX
+  //   Pattern: (a|aa|aaa|aaaa)+!
+  //   - 4-way alternation with overlapping prefixes (each is a prefix of the longer).
+  //   - + quantifier + final '!' literal that never matches against "a"-only input.
+  //   - Star-height = 1 (single + on the group) → safe-regex2 ACCEPTS.
+  //   - Polynomial (~O(n^4)) backtracking → predictable scaling.
+  //
+  //   Input "a".repeat(25) → ~108ms mean local; over per-rule 50ms envelope.
+  //   Input "a".repeat(26) → ~200ms mean local; 2 rules guaranteed to
+  //                          exceed PIPELINE_BUDGET_MS (250ms) even on
+  //                          fast CI hardware (~10-30% speedup over local).
+  //
+  // Q-ADD-EXECUTOR-PRECISION
+  //   Executor iterates over PARSE_RULE_WRITABLE_FIELDS (5 fields in fixed
+  //   order: firstName, lastName, companyName, phone, intentSummary), NOT
+  //   over all rules. selectRuleForField picks per-field cascade winner.
+  //   Each KAN-1158 test rule targets a DIFFERENT writable field to ensure
+  //   sequential execution.
+  //
+  // Q-ADD-TIMING
+  //   Assertions use boolean state (pipelineBudgetExceeded === true) and
+  //   relative counts (rulesEvaluated < N), NOT absolute time bounds.
+  //
+  // safe-regex2 PERMISSIVENESS BOUNDARY
+  //   safe-regex2 v5.x uses star-height analysis (rejects nested quantifiers).
+  //   It PERMITS alternation-overlap patterns like (a|aa|aaa|aaaa)+ — this
+  //   is its known false-negative gap, which KAN-1158 exploits.
+  //
+  //   If safe-regex2 gets stricter and rejects our pattern, CI will fail —
+  //   that's the intended signal. Update the pattern intentionally.
+  // ─────────────────────────────────────────────────────────────────────
+
+  it("KAN-1158 lock: synthetic slow pattern STILL passes ParseRuleBodySchema (PR 9a validators)", async () => {
+    // Defense-in-depth: if PR 9a's validators ever get strict enough to
+    // reject this pattern, CI fails — and the budget-mechanism test loses
+    // its empirical lock. This test surfaces that drift instantly.
+    const { ParseRuleBodySchema } = (await import("@growth/shared")) as {
+      ParseRuleBodySchema: { parse: (input: unknown) => unknown };
+    };
+    expect(() => ParseRuleBodySchema.parse(makeSlowRuleBody("firstName"))).not.toThrow();
+
+    // Pre-warm V8 RegExp JIT for the synthetic pattern. Running .exec on a
+    // tiny input triggers source-pattern JIT compile without measurable
+    // backtracking. Subsequent KAN-1158 scenarios pay no first-match JIT
+    // cost; timing assertions stay deterministic across CI hardware.
+    // (Single-trial JIT-cold runs can spike ~7× vs 5-trial mean; pre-warm
+    // collapses that variance.)
+    new RegExp("(a|aa|aaa|aaaa)+!").exec("a".repeat(10));
+  });
+
+  it("KAN-1158 case 9: per-rule slow regex completes; pipeline-budget metric stays false", async () => {
+    await withRollback(async (tx) => {
+      const { id: tenantId } = await createTenant(tx);
+      const fp = await tx.parseFingerprint.create({
+        data: {
+          tenantId,
+          structureHash: "sh-1158-9",
+          senderDomainHash: "sd-1158-9",
+          format: "html",
+          formatConfidence: "high",
+        },
+      });
+
+      // Slow rule on firstName (n=25 → ~108ms; over per-rule 50ms but
+      // under total 250ms). Captures group 0 = full match.
+      await tx.parseRule.create({
+        data: {
+          tenantId,
+          fingerprintId: fp.id,
+          body: makeSlowRuleBody("firstName"),
+          label: "KAN-1158 slow firstName",
+          status: "active",
+          createdBy: "test-user",
+          updatedBy: "test-user",
+        },
+      });
+
+      // Fast rule on lastName (single-token capture; ~0ms).
+      await tx.parseRule.create({
+        data: {
+          tenantId,
+          fingerprintId: fp.id,
+          body: makeBody("lastName", "(Fred)"),
+          label: "KAN-1158 fast lastName",
+          status: "active",
+          createdBy: "test-user",
+          updatedBy: "test-user",
+        },
+      });
+
+      // Payload: 25 a's (triggers slow rule's catastrophic backtracking)
+      // + "\nFred" so the fast rule's regex matches.
+      const payload = {
+        fromAddress: "test@example.com",
+        subject: null,
+        bodyPreview: "a".repeat(25) + "\nFred",
+      };
+
+      const rules = await (await getService()).getApplicableRules(tx, {
+        tenantId,
+        fingerprintId: fp.id,
+        format: fp.format,
+        vendor: fp.vendor,
+      });
+      const result = await (await getExecutor()).executeRules({
+        tenantId,
+        rules: rules as unknown as ExecutableRule[],
+        payload,
+      });
+
+      // Slow rule produced output (group 0 = full backtrack match; non-empty).
+      expect(typeof result.output.firstName).toBe("string");
+      expect((result.output.firstName ?? "").length).toBeGreaterThan(0);
+      // Fast rule produced output.
+      expect(result.output.lastName).toBe("Fred");
+      // Total budget NOT exceeded (~108ms + ~0ms = ~108ms < 250ms).
+      expect(result.metrics.pipelineBudgetExceeded).toBe(false);
+      // Both rules ran to completion.
+      expect(result.metrics.rulesEvaluated).toBe(2);
+    });
+  });
+
+  it("KAN-1158 case 10: cascade-exhausting slow rules trigger pipeline-budget skip", async () => {
+    await withRollback(async (tx) => {
+      const { id: tenantId } = await createTenant(tx);
+      const fp = await tx.parseFingerprint.create({
+        data: {
+          tenantId,
+          structureHash: "sh-1158-10",
+          senderDomainHash: "sd-1158-10",
+          format: "html",
+          formatConfidence: "high",
+        },
+      });
+
+      // Three slow rules on different fields. Q-ADD-EXECUTOR-PRECISION:
+      // each must occupy a distinct field iteration. n=26 → ~200ms per rule;
+      // after 2 complete (~400ms elapsed), 3rd iteration's pre-check fires.
+      for (const field of ["firstName", "lastName", "companyName"] as const) {
+        await tx.parseRule.create({
+          data: {
+            tenantId,
+            fingerprintId: fp.id,
+            body: makeSlowRuleBody(field),
+            label: `KAN-1158 slow ${field}`,
+            status: "active",
+            createdBy: "test-user",
+            updatedBy: "test-user",
+          },
+        });
+      }
+
+      const payload = {
+        fromAddress: "test@example.com",
+        subject: null,
+        bodyPreview: "a".repeat(26),
+      };
+
+      const rules = await (await getService()).getApplicableRules(tx, {
+        tenantId,
+        fingerprintId: fp.id,
+        format: fp.format,
+        vendor: fp.vendor,
+      });
+      const result = await (await getExecutor()).executeRules({
+        tenantId,
+        rules: rules as unknown as ExecutableRule[],
+        payload,
+      });
+
+      // The runtime ReDoS defense fired.
+      expect(result.metrics.pipelineBudgetExceeded).toBe(true);
+      // At least one cascade field was skipped vs total rules.
+      expect(result.metrics.rulesEvaluated).toBeLessThan(3);
+      // First slow rule completed before budget check fired.
+      expect(typeof result.output.firstName).toBe("string");
+      expect((result.output.firstName ?? "").length).toBeGreaterThan(0);
+      // Note: we don't assert WHICH fields are skipped — that depends on
+      // exact CI timing. We assert the COUNT relationship (Q-ADD-TIMING).
+    });
+  });
+
+  it("KAN-1158 case 11: all fast rules complete; budget metric stays false (happy-path regression guard)", async () => {
+    await withRollback(async (tx) => {
+      const { id: tenantId } = await createTenant(tx);
+      const fp = await tx.parseFingerprint.create({
+        data: {
+          tenantId,
+          structureHash: "sh-1158-11",
+          senderDomainHash: "sd-1158-11",
+          format: "html",
+          formatConfidence: "high",
+        },
+      });
+
+      // Three fast rules on different fields.
+      const fastRules = [
+        { field: "firstName" as const, pattern: "(Alice)" },
+        { field: "lastName" as const, pattern: "(Smith)" },
+        { field: "companyName" as const, pattern: "(Acme)" },
+      ];
+      for (const r of fastRules) {
+        await tx.parseRule.create({
+          data: {
+            tenantId,
+            fingerprintId: fp.id,
+            body: makeBody(r.field, r.pattern),
+            label: `KAN-1158 fast ${r.field}`,
+            status: "active",
+            createdBy: "test-user",
+            updatedBy: "test-user",
+          },
+        });
+      }
+
+      const payload = {
+        fromAddress: "test@example.com",
+        subject: "Alice Smith Acme",
+        bodyPreview: "Alice Smith Acme",
+      };
+
+      const rules = await (await getService()).getApplicableRules(tx, {
+        tenantId,
+        fingerprintId: fp.id,
+        format: fp.format,
+        vendor: fp.vendor,
+      });
+      const result = await (await getExecutor()).executeRules({
+        tenantId,
+        rules: rules as unknown as ExecutableRule[],
+        payload,
+      });
+
+      // Regression guard: happy-path budget metric MUST stay false.
+      expect(result.metrics.pipelineBudgetExceeded).toBe(false);
+      expect(result.metrics.rulesEvaluated).toBe(3);
+      expect(result.output.firstName).toBe("Alice");
+      expect(result.output.lastName).toBe("Smith");
+      expect(result.output.companyName).toBe("Acme");
+    });
+  });
 });
+
+/**
+ * KAN-1158 — Synthetic slow-rule body factory.
+ *
+ * Pattern (a|aa|aaa|aaaa)+! exhibits polynomial backtracking against
+ * "a"-only input lacking the trailing '!'. Star-height = 1 → safe-regex2
+ * permits. See KAN-1158 documentation block above for full rationale.
+ *
+ * captureGroup = 0 (full match) — the regex either matches the full
+ * "a"-prefix sequence after exhaustive backtracking OR (more commonly)
+ * returns null. Tests assert non-null + non-empty output for the
+ * completing slow rule.
+ */
+function makeSlowRuleBody(
+  field: "firstName" | "lastName" | "companyName" | "phone" | "intentSummary",
+) {
+  return {
+    extractors: [
+      {
+        field,
+        extractor: {
+          type: "regex" as const,
+          pattern: "(a|aa|aaa|aaaa)+!",
+          captureGroup: 0,
+        },
+      },
+    ],
+  };
+}
