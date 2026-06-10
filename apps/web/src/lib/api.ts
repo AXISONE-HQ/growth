@@ -538,8 +538,42 @@ export const pipelinesApi = {
   toggleActive: (id: string, isActive: boolean) =>
     trpcMutation<PipelineDetail>('pipelines.toggleActive', { id, isActive }),
 
-  delete: (id: string) => trpcMutation<{ id: string }>('pipelines.delete', { id }),
+  // KAN-1169 — Pre-delete inspection. Drives the ReassignmentModal copy
+  // (block path / empty hard-delete / empty soft-archive / reassign).
+  previewDelete: (pipelineId: string) =>
+    trpcQuery<PipelineDeletePreview>('pipelines.previewDelete', { pipelineId }),
+
+  // KAN-1169 — Signature changed from `(id: string)` to
+  // `({ pipelineId, reassignTo? })`. Server returns the chosen outcome path
+  // (deleted_empty / archived_empty / archived_with_reassign) so the UI can
+  // surface the right toast.
+  delete: (input: { pipelineId: string; reassignTo?: string | null }) =>
+    trpcMutation<PipelineDeleteResult>('pipelines.delete', input),
 };
+
+// KAN-1169 — Preview payload shape; consumed by ReassignmentModal.
+export interface PipelineDeletePreview {
+  source: { id: string; name: string };
+  blockReason: 'last_pipeline' | 'default_assignment' | null;
+  dealCount: number;
+  hasStageHistory: boolean;
+  destinations: Array<{
+    id: string;
+    name: string;
+    initialStageId: string | null;
+    initialStageName: string | null;
+  }>;
+}
+
+export interface PipelineDeleteResult {
+  id: string;
+  outcome:
+    | 'pipeline.deleted_empty'
+    | 'pipeline.archived_empty'
+    | 'pipeline.archived_with_reassign';
+  dealCount: number;
+  softArchived: boolean;
+}
 
 export const stagesApi = {
   reorder: (pipelineId: string, stageIdsInOrder: string[]) =>

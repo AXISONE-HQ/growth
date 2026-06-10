@@ -11,6 +11,7 @@ import { Separator } from "@/components/ui/separator";
 import { EditPipelineDrawer } from "@/components/pipelines/edit-drawer";
 import { PipelineKnowledgeFilter } from "@/components/knowledge/pipeline-knowledge-filter";
 import { OBJECTIVE_OPTIONS } from "@/components/pipelines/wizard-schema";
+import { ReassignmentModal } from "../_components/ReassignmentModal";
 import { pipelinesApi, type PipelineDetail } from "@/lib/api";
 import type { KnowledgeCategory } from "@growth/shared";
 
@@ -20,25 +21,14 @@ export default function PipelineDetailPage() {
   const [pipeline, setPipeline] = useState<PipelineDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
-  const [deleting, setDeleting] = useState(false);
+  // KAN-1169 — Replaces the prior window.confirm flow. ReassignmentModal
+  // handles all three outcome paths (delete / archive-empty / reassign+archive).
+  const [deleteModalOpen, setDeleteModalOpen] = useState(false);
 
   useEffect(() => {
     if (!params?.id) return;
     pipelinesApi.getById(params.id).then(setPipeline).catch((e) => setError(e?.message));
   }, [params?.id]);
-
-  async function onDelete() {
-    if (!pipeline) return;
-    if (!confirm(`Delete pipeline "${pipeline.name}"? This cannot be undone.`)) return;
-    setDeleting(true);
-    try {
-      await pipelinesApi.delete(pipeline.id);
-      router.push("/settings/pipelines");
-    } catch (e) {
-      setError((e as Error)?.message ?? "Delete failed");
-      setDeleting(false);
-    }
-  }
 
   if (error) {
     return (
@@ -86,7 +76,7 @@ export default function PipelineDetailPage() {
               <Pencil className="h-4 w-4" />
               Edit
             </Button>
-            <Button variant="outline" size="sm" onClick={onDelete} disabled={deleting}>
+            <Button variant="outline" size="sm" onClick={() => setDeleteModalOpen(true)}>
               <Trash2 className="h-4 w-4" />
               Delete
             </Button>
@@ -185,6 +175,16 @@ export default function PipelineDetailPage() {
         onOpenChange={setEditing}
         pipeline={pipeline}
         onSaved={(updated) => setPipeline(updated)}
+      />
+
+      {/* KAN-1169 — Reassignment + soft-archive modal. Same component used by
+          Settings/Pipelines list page. On any successful outcome (delete /
+          archive-empty / reassign+archive) we navigate back to the list. */}
+      <ReassignmentModal
+        pipelineId={pipeline.id}
+        open={deleteModalOpen}
+        onOpenChange={setDeleteModalOpen}
+        onDeleted={() => router.push("/settings/pipelines")}
       />
     </div>
   );
