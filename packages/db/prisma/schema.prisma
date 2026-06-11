@@ -181,17 +181,17 @@ model Tenant {
   campaignMemberships     CampaignMembership[]
 
   //   tenantSettings  TenantSettings[]  // commented out for smoke build (model missing on main)
-  channelConnections ChannelConnection[]
+  channelConnections    ChannelConnection[]
   // M3-1 Sub-Objective Framework MVP — tenant-scoped discovery state.
   // RESTRICT delete: tenant deletion should never silently drop gap-state.
   subObjectiveGapStates ContactSubObjectiveGapState[]
   // KAN-1140 Phase 3 PR 7 — per-tenant parse-fingerprint aggregation rows.
   // Each unique (structureHash, senderDomainHash) inbound pattern collapses
   // to one row with occurrenceCount; bounded LRU samples on related table.
-  parseFingerprints ParseFingerprint[]
+  parseFingerprints     ParseFingerprint[]
   // KAN-1140 Phase 3 PR 9a — tenant-configurable parsing rules. Substrate
   // only in 9a (no executor); PR 9b wires execution in lead-normalizer.
-  parseRules ParseRule[]
+  parseRules            ParseRule[]
 
   @@map("tenants")
 }
@@ -224,11 +224,11 @@ model User {
 // ─────────────────────────────────────────────
 
 model Blueprint {
-  id                String   @id @default(uuid())
-  vertical          String
-  customerModel     Json     @map("customer_model")
-  journeys          Json
-  strategyTemplates Json     @map("strategy_templates")
+  id                  String   @id @default(uuid())
+  vertical            String
+  customerModel       Json     @map("customer_model")
+  journeys            Json
+  strategyTemplates   Json     @map("strategy_templates")
   // KAN-852 — Account Page Cohort 1. Per-vertical legal defaults the
   // /settings/account/legal tab pre-fills when the tenant hasn't
   // overridden them. Shape: keyed by ISO 639-1 language code —
@@ -240,7 +240,7 @@ model Blueprint {
   //   tenant override → blueprint.legalDefaults[defaultLanguage] → .en.
   // Backfilled for existing rows with both languages in the same
   // migration. Future verticals populate their own keyed bundles.
-  legalDefaults     Json?    @map("legal_defaults")
+  legalDefaults       Json?    @map("legal_defaults")
   // KAN-1063 (Cluster II PR I, Phase 1 design trace Lock 3) — per-vertical
   // 4-phase EnginePhase definitions. Shape (Json):
   // `{ phases: [{ key: 'qualify'|'problem'|'proof'|'closing', label, subObjectives: [...], priority }] }`.
@@ -251,7 +251,7 @@ model Blueprint {
   // rationale). Resolution lives in `blueprint-engine-phases-resolver.ts`
   // (Cluster II PR II). When null on Blueprint AND null on Tenant override,
   // engine falls back to DEFAULT_ENGINE_PHASES_GENERIC_B2B.
-  enginePhases      Json?    @map("engine_phases")
+  enginePhases        Json?    @map("engine_phases")
   // KAN-1080 (Cluster III PR I, Phase 1 Q4 lock) — per-vertical EnginePhase →
   // PipelineStage mapping. Shape (Json): `{ qualify?: { stageName, stageRoleHint? },
   // problem?: ..., proof?: ..., closing?: ... }`. Sibling slot to `enginePhases`
@@ -262,7 +262,7 @@ model Blueprint {
   // audit finding: PROD shows 32 distinct Stage.name values with idiosyncratic
   // naming; Blueprint defaults near-useless, per-tenant override is the primary
   // config path. Resolution lives in `engine-phase-stage-map-resolver.ts` (PR I).
-  enginePhaseStageMap Json?  @map("engine_phase_stage_map")
+  enginePhaseStageMap Json?    @map("engine_phase_stage_map")
   // KAN-1093 (Cluster IV-B PR I, Phase 1 Q2 lock) — per-vertical Persona config
   // (name, voice, per-phase tone defaults, brand attributes, voice examples).
   // Sibling slot to enginePhases + enginePhaseStageMap above (same engine-config
@@ -272,10 +272,10 @@ model Blueprint {
   // voiceExamples) per discipline-pin-1 — cognitive defaults stay unopinionated;
   // design partners populate per-tenant during onboarding. Resolution lives in
   // `blueprint-persona-resolver.ts` (PR I).
-  persona             Json?  @map("persona")
-  isActive          Boolean  @default(true) @map("is_active")
-  createdAt         DateTime @default(now()) @map("created_at")
-  updatedAt         DateTime @updatedAt @map("updated_at")
+  persona             Json?    @map("persona")
+  isActive            Boolean  @default(true) @map("is_active")
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
 
   tenants    Tenant[]
   objectives Objective[]
@@ -353,7 +353,7 @@ model Contact {
   createdAt         DateTime       @default(now()) @map("created_at")
   updatedAt         DateTime       @updatedAt @map("updated_at")
 
-  tenant                Tenant                  @relation(fields: [tenantId], references: [id])
+  tenant                Tenant                        @relation(fields: [tenantId], references: [id])
   contactObjectiveStack ContactObjectiveStack[]
   decisions             Decision[]
   outcomes              Outcome[]
@@ -361,14 +361,14 @@ model Contact {
   conversations         Conversation[]
   escalations           Escalation[]
   actions               Action[]
-  currentPipeline       Pipeline?               @relation("ContactCurrentPipeline", fields: [currentPipelineId], references: [id], onDelete: SetNull)
-  currentStage          Stage?                  @relation("ContactCurrentStage", fields: [currentStageId], references: [id], onDelete: SetNull)
+  currentPipeline       Pipeline?                     @relation("ContactCurrentPipeline", fields: [currentPipelineId], references: [id], onDelete: SetNull)
+  currentStage          Stage?                        @relation("ContactCurrentStage", fields: [currentStageId], references: [id], onDelete: SetNull)
   // KAN-791 — LeadStageHistory dropped (replaced by DealStageHistory which is deal-scoped)
   deals                 Deal[]
   engagements           Engagement[]
   deferredSends         DeferredSend[]
   // KAN-879
-  company               Company?                @relation(fields: [companyId], references: [id])
+  company               Company?                      @relation(fields: [companyId], references: [id])
   orders                Order[]
   // KAN-1001 Campaign Slice 0 — Contact ↔ CampaignMembership back-relation.
   campaignMemberships   CampaignMembership[]
@@ -569,23 +569,91 @@ model Campaign {
   completedAt DateTime?      @map("completed_at")
   archivedAt  DateTime?      @map("archived_at")
 
+  // ─── KAN-1167 Campaign-as-Conversation v0.1 foundation ───
+  // Outcome-goal fields — NULL for legacy audience+window Campaigns; SET for
+  // new outcome-target Campaigns (PR 1 lands the schema; PR 2 populates via
+  // feasibility analyzer; PR 3 surfaces in chat UI).
+  goalType        String? @map("goal_type") // 'revenue' | 'units' | 'deals' | 'meetings' | 'custom'
+  goalTarget      Int?    @map("goal_target") // numeric target value
+  goalProductId   String? @map("goal_product_id") // soft pointer to Product (no relation declared this PR)
+  goalDescription String? @map("goal_description") // free-text operator statement
+
+  // AI counsel snapshots — populated by feasibility analyzer in PR 2+.
+  feasibilityAnalysis Json? @map("feasibility_analysis")
+  proposedPlan        Json? @map("proposed_plan")
+  committedPlan       Json? @map("committed_plan")
+  // Override-with-logging (Q5 lock) — schema lands in PR 1; surface in PR 6.
+  overrideHistory     Json? @map("override_history")
+
+  // Drift detection state — populated by daily monitoring cron in PR 7+.
+  lastConfidenceCheck DateTime? @map("last_confidence_check")
+  lastConfidenceValue Float?    @map("last_confidence_value")
+  driftThreshold      Float     @default(0.20) @map("drift_threshold")
+
+  // Always-On Campaign marker (Q1 lock — per-tenant catch-all for inbound
+  // leads that don't match any active outcome-Campaign's audience). Lowest
+  // priority so any intentional Campaign takes precedence in arbitration.
+  isAlwaysOn Boolean @default(false) @map("is_always_on")
+
+  // Chat thread linkage — populated when conversational UX surfaces in PR 3.
+  conversationThreadId String? @map("conversation_thread_id")
+  // ─── end KAN-1167 fields ───
+
   createdByUserId String?  @map("created_by_user_id")
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")
 
-  tenant       Tenant                  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenant            Tenant                     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   // Restrict — you can't drop an Objective with live Campaigns hanging off it.
   // Mirrors TenantObjectiveSelection.objective relation posture.
-  objective    Objective               @relation(fields: [objectiveId], references: [id], onDelete: Restrict)
-  pipelines    Pipeline[]
-  memberships  CampaignMembership[]
-  stackEntries ContactObjectiveStack[]
+  objective         Objective                  @relation(fields: [objectiveId], references: [id], onDelete: Restrict)
+  pipelines         Pipeline[]
+  memberships       CampaignMembership[]
+  stackEntries      ContactObjectiveStack[]
+  // KAN-1167 — conversational turn log (PR 3 chat UI renders these)
+  conversationTurns CampaignConversationTurn[]
 
   @@index([tenantId, status])
   @@index([tenantId, objectiveId])
   // Slice 5 dynamic-cron filter: pick active+dynamic campaigns due for re-eval.
   @@index([tenantId, status, audienceMode])
+  // KAN-1167 — efficient Always-On lookup per tenant (catch-all routing).
+  @@index([tenantId, isAlwaysOn])
   @@map("campaigns")
+}
+
+/// KAN-1167 — Conversational UX substrate for outcome-Campaign chat thread.
+/// Persisted per-turn so AI can re-read its own prior reasoning and operator
+/// can reload the conversation across sessions. PR 3 (chat UI) renders these.
+///
+/// Q-ADD-CONVERSATIONTHREAD-STORAGE (Phase 1 lock): index on
+/// (campaignId, createdAt) for efficient turn-by-turn loading; retention
+/// policy + partitioning deferred to PR 7+ when daily-update writes begin and
+/// volume becomes empirical.
+model CampaignConversationTurn {
+  id         String   @id @default(cuid())
+  tenantId   String   @map("tenant_id")
+  campaignId String   @map("campaign_id")
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  turnType String @map("turn_type") // 'operator' | 'ai' | 'system'
+  content  String @db.Text
+
+  // AI-generated proposal snapshot — populated when turnType='ai' and the
+  // turn includes a structured proposal card.
+  proposalSnapshot Json? @map("proposal_snapshot")
+
+  // Q8 data acquisition flow (PR 4):
+  //   dataRequest      — AI asking operator for missing data
+  //   dataIngestionEvent — operator-provided data after parse + ingest
+  dataRequest        Json? @map("data_request")
+  dataIngestionEvent Json? @map("data_ingestion_event")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([campaignId, createdAt])
+  @@index([tenantId, createdAt])
+  @@map("campaign_conversation_turns")
 }
 
 model CampaignMembership {
@@ -1052,7 +1120,18 @@ model Pipeline {
   // Verify Pipeline) has objectiveId=NULL so its backfill skips → stays
   // NULL until/unless reassigned. Phase 2 cuts lead-assignment routing
   // over to read Campaign instead of Pipeline.objectiveId+segment.
+  //
+  // KAN-1167 — column stays nullable at the schema level (no Prisma change)
+  // but application-level guards in pipelinesRouter.create + update enforce
+  // required-ness post-backfill (closes the FK-nullable defensive window
+  // identified as Q-ADD-PIPELINE-FK-NULLABLE-WINDOW in Phase 1).
   campaignId               String?          @map("campaign_id")
+  // KAN-1167 — multi-motion Pipeline orchestration (1:N under outcome Campaign).
+  // When an outcome Campaign spawns multiple Pipelines (New Leads + Upsell +
+  // Winback), each carries its motion + projected contribution toward the
+  // parent goal. NULL for legacy Pipelines + Always-On-attached Pipelines.
+  motion                   String?          @map("motion")
+  projectedContribution    Int?             @map("projected_contribution")
   createdAt                DateTime         @default(now()) @map("created_at")
   updatedAt                DateTime         @updatedAt @map("updated_at")
 
@@ -1978,9 +2057,9 @@ model DeferredSend {
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
 
-  tenant  Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  deal    Deal?    @relation(fields: [dealId], references: [id], onDelete: Cascade)
-  contact Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  deal    Deal?   @relation(fields: [dealId], references: [id], onDelete: Cascade)
+  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
 
   // Cron worker scan: pending rows whose defer_until has elapsed
   @@index([status, deferUntil])
@@ -2046,13 +2125,13 @@ model Engagement {
   occurredAt     DateTime    @map("occurred_at")
   createdAt      DateTime    @default(now()) @map("created_at")
 
-  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  deal    Deal    @relation(fields: [dealId], references: [id], onDelete: Restrict)
-  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  tenant        Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  deal          Deal                     @relation(fields: [dealId], references: [id], onDelete: Restrict)
+  contact       Contact                  @relation(fields: [contactId], references: [id], onDelete: Cascade)
   // M3-2.5a — Decision FK with SET NULL: an Engagement row stays as an
   // audit record of "what happened" even if the originating Decision is
   // ever purged.
-  decision Decision? @relation(fields: [decisionId], references: [id], onUpdate: Cascade, onDelete: SetNull)
+  decision      Decision?                @relation(fields: [decisionId], references: [id], onUpdate: Cascade, onDelete: SetNull)
   // M3-2.5a — 1:1 sidecar holding email-wire metadata (provider, message-
   // id, in-reply-to, references). Only email-type engagements have a row.
   // CASCADE on engagement delete keeps the sidecar in lockstep.
@@ -3210,20 +3289,20 @@ model ContactSubObjectiveGapState {
 // doesn't atomic-increment); real-Postgres integration test required per
 // `query_raw_sql_syntax_validation_must_execute_not_mock` memo.
 model ParseFingerprint {
-  id                 String   @id @default(uuid())
-  tenantId           String   @map("tenant_id")
+  id                 String    @id @default(uuid())
+  tenantId           String    @map("tenant_id")
   /// Null on 'unknown' format (insufficient signal); set on HTML/ADF
   /// (tag-tree hash) and plain-text (label-token hash).
-  structureHash      String?  @map("structure_hash")
-  senderDomainHash   String   @map("sender_domain_hash")
+  structureHash      String?   @map("structure_hash")
+  senderDomainHash   String    @map("sender_domain_hash")
   /// Null off plain-text; equal to structureHash on plain-text. Surfaces
   /// the "label inventory" view independently for operator queries.
-  labelTokenHash     String?  @map("label_token_hash")
+  labelTokenHash     String?   @map("label_token_hash")
   format             String
   language           String?
   vendor             String?
-  formatConfidence   String   @map("format_confidence")
-  languageConfidence String?  @map("language_confidence")
+  formatConfidence   String    @map("format_confidence")
+  languageConfidence String?   @map("language_confidence")
   /// KAN-1140 PR 8 — capability announcement state machine.
   /// Vocabulary: `pending | suggested | supported | unsupported`
   ///   - `pending`     — initial state; auto-suggest predicate may promote
@@ -3235,7 +3314,7 @@ model ParseFingerprint {
   ///                     auto-re-suggestion (predicate gates on `=== 'pending'`)
   /// Convention follows `Action.status` and `DeferredSend.status` — String
   /// column with documented vocabulary, NOT a Prisma enum type.
-  supportStatus      String   @default("pending") @map("support_status")
+  supportStatus      String    @default("pending") @map("support_status")
   /// KAN-1140 PR 8 — set on auto-promotion from pending → suggested.
   /// Doubles as the "since when has this been suggested" anchor for
   /// KAN-1147 (operator notification on lingering-suggested patterns).
@@ -3243,25 +3322,25 @@ model ParseFingerprint {
   /// KAN-1140 PR 8 — operator-confirmed timestamp. Null off `supported`.
   supportedAt        DateTime? @map("supported_at")
   /// KAN-1140 PR 8 — Firebase UID of operator who confirmed. Null off `supported`.
-  supportedBy        String?  @map("supported_by")
-  occurrenceCount    Int      @default(1) @map("occurrence_count")
+  supportedBy        String?   @map("supported_by")
+  occurrenceCount    Int       @default(1) @map("occurrence_count")
   /// KAN-1140 PR 6 hook — count of matching inbounds that ALSO created a
   /// parse_confidence_review escalation. Surfaces low-confidence recurring
   /// patterns ("we keep failing on this one — should we train a parser?").
-  escalationCount    Int      @default(0) @map("escalation_count")
+  escalationCount    Int       @default(0) @map("escalation_count")
   /// KAN-1140 PR 6 hook — count of matching inbounds where an operator
   /// reclassified the metadata. Marks operator-confirmed pattern — these
   /// are the highest-priority training candidates for PR 8 / KAN-1147.
   /// NOTE: PR 8 reads this column in its auto-suggest predicate (Q3 lock:
   /// reclassifyCount >= 1 → suggest).
-  reclassifyCount    Int      @default(0) @map("reclassify_count")
-  firstSeenAt        DateTime @default(now()) @map("first_seen_at")
-  lastSeenAt         DateTime @default(now()) @map("last_seen_at")
-  createdAt          DateTime @default(now()) @map("created_at")
-  updatedAt          DateTime @updatedAt @map("updated_at")
+  reclassifyCount    Int       @default(0) @map("reclassify_count")
+  firstSeenAt        DateTime  @default(now()) @map("first_seen_at")
+  lastSeenAt         DateTime  @default(now()) @map("last_seen_at")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
 
-  tenant  Tenant                   @relation(fields: [tenantId], references: [id])
-  samples ParseFingerprintSample[]
+  tenant     Tenant                   @relation(fields: [tenantId], references: [id])
+  samples    ParseFingerprintSample[]
   // KAN-1140 Phase 3 PR 9a — tenant-configurable parsing rules optionally
   // attached to this fingerprint. SetNull on rule's FK so fingerprint
   // delete doesn't cascade-drop rules; rule remains with broader scope.

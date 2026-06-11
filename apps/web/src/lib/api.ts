@@ -2576,7 +2576,42 @@ export const audienceApi = {
    *  guard rejects any in-flight or redelivered decision.run. */
   pause: (campaignId: string) =>
     trpcMutation<CampaignPauseResult>('audience.pause', { campaignId }),
+
+  /**
+   * KAN-1167 — Campaign-as-Conversation v0.1 outcome-goal entry.
+   *
+   * Operator sets the quantified business outcome target for an outcome
+   * Campaign. Rejected on Always-On Campaigns (they're intent-less). Server
+   * validates goalType + goalTarget required-together and writes an audit
+   * row via the shared writeAuditBestEffort helper (KAN-1168 closeout
+   * pattern).
+   *
+   * NOTE: route lives under `audience.*` because the existing tRPC router
+   * is named `audienceRouter` (carried over from Slice 1 text-to-segment
+   * naming). Router rename to `campaignsRouter` is a separate follow-up.
+   */
+  setGoal: (input: CampaignGoalInput) =>
+    trpcMutation<CampaignGoalResult>('audience.setGoal', input),
 };
+
+// KAN-1167 — Campaign-as-Conversation v0.1 outcome-goal types.
+export type CampaignGoalType = 'revenue' | 'units' | 'deals' | 'meetings' | 'custom';
+
+export interface CampaignGoalInput {
+  campaignId: string;
+  goalType: CampaignGoalType;
+  goalTarget: number;
+  goalProductId?: string | null;
+  goalDescription: string;
+}
+
+export interface CampaignGoalResult {
+  id: string;
+  goalType: CampaignGoalType;
+  goalTarget: number;
+  goalProductId: string | null;
+  goalDescription: string;
+}
 
 export type CampaignActivateResult =
   | {
