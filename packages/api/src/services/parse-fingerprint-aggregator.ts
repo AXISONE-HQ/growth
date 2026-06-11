@@ -13,6 +13,10 @@
  */
 import { TRPCError } from "@trpc/server";
 import type { PrismaClient } from "@prisma/client";
+// KAN-1168 — Consolidated audit-helper migration. Previously inline copy at
+// :296 (5-arg positional with explicit `actor`). Callers below pass the
+// per-call actor (input.userId) at the callsite.
+import { writeAuditBestEffort } from "../utils/audit-helpers.js";
 
 export type SortBy = "lastSeenAt" | "occurrenceCount" | "escalationCount";
 
@@ -293,23 +297,9 @@ export async function getParseFingerprintDetail(
 // the mutation succeeds even if the audit row write fails. The audit row
 // captures `{ previousStatus, newStatus, fingerprintId, actor }`.
 
-async function writeAuditBestEffort(
-  prisma: PrismaClient,
-  tenantId: string,
-  actor: string,
-  actionType: string,
-  payload: Record<string, unknown>,
-): Promise<void> {
-  try {
-    await (prisma as unknown as { auditLog: { create: (args: unknown) => Promise<unknown> } })
-      .auditLog.create({
-        data: { tenantId, actor, actionType, payload },
-      });
-  } catch (err) {
-    // Best-effort — never fail the mutation on audit-log write failure.
-    console.error(`[parse-fingerprint-aggregator] auditLog write failed for ${actionType}:`, err);
-  }
-}
+// KAN-1168 — inline writeAuditBestEffort deleted; consolidated into
+// packages/api/src/utils/audit-helpers.ts. Callers below pass `actor: input.userId`
+// at each invocation (preserving the per-call operator identity).
 
 export async function markFingerprintSupported(
   prisma: PrismaClient,
@@ -356,17 +346,16 @@ export async function markFingerprintSupported(
       message: `Cannot mark as supported from status='${previousStatus}'`,
     });
   }
-  await writeAuditBestEffort(
-    prisma,
-    input.tenantId,
-    input.userId,
-    "parse_fingerprint.marked_supported",
-    {
+  await writeAuditBestEffort(prisma, {
+    tenantId: input.tenantId,
+    actor: input.userId,
+    actionType: "parse_fingerprint.marked_supported",
+    payload: {
       fingerprintId: input.fingerprintId,
       previousStatus,
       newStatus: "supported",
     },
-  );
+  });
   return { id: input.fingerprintId, supportStatus: "supported", previousStatus };
 }
 
@@ -410,17 +399,16 @@ export async function markFingerprintUnsupported(
       message: `Cannot mark as unsupported from status='${previousStatus}'`,
     });
   }
-  await writeAuditBestEffort(
-    prisma,
-    input.tenantId,
-    input.userId,
-    "parse_fingerprint.marked_unsupported",
-    {
+  await writeAuditBestEffort(prisma, {
+    tenantId: input.tenantId,
+    actor: input.userId,
+    actionType: "parse_fingerprint.marked_unsupported",
+    payload: {
       fingerprintId: input.fingerprintId,
       previousStatus,
       newStatus: "unsupported",
     },
-  );
+  });
   return { id: input.fingerprintId, supportStatus: "unsupported", previousStatus };
 }
 
@@ -465,16 +453,15 @@ export async function unmarkFingerprint(
       message: `Cannot unmark from status='${previousStatus}'`,
     });
   }
-  await writeAuditBestEffort(
-    prisma,
-    input.tenantId,
-    input.userId,
-    "parse_fingerprint.unmarked",
-    {
+  await writeAuditBestEffort(prisma, {
+    tenantId: input.tenantId,
+    actor: input.userId,
+    actionType: "parse_fingerprint.unmarked",
+    payload: {
       fingerprintId: input.fingerprintId,
       previousStatus,
       newStatus: "pending",
     },
-  );
+  });
   return { id: input.fingerprintId, supportStatus: "pending", previousStatus };
 }

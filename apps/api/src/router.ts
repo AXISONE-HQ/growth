@@ -320,29 +320,10 @@ export async function checkPipelineDeletability(
   };
 }
 
-/**
- * KAN-1169 — 6th inline copy of writeAuditBestEffort (KAN-1150 P2
- * consolidation pressure: parse-rule-service, sub-objective-gap-tracker,
- * parse-fingerprint-aggregator, lead-normalizer, recommendations, + this
- * one). Best-effort: audit failure never blocks the destructive operation.
- */
-async function writePipelineAuditBestEffort(
-  prisma: unknown,
-  tenantId: string,
-  actor: string,
-  actionType: string,
-  payload: Record<string, unknown>,
-): Promise<void> {
-  try {
-    await (prisma as {
-      auditLog: { create: (args: unknown) => Promise<unknown> };
-    }).auditLog.create({
-      data: { tenantId, actor, actionType, payload },
-    });
-  } catch (err) {
-    console.error(`[pipelines.delete] auditLog write failed for ${actionType}:`, err);
-  }
-}
+// KAN-1168 — writePipelineAuditBestEffort (6th inline copy from KAN-1169) deleted;
+// consolidated into packages/api/src/utils/audit-helpers.ts. The single caller
+// (pipelines.delete procedure) uses variable-specifier dynamic import to keep
+// the helper out of apps/api rootDir static graph (TS6059 avoidance).
 
 export function canDeleteStage(input: {
   activeLeadCount: number;
@@ -5564,12 +5545,29 @@ const pipelinesRouter = router({
         actionType = 'pipeline.archived_with_reassign';
       }
 
-      await writePipelineAuditBestEffort(
-        ctx.prisma,
-        ctx.tenantId,
-        ctx.firebaseUser?.uid ?? 'unknown',
+      // KAN-1168 — Consolidated via shared writeAuditBestEffort helper. KAN-689
+      // cohort discipline: variable-specifier dynamic import keeps the helper
+      // out of the apps/api rootDir static graph (TS6059 avoidance per
+      // feedback_cc_prompt_cross_rootdir_imports_must_be_pattern_conformant).
+      // Same pattern KAN-1167 used for audience.setGoal.
+      const auditHelpersSpec = "../../../packages/api/src/utils/audit-helpers.js";
+      const { writeAuditBestEffort } = (await import(auditHelpersSpec)) as {
+        writeAuditBestEffort: (
+          prisma: unknown,
+          params: {
+            tenantId: string;
+            actor: string;
+            actionType: string;
+            payload: Record<string, unknown>;
+            reasoning?: string;
+          },
+        ) => Promise<void>;
+      };
+      await writeAuditBestEffort(ctx.prisma, {
+        tenantId: ctx.tenantId,
+        actor: ctx.firebaseUser?.uid ?? 'unknown',
         actionType,
-        {
+        payload: {
           sourceId: source.id,
           sourceLabel: source.name,
           destinationId: dest?.id ?? null,
@@ -5580,7 +5578,7 @@ const pipelinesRouter = router({
           hasStageHistory: check.hasStageHistory,
           softArchived: shouldArchive,
         },
-      );
+      });
 
       return {
         id: input.pipelineId,

@@ -48,6 +48,10 @@ import { LEAD_RECEIVED_TOPIC, LeadReceivedEventSchema } from '@growth/shared';
 // the matching parse_fingerprint row's reclassify_count increments. Hash
 // algorithm lives in @growth/shared (cross-workspace single source of truth).
 import { deriveParseFingerprint, type DetectedFormat } from '@growth/shared';
+// KAN-1168 — Consolidated audit-helper migration. Previously inline copy at
+// :433 (5-arg positional with explicit `actor`). All 4 callers below pass
+// the per-call ctx.actor (operator identity) at the callsite.
+import { writeAuditBestEffort } from '../utils/audit-helpers.js';
 
 // ─────────────────────────────────────────────
 // Input shapes — keep zod-equivalent here so tests can import without zod
@@ -430,28 +434,9 @@ function assertNotSample(
   }
 }
 
-async function writeAuditBestEffort(
-  prisma: PrismaClient,
-  tenantId: string,
-  actor: string,
-  actionType: string,
-  payload: Record<string, unknown>,
-): Promise<void> {
-  try {
-    await prisma.auditLog.create({
-      data: {
-        tenantId,
-        actor,
-        actionType,
-        payload: payload as never,
-      },
-    });
-  } catch (err) {
-    // Best-effort per existing pattern — never fail the mutation on audit-log
-    // write failure. Logged for ops visibility.
-    console.error(`[recommendations] auditLog write failed for ${actionType}:`, err);
-  }
-}
+// KAN-1168 — inline writeAuditBestEffort deleted; consolidated into
+// packages/api/src/utils/audit-helpers.ts. All 4 callers above use the shared
+// object-arg helper with per-call ctx.actor (operator identity).
 
 export async function acceptRecommendation(
   ctx: MutationContext,
@@ -596,20 +581,25 @@ export async function acceptRecommendation(
     },
   });
 
-  await writeAuditBestEffort(ctx.prisma, ctx.tenantId, ctx.actor, auditActionType, {
-    escalationId: before.id,
-    beforeStatus: before.status,
-    afterStatus: 'resolved',
-    modifiedAction: input.modifiedAction ?? null,
-    // KAN-1037 — record whether the publish drew from operator modify, the
-    // engine-emitted originalAction fallback, or neither. Enables ops to
-    // trace the post-fix dispatch behavior across the queue.
-    publishSource: parsedAction?.success
-      ? input.modifiedAction
-        ? 'modified_action'
-        : 'original_action'
-      : 'none',
-    publishedActionDecidedId: publishedEventId,
+  await writeAuditBestEffort(ctx.prisma, {
+    tenantId: ctx.tenantId,
+    actor: ctx.actor,
+    actionType: auditActionType,
+    payload: {
+      escalationId: before.id,
+      beforeStatus: before.status,
+      afterStatus: 'resolved',
+      modifiedAction: input.modifiedAction ?? null,
+      // KAN-1037 — record whether the publish drew from operator modify, the
+      // engine-emitted originalAction fallback, or neither. Enables ops to
+      // trace the post-fix dispatch behavior across the queue.
+      publishSource: parsedAction?.success
+        ? input.modifiedAction
+          ? 'modified_action'
+          : 'original_action'
+        : 'none',
+      publishedActionDecidedId: publishedEventId,
+    },
   });
 
   return { id: updated.id, status: updated.status, publishedEventId };
@@ -638,12 +628,17 @@ export async function modifyRecommendation(
     data: { aiSuggestion: input.suggestedAction },
   });
 
-  await writeAuditBestEffort(ctx.prisma, ctx.tenantId, ctx.actor, 'recommendation.modify', {
-    escalationId: before.id,
-    beforeStatus: before.status,
-    afterStatus: before.status,
-    beforeSuggestion: before.aiSuggestion,
-    afterSuggestion: input.suggestedAction,
+  await writeAuditBestEffort(ctx.prisma, {
+    tenantId: ctx.tenantId,
+    actor: ctx.actor,
+    actionType: 'recommendation.modify',
+    payload: {
+      escalationId: before.id,
+      beforeStatus: before.status,
+      afterStatus: before.status,
+      beforeSuggestion: before.aiSuggestion,
+      afterSuggestion: input.suggestedAction,
+    },
   });
 
   return { id: updated.id, status: updated.status, aiSuggestion: updated.aiSuggestion };
@@ -671,11 +666,16 @@ export async function dismissRecommendation(
     },
   });
 
-  await writeAuditBestEffort(ctx.prisma, ctx.tenantId, ctx.actor, 'recommendation.dismiss', {
-    escalationId: before.id,
-    beforeStatus: before.status,
-    afterStatus: 'dismissed',
-    dismissReason: input.reason,
+  await writeAuditBestEffort(ctx.prisma, {
+    tenantId: ctx.tenantId,
+    actor: ctx.actor,
+    actionType: 'recommendation.dismiss',
+    payload: {
+      escalationId: before.id,
+      beforeStatus: before.status,
+      afterStatus: 'dismissed',
+      dismissReason: input.reason,
+    },
   });
 
   return { id: updated.id, status: updated.status };
@@ -877,17 +877,22 @@ export async function reclassifyRecommendation(
     },
   });
 
-  await writeAuditBestEffort(ctx.prisma, ctx.tenantId, ctx.actor, 'recommendation.reclassify', {
-    escalationId: before.id,
-    beforeStatus: before.status,
-    afterStatus: 'resolved',
-    corrections: {
-      ...(input.correctedFormat ? { format: input.correctedFormat } : {}),
-      ...(input.correctedLanguage ? { language: input.correctedLanguage } : {}),
-      ...(input.correctedVendor ? { vendor: input.correctedVendor } : {}),
+  await writeAuditBestEffort(ctx.prisma, {
+    tenantId: ctx.tenantId,
+    actor: ctx.actor,
+    actionType: 'recommendation.reclassify',
+    payload: {
+      escalationId: before.id,
+      beforeStatus: before.status,
+      afterStatus: 'resolved',
+      corrections: {
+        ...(input.correctedFormat ? { format: input.correctedFormat } : {}),
+        ...(input.correctedLanguage ? { language: input.correctedLanguage } : {}),
+        ...(input.correctedVendor ? { vendor: input.correctedVendor } : {}),
+      },
+      syntheticEventId: syntheticEvent.eventId,
+      pubsubMessageId: messageId,
     },
-    syntheticEventId: syntheticEvent.eventId,
-    pubsubMessageId: messageId,
   });
 
   // KAN-1140 Phase 3 PR 7 — increment reclassify_count on the matching

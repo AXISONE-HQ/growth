@@ -27,6 +27,9 @@ import {
   type SubObjectiveState,
   type SubObjectiveValueType,
 } from '@growth/shared';
+// KAN-1168 — Consolidated audit-helper migration. Previously inline copy at
+// :475. Caller-side `actor` literal preserves 'system:gap-tracker' verbatim.
+import { writeAuditBestEffort } from '../utils/audit-helpers.js';
 
 // ─────────────────────────────────────────────
 // Contact context the priority math needs
@@ -73,9 +76,14 @@ export async function computeGapState(
       `[sub-objective-gap-tracker] computeGapState failed tenantId=${tenantId} contactId=${contactId}:`,
       err,
     );
-    await writeAuditBestEffort(prisma, tenantId, 'sub_objective_gap_state.read_failed', {
-      contactId,
-      error: err instanceof Error ? err.message : String(err),
+    await writeAuditBestEffort(prisma, {
+      tenantId,
+      actor: 'system:gap-tracker',
+      actionType: 'sub_objective_gap_state.read_failed',
+      payload: {
+        contactId,
+        error: err instanceof Error ? err.message : String(err),
+      },
     });
     return { prioritizedGaps: [], topCandidate: undefined, resolvedGaps: [] };
   }
@@ -120,10 +128,15 @@ async function seedDefaultsIfMissing(
   });
 
   if (result.count > 0) {
-    await writeAuditBestEffort(prisma, tenantId, 'sub_objective_gap_state.seeded', {
-      contactId,
-      rowsInserted: result.count,
-      rowsAttempted: rowsToSeed.length,
+    await writeAuditBestEffort(prisma, {
+      tenantId,
+      actor: 'system:gap-tracker',
+      actionType: 'sub_objective_gap_state.seeded',
+      payload: {
+        contactId,
+        rowsInserted: result.count,
+        rowsAttempted: rowsToSeed.length,
+      },
     });
   }
 }
@@ -447,22 +460,27 @@ export async function transitionSubObjectiveState(
   // and (when source==='engine') the engineContext forensic fields. Single
   // row per transition, source-discriminated, query-friendly via
   // `payload->>'source' = 'engine'` + `payload->>'wasNoOp' = 'true'`.
-  await writeAuditBestEffort(prisma, tenantId, 'sub_objective_gap_state.transitioned', {
-    contactId: input.contactId,
-    subObjectiveKey: input.subObjectiveKey,
-    previousState,
-    newState: input.toState,
-    actor,
-    source,
-    wasNoOp,
-    ...(source === 'engine' && engineContext
-      ? {
-          brainReasoning: engineContext.reasoning,
-          brainConfidence: engineContext.confidence,
-          triggerDecisionId: engineContext.decisionId,
-          eventId: engineContext.eventId,
-        }
-      : {}),
+  await writeAuditBestEffort(prisma, {
+    tenantId,
+    actor: 'system:gap-tracker',
+    actionType: 'sub_objective_gap_state.transitioned',
+    payload: {
+      contactId: input.contactId,
+      subObjectiveKey: input.subObjectiveKey,
+      previousState,
+      newState: input.toState,
+      actor,
+      source,
+      wasNoOp,
+      ...(source === 'engine' && engineContext
+        ? {
+            brainReasoning: engineContext.reasoning,
+            brainConfidence: engineContext.confidence,
+            triggerDecisionId: engineContext.decisionId,
+            eventId: engineContext.eventId,
+          }
+        : {}),
+    },
   });
 
   return { ok: true, previousState, wasNoOp };
@@ -472,23 +490,6 @@ export async function transitionSubObjectiveState(
 // Best-effort audit-log write
 // ─────────────────────────────────────────────
 
-async function writeAuditBestEffort(
-  prisma: PrismaClient,
-  tenantId: string,
-  actionType: string,
-  payload: Record<string, unknown>,
-): Promise<void> {
-  try {
-    await prisma.auditLog.create({
-      data: {
-        tenantId,
-        actor: 'system:gap-tracker',
-        actionType,
-        payload: payload as never,
-      },
-    });
-  } catch (err) {
-    // Audit failure is never load-bearing.
-    console.error(`[sub-objective-gap-tracker] audit write failed for ${actionType}:`, err);
-  }
-}
+// KAN-1168 — inline writeAuditBestEffort deleted; consolidated into
+// packages/api/src/utils/audit-helpers.ts. Callers above pass
+// `actor: 'system:gap-tracker'` at each invocation.
