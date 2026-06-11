@@ -38,8 +38,8 @@ import { contactRepliedPushApp } from "./subscribers/contact-replied-push.js";
 import { knowledgeSourceIngestedPushApp } from "./subscribers/knowledge-source-ingested-push.js";
 // KAN-1007 SAE PR3 — Pub/Sub bringup. Both subscribers ship dormant in
 // the sense that nothing in app code publishes decision.run today
-// (audience.activate() is SAE PR5). campaign.materialize is published by
-// the audience.commit kickOff hook (durable replacement for the KAN-1002
+// (campaigns.activate() is SAE PR5). campaign.materialize is published by
+// the campaigns.commit kickOff hook (durable replacement for the KAN-1002
 // in-process worker; folds KAN-1003).
 import { campaignMaterializePushApp } from "./subscribers/campaign-materialize-push.js";
 import { decisionRunPushApp } from "./subscribers/decision-run-push.js";

@@ -2454,7 +2454,7 @@ export const importJobsApi = {
 // future API consumers.
 // ─────────────────────────────────────────────
 
-export type AudienceTextToSegmentResult =
+export type CampaignTextToSegmentResult =
   | {
       kind: 'segment';
       conditions: unknown;
@@ -2496,12 +2496,12 @@ export type CampaignProposalShape = {
   firstActions: CampaignFirstAction[];
 };
 
-export type AudienceProposeResult =
+export type CampaignProposeResult =
   | { kind: 'proposal'; proposal: CampaignProposalShape; message: string }
   | { kind: 'thin'; proposal: CampaignProposalShape; message: string }
   | { kind: 'ambiguous'; clarifyingQuestion: string };
 
-export const audienceApi = {
+export const campaignsApi = {
   /**
    * NL → audience_conditions + count, single round-trip. LLM is
    * tier='reasoning' (claude-sonnet-4-6) with callerTag
@@ -2509,7 +2509,7 @@ export const audienceApi = {
    * under the 'campaign' prefix chip).
    */
   textToSegment: (nl: string) =>
-    trpcMutation<AudienceTextToSegmentResult>('audience.textToSegment', { nl }),
+    trpcMutation<CampaignTextToSegmentResult>('campaigns.textToSegment', { nl }),
 
   /**
    * Direct count for a pre-built AudienceConditions tree. Slice 1 UI
@@ -2519,7 +2519,7 @@ export const audienceApi = {
    */
   count: (conditions: unknown) =>
     trpcQuery<{ count: number; isThin: boolean; historicalValueUsd: number }>(
-      'audience.count',
+      'campaigns.count',
       { conditions },
     ),
 
@@ -2530,7 +2530,7 @@ export const audienceApi = {
    * Cost callerTag = 'campaign:propose' (rolls up on observability).
    */
   propose: (nl: string) =>
-    trpcMutation<AudienceProposeResult>('audience.propose', { nl }),
+    trpcMutation<CampaignProposeResult>('campaigns.propose', { nl }),
 
   /**
    * KAN-1001 Slice 3a — commit a validated proposal into Campaign +
@@ -2549,13 +2549,13 @@ export const audienceApi = {
     };
     idempotencyKey: string;
   }) =>
-    trpcMutation<CampaignCommitResult>('audience.commit', input),
+    trpcMutation<CampaignCommitResult>('campaigns.commit', input),
 
   /** KAN-1001 Slice 3a — archive a committed campaign (hides it +
    *  prevents further admits). Audit-logged. */
   archive: (campaignId: string) =>
     trpcMutation<{ campaignId: string; status: 'archived'; archivedAt: string }>(
-      'audience.archive',
+      'campaigns.archive',
       { campaignId },
     ),
 
@@ -2569,13 +2569,13 @@ export const audienceApi = {
    *  IS NOT NULL. Else returns kind='rejected' with a named reason.
    *  Idempotent on active. */
   activate: (campaignId: string) =>
-    trpcMutation<CampaignActivateResult>('audience.activate', { campaignId }),
+    trpcMutation<CampaignActivateResult>('campaigns.activate', { campaignId }),
 
   /** KAN-1010 SAE PR5 — pause an active campaign. The stop lever:
    *  flips status → paused + stack rows → paused so the PR3 consumer
    *  guard rejects any in-flight or redelivered decision.run. */
   pause: (campaignId: string) =>
-    trpcMutation<CampaignPauseResult>('audience.pause', { campaignId }),
+    trpcMutation<CampaignPauseResult>('campaigns.pause', { campaignId }),
 
   /**
    * KAN-1167 — Campaign-as-Conversation v0.1 outcome-goal entry.
@@ -2585,13 +2585,9 @@ export const audienceApi = {
    * validates goalType + goalTarget required-together and writes an audit
    * row via the shared writeAuditBestEffort helper (KAN-1168 closeout
    * pattern).
-   *
-   * NOTE: route lives under `audience.*` because the existing tRPC router
-   * is named `audienceRouter` (carried over from Slice 1 text-to-segment
-   * naming). Router rename to `campaignsRouter` is a separate follow-up.
    */
   setGoal: (input: CampaignGoalInput) =>
-    trpcMutation<CampaignGoalResult>('audience.setGoal', input),
+    trpcMutation<CampaignGoalResult>('campaigns.setGoal', input),
 };
 
 // KAN-1167 — Campaign-as-Conversation v0.1 outcome-goal types.

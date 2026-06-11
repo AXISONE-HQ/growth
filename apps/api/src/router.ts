@@ -5549,7 +5549,7 @@ const pipelinesRouter = router({
       // cohort discipline: variable-specifier dynamic import keeps the helper
       // out of the apps/api rootDir static graph (TS6059 avoidance per
       // feedback_cc_prompt_cross_rootdir_imports_must_be_pattern_conformant).
-      // Same pattern KAN-1167 used for audience.setGoal.
+      // Same pattern KAN-1167 used for campaigns.setGoal.
       const auditHelpersSpec = "../../../packages/api/src/utils/audit-helpers.js";
       const { writeAuditBestEffort } = (await import(auditHelpersSpec)) as {
         writeAuditBestEffort: (
@@ -7070,12 +7070,12 @@ export const accountRouter = router({
 // prisma query, matches pipelines.listWithStages precedent.
 // ─────────────────────────────────────────────
 // KAN-997 — Campaign Layer Slice 1: text-to-segment (read-only).
-// audience.count + audience.textToSegment tRPC procedures.
+// campaigns.count + campaigns.textToSegment tRPC procedures.
 // Module loaded via variable-specifier dynamic import to bypass TS6059
 // cross-rootDir (packages/api/src/services lives outside apps/api/src
 // rootDir; same pattern as loadDealsModule above).
 // ─────────────────────────────────────────────
-interface AudienceRouterModule {
+interface CampaignsRouterModule {
   countAudience: (
     prisma: unknown,
     tenantId: string,
@@ -7203,15 +7203,15 @@ async function loadPubSubClientModule(): Promise<PubSubClientModule> {
   return _pubsubClientModule;
 }
 
-let _audienceModule: AudienceRouterModule | null = null;
-async function loadAudienceModule(): Promise<AudienceRouterModule> {
-  if (_audienceModule) return _audienceModule;
+let _campaignsModule: CampaignsRouterModule | null = null;
+async function loadCampaignsModule(): Promise<CampaignsRouterModule> {
+  if (_campaignsModule) return _campaignsModule;
   const spec = "../../../packages/api/src/services/audience-router.js";
-  _audienceModule = (await import(spec)) as AudienceRouterModule;
-  return _audienceModule;
+  _campaignsModule = (await import(spec)) as CampaignsRouterModule;
+  return _campaignsModule;
 }
 
-// LLM client wrapper — matches the LLMCompleteFn shape the audience
+// LLM client wrapper — matches the LLMCompleteFn shape the campaigns
 // module expects. Real llm-client imported the same way (variable
 // specifier) so the apps/api tsc rootDir doesn't complain.
 interface LlmClientModule {
@@ -7239,7 +7239,7 @@ async function loadLlmModule(): Promise<LlmClientModule> {
   return _llmModule;
 }
 
-const audienceRouter = router({
+const campaignsRouter = router({
   // Direct count — exposed for Slice 2 manual filter builder + future
   // API consumers. Slice 1 UI doesn't call this directly; textToSegment
   // calls it internally after LLM extraction.
@@ -7255,7 +7255,7 @@ const audienceRouter = router({
       }),
     )
     .query(async ({ ctx, input }) => {
-      const { countAudience } = await loadAudienceModule();
+      const { countAudience } = await loadCampaignsModule();
       return countAudience(ctx.prisma, ctx.tenantId, input);
     }),
 
@@ -7268,7 +7268,7 @@ const audienceRouter = router({
     )
     .mutation(async ({ ctx, input }) => {
       const [{ textToSegment }, llmModule] = await Promise.all([
-        loadAudienceModule(),
+        loadCampaignsModule(),
         loadLlmModule(),
       ]);
       return textToSegment(
@@ -7291,7 +7291,7 @@ const audienceRouter = router({
     )
     .mutation(async ({ ctx, input }) => {
       const [{ proposeCampaign }, llmModule] = await Promise.all([
-        loadAudienceModule(),
+        loadCampaignsModule(),
         loadLlmModule(),
       ]);
       return proposeCampaign(
@@ -7318,7 +7318,7 @@ const audienceRouter = router({
       z.object({
         // The proposal payload is large + nested; treat as z.unknown()
         // here and re-parse via CampaignProposalSchema inside the
-        // service (same pattern as audience.count's conditions input).
+        // service (same pattern as campaigns.count's conditions input).
         proposal: z.unknown(),
         edits: z
           .object({
@@ -7487,7 +7487,7 @@ const audienceRouter = router({
       );
     }),
 
-  // KAN-1010 SAE PR5 — audience.activate(): the M1 trigger
+  // KAN-1010 SAE PR5 — campaigns.activate(): the M1 trigger
   //
   // Flips committed campaign to active, upserts ContactObjectiveStack
   // entries, drip-publishes decision.run per member. Under
@@ -7565,7 +7565,7 @@ const audienceRouter = router({
       );
     }),
 
-  // KAN-1010 SAE PR5 — audience.pause(): the M1 stop lever
+  // KAN-1010 SAE PR5 — campaigns.pause(): the M1 stop lever
   //
   // Flips active campaign to paused + updateMany stack entries to
   // paused. The PR3 consumer guard fails on stack.status='paused' for
@@ -8034,7 +8034,7 @@ export const appRouter = router({
   // KAN-852 — Account Page Cohort 1
   account: accountRouter,
   // KAN-997 — Campaign Layer Slice 1 — text-to-segment (read-only).
-  audience: audienceRouter,
+  campaigns: campaignsRouter,
   // KAN-1005 M2-4 — Circuit breaker admin surface (status/reset/trip).
   circuitBreaker: circuitBreakerRouter,
   // M3-1c — Sub-objective gap-state read + operator manual transition.

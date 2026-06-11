@@ -41,8 +41,8 @@ import {
   AlertOctagon,
 } from 'lucide-react';
 import {
-  audienceApi,
-  type AudienceProposeResult,
+  campaignsApi,
+  type CampaignProposeResult,
   type CampaignActivateResult,
   type CampaignCommitResult,
   type CampaignFirstAction,
@@ -101,7 +101,7 @@ function isoToDateInput(iso: string | null): string {
 }
 
 /** Stable per-proposal UUID — generated client-side once when a proposal
- *  lands. Sent to audience.commit as `idempotencyKey` so a double-click
+ *  lands. Sent to campaigns.commit as `idempotencyKey` so a double-click
  *  on Activate returns the existing IDs (same key + same name within the
  *  server's 5-minute window = recognized as a retry). Re-generated on
  *  each new proposal so subsequent commits are distinct. */
@@ -127,8 +127,8 @@ export default function CampaignsPage() {
     newIdempotencyKey(),
   );
 
-  const mutation = useMutation<AudienceProposeResult, Error, string>({
-    mutationFn: (input) => audienceApi.propose(input),
+  const mutation = useMutation<CampaignProposeResult, Error, string>({
+    mutationFn: (input) => campaignsApi.propose(input),
     onSuccess: (result) => {
       if (result.kind === 'proposal' || result.kind === 'thin') {
         setEditName(result.proposal.name);
@@ -158,17 +158,17 @@ export default function CampaignsPage() {
       idempotencyKey: string;
     }
   >({
-    mutationFn: (input) => audienceApi.commit(input),
+    mutationFn: (input) => campaignsApi.commit(input),
   });
 
   // KAN-1010 SAE PR5 — activate the just-committed campaign. M1 closer.
   const activateMutation = useMutation<CampaignActivateResult, Error, string>({
-    mutationFn: (campaignId) => audienceApi.activate(campaignId),
+    mutationFn: (campaignId) => campaignsApi.activate(campaignId),
   });
 
   // KAN-1010 SAE PR5 — pause an active campaign. Stop lever.
   const pauseMutation = useMutation<CampaignPauseResult, Error, string>({
-    mutationFn: (campaignId) => audienceApi.pause(campaignId),
+    mutationFn: (campaignId) => campaignsApi.pause(campaignId),
   });
 
   if (!FLAG_ON) {
@@ -363,7 +363,7 @@ function ProposalPreview({
   pausePending,
   onPause,
 }: {
-  result: AudienceProposeResult;
+  result: CampaignProposeResult;
   editName: string;
   editWindowStart: string;
   editWindowEnd: string;
