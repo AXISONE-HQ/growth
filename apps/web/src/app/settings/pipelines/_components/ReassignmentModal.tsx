@@ -50,6 +50,15 @@ export function ReassignmentModal({
       setPreviewError(null);
       setReassignTo("");
       setSubmitError(null);
+      // KAN-1173 fix-forward — `submitting` was leaking across opens. The
+      // success path of handleConfirm sets submitting=true, awaits the
+      // mutation, then closes via onOpenChange(false) without resetting.
+      // Modal early-returns null on the next render but stays mounted, so
+      // submitting=true persisted; opening the modal for a different
+      // pipeline showed Confirm stuck on "Working…" disabled. Reset here
+      // (single state-reset path) covers both close-via-cancel and
+      // close-via-success cleanly.
+      setSubmitting(false);
       return;
     }
     let cancelled = false;
