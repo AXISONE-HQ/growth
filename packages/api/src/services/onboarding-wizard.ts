@@ -20,7 +20,7 @@ import { loadBlueprintForTenant, getBlueprintForTenant, GENERIC_BLUEPRINT } from
 // KAN-1167 — Always-On Campaign hook lands at go-live (after Objectives created).
 // Senior PO dispatch chose Option (β) — wire here rather than at tenant.create
 // (no Objectives at that point) or via schema-relax (FK posture inversion).
-import { ensureAlwaysOnCampaign } from './always-on-campaign';
+import { ensureAlwaysOnCampaign } from './always-on-campaign.js';
 
 const router = Router();
 const prisma = new PrismaClient();
