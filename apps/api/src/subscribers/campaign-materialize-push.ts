@@ -72,7 +72,7 @@ const PushEnvelopeSchema = z.object({
 });
 
 /**
- * Inner event schema — published by `audience.commit` tRPC mutation when
+ * Inner event schema — published by `campaigns.commit` tRPC mutation when
  * audience size exceeds `MEMBERSHIP_SYNC_LIMIT` (500). `conditions` is
  * the AudienceConditions JSONB the campaign was committed with; the
  * worker re-parses it via AudienceConditionsSchema inside

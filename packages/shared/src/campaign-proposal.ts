@@ -104,7 +104,7 @@ export const ProposalAudienceSchema = z.object({
 export type ProposalAudience = z.infer<typeof ProposalAudienceSchema>;
 
 // ─────────────────────────────────────────────
-// Full proposal — what audience.propose returns
+// Full proposal — what campaigns.propose returns
 // ─────────────────────────────────────────────
 
 export const CampaignProposalSchema = z.object({

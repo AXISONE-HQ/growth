@@ -1,5 +1,5 @@
 /**
- * KAN-1010 — SAE PR5: audience.activate() + audience.pause().
+ * KAN-1010 — SAE PR5: campaigns.activate() + campaigns.pause().
  *
  * The trigger that wakes the autonomous Decision Engine for committed
  * campaigns. Closes Milestone 1.

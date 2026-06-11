@@ -3,7 +3,7 @@
  *
  * Wakeup consumer for the autonomous Decision Engine. SHIPS DORMANT in
  * PR3 — no app code publishes `decision.run` until SAE PR5
- * (`audience.activate()`). The hard guards below would refuse to evaluate
+ * (`campaigns.activate()`). The hard guards below would refuse to evaluate
  * any contact whose Campaign isn't status='active', and PR1's backfill
  * relabeled every existing inert campaign to 'committed'. So even a
  * manually-published decision.run event during PR3's smoke will no-op.
@@ -13,7 +13,7 @@
  * Before any call to `runDecisionForContact`, the consumer asserts:
  *
  *   1. Campaign.status === 'active'
- *      — Nothing has this status until PR5's `audience.activate()` writes
+ *      — Nothing has this status until PR5's `campaigns.activate()` writes
  *        it. PR1 (KAN-1004) backfilled the 2 existing PROD campaigns from
  *        'active' (3a-era misnomer) to 'committed' specifically so this
  *        guard means what it says.
