@@ -451,17 +451,6 @@ function mergeExtractedFields(
   };
 }
 
-/**
- * KAN-1140 Phase 3 PR 9b — Best-effort audit row writer.
- *
- * 5th inline copy of the helper (KAN-1150 consolidation deferred per
- * Q12 lock — file the 5th instance in PR 9b close report as the
- * "consolidation should be next refactor sprint" trigger).
- *
- * Mirrors `recommendations.ts:writeAuditBestEffort` 4-arg shape (no
- * actor parameter — system-level audit; actor='system:parse-rule-executor'
- * hardcoded). 4-arg variant because the call sites here all use the
- * same system actor; surface symmetry with the 5-arg variant in
 // KAN-1168 — inline writeAuditBestEffort deleted; consolidated into
 // packages/api/src/utils/audit-helpers.ts (created in KAN-1167). Callers above
 // import { writeAuditBestEffort } from '../utils/audit-helpers.js' and pass
