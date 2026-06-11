@@ -82,6 +82,35 @@ async function setCustomer(prisma: PrismaClient, contactId: string): Promise<voi
   });
 }
 
+/** Mirror of setup.ts createDeal that also sets closedAt — required so the
+ *  service's dataReadiness + conversionRate queries (which filter
+ *  `closedAt >= windowStart`) recognize the deal as closed-in-window. The
+ *  shared setup.ts createDeal leaves closedAt NULL by default. */
+async function createWonDeal(
+  prisma: PrismaClient,
+  args: {
+    tenantId: string;
+    contactId: string;
+    pipelineId: string;
+    stageId: string;
+    value?: number;
+    closedAt?: Date;
+  },
+): Promise<{ id: string }> {
+  return prisma.deal.create({
+    data: {
+      tenantId: args.tenantId,
+      contactId: args.contactId,
+      pipelineId: args.pipelineId,
+      currentStageId: args.stageId,
+      status: "won",
+      value: args.value ?? 1000,
+      closedAt: args.closedAt ?? new Date(),
+    },
+    select: { id: true },
+  });
+}
+
 async function createEngagement(
   prisma: PrismaClient,
   args: {
@@ -174,24 +203,22 @@ describe("KAN-1171-A — multi-tenant isolation (Q5 sentinel)", () => {
 
       // Tenant A: 35 won deals + 35 orders (sufficient + distinct shape)
       for (let i = 0; i < 35; i++) {
-        await createDeal(tx, {
+        await createWonDeal(tx, {
           tenantId: tenantA,
           contactId: contactA,
           pipelineId: pipelineA,
           stageId: stageA,
-          status: "won",
           value: 1000,
         });
         await createOrder(tx, { tenantId: tenantA, contactId: contactA });
       }
       // Tenant B: 5 won deals + 5 orders (distinct shape)
       for (let i = 0; i < 5; i++) {
-        await createDeal(tx, {
+        await createWonDeal(tx, {
           tenantId: tenantB,
           contactId: contactB,
           pipelineId: pipelineB,
           stageId: stageB,
-          status: "won",
           value: 5000,
         });
         await createOrder(tx, { tenantId: tenantB, contactId: contactB });
@@ -252,12 +279,11 @@ describe("KAN-1171-A — Q1 caveat trendDirection raw-SQL execute-against-Postgr
       // dataReadiness needs ≥30 closed deals + ≥90 days history for 'sufficient'.
       // Seed 35 won deals across the window so dataReadiness passes.
       for (let i = 0; i < 35; i++) {
-        await createDeal(tx, {
+        await createWonDeal(tx, {
           tenantId,
           contactId,
           pipelineId,
           stageId,
-          status: "won",
           value: 1000,
         });
       }
@@ -312,12 +338,11 @@ describe("KAN-1171-A — Q1 caveat trendDirection raw-SQL execute-against-Postgr
       // dataReadiness needs ≥30 closed deals OR ≥90 days history for 'partial'.
       // Seed 12 won deals for partial gradient (still runs the compute helpers).
       for (let i = 0; i < 12; i++) {
-        await createDeal(tx, {
+        await createWonDeal(tx, {
           tenantId,
           contactId,
           pipelineId,
           stageId,
-          status: "won",
           value: 1000,
         });
       }
@@ -354,12 +379,11 @@ describe("KAN-1171-A — Q1 caveat lastEngagementDistribution raw-SQL + Q3 signa
       const anchorContact = await createContact(tx, tenantId);
       await setCustomer(tx, anchorContact.id);
       for (let i = 0; i < 35; i++) {
-        await createDeal(tx, {
+        await createWonDeal(tx, {
           tenantId,
           contactId: anchorContact.id,
           pipelineId,
           stageId,
-          status: "won",
           value: 1000,
         });
       }
