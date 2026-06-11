@@ -87,3 +87,8 @@ export * from "./campaign-proposal.js";
 // action-decided-push.ts) and packages/api (recommendations.ts guard
 // + queue filter). Single source of truth for SAMPLED_TRIGGER_TYPE.
 export * from "./sampling-markers.js";
+// KAN-1166 PR 2a — FeasibilityContextService shared types. GoalShape (5-variant
+// discriminated union mirroring Campaign.goalType inline taxonomy at
+// schema.prisma:576) + TenantHistoricalContext (analyzer + chat UI consume) +
+// RequiredDataType taxonomy. Hoist per Memo 37 — cross-workspace single source.
+export * from "./feasibility-context-types.js";
