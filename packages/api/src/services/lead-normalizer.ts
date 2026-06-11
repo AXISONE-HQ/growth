@@ -39,6 +39,10 @@ import {
 import { complete as llmComplete } from './llm-client.js';
 import { getApplicableRules } from './parse-rule-service.js';
 import { executeRules, isAllFieldsCovered } from './parse-rule-executor.js';
+// KAN-1168 — Consolidated audit-helper migration. Previously inline copy at
+// :453 (one of 6 closed by this PR). Caller-side `actor` literal preserves
+// the forensic-chain identifier 'system:parse-rule-executor' verbatim.
+import { writeAuditBestEffort } from '../utils/audit-helpers.js';
 
 // ─────────────────────────────────────────────
 // Types
@@ -348,20 +352,28 @@ export async function normalizeInboundEmail(
         },
       });
       ruleOutput = result.output;
-      // Best-effort audit (5th inline writeAuditBestEffort — KAN-1150
-      // consolidation still deferred per Q12 lock).
-      await writeAuditBestEffort(prisma, tenantId, 'parse_rule.executed', {
-        fingerprintId: fingerprint?.id ?? null,
-        ruleCount: rules.length,
-        metrics: result.metrics,
+      // KAN-1168 — Best-effort audit via shared helper. Replaces the prior
+      // inline 4-arg writeAuditBestEffort; actor literal preserved verbatim.
+      await writeAuditBestEffort(prisma, {
+        tenantId,
+        actor: 'system:parse-rule-executor',
+        actionType: 'parse_rule.executed',
+        payload: {
+          fingerprintId: fingerprint?.id ?? null,
+          ruleCount: rules.length,
+          metrics: result.metrics,
+        },
       });
     }
   } catch (err) {
     // Outer catastrophic-failure isolation (Memo 32 family lock).
     // Fingerprint lookup OR cascade lookup OR cross-tenant assertion
     // throws land here. Lead still lands via Haiku-only path.
-    await writeAuditBestEffort(prisma, tenantId, 'parse_rule.executor_threw', {
-      err: err instanceof Error ? err.message : String(err),
+    await writeAuditBestEffort(prisma, {
+      tenantId,
+      actor: 'system:parse-rule-executor',
+      actionType: 'parse_rule.executor_threw',
+      payload: { err: err instanceof Error ? err.message : String(err) },
     });
     ruleOutput = {};
   }
@@ -379,8 +391,11 @@ export async function normalizeInboundEmail(
     haikuExtracted = emptyExtractedFields();
     confidence = 'high';
     error = null;
-    await writeAuditBestEffort(prisma, tenantId, 'parse_rule.haiku_short_circuit', {
-      fingerprintId: fingerprint?.id ?? null,
+    await writeAuditBestEffort(prisma, {
+      tenantId,
+      actor: 'system:parse-rule-executor',
+      actionType: 'parse_rule.haiku_short_circuit',
+      payload: { fingerprintId: fingerprint?.id ?? null },
     });
   } else {
     const r = await runAIExtraction(tenantId, preParsed);
@@ -447,30 +462,10 @@ function mergeExtractedFields(
  * actor parameter — system-level audit; actor='system:parse-rule-executor'
  * hardcoded). 4-arg variant because the call sites here all use the
  * same system actor; surface symmetry with the 5-arg variant in
- * parse-fingerprint-aggregator/parse-rule-service is deliberately
- * sacrificed for callsite simplicity.
- */
-async function writeAuditBestEffort(
-  prisma: PrismaClient,
-  tenantId: string,
-  actionType: string,
-  payload: Record<string, unknown>,
-): Promise<void> {
-  try {
-    await (prisma as unknown as {
-      auditLog: { create: (args: { data: Record<string, unknown> }) => Promise<unknown> };
-    }).auditLog.create({
-      data: {
-        tenantId,
-        actor: 'system:parse-rule-executor',
-        actionType,
-        payload,
-      },
-    });
-  } catch (err) {
-    console.error(`[lead-normalizer] auditLog write failed for ${actionType}:`, err);
-  }
-}
+// KAN-1168 — inline writeAuditBestEffort deleted; consolidated into
+// packages/api/src/utils/audit-helpers.ts (created in KAN-1167). Callers above
+// import { writeAuditBestEffort } from '../utils/audit-helpers.js' and pass
+// `actor: 'system:parse-rule-executor'` at each invocation.
 
 // ─────────────────────────────────────────────
 // Email pre-parser (no LLM — pure shape extraction)

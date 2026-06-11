@@ -49,6 +49,10 @@ import {
   MAX_RULES_PER_TENANT,
   type ParseRuleBody,
 } from "@growth/shared";
+// KAN-1168 — Consolidated audit-helper migration. Previously inline copy at
+// :792 (5-arg positional with explicit `actor`). All 7 callsites pass the
+// per-call operator identity (input.userId) at the callsite.
+import { writeAuditBestEffort } from "../utils/audit-helpers.js";
 
 // ─────────────────────────────────────────────
 // Service input/output shapes
@@ -244,13 +248,18 @@ export async function createParseRule(
     },
   });
 
-  await writeAuditBestEffort(prisma, input.tenantId, input.userId, "parse_rule.created", {
-    ruleId: rule.id,
-    label: input.label,
-    scope: {
-      fingerprintId: input.fingerprintId ?? null,
-      format: input.format ?? null,
-      vendor: input.vendor ?? null,
+  await writeAuditBestEffort(prisma, {
+    tenantId: input.tenantId,
+    actor: input.userId,
+    actionType: "parse_rule.created",
+    payload: {
+      ruleId: rule.id,
+      label: input.label,
+      scope: {
+        fingerprintId: input.fingerprintId ?? null,
+        format: input.format ?? null,
+        vendor: input.vendor ?? null,
+      },
     },
   });
 
@@ -310,9 +319,14 @@ export async function updateParseRule(
     data: updateData,
   });
 
-  await writeAuditBestEffort(prisma, input.tenantId, input.userId, "parse_rule.updated", {
-    ruleId: input.ruleId,
-    fieldsChanged: Object.keys(updateData).filter((k) => k !== "updatedBy"),
+  await writeAuditBestEffort(prisma, {
+    tenantId: input.tenantId,
+    actor: input.userId,
+    actionType: "parse_rule.updated",
+    payload: {
+      ruleId: input.ruleId,
+      fieldsChanged: Object.keys(updateData).filter((k) => k !== "updatedBy"),
+    },
   });
 
   return { id: input.ruleId };
@@ -339,9 +353,14 @@ export async function deleteParseRule(
   // FK onDelete: Cascade drops the ParseRuleVersion snapshot atomically.
   await ps.parseRule.delete({ where: { id: input.ruleId } });
 
-  await writeAuditBestEffort(prisma, input.tenantId, input.userId, "parse_rule.deleted", {
-    ruleId: input.ruleId,
-    label: current.label,
+  await writeAuditBestEffort(prisma, {
+    tenantId: input.tenantId,
+    actor: input.userId,
+    actionType: "parse_rule.deleted",
+    payload: {
+      ruleId: input.ruleId,
+      label: current.label,
+    },
   });
 
   return { id: input.ruleId };
@@ -510,9 +529,14 @@ export async function restoreParseRulePreviousVersion(
     },
   });
 
-  await writeAuditBestEffort(prisma, input.tenantId, input.userId, "parse_rule.restored", {
-    ruleId: input.ruleId,
-    snapshotArchivedAt: snapshot.archivedAt.toISOString(),
+  await writeAuditBestEffort(prisma, {
+    tenantId: input.tenantId,
+    actor: input.userId,
+    actionType: "parse_rule.restored",
+    payload: {
+      ruleId: input.ruleId,
+      snapshotArchivedAt: snapshot.archivedAt.toISOString(),
+    },
   });
 
   return { id: input.ruleId };
@@ -562,9 +586,14 @@ export async function activateParseRule(
     where: { id: input.ruleId },
     data: { status: "active", updatedBy: input.userId },
   });
-  await writeAuditBestEffort(prisma, input.tenantId, input.userId, "parse_rule.activated", {
-    ruleId: input.ruleId,
-    fromStatus: current.status,
+  await writeAuditBestEffort(prisma, {
+    tenantId: input.tenantId,
+    actor: input.userId,
+    actionType: "parse_rule.activated",
+    payload: {
+      ruleId: input.ruleId,
+      fromStatus: current.status,
+    },
   });
   return { id: input.ruleId, status: "active" };
 }
@@ -598,9 +627,14 @@ export async function deactivateParseRule(
     where: { id: input.ruleId },
     data: { status: "disabled", updatedBy: input.userId },
   });
-  await writeAuditBestEffort(prisma, input.tenantId, input.userId, "parse_rule.deactivated", {
-    ruleId: input.ruleId,
-    fromStatus: current.status,
+  await writeAuditBestEffort(prisma, {
+    tenantId: input.tenantId,
+    actor: input.userId,
+    actionType: "parse_rule.deactivated",
+    payload: {
+      ruleId: input.ruleId,
+      fromStatus: current.status,
+    },
   });
   return { id: input.ruleId, status: "disabled" };
 }
@@ -773,10 +807,15 @@ export async function testRuleAgainstSample(
     payload: { fromAddress, subject: null, bodyPreview: bodyText, structured },
   });
 
-  await writeAuditBestEffort(prisma, input.tenantId, input.userId, "parse_rule.tested", {
-    sampleSource: input.sampleSource,
-    sampleId: input.sampleId ?? null,
-    metrics: result.metrics,
+  await writeAuditBestEffort(prisma, {
+    tenantId: input.tenantId,
+    actor: input.userId,
+    actionType: "parse_rule.tested",
+    payload: {
+      sampleSource: input.sampleSource,
+      sampleId: input.sampleId ?? null,
+      metrics: result.metrics,
+    },
   });
 
   return {
@@ -785,23 +824,6 @@ export async function testRuleAgainstSample(
   };
 }
 
-// ─────────────────────────────────────────────
-// writeAuditBestEffort (4th inline; KAN-1150 consolidation queued)
-// ─────────────────────────────────────────────
-
-async function writeAuditBestEffort(
-  prisma: PrismaClient,
-  tenantId: string,
-  actor: string,
-  actionType: string,
-  payload: Record<string, unknown>,
-): Promise<void> {
-  try {
-    await (prisma as unknown as PrismaSurface).auditLog.create({
-      data: { tenantId, actor, actionType, payload },
-    });
-  } catch (err) {
-    // Best-effort — never fail the mutation on audit-log write failure.
-    console.error(`[parse-rule-service] auditLog write failed for ${actionType}:`, err);
-  }
-}
+// KAN-1168 — inline writeAuditBestEffort deleted; consolidated into
+// packages/api/src/utils/audit-helpers.ts. All 7 callers above use the
+// shared object-arg helper with per-call `actor: input.userId`.
