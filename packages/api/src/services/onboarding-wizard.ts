@@ -17,6 +17,10 @@ import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { PrismaClient } from '@prisma/client';
 import { loadBlueprintForTenant, getBlueprintForTenant, GENERIC_BLUEPRINT } from './blueprint-loader';
+// KAN-1167 — Always-On Campaign hook lands at go-live (after Objectives created).
+// Senior PO dispatch chose Option (β) — wire here rather than at tenant.create
+// (no Objectives at that point) or via schema-relax (FK posture inversion).
+import { ensureAlwaysOnCampaign } from './always-on-campaign.js';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -925,6 +929,40 @@ router.post('/onboarding/go-live', async (req: Request, res: Response) => {
       where: { id: session.id },
       data: { status: 'completed' },
     });
+
+    // 5.5. KAN-1167 — Ensure Always-On Campaign for this tenant. The first
+    // Objective created above (by createdAt) anchors the Campaign's required
+    // objectiveId FK. Idempotent: safe to re-call on re-go-live.
+    //
+    // Best-effort wrapper: a failure here does NOT block go-live. The
+    // backfill script (packages/db/scripts/backfill-kan-1167-always-on-and-pipelines.ts)
+    // can recover any tenants whose go-live succeeded but Always-On creation
+    // failed transiently.
+    if (createdObjectives.length > 0) {
+      try {
+        const firstObjectiveId = createdObjectives[0]!;
+        const result = await ensureAlwaysOnCampaign(prisma, {
+          tenantId,
+          objectiveId: firstObjectiveId,
+        });
+        console.log(
+          `[onboarding/go-live] Always-On Campaign for tenant ${tenantId}: ` +
+            `id=${result.campaignId} created=${result.created}`,
+        );
+      } catch (err) {
+        console.error(
+          `[onboarding/go-live] Always-On Campaign hook failed for tenant ${tenantId} ` +
+            `— backfill script can recover:`,
+          err,
+        );
+      }
+    } else {
+      console.warn(
+        `[onboarding/go-live] Tenant ${tenantId} went live with zero Objectives — ` +
+          `skipping Always-On hook. Operator must seed at least one Objective + ` +
+          `run backfill script before inbound routing can fire.`,
+      );
+    }
 
     // 6. Audit log
     await prisma.auditLog.create({

@@ -5192,6 +5192,12 @@ const pipelinesRouter = router({
   // MicroObjective associations land via the dedicated routers below — keeps
   // each mutation small + lets the wizard fire them in parallel after the
   // pipeline shell exists.
+  //
+  // KAN-1167 — `campaignId` is now REQUIRED. Every Pipeline must be owned by
+  // a Campaign (use the tenant's Always-On Campaign for non-outcome-bound
+  // Pipelines). Closes Q-ADD-PIPELINE-FK-NULLABLE-WINDOW from Phase 1 trace:
+  // the schema column stays nullable (KAN-1001 legacy), but the application
+  // layer enforces required-ness so no NEW Pipeline can be orphaned.
   create: adminProcedure
     .input(
       z.object({
@@ -5201,6 +5207,13 @@ const pipelinesRouter = router({
         objectiveDescription: z.string().max(2000).optional().nullable(),
         order: z.number().int().min(0).default(0),
         stages: z.array(StageInputSchema).min(1),
+        // KAN-1167 — required FK. tRPC + Zod reject a missing value before the
+        // mutation runs. The backfill script (Step 4) ensured every existing
+        // tenant has an Always-On Campaign id available to callers.
+        campaignId: z.string().uuid({
+          message:
+            'KAN-1167: campaignId is required. Use the tenant\'s Always-On Campaign id if no outcome-Campaign applies.',
+        }),
       }),
     )
     .mutation(async ({ ctx, input }) => {
@@ -5243,6 +5256,20 @@ const pipelinesRouter = router({
         select: { id: true },
       });
 
+      // KAN-1167 — verify the supplied Campaign belongs to this tenant before
+      // attaching the Pipeline. Prevents cross-tenant Pipeline→Campaign FK
+      // attachment via spoofed campaignId in the request.
+      const campaign: { id: string } | null = await (ctx.prisma as any).campaign?.findFirst({
+        where: { id: input.campaignId, tenantId: ctx.tenantId },
+        select: { id: true },
+      });
+      if (!campaign) {
+        throw new TRPCError({
+          code: "NOT_FOUND",
+          message: "KAN-1167: Campaign not found in this tenant for the supplied campaignId.",
+        });
+      }
+
       const created: any = await (ctx.prisma as any).pipeline?.create({
         data: {
           tenantId: ctx.tenantId,
@@ -5252,6 +5279,8 @@ const pipelinesRouter = router({
           objectiveDescription: input.objectiveDescription ?? null,
           // KAN-959 — new column. Null on tenants without the catalog seed.
           objectiveId: matchingObjective?.id ?? null,
+          // KAN-1167 — required FK; verified above to belong to this tenant.
+          campaignId: input.campaignId,
           order: input.order,
           isActive: true,
           stages: {
@@ -5271,6 +5300,13 @@ const pipelinesRouter = router({
       return created;
     }),
 
+  // KAN-1167 — `campaignId` is intentionally NOT in this update schema. Zod's
+  // default behavior strips extra keys, so callers cannot orphan a Pipeline
+  // from its Campaign via update. To REASSIGN a Pipeline to a different
+  // Campaign (when KAN-1166 PR 5 multi-Pipeline orchestration lands), a
+  // dedicated `pipelines.reassignCampaign` procedure will be added — it will
+  // verify the destination Campaign belongs to the same tenant and refuse
+  // null. Closes Q-ADD-PIPELINE-FK-NULLABLE-WINDOW for the update path.
   update: adminProcedure
     .input(
       z.object({
@@ -5302,6 +5338,10 @@ const pipelinesRouter = router({
         }
       }
       const { id, ...data } = input;
+      // KAN-1167 — defensive belt-and-suspenders: if any future maintainer
+      // adds campaignId to the update schema and forgets the guard, the
+      // explicit "delete" here ensures it never reaches Prisma.
+      delete (data as Record<string, unknown>).campaignId;
       return (ctx.prisma as any).pipeline?.update({ where: { id }, data });
     }),
 
@@ -7569,6 +7609,110 @@ const audienceRouter = router({
         },
         hooks,
       );
+    }),
+
+  /**
+   * KAN-1167 — Campaign-as-Conversation v0.1 outcome-goal entry point.
+   *
+   * Operator (or feasibility analyzer in PR 2+) supplies the quantified
+   * business outcome target for an outcome Campaign:
+   *   - goalType: revenue | units | deals | meetings | custom
+   *   - goalTarget: numeric target (positive integer)
+   *   - goalProductId: optional Product FK
+   *   - goalDescription: operator's free-text statement
+   *
+   * Refuses:
+   *   - Always-On Campaigns (intent-less by design — Q1 lock)
+   *   - cross-tenant Campaigns (NOT_FOUND for tenant isolation)
+   *   - invalid Zod inputs (non-positive goalTarget, missing required pair)
+   *
+   * Audit: uses the new shared writeAuditBestEffort helper from
+   * packages/api/src/utils/audit-helpers.ts (KAN-1168 will migrate the 6
+   * existing inline copies to this helper and close KAN-1150).
+   */
+  setGoal: protectedProcedure
+    .input(
+      z.object({
+        campaignId: z.string().uuid(),
+        goalType: z.enum(['revenue', 'units', 'deals', 'meetings', 'custom']),
+        goalTarget: z.number().int().positive(),
+        goalProductId: z.string().optional().nullable(),
+        goalDescription: z.string().min(1).max(2000),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const campaign: { id: string; tenantId: string; isAlwaysOn: boolean } | null =
+        await (ctx.prisma as any).campaign?.findUnique({
+          where: { id: input.campaignId },
+          select: { id: true, tenantId: true, isAlwaysOn: true },
+        });
+      if (!campaign || campaign.tenantId !== ctx.tenantId) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Campaign not found" });
+      }
+      if (campaign.isAlwaysOn) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message:
+            "KAN-1167: Cannot set a goal on the Always-On Campaign. Create a new outcome Campaign for outcome targets.",
+        });
+      }
+
+      const updated = await (ctx.prisma as any).campaign?.update({
+        where: { id: input.campaignId },
+        data: {
+          goalType: input.goalType,
+          goalTarget: input.goalTarget,
+          goalProductId: input.goalProductId ?? null,
+          goalDescription: input.goalDescription,
+        },
+        select: {
+          id: true,
+          goalType: true,
+          goalTarget: true,
+          goalProductId: true,
+          goalDescription: true,
+        },
+      });
+
+      // KAN-1167 / KAN-1168 — audit via the new shared helper (post-commit;
+      // best-effort; never fails the mutation). Sequenced AFTER the update
+      // so a successful update never gets rolled back by a flaky audit
+      // write.
+      //
+      // KAN-689 cohort — variable-specifier dynamic import keeps the helper
+      // out of the apps/api rootDir static graph (TS6059 avoidance per
+      // feedback_cc_prompt_cross_rootdir_imports_must_be_pattern_conformant).
+      const auditHelpersSpec = "../../../packages/api/src/utils/audit-helpers.js";
+      const { writeAuditBestEffort: writeAuditBestEffortShared } =
+        (await import(auditHelpersSpec)) as {
+          writeAuditBestEffort: (
+            prisma: unknown,
+            params: {
+              tenantId: string;
+              actor: string;
+              actionType: string;
+              payload: Record<string, unknown>;
+              reasoning?: string;
+            },
+          ) => Promise<void>;
+        };
+      await writeAuditBestEffortShared(ctx.prisma, {
+        tenantId: ctx.tenantId,
+        actor: ctx.firebaseUser?.uid ?? "unknown",
+        actionType: "campaign.goal_set",
+        payload: {
+          campaignId: input.campaignId,
+          goalType: input.goalType,
+          goalTarget: input.goalTarget,
+          goalProductId: input.goalProductId ?? null,
+          // Description retained in-payload — operator's own statement in
+          // their own tenant scope; not PII per se. If audit-payload PII
+          // posture tightens later, swap to hashed/truncated.
+          goalDescription: input.goalDescription,
+        },
+      });
+
+      return updated;
     }),
 });
 
