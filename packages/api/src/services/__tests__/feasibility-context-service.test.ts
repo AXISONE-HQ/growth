@@ -82,14 +82,24 @@ interface PrismaMockOpts {
 }
 
 function makePrisma(opts: PrismaMockOpts = {}): PrismaClient {
-  const dealCount = vi.fn(async () => {
-    if (opts.throwOnDataReadiness) throw new Error("db transient");
-    return opts.closedDealsCount ?? 50;
-  });
-  // Order/Contact/Engagement first-row queries
-  const orderFirst = vi.fn(async () => opts.earliestOrder ?? null);
-  const contactFirst = vi.fn(async () => opts.earliestContact ?? null);
-  const engagementFirst = vi.fn(async () => opts.earliestEngagement ?? null);
+  // Default earliestX to 200 days ago so dataReadiness.historyDays >= 90 and
+  // closedDealsCount default of 50 lands the orchestrator in "sufficient".
+  // Cold-start tests pass explicit `null` to override.
+  const defaultEarliest = new Date(Date.now() - 200 * 86_400_000);
+  // Order/Contact/Engagement first-row queries — explicit `null` opts honored.
+  const orderFirst = vi.fn(async () =>
+    opts.earliestOrder !== undefined ? opts.earliestOrder : { placedAt: defaultEarliest },
+  );
+  const contactFirst = vi.fn(async () =>
+    opts.earliestContact !== undefined
+      ? opts.earliestContact
+      : { createdAt: defaultEarliest },
+  );
+  const engagementFirst = vi.fn(async () =>
+    opts.earliestEngagement !== undefined
+      ? opts.earliestEngagement
+      : { occurredAt: defaultEarliest },
+  );
 
   // Per-call count tracking: dataReadiness customerCount/leadCount + then conversionRate wonDeals + leadsCreated + customerBase totals + leadPipeline totals
   let contactCountIdx = 0;
@@ -110,7 +120,14 @@ function makePrisma(opts: PrismaMockOpts = {}): PrismaClient {
     opts.closedDealsCount ?? 50, // dataReadiness closed deals
     opts.wonDealsCount ?? 10, // conversionRate won deals
   ];
-  const dealCountAll = vi.fn(async () => dealCounts[dealCountIdx++] ?? 0);
+  const dealCountAll = vi.fn(async () => {
+    // First call is dataReadiness's closed-deals count; throw here when
+    // simulating orchestrator-level DB transient (fail-safe scenario).
+    if (opts.throwOnDataReadiness && dealCountIdx === 0) {
+      throw new Error("db transient");
+    }
+    return dealCounts[dealCountIdx++] ?? 0;
+  });
 
   const orderCount = vi.fn(async () => opts.orderCount ?? 25);
   const orderAggregate = vi.fn(async () => ({

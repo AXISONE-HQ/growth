@@ -212,8 +212,10 @@ describe("KAN-1171-A — multi-tenant isolation (Q5 sentinel)", () => {
         });
         await createOrder(tx, { tenantId: tenantA, contactId: contactA });
       }
-      // Tenant B: 5 won deals + 5 orders (distinct shape)
-      for (let i = 0; i < 5; i++) {
+      // Tenant B: 30 won deals + 30 orders (distinct shape — value 5000 vs 1000;
+      // 30 wins clears the partial threshold so dataReadiness computes signals
+      // instead of returning the insufficient_data skeleton).
+      for (let i = 0; i < 30; i++) {
         await createWonDeal(tx, {
           tenantId: tenantB,
           contactId: contactB,
@@ -233,9 +235,9 @@ describe("KAN-1171-A — multi-tenant isolation (Q5 sentinel)", () => {
         goalShape: { type: "revenue" },
       });
 
-      // Conversion sampleSize: tenant A has 35 wins, B has 5 — zero leak
+      // Conversion sampleSize: tenant A has 35 wins, B has 30 — zero leak
       expect(resultA.conversionRate.sampleSize).toBe(35);
-      expect(resultB.conversionRate.sampleSize).toBe(5);
+      expect(resultB.conversionRate.sampleSize).toBe(30);
       // Customer count: 1 customer per tenant (contacted seeded as customer)
       expect(resultA.customerBase.totalCustomers).toBe(1);
       expect(resultB.customerBase.totalCustomers).toBe(1);
