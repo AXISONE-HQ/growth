@@ -125,6 +125,8 @@ export default function CampaignChatPage() {
           {hasGoalTriplet ? (
             <ChatThread
               goalDescription={campaign.goalDescription as string}
+              goalTarget={campaign.goalTarget as number}
+              campaignId={campaign.id}
               feasibility={feasibility}
               isAnalyzing={isAnalyzing}
               analyzeError={analyzeError}
