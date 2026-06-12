@@ -2504,7 +2504,43 @@ export type CampaignProposeResult =
   | { kind: 'thin'; proposal: CampaignProposalShape; message: string }
   | { kind: 'ambiguous'; clarifyingQuestion: string };
 
+// KAN-1166 PR 3 — Campaign detail shape consumed by /campaigns/[id] chat UI.
+// Mirrors the campaigns.get tRPC select set. feasibilityAnalysis is the
+// FeasibilityCounselResult written by analyzeFeasibility; null until first run.
+export interface CampaignDetail {
+  id: string;
+  tenantId: string;
+  name: string;
+  status: 'draft' | 'committed' | 'active' | 'paused' | 'archived' | 'completed';
+  objectiveId: string;
+  strategy: 'direct' | 're_engage' | 'trust_build' | 'guided' | null;
+  audienceConditions: unknown;
+  audienceMode: 'static' | 'dynamic';
+  audienceSnapshotCount: number | null;
+  windowStart: string | null;
+  windowEnd: string | null;
+  goalType: CampaignGoalType | null;
+  goalTarget: number | null;
+  goalProductId: string | null;
+  goalDescription: string | null;
+  feasibilityAnalysis: FeasibilityCounselResult | null;
+  proposedPlan: unknown | null;
+  committedPlan: unknown | null;
+  conversationThreadId: string | null;
+  activatedAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export const campaignsApi = {
+  /**
+   * KAN-1166 PR 3 — Campaign read for the chat UI. Tenant-scoped on the
+   * server (where: { id, tenantId }); 404 on cross-tenant probe.
+   */
+  get: (campaignId: string) =>
+    trpcQuery<CampaignDetail>('campaigns.get', { campaignId }),
+
   /**
    * NL → audience_conditions + count, single round-trip. LLM is
    * tier='reasoning' (claude-sonnet-4-6) with callerTag
