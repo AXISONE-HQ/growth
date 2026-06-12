@@ -1,24 +1,27 @@
 /**
- * KAN-1166 PR 3-core-shell — Chat thread container.
+ * KAN-1166 PR 3-core-shell → PR 3-variants — Chat thread container.
  *
  * Renders the scrollable conversation panel composed of operator + AI
  * message bubbles. The shell composes:
  *   - the operator's goal-setting statement (from Campaign.goalDescription)
- *   - one AI turn rendering one of: LoadingState | AnalyzerUnavailableCard |
- *     feasibility honestAssessment | cold-start placeholder
+ *   - one AI turn rendering one of: LoadingState | FeasibilityCounselCard
+ *     (which dispatches to ColdStart / Detail / AnalyzerUnavailable)
  *
- * PR 3-variants expands the AI turn to render full cold_start_counsel +
- * feasibility_counsel cards with achievable-path grids. PR 3-tests adds RTL
- * coverage.
+ * PR 3-variants replaced the inline cold-start + honestAssessment paragraph
+ * placeholders with the FeasibilityCounselCard dispatcher (variant cards).
+ * PR 3-tests adds RTL coverage.
  */
 import type { FeasibilityCounselResult } from "@growth/shared";
 import { OperatorMessage } from "./OperatorMessage";
 import { AIMessage } from "./AIMessage";
 import { LoadingState } from "./LoadingState";
 import { AnalyzerUnavailableCard } from "./AnalyzerUnavailableCard";
+import { FeasibilityCounselCard } from "./FeasibilityCounselCard";
 
 export interface ChatThreadProps {
   goalDescription: string;
+  goalTarget: number;
+  campaignId: string;
   feasibility: FeasibilityCounselResult | null;
   isAnalyzing: boolean;
   analyzeError: Error | null;
@@ -27,6 +30,8 @@ export interface ChatThreadProps {
 
 export function ChatThread({
   goalDescription,
+  goalTarget,
+  campaignId,
   feasibility,
   isAnalyzing,
   analyzeError,
@@ -36,7 +41,14 @@ export function ChatThread({
     <div className="flex flex-col gap-6 px-6 py-6">
       <OperatorMessage content={goalDescription} />
       <AIMessage timestamp={feasibility ? formatComputedAt(feasibility) : undefined}>
-        {renderCounselBody({ feasibility, isAnalyzing, analyzeError, onRetry })}
+        {renderCounselBody({
+          feasibility,
+          goalTarget,
+          campaignId,
+          isAnalyzing,
+          analyzeError,
+          onRetry,
+        })}
       </AIMessage>
     </div>
   );
@@ -44,17 +56,21 @@ export function ChatThread({
 
 function renderCounselBody({
   feasibility,
+  goalTarget,
+  campaignId,
   isAnalyzing,
   analyzeError,
   onRetry,
 }: {
   feasibility: FeasibilityCounselResult | null;
+  goalTarget: number;
+  campaignId: string;
   isAnalyzing: boolean;
   analyzeError: Error | null;
   onRetry: () => void;
 }): React.ReactNode {
-  if (isAnalyzing) return <LoadingState />;
-  if (analyzeError) {
+  if (isAnalyzing && !feasibility) return <LoadingState />;
+  if (analyzeError && !feasibility) {
     return (
       <AnalyzerUnavailableCard
         message={`Couldn't reach the analyzer (${analyzeError.message}). Try again in a moment.`}
@@ -65,18 +81,15 @@ function renderCounselBody({
   if (!feasibility) {
     return <p className="text-body text-muted-foreground">Preparing counsel…</p>;
   }
-  if (feasibility.kind === "analyzer_unavailable") {
-    return <AnalyzerUnavailableCard message={feasibility.message} onRetry={onRetry} />;
-  }
-  if (feasibility.kind === "cold_start_counsel") {
-    return (
-      <p className="whitespace-pre-wrap text-body">{feasibility.counsel.message}</p>
-    );
-  }
   return (
-    <p className="whitespace-pre-wrap text-body">
-      {feasibility.counsel.honestAssessment}
-    </p>
+    <FeasibilityCounselCard
+      counsel={feasibility}
+      goalTarget={goalTarget}
+      campaignId={campaignId}
+      onRetry={onRetry}
+      onReAnalyze={onRetry}
+      isReAnalyzing={isAnalyzing}
+    />
   );
 }
 
