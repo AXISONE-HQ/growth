@@ -37,7 +37,10 @@ export function FeasibilityCounselDetailCard({
   className,
 }: FeasibilityCounselDetailCardProps) {
   return (
-    <div className={"flex flex-col gap-4 " + (className ?? "")}>
+    <div
+      data-doctrine-anchor="counsel-detail-fold"
+      className={"flex flex-col gap-4 " + (className ?? "")}
+    >
       <div className="flex flex-wrap items-center gap-2">
         <AchievabilityBadge verdict={counsel.achievability} />
         <ConfidenceBadge confidence={counsel.confidence} />
