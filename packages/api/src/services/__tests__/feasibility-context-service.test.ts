@@ -166,8 +166,6 @@ function makePrisma(opts: PrismaMockOpts = {}): PrismaClient {
     },
     engagement: { findFirst: engagementFirst },
     $queryRaw: queryRaw,
-    // Used by raw test for dealCount alias (unused)
-    _spies: { dealCount, contactCount, queryRaw },
   } as unknown as PrismaClient;
 }
 
