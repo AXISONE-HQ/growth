@@ -92,3 +92,8 @@ export * from "./sampling-markers.js";
 // schema.prisma:576) + TenantHistoricalContext (analyzer + chat UI consume) +
 // RequiredDataType taxonomy. Hoist per Memo 37 — cross-workspace single source.
 export * from "./feasibility-context-types.js";
+// KAN-1166 PR 2b — Feasibility Analyzer output contract. FeasibilityCounselResult
+// discriminated union (cold_start_counsel / feasibility_counsel / analyzer_unavailable)
+// consumed by apps/api tRPC procedure + apps/web PR 3 chat UI. Memo 37 hoist
+// for cross-workspace single source of truth.
+export * from "./feasibility-counsel-types.js";

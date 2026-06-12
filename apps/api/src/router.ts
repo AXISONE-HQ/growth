@@ -7712,6 +7712,168 @@ const campaignsRouter = router({
 
       return updated;
     }),
+
+  /**
+   * KAN-1166 PR 2b — analyzeFeasibility: AI honest counsel on the Campaign's
+   * stated outcome goal.
+   *
+   * Reads Campaign (verifies tenant ownership + goalType/goalTarget set +
+   * audienceConditions present). Calls the Feasibility Analyzer (pure
+   * compute) → persists result to Campaign.feasibilityAnalysis +
+   * .proposedPlan → emits writeAuditBestEffort with prior counsel snapshot
+   * for forensic chain (Q5 override-with-logging substrate; Phase 1
+   * Decision 4 Refinement 1).
+   *
+   * Idempotent re-run: overwrite + audit-prior. Last-write-wins on
+   * concurrent triggers; both audits preserved.
+   *
+   * Cold-start path: analyzer returns `cold_start_counsel` (NO LLM call,
+   * deterministic template). Sufficient/partial paths: LLM 'reasoning' tier.
+   */
+  analyzeFeasibility: protectedProcedure
+    .input(z.object({ campaignId: z.string().uuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const campaign: {
+        id: string;
+        tenantId: string;
+        goalType: string | null;
+        goalTarget: number | null;
+        goalProductId: string | null;
+        goalDescription: string | null;
+        audienceConditions: unknown;
+        segment: string | null;
+        feasibilityAnalysis: unknown;
+      } | null = await (ctx.prisma as any).campaign?.findUnique({
+        where: { id: input.campaignId },
+        select: {
+          id: true,
+          tenantId: true,
+          goalType: true,
+          goalTarget: true,
+          goalProductId: true,
+          goalDescription: true,
+          audienceConditions: true,
+          feasibilityAnalysis: true,
+        },
+      });
+      if (!campaign || campaign.tenantId !== ctx.tenantId) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Campaign not found" });
+      }
+      if (
+        !campaign.goalType ||
+        campaign.goalTarget == null ||
+        !campaign.goalDescription
+      ) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message:
+            "Set the Campaign's outcome goal (goalType + goalTarget + goalDescription) before requesting feasibility counsel. Use campaigns.setGoal first.",
+        });
+      }
+
+      // KAN-689 cohort — variable-specifier dynamic imports for cross-rootDir
+      // (TS6059 avoidance; mirrors kan-1167-foundation.test.ts:34-58 +
+      // KAN-1168 audit-helper migration).
+      const analyzerSpec = "../../../packages/api/src/services/feasibility-analyzer.js";
+      const llmClientSpec = "../../../packages/api/src/services/llm-client.js";
+      const auditHelpersSpec = "../../../packages/api/src/utils/audit-helpers.js";
+
+      type AnalyzerModule = {
+        analyzeFeasibility: (
+          prisma: unknown,
+          redis: unknown | null,
+          llm: (input: unknown) => Promise<unknown>,
+          params: {
+            tenantId: string;
+            goalShape: { type: string; productId?: string; segmentId?: string; description?: string };
+            goalTarget: number;
+            goalDescription: string;
+            goalWindowDays?: number;
+          },
+        ) => Promise<unknown>;
+        persistCampaignFeasibility: (
+          prisma: unknown,
+          campaignId: string,
+          result: unknown,
+        ) => Promise<void>;
+      };
+      type LlmClientModule = {
+        complete: (input: unknown) => Promise<unknown>;
+      };
+      type AuditHelpersModule = {
+        writeAuditBestEffort: (
+          prisma: unknown,
+          params: {
+            tenantId: string;
+            actor: string;
+            actionType: string;
+            payload: Record<string, unknown>;
+            reasoning?: string;
+          },
+        ) => Promise<void>;
+      };
+
+      const [analyzerMod, llmMod, auditMod] = await Promise.all([
+        import(analyzerSpec) as Promise<AnalyzerModule>,
+        import(llmClientSpec) as Promise<LlmClientModule>,
+        import(auditHelpersSpec) as Promise<AuditHelpersModule>,
+      ]);
+
+      // Build GoalShape from Campaign fields. goalType is the discriminator;
+      // other fields slot per-variant per the discriminated union shape in
+      // packages/shared/src/feasibility-context-types.ts.
+      const goalShape =
+        campaign.goalType === "custom"
+          ? { type: "custom" as const, description: campaign.goalDescription }
+          : campaign.goalType === "units"
+            ? {
+                type: "units" as const,
+                productId: campaign.goalProductId ?? "",
+                ...(campaign.segment ? { segmentId: campaign.segment } : {}),
+              }
+            : {
+                type: campaign.goalType as "revenue" | "deals" | "meetings",
+                ...(campaign.goalProductId ? { productId: campaign.goalProductId } : {}),
+                ...(campaign.segment ? { segmentId: campaign.segment } : {}),
+              };
+
+      const result = await analyzerMod.analyzeFeasibility(
+        ctx.prisma,
+        null, // v0.1: no Redis cache on analyzer; FeasibilityContextService
+        //       internal caching covers the heavy historical aggregates
+        llmMod.complete,
+        {
+          tenantId: ctx.tenantId,
+          goalShape,
+          goalTarget: campaign.goalTarget,
+          goalDescription: campaign.goalDescription,
+        },
+      );
+
+      // Persist BEFORE audit so prior counsel is captured pre-overwrite in
+      // the audit payload (Phase 1 Decision 4 Refinement 1 — forensic chain).
+      const priorCounsel = campaign.feasibilityAnalysis;
+      await analyzerMod.persistCampaignFeasibility(ctx.prisma, campaign.id, result);
+
+      await auditMod.writeAuditBestEffort(ctx.prisma, {
+        tenantId: ctx.tenantId,
+        actor: ctx.firebaseUser?.uid ?? "unknown",
+        actionType: "campaign.feasibility_analyzed",
+        payload: {
+          campaignId: campaign.id,
+          newCounsel: result as Record<string, unknown>,
+          priorCounsel: priorCounsel as Record<string, unknown> | null,
+        },
+        reasoning:
+          (result as { kind: string }).kind === "cold_start_counsel"
+            ? "cold-start path — deterministic template; no LLM call"
+            : (result as { kind: string }).kind === "analyzer_unavailable"
+              ? "LLM transient post-retry-exhaustion"
+              : "LLM-synthesized counsel (Sonnet 4.6 reasoning tier)",
+      });
+
+      return result;
+    }),
 });
 
 const usersRouter = router({

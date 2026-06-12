@@ -402,6 +402,9 @@ import type {
   TargetMetric,
   TargetPeriod,
   KnowledgeCategory,
+  // KAN-1166 PR 2b — Feasibility Analyzer return contract. Consumed by
+  // PR 3 chat UI to render counsel + paths after operator goal-setting.
+  FeasibilityCounselResult,
 } from "@growth/shared";
 // KAN-826: IngestRequest + IngestStatus removed — legacy KAN-707 ingestion API
 // (knowledgeIngestApi) deleted along with the dead /settings/knowledge admin
@@ -2588,6 +2591,26 @@ export const campaignsApi = {
    */
   setGoal: (input: CampaignGoalInput) =>
     trpcMutation<CampaignGoalResult>('campaigns.setGoal', input),
+
+  /**
+   * KAN-1166 PR 2b — request AI honest counsel on the Campaign's outcome goal.
+   *
+   * Preconditions: Campaign.goalType + goalTarget + goalDescription set via
+   * campaigns.setGoal first. Audience conditions present (campaigns.commit'd).
+   * Throws BAD_REQUEST when goal isn't set.
+   *
+   * Returns discriminated FeasibilityCounselResult:
+   *   - 'cold_start_counsel'  — dataReadiness=insufficient; deterministic
+   *                              substrate-acquisition counsel (NO LLM call)
+   *   - 'feasibility_counsel' — dataReadiness=partial|sufficient; LLM-synthesized
+   *                              counsel with achievability verdict + 3 paths
+   *   - 'analyzer_unavailable' — LLM transient post-retry; graceful degradation
+   *
+   * Idempotent re-run — overwrites Campaign.feasibilityAnalysis +
+   * Campaign.proposedPlan + emits audit log with prior counsel snapshot.
+   */
+  analyzeFeasibility: (campaignId: string) =>
+    trpcMutation<FeasibilityCounselResult>('campaigns.analyzeFeasibility', { campaignId }),
 };
 
 // KAN-1167 — Campaign-as-Conversation v0.1 outcome-goal types.
