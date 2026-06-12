@@ -198,6 +198,55 @@ export async function createDeal(
 }
 
 /**
+ * KAN-1179 — committed Campaign fixture for Feasibility Analyzer integration
+ * tests. Q-ADD-C extract decision (≥5 scenarios across KAN-1179 + future PR 3
+ * chat-UI tests share this shape).
+ *
+ * Creates an Objective FK + Campaign in status='committed' with goal fields
+ * populated. Optional priorCounsel for the idempotent-re-run scenario seeds
+ * Campaign.feasibilityAnalysis pre-analyzer.
+ */
+export async function createCommittedCampaign(
+  prisma: PrismaClient,
+  args: {
+    tenantId: string;
+    goalType?: 'revenue' | 'units' | 'deals' | 'meetings' | 'custom';
+    goalTarget?: number;
+    goalDescription?: string;
+    /** Pre-seeds Campaign.feasibilityAnalysis for the idempotent-re-run test. */
+    priorCounsel?: unknown;
+  },
+): Promise<{ id: string; objectiveId: string }> {
+  const objective = await prisma.objective.create({
+    data: {
+      tenantId: args.tenantId,
+      name: `Test objective ${uniqueSuffix()}`,
+      type: 'custom',
+      successCondition: {},
+    },
+    select: { id: true },
+  });
+  const campaign = await prisma.campaign.create({
+    data: {
+      tenantId: args.tenantId,
+      name: `Test Campaign ${uniqueSuffix()}`,
+      objectiveId: objective.id,
+      audienceConditions: {},
+      audienceMode: 'static',
+      status: 'committed',
+      goalType: args.goalType ?? 'revenue',
+      goalTarget: args.goalTarget ?? 100000,
+      goalDescription: args.goalDescription ?? 'Test feasibility goal',
+      ...(args.priorCounsel
+        ? { feasibilityAnalysis: args.priorCounsel as object }
+        : {}),
+    },
+    select: { id: true },
+  });
+  return { id: campaign.id, objectiveId: objective.id };
+}
+
+/**
  * KAN-1132 PR 2 — Order fixture builder. Minimal required fields:
  * tenantId + contactId (FK) + orderNumber (no default). Money columns
  * default to 0; tests that need specific Decimal values pass them in
