@@ -7259,6 +7259,47 @@ const campaignsRouter = router({
       return countAudience(ctx.prisma, ctx.tenantId, input);
     }),
 
+  // KAN-1166 PR 3 — Campaign read for chat UI (/campaigns/[id]). Tenant-scoped
+  // via where: { id, tenantId } — never leak cross-tenant Campaign data.
+  // Selects only the fields the chat substrate reads (goal triplet +
+  // feasibilityAnalysis + proposedPlan + audience snapshot + lifecycle).
+  get: protectedProcedure
+    .input(z.object({ campaignId: z.string().uuid() }))
+    .query(async ({ ctx, input }) => {
+      const campaign = await (ctx.prisma as any).campaign?.findFirst({
+        where: { id: input.campaignId, tenantId: ctx.tenantId },
+        select: {
+          id: true,
+          tenantId: true,
+          name: true,
+          status: true,
+          objectiveId: true,
+          strategy: true,
+          audienceConditions: true,
+          audienceMode: true,
+          audienceSnapshotCount: true,
+          windowStart: true,
+          windowEnd: true,
+          goalType: true,
+          goalTarget: true,
+          goalProductId: true,
+          goalDescription: true,
+          feasibilityAnalysis: true,
+          proposedPlan: true,
+          committedPlan: true,
+          conversationThreadId: true,
+          activatedAt: true,
+          completedAt: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+      });
+      if (!campaign) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Campaign not found" });
+      }
+      return campaign;
+    }),
+
   // NL → audience_conditions + count, single round-trip.
   textToSegment: protectedProcedure
     .input(
