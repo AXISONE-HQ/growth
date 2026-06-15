@@ -405,7 +405,11 @@ import type {
   // KAN-1166 PR 2b — Feasibility Analyzer return contract. Consumed by
   // PR 3 chat UI to render counsel + paths after operator goal-setting.
   FeasibilityCounselResult,
+  // KAN-1184 — Conversational orchestrator types.
+  ConversationState,
+  ChatTurnResult,
 } from "@growth/shared";
+export type { ConversationState, ChatTurnResult } from "@growth/shared";
 // KAN-826: IngestRequest + IngestStatus removed — legacy KAN-707 ingestion API
 // (knowledgeIngestApi) deleted along with the dead /settings/knowledge admin
 // route. Sprint 11a KAN-827 will introduce a new ingestion contract; types
@@ -2499,10 +2503,11 @@ export type CampaignProposalShape = {
   firstActions: CampaignFirstAction[];
 };
 
-export type CampaignProposeResult =
-  | { kind: 'proposal'; proposal: CampaignProposalShape; message: string }
-  | { kind: 'thin'; proposal: CampaignProposalShape; message: string }
-  | { kind: 'ambiguous'; clarifyingQuestion: string };
+// KAN-1184 — CampaignProposeResult retired (campaigns.propose tRPC + client
+// wrapper deleted). Substrate types CampaignProposalShape /
+// CampaignFirstAction stay as internal references (referenced by
+// audience-router.ts proposeCampaign function which orchestrator may call
+// per Q-ADD D Finding E internal-helper retention).
 
 // KAN-1166 PR 3 — Campaign detail shape consumed by /campaigns/[id] chat UI.
 // Mirrors the campaigns.get tRPC select set. feasibilityAnalysis is the
@@ -2606,13 +2611,22 @@ export const campaignsApi = {
     ),
 
   /**
-   * KAN-1000 Slice 2 — NL → full campaign proposal. Two LLM calls
-   * server-side (text-to-segment + propose), single round-trip from
-   * the client's view. Read-only — no Campaign entity is persisted.
-   * Cost callerTag = 'campaign:propose' (rolls up on observability).
+   * KAN-1184 — Conversational orchestrator turn. Multi-turn dialogue
+   * extracts the 4 dimensions (Product / Objectives / Timeline / Audience)
+   * in canonical order; orchestrator persists each turn to
+   * CampaignConversationTurn. On first turn `campaignId` is omitted; the
+   * server creates a Draft Campaign + returns its id.
+   *
+   * (Replaces the KAN-1000 Slice 2 `propose` one-shot which retired with
+   * KAN-1184 — operators no longer get a one-shot full proposal; the
+   * orchestrator surfaces dimensions iteratively with concrete-number
+   * counts on the audience step.)
    */
-  propose: (nl: string) =>
-    trpcMutation<CampaignProposeResult>('campaigns.propose', { nl }),
+  chat: (input: {
+    campaignId?: string;
+    message: string;
+    state: ConversationState;
+  }) => trpcMutation<ChatTurnResult>('campaigns.chat', input),
 
   /**
    * KAN-1001 Slice 3a — commit a validated proposal into Campaign +
