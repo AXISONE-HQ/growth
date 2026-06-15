@@ -27,6 +27,7 @@ import { useAuth } from "@/lib/AuthContext";
 import { useCampaignBuilder } from "@/lib/hooks/useCampaignBuilder";
 import { BuilderChatThread } from "./_components/BuilderChatThread";
 import { DimensionSidebar } from "./_components/DimensionSidebar";
+import { ActionPlanCard } from "./_components/ActionPlanCard";
 
 export default function CampaignBuilderPage() {
   const router = useRouter();
@@ -89,22 +90,13 @@ export default function CampaignBuilderPage() {
         />
       </div>
 
-      {/* F8 — minimal placeholder for generate result; ActionPlanCard lands in KAN-1188 */}
+      {/* G10 — ActionPlanCard fills the KAN-1187 F8 placeholder slot once
+       *   generatePlanResult returns an action_plan. Card owns refine + revert. */}
       {generatePlanResult?.kind === "action_plan" && campaignId && (
-        <div className="mt-6 rounded-lg border border-border bg-card p-6">
-          <h2 className="text-h3 font-semibold">Action Plan generated</h2>
-          <p className="mt-2 text-sm text-muted-foreground">
-            We&apos;ve drafted a multi-Pipeline Action Plan. Detailed editing
-            ships in KAN-1188.
-          </p>
-          <button
-            type="button"
-            onClick={() => router.push(`/campaigns/${campaignId}`)}
-            className="mt-3 text-sm font-medium text-primary hover:underline"
-          >
-            Open Campaign →
-          </button>
-        </div>
+        <ActionPlanCard
+          campaignId={campaignId}
+          initialPlan={generatePlanResult.plan}
+        />
       )}
       {generatePlanResult?.kind === "analyzer_unavailable" && (
         <div
