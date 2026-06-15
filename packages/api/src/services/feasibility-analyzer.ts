@@ -37,9 +37,10 @@
  *
  * # Idempotent re-run (Phase 1 Decision 4 Refinement 1)
  *
- * `persistCampaignFeasibility` overwrites Campaign.feasibilityAnalysis +
- * Campaign.proposedPlan with the new computedAt. The tRPC procedure layer
- * emits writeAuditBestEffort with `action: 'campaign.feasibility_analyzed'`
+ * `persistCampaignFeasibility` overwrites Campaign.feasibilityAnalysis with
+ * the new computedAt. (Per KAN-1185 NEW-1 layer separation, .proposedPlan
+ * is owned by action-plan-generator, not this analyzer.) The tRPC procedure
+ * layer emits writeAuditBestEffort with `action: 'campaign.feasibility_analyzed'`
  * + payload includes BOTH the new counsel AND the prior counsel snapshot
  * for forensic-chain preservation (Q5 override-with-logging substrate).
  */
@@ -55,7 +56,6 @@ import type {
   GoalShape,
   TenantHistoricalContext,
   RequiredDataType,
-  FeasibilityConfidence,
 } from "@growth/shared";
 import {
   getTenantHistoricalContext,
@@ -63,6 +63,13 @@ import {
   type FeasibilityRedis,
 } from "./feasibility-context-service.js";
 import type { LLMCompleteInput, LLMCompleteResult } from "./llm-client.js";
+// KAN-1185 NEW-3 — projection math hoisted to single-workspace module;
+// both this analyzer and action-plan-generator import from there to
+// prevent algorithm drift between two services with the same math.
+import {
+  projectOrganicCount,
+  dominantConfidence,
+} from "./projection-math.js";
 
 // ─────────────────────────────────────────────
 // Public params + types
@@ -233,65 +240,14 @@ function unitForGoalShape(goalShape: GoalShape): string {
   }
 }
 
-/** Estimate organic projection over goalWindowDays based on the historical
- *  signal that best matches the GoalShape type. v0.1 simple math; LLM
- *  refinement in honestAssessment narrative. */
-function projectOrganicCount(
-  goalShape: GoalShape,
-  context: TenantHistoricalContext,
-  goalWindowDays: number,
-): number {
-  const months = goalWindowDays / 30;
-
-  switch (goalShape.type) {
-    case "revenue": {
-      const monthly = context.salesVelocity.revenuePerMonth ?? 0;
-      return Math.round(monthly * months);
-    }
-    case "units": {
-      const monthly = context.salesVelocity.unitsPerMonth ?? 0;
-      return Math.round(monthly * months);
-    }
-    case "deals": {
-      // Approximate deals/month from conversionRate * leads/month.
-      const leadsPerMonth =
-        (context.leadPipeline.weeklyAcquisitionRate ?? 0) * (52 / 12);
-      const conv = context.conversionRate.value ?? 0;
-      return Math.round(leadsPerMonth * conv * months);
-    }
-    case "meetings":
-    case "custom": {
-      // v0.1 limitation — no canonical projection. Use leads * 0.1 as rough
-      // proxy for meetings; LLM interprets in honestAssessment for custom.
-      const leadsPerMonth =
-        (context.leadPipeline.weeklyAcquisitionRate ?? 0) * (52 / 12);
-      return Math.round(leadsPerMonth * 0.1 * months);
-    }
-  }
-}
+// KAN-1185 NEW-3 — projectOrganicCount + dominantConfidence extracted to
+// ./projection-math.ts. Imports above. Both helpers preserved verbatim
+// (analyzer's behavior unchanged).
 
 function classifyAchievability(goalGapPercent: number): AchievabilityVerdict {
   if (goalGapPercent <= ACHIEVABILITY_FEASIBLE_MAX_GAP_PCT) return "feasible";
   if (goalGapPercent <= ACHIEVABILITY_STRETCH_MAX_GAP_PCT) return "stretch";
   return "unrealistic";
-}
-
-/** Pick the dominant confidence signal across the relevant compute helpers.
- *  Falls back to conversionRate.confidence as canonical. */
-function dominantConfidence(
-  context: TenantHistoricalContext,
-): FeasibilityConfidence {
-  // Prefer salesVelocity for revenue/units; conversionRate for deals.
-  // v0.1: just take the worse of the two (more honest framing).
-  const order: FeasibilityConfidence[] = [
-    "insufficient_data",
-    "low",
-    "medium",
-    "high",
-  ];
-  const a = context.salesVelocity.confidence;
-  const b = context.conversionRate.confidence;
-  return order.indexOf(a) < order.indexOf(b) ? a : b;
 }
 
 // ─────────────────────────────────────────────
@@ -540,10 +496,21 @@ export async function analyzeFeasibility(
 }
 
 /**
- * Persist the analyzer result to Campaign.feasibilityAnalysis + .proposedPlan.
+ * Persist the analyzer result to Campaign.feasibilityAnalysis ONLY.
  * Called by the tRPC procedure layer after analyzeFeasibility. Idempotent
  * (overwrites prior result). The audit log emission lives in the tRPC layer
  * so prior-counsel snapshot is captured before overwrite.
+ *
+ * KAN-1185 NEW-1 layer separation — analyzer owns Campaign.feasibilityAnalysis;
+ * generator (action-plan-generator.ts) owns Campaign.proposedPlan. Prior to
+ * KAN-1185, this function wrote BOTH (analyzer's achievablePaths slice as a
+ * proto-plan placeholder). The proposedPlan write was removed to establish
+ * clean ownership — two writers on one column = ownership ambiguity.
+ *
+ * Layer responsibilities:
+ *   Campaign.feasibilityAnalysis  ← "is the goal achievable?" (this analyzer)
+ *   Campaign.proposedPlan         ← "how do we execute it?" (action-plan-generator)
+ *   Campaign.committedPlan        ← "the live execution shape" (KAN-1190 commit)
  *
  * Fail-safe: write failures are logged + swallowed. Counsel result still
  * returns to operator; persistence is a side effect.
@@ -558,11 +525,6 @@ export async function persistCampaignFeasibility(
       where: { id: campaignId },
       data: {
         feasibilityAnalysis: result as unknown as Prisma.InputJsonValue,
-        // proposedPlan = the achievable paths slice for surface ergonomics
-        proposedPlan:
-          result.kind === "feasibility_counsel"
-            ? (result.counsel.achievablePaths as unknown as Prisma.InputJsonValue)
-            : Prisma.JsonNull,
       },
     });
   } catch (err) {

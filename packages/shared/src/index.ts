@@ -102,3 +102,9 @@ export * from "./feasibility-counsel-types.js";
 // consumed by orchestrator service (packages/api) + builder UI (apps/web).
 // Memo 37 hoist for cross-workspace type discipline.
 export * from "./conversation-types.js";
+// KAN-1185 — Action Plan generator types (Campaign Module Reset PR 4).
+// ActionPlan + ActionPlanPipeline + ActionPlanResult discriminated union +
+// STRATEGY_STAGE_BOUNDS consumed by generator service (packages/api) + the
+// post-confirmation UI affordance (apps/web). D5 lock: single tenant-level
+// confidence — no per-Pipeline confidence field.
+export * from "./action-plan-types.js";

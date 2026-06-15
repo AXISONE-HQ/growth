@@ -7273,6 +7273,30 @@ async function loadConversationalOrchestrator(): Promise<ConversationalOrchestra
   return _orchestratorModule;
 }
 
+// KAN-1185 — Action Plan generator loader. KAN-689 cohort variable-specifier
+// dynamic import. Operator-initiated dispatch — NOT auto-chained from the
+// orchestrator's `all_dimensions_confirmed` turn (Q-ADD-NEW-2 lock).
+interface ActionPlanGeneratorModule {
+  generateActionPlan: (
+    prisma: unknown,
+    redis: unknown,
+    llm: unknown,
+    countAudience: unknown,
+    params: {
+      campaignId: string;
+      tenantId: string;
+      todayUtc?: Date;
+    },
+  ) => Promise<unknown>;
+}
+let _actionPlanGeneratorModule: ActionPlanGeneratorModule | null = null;
+async function loadActionPlanGenerator(): Promise<ActionPlanGeneratorModule> {
+  if (_actionPlanGeneratorModule) return _actionPlanGeneratorModule;
+  const spec = "../../../packages/api/src/services/action-plan-generator.js";
+  _actionPlanGeneratorModule = (await import(spec)) as ActionPlanGeneratorModule;
+  return _actionPlanGeneratorModule;
+}
+
 // LLM client wrapper — matches the LLMCompleteFn shape the campaigns
 // module expects. Real llm-client imported the same way (variable
 // specifier) so the apps/api tsc rootDir doesn't complain.
@@ -7435,6 +7459,40 @@ const campaignsRouter = router({
           tenantId: ctx.tenantId,
           message: input.message,
           state: input.state,
+        },
+      );
+    }),
+
+  // KAN-1185 — Action Plan generator (Campaign Module Reset PR 4).
+  //
+  // Operator-initiated (Q-ADD-NEW-2 lock — NOT auto-chained from chat
+  // `all_dimensions_confirmed` turn): UI surfaces a "Generate Action Plan"
+  // affordance once the 4 dimensions are Confirmed. Multi-LLM round-trips
+  // (one per Pipeline) can take 5-30s — auto-chain would block chat UX.
+  //
+  // Layer separation (Q-ADD-NEW-1 lock): generator owns Campaign.proposedPlan;
+  // feasibility-analyzer owns Campaign.feasibilityAnalysis. See doctrine
+  // comment on persistCampaignFeasibility for the cleanup rationale.
+  generateActionPlan: protectedProcedure
+    .input(
+      z.object({
+        campaignId: z.string().uuid(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const [generatorMod, llmMod, audienceMod] = await Promise.all([
+        loadActionPlanGenerator(),
+        loadLlmModule(),
+        loadCampaignsModule(),
+      ]);
+      return generatorMod.generateActionPlan(
+        ctx.prisma,
+        null, // Redis is optional — generator's FCS call tolerates null
+        llmMod.complete,
+        audienceMod.countAudience,
+        {
+          campaignId: input.campaignId,
+          tenantId: ctx.tenantId,
         },
       );
     }),
