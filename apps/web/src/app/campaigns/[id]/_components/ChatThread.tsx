@@ -12,10 +12,10 @@
  * PR 3-tests adds RTL coverage.
  */
 import type { FeasibilityCounselResult } from "@growth/shared";
-import { OperatorMessage } from "./OperatorMessage";
-import { AIMessage } from "./AIMessage";
-import { LoadingState } from "./LoadingState";
-import { AnalyzerUnavailableCard } from "./AnalyzerUnavailableCard";
+import { OperatorMessage } from "../../_components/OperatorMessage";
+import { AIMessage } from "../../_components/AIMessage";
+import { LoadingState } from "../../_components/LoadingState";
+import { AnalyzerUnavailableCard } from "../../_components/AnalyzerUnavailableCard";
 import { FeasibilityCounselCard } from "./FeasibilityCounselCard";
 
 export interface ChatThreadProps {
