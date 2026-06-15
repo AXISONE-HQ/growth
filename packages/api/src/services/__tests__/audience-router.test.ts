@@ -341,6 +341,130 @@ describe('KAN-997 — conditionsToWhere (Prisma where-tree builder)', () => {
       ],
     });
   });
+
+  // ─────────────────────────────────────────────
+  // KAN-1182 — 5 new audience leaves
+  // ─────────────────────────────────────────────
+
+  it('leaf region → { region: { in: [...] } }', () => {
+    const where = conditionsToWhere({
+      field: 'region',
+      op: 'in',
+      values: ['CA', 'NY'],
+    });
+    expect(where).toEqual({ region: { in: ['CA', 'NY'] } });
+  });
+
+  it('leaf city → { city: { in: [...] } }', () => {
+    const where = conditionsToWhere({
+      field: 'city',
+      op: 'in',
+      values: ['Toronto', 'Montreal'],
+    });
+    expect(where).toEqual({ city: { in: ['Toronto', 'Montreal'] } });
+  });
+
+  it('leaf deal.value.gte → deals.some relation w/ USD-currency lock + gte filter', () => {
+    const where = conditionsToWhere({
+      field: 'deal.value.gte',
+      op: 'gte',
+      value: 500,
+    });
+    expect(where).toEqual({
+      deals: { some: { currency: 'USD', value: { gte: 500 } } },
+    });
+  });
+
+  it('leaf deal.value.lte → deals.some relation w/ USD-currency lock + lte filter', () => {
+    const where = conditionsToWhere({
+      field: 'deal.value.lte',
+      op: 'lte',
+      value: 2000,
+    });
+    expect(where).toEqual({
+      deals: { some: { currency: 'USD', value: { lte: 2000 } } },
+    });
+  });
+
+  it('leaf deal.value.between → deals.some relation w/ USD-currency lock + range filter', () => {
+    const where = conditionsToWhere({
+      field: 'deal.value.between',
+      op: 'between',
+      minUsd: 500,
+      maxUsdExclusive: 2000,
+    });
+    expect(where).toEqual({
+      deals: { some: { currency: 'USD', value: { gte: 500, lt: 2000 } } },
+    });
+  });
+
+  it('leaf orders.refundedAt → orders.some relation w/ NOT-NULL sparse + date range', () => {
+    const where = conditionsToWhere({
+      field: 'orders.refundedAt',
+      op: 'between',
+      fromUtc: '2026-01-01T00:00:00.000Z',
+      toUtcExclusive: '2026-04-01T00:00:00.000Z',
+    });
+    expect(where).toEqual({
+      orders: {
+        some: {
+          refundedAt: {
+            not: null,
+            gte: new Date('2026-01-01T00:00:00.000Z'),
+            lt: new Date('2026-04-01T00:00:00.000Z'),
+          },
+        },
+      },
+    });
+  });
+
+  it('leaf orders.cancelledAt → orders.some relation w/ NOT-NULL sparse + date range', () => {
+    const where = conditionsToWhere({
+      field: 'orders.cancelledAt',
+      op: 'between',
+      fromUtc: '2026-01-01T00:00:00.000Z',
+      toUtcExclusive: '2026-04-01T00:00:00.000Z',
+    });
+    expect(where).toEqual({
+      orders: {
+        some: {
+          cancelledAt: {
+            not: null,
+            gte: new Date('2026-01-01T00:00:00.000Z'),
+            lt: new Date('2026-04-01T00:00:00.000Z'),
+          },
+        },
+      },
+    });
+  });
+
+  it('composite "Lead created at" derived via allOf of lifecycleStage + createdAt (Q-ADD B lock)', () => {
+    // KAN-1182 / Q-ADD B — Lead-created-at semantics are derived rather than a
+    // separate leaf type. Operator says "leads created in Q1 2026"; orchestrator
+    // composes the existing two leaves into an allOf wrapper.
+    const where = conditionsToWhere({
+      allOf: [
+        { field: 'lifecycleStage', op: 'in', values: ['lead'] },
+        {
+          field: 'createdAt',
+          op: 'between',
+          fromUtc: '2026-01-01T00:00:00.000Z',
+          toUtcExclusive: '2026-04-01T00:00:00.000Z',
+        },
+      ],
+    });
+    expect(where).toEqual({
+      AND: [
+        { lifecycleStage: { in: ['lead'] } },
+        {
+          createdAt: {
+            gte: new Date('2026-01-01T00:00:00.000Z'),
+            lt: new Date('2026-04-01T00:00:00.000Z'),
+          },
+        },
+      ],
+    });
+  });
 });
 
 // ─────────────────────────────────────────────

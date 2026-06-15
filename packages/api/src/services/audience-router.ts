@@ -150,7 +150,84 @@ function leafToWhere(leaf: LeafCondition): Record<string, unknown> {
       return leaf.value
         ? { orders: { some: {} } }
         : { orders: { none: {} } };
+    // ─────────────────────────────────────────────
+    // KAN-1182 — 5 new audience leaves (region / city / deal.value × 3 /
+    // orders.refundedAt / orders.cancelledAt). Lead-created-at is composed
+    // via {allOf: [lifecycleStage='lead', createdAt BETWEEN ...]} per
+    // Q-ADD B; no new case needed for it.
+    // ─────────────────────────────────────────────
+    case 'region':
+      return { region: { in: leaf.values } };
+    case 'city':
+      return { city: { in: leaf.values } };
+    case 'deal.value.gte':
+      return { deals: { some: dealValueWhere('gte', leaf.value) } };
+    case 'deal.value.lte':
+      return { deals: { some: dealValueWhere('lte', leaf.value) } };
+    case 'deal.value.between':
+      return {
+        deals: {
+          some: dealValueBetweenWhere(leaf.minUsd, leaf.maxUsdExclusive),
+        },
+      };
+    case 'orders.refundedAt':
+      return {
+        orders: {
+          some: {
+            refundedAt: {
+              not: null,
+              gte: new Date(leaf.fromUtc),
+              lt: new Date(leaf.toUtcExclusive),
+            },
+          },
+        },
+      };
+    case 'orders.cancelledAt':
+      return {
+        orders: {
+          some: {
+            cancelledAt: {
+              not: null,
+              gte: new Date(leaf.fromUtc),
+              lt: new Date(leaf.toUtcExclusive),
+            },
+          },
+        },
+      };
+    default: {
+      // Exhaustive-typed discriminated union — catches missing leaf cases
+      // at TypeScript compile-time when LeafConditionSchema extends.
+      // Banked from KAN-1182 Finding A.
+      const _exhaustiveCheck: never = leaf;
+      throw new Error(
+        `leafToWhere: unknown leaf field on ${JSON.stringify(_exhaustiveCheck)}`,
+      );
+    }
   }
+}
+
+// KAN-1182 helpers — compose the Deal-side Prisma where for `dealValue`
+// audience-leaves. USD currency lock per Q-ADD B1; see audience-conditions.ts
+// dealValue*Leaf LIMITATION comment for the KAN-1132 multi-currency follow-up.
+
+function dealValueWhere(
+  op: 'gte' | 'lte',
+  value: number,
+): Record<string, unknown> {
+  return {
+    currency: 'USD',
+    value: { [op]: value },
+  };
+}
+
+function dealValueBetweenWhere(
+  minUsd: number,
+  maxUsdExclusive: number,
+): Record<string, unknown> {
+  return {
+    currency: 'USD',
+    value: { gte: minUsd, lt: maxUsdExclusive },
+  };
 }
 
 /**

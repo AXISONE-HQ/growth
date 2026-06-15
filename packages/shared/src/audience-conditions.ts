@@ -92,6 +92,67 @@ const ordersExistsLeaf = z.object({
   value: z.boolean(),
 });
 
+// ─────────────────────────────────────────────
+// KAN-1182 — 5 new leaves completing the 8-dimension AI vocabulary from
+// KAN-1181 brainstorm. Lead-created-at is composed via {allOf: [
+// lifecycleStage='lead', createdAt BETWEEN ...]} — no new leaf needed.
+// ─────────────────────────────────────────────
+
+const regionLeaf = z.object({
+  field: z.literal('region'),
+  op: z.literal('in'),
+  // Free-text state/province; DB column is Contact.region: String?.
+  // No format constraint upstream — operator-correctness is best-effort.
+  values: z.array(z.string().min(1)).min(1),
+});
+
+const cityLeaf = z.object({
+  field: z.literal('city'),
+  op: z.literal('in'),
+  values: z.array(z.string().min(1)).min(1),
+});
+
+// LIMITATION: USD-only filter. Multi-currency support deferred to KAN-1132
+// (multi-currency epic). When KAN-1132 ships, this should become tenant-aware
+// via AccountProfile.defaultCurrency OR per-leaf currency parameter.
+//
+// Three op variants share field='deal.value'. Outer LeafConditionSchema
+// uses `field` as discriminator, so the three ops land as three distinct
+// schemas (Zod's discriminatedUnion requires each variant to be a flat
+// ZodObject with a literal discriminator).
+const dealValueGteLeaf = z.object({
+  field: z.literal('deal.value.gte'),
+  op: z.literal('gte'),
+  value: z.number().nonnegative(),
+});
+
+const dealValueLteLeaf = z.object({
+  field: z.literal('deal.value.lte'),
+  op: z.literal('lte'),
+  value: z.number().nonnegative(),
+});
+
+const dealValueBetweenLeaf = z.object({
+  field: z.literal('deal.value.between'),
+  op: z.literal('between'),
+  minUsd: z.number().nonnegative(),
+  maxUsdExclusive: z.number().nonnegative(),
+});
+
+const ordersRefundedAtLeaf = z.object({
+  field: z.literal('orders.refundedAt'),
+  op: z.literal('between'),
+  fromUtc: z.string().datetime(),
+  toUtcExclusive: z.string().datetime(),
+});
+
+const ordersCancelledAtLeaf = z.object({
+  field: z.literal('orders.cancelledAt'),
+  op: z.literal('between'),
+  fromUtc: z.string().datetime(),
+  toUtcExclusive: z.string().datetime(),
+});
+
 /** Discriminated union of leaf conditions. */
 export const LeafConditionSchema = z.discriminatedUnion('field', [
   lifecycleStageLeaf,
@@ -101,6 +162,17 @@ export const LeafConditionSchema = z.discriminatedUnion('field', [
   createdAtLeaf,
   ordersPlacedAtLeaf,
   ordersExistsLeaf,
+  // KAN-1182 — 5 new audience-filter dimensions (deal.value occupies 3
+  // discriminator slots — gte / lte / between — sharing the deal-value
+  // semantics; treat as a single dimension at the operator-vocabulary
+  // level).
+  regionLeaf,
+  cityLeaf,
+  dealValueGteLeaf,
+  dealValueLteLeaf,
+  dealValueBetweenLeaf,
+  ordersRefundedAtLeaf,
+  ordersCancelledAtLeaf,
 ]);
 
 export type LeafCondition = z.infer<typeof LeafConditionSchema>;
