@@ -265,7 +265,10 @@ describe("KAN-1179 — Scenario 2: Sufficient E2E (with SUFFICIENT_FEASIBLE_FIXT
       await persistCampaignFeasibility(tx as unknown as PrismaClient, campaignId, result);
       const campaign = await tx.campaign.findUnique({ where: { id: campaignId } });
       expect(campaign?.feasibilityAnalysis).toBeTruthy();
-      expect(campaign?.proposedPlan).toBeTruthy();
+      // KAN-1185 NEW-1 layer separation — analyzer no longer writes proposedPlan;
+      // generator (action-plan-generator.ts) is the sole writer. Pre-KAN-1185 this
+      // asserted toBeTruthy() (analyzer wrote achievablePaths as proto-plan).
+      expect(campaign?.proposedPlan).toBeNull();
     });
   });
 });
@@ -345,7 +348,10 @@ describe("KAN-1179 — Scenario 4: analyzer_unavailable graceful", () => {
       await persistCampaignFeasibility(tx as unknown as PrismaClient, campaignId, result);
       const campaign = await tx.campaign.findUnique({ where: { id: campaignId } });
       expect(campaign?.feasibilityAnalysis).toBeTruthy();
-      // proposedPlan should be JsonNull (not feasibility_counsel variant)
+      // KAN-1185 NEW-1 layer separation — analyzer never touches proposedPlan
+      // (generator owns it). Pre-KAN-1185 this column was set to Prisma.JsonNull
+      // on analyzer_unavailable; now it stays at default null from never being
+      // written. Both produce a null read, so assertion is unchanged.
       expect(campaign?.proposedPlan).toBeNull();
     });
   });

@@ -408,8 +408,17 @@ import type {
   // KAN-1184 — Conversational orchestrator types.
   ConversationState,
   ChatTurnResult,
+  // KAN-1185 — Action Plan generator types (per-pipeline strategy/stages/
+  // first-actions output for the post-confirmation UI affordance).
+  ActionPlan,
+  ActionPlanResult,
 } from "@growth/shared";
-export type { ConversationState, ChatTurnResult } from "@growth/shared";
+export type {
+  ConversationState,
+  ChatTurnResult,
+  ActionPlan,
+  ActionPlanResult,
+} from "@growth/shared";
 // KAN-826: IngestRequest + IngestStatus removed — legacy KAN-707 ingestion API
 // (knowledgeIngestApi) deleted along with the dead /settings/knowledge admin
 // route. Sprint 11a KAN-827 will introduce a new ingestion contract; types
@@ -2627,6 +2636,29 @@ export const campaignsApi = {
     message: string;
     state: ConversationState;
   }) => trpcMutation<ChatTurnResult>('campaigns.chat', input),
+
+  /**
+   * KAN-1185 — Action Plan generator.
+   *
+   * Operator-initiated (Q-ADD-NEW-2 lock): UI surfaces this affordance
+   * once chat returns `all_dimensions_confirmed`. NOT auto-chained from the
+   * orchestrator turn — multi-pipeline LLM round-trips can take 5-30s and
+   * blocking chat UX would defeat the edit-after-confirm affordance.
+   *
+   * Layer separation (Q-ADD-NEW-1 lock): generator owns Campaign.proposedPlan;
+   * feasibility-analyzer owns Campaign.feasibilityAnalysis. The shipped
+   * persistCampaignFeasibility was modified in this same PR to stop writing
+   * proposedPlan (clean ownership).
+   *
+   * Returns `ActionPlanResult` discriminated union — fail-safe (never throws):
+   *   - 'action_plan'              — plan generated + persisted
+   *   - 'analyzer_unavailable'     — DB/LLM transient
+   *   - 'insufficient_dimensions'  — chat hasn't filled all 4 dimensions yet
+   */
+  generateActionPlan: (input: {
+    campaignId: string;
+  }) =>
+    trpcMutation<ActionPlanResult>('campaigns.generateActionPlan', input),
 
   /**
    * KAN-1001 Slice 3a — commit a validated proposal into Campaign +
