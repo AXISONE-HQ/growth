@@ -386,6 +386,8 @@ model Contact {
   @@index([tenantId, currentStageId])
   @@index([tenantId, companyId])
   @@index([tenantId, country, region])
+  // KAN-1182 — Audience composition filter on Contact.city.
+  @@index([tenantId, city])
   @@map("contacts")
 }
 
@@ -1132,6 +1134,13 @@ model Pipeline {
   // parent goal. NULL for legacy Pipelines + Always-On-attached Pipelines.
   motion                   String?          @map("motion")
   projectedContribution    Int?             @map("projected_contribution")
+  // KAN-1182 — Per-Pipeline strategy override. NULL = Campaign-level default
+  // (Campaign.strategy) applies. Multi-Pipeline Campaigns from KAN-1188
+  // ActionPlanCard set distinct per-Pipeline strategies (e.g., direct on
+  // Upsell pipeline + trust_build on Winback pipeline). Q-ADD A (KAN-1181)
+  // Option 2 additive lock — backwards-compatible with single-Pipeline
+  // legacy Campaigns; no backfill needed.
+  strategy                 CampaignStrategy? @map("strategy")
   createdAt                DateTime         @default(now()) @map("created_at")
   updatedAt                DateTime         @updatedAt @map("updated_at")
 
@@ -2000,6 +2009,9 @@ model Deal {
   @@index([tenantId, status])
   @@index([tenantId, companyId, status])
   @@index([tenantId, expectedCloseDate])
+  // KAN-1182 — Audience composition filter on Deal.value (USD-locked range
+  // queries; see audience-conditions.ts dealValue*Leaf LIMITATION).
+  @@index([tenantId, value])
   @@map("deals")
 }
 
@@ -2634,6 +2646,13 @@ model Order {
   @@index([tenantId, dealId])
   @@index([tenantId, status])
   @@index([tenantId, placedAt(sort: Desc)])
+  // KAN-1182 — Audience composition filters on refundedAt/cancelledAt.
+  // Migration SQL hand-edited to WHERE column IS NOT NULL for sparse-index
+  // optimization (Prisma schema syntax doesn't support partial indexes;
+  // the @@index declarations here keep the schema source-of-truth in sync
+  // with the post-migration database state per Prisma drift discipline).
+  @@index([tenantId, refundedAt])
+  @@index([tenantId, cancelledAt])
   @@map("orders")
 }
 
