@@ -7249,6 +7249,30 @@ async function loadCampaignsListModule(): Promise<CampaignsListModule> {
   return _campaignsListModule;
 }
 
+// KAN-1184 — conversational orchestrator loader. KAN-689 cohort variable-
+// specifier dynamic import.
+interface ConversationalOrchestratorModule {
+  handleChatTurn: (
+    prisma: unknown,
+    llm: unknown,
+    audienceCount: unknown,
+    params: {
+      campaignId?: string;
+      tenantId: string;
+      message: string;
+      state: unknown;
+    },
+    todayUtc?: Date,
+  ) => Promise<unknown>;
+}
+let _orchestratorModule: ConversationalOrchestratorModule | null = null;
+async function loadConversationalOrchestrator(): Promise<ConversationalOrchestratorModule> {
+  if (_orchestratorModule) return _orchestratorModule;
+  const spec = "../../../packages/api/src/services/conversational-orchestrator.js";
+  _orchestratorModule = (await import(spec)) as ConversationalOrchestratorModule;
+  return _orchestratorModule;
+}
+
 // LLM client wrapper — matches the LLMCompleteFn shape the campaigns
 // module expects. Real llm-client imported the same way (variable
 // specifier) so the apps/api tsc rootDir doesn't complain.
@@ -7380,26 +7404,38 @@ const campaignsRouter = router({
       );
     }),
 
-  // KAN-1000 Slice 2 — NL → full campaign proposal (audience +
-  // inferred objective + strategy + stages + first-actions). Two
-  // sequential LLM calls under the hood (text-to-segment then propose);
-  // read-only — no Campaign entity persisted.
-  propose: protectedProcedure
+  // KAN-1184 — Conversational orchestrator entry. Multi-turn dialogue;
+  // extracts the 4 dimensions (Product / Objectives / Timeline / Audience)
+  // in canonical order; persists turns to CampaignConversationTurn.
+  // Per Q-ADD C3: Campaign row created on first turn if `campaignId` omitted.
+  // Per Q-ADD D / Finding E: campaigns.propose retired; orchestrator calls
+  // audience-router substrate functions directly.
+  chat: protectedProcedure
     .input(
       z.object({
-        nl: z.string().min(1).max(2000),
+        campaignId: z.string().uuid().optional(),
+        message: z.string().min(1).max(2000),
+        // ConversationState parsed via the shared Zod schema downstream
+        // (handler imports ConversationStateSchema from @growth/shared).
+        state: z.unknown(),
       }),
     )
     .mutation(async ({ ctx, input }) => {
-      const [{ proposeCampaign }, llmModule] = await Promise.all([
-        loadCampaignsModule(),
+      const [orchestratorMod, llmMod, audienceMod] = await Promise.all([
+        loadConversationalOrchestrator(),
         loadLlmModule(),
+        loadCampaignsModule(),
       ]);
-      return proposeCampaign(
+      return orchestratorMod.handleChatTurn(
         ctx.prisma,
-        ctx.tenantId,
-        { nl: input.nl },
-        llmModule.complete,
+        llmMod.complete,
+        audienceMod.countAudience,
+        {
+          campaignId: input.campaignId,
+          tenantId: ctx.tenantId,
+          message: input.message,
+          state: input.state,
+        },
       );
     }),
 

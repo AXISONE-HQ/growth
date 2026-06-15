@@ -97,3 +97,8 @@ export * from "./feasibility-context-types.js";
 // consumed by apps/api tRPC procedure + apps/web PR 3 chat UI. Memo 37 hoist
 // for cross-workspace single source of truth.
 export * from "./feasibility-counsel-types.js";
+// KAN-1184 — Conversational orchestrator types (Campaign Module Reset).
+// ConversationState + DimensionState + ChatTurnResult discriminated union
+// consumed by orchestrator service (packages/api) + builder UI (apps/web).
+// Memo 37 hoist for cross-workspace type discipline.
+export * from "./conversation-types.js";
