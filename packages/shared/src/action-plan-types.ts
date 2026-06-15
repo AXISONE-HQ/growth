@@ -168,3 +168,134 @@ export const STRATEGY_STAGE_BOUNDS: Record<
     roleHints: ['educate', 'compare', 'recommend', 'close'],
   },
 };
+
+// ─────────────────────────────────────────────
+// KAN-1186 — Action Plan Edit (4-family discriminated union)
+//
+// LLM classifies operator NL refinement into ONE family; refiner dispatches
+// to the family-specific handler. E2 lock: NO generic "structural edit"
+// path. Families have disjoint semantics + disjoint side effects.
+//
+//   stage          — rename / reorder / add / remove stages within a Pipeline
+//                    (validated against STRATEGY_STAGE_BOUNDS)
+//   first_actions  — modify per-Pipeline first-actions (channel / day / intent)
+//   audience       — modify Campaign.audienceConditions; re-runs split heuristic
+//                    + per-pipeline countAudience
+//   dimension      — edit goal/timeline columns ON the Campaign row + emit
+//                    separate audit type campaign.dimension_post_confirm_edit;
+//                    triggers feasibility re-eval (NOT Action Plan regen)
+// ─────────────────────────────────────────────
+
+const StageEditOpEnum = z.enum(['rename', 'reorder', 'add', 'remove']);
+const StageEditSchema = z.object({
+  axis: z.literal('stage'),
+  pipelineIndex: z.number().int().min(0).max(5),
+  op: StageEditOpEnum,
+  /** Target stage index for rename/remove/reorder. */
+  stageIndex: z.number().int().min(0).max(4).optional(),
+  /** New name on rename/add; new order index on reorder. */
+  newName: z.string().min(1).max(60).optional(),
+  newOrder: z.number().int().min(0).max(4).optional(),
+  /** One-sentence stage description for add/rename. */
+  newDescription: z.string().min(1).max(300).optional(),
+});
+
+const FirstActionEditOpEnum = z.enum(['edit', 'add', 'remove']);
+const FirstActionEditSchema = z.object({
+  axis: z.literal('first_actions'),
+  pipelineIndex: z.number().int().min(0).max(5),
+  op: FirstActionEditOpEnum,
+  actionIndex: z.number().int().min(0).max(4).optional(),
+  newDay: z.number().int().min(0).max(90).optional(),
+  newChannel: z.enum(['email', 'sms', 'whatsapp']).optional(),
+  newIntent: z.string().min(1).max(80).optional(),
+  newDescription: z.string().min(1).max(300).optional(),
+});
+
+const AudienceEditSchema = z.object({
+  axis: z.literal('audience'),
+  /** Replacement audience conditions (LLM emits full new tree). */
+  newAudienceConditions: AudienceConditionsSchema,
+});
+
+const DimensionEditFieldEnum = z.enum([
+  'goalType',
+  'goalTarget',
+  'goalDescription',
+  'goalProductId',
+  'windowStart',
+  'windowEnd',
+]);
+const DimensionEditSchema = z.object({
+  axis: z.literal('dimension'),
+  field: DimensionEditFieldEnum,
+  newValue: z.union([z.string(), z.number(), z.null()]),
+});
+
+export const ActionPlanEditSchema = z.discriminatedUnion('axis', [
+  StageEditSchema,
+  FirstActionEditSchema,
+  AudienceEditSchema,
+  DimensionEditSchema,
+]);
+export type ActionPlanEdit = z.infer<typeof ActionPlanEditSchema>;
+export type ActionPlanEditAxis = ActionPlanEdit['axis'];
+
+// ─────────────────────────────────────────────
+// RefineActionPlanResult — discriminated union from refineActionPlan()
+//
+// Mirrors generator's ActionPlanResult shape + refiner-specific variants:
+//   - bounds_violation         — stage edit would violate STRATEGY_STAGE_BOUNDS
+//   - no_plan_to_refine        — Campaign.proposedPlan is NULL (Q-ADD-NEW-C)
+//   - concurrent_edit_conflict — Campaign.updatedAt drifted (Q-ADD-NEW-B)
+// ─────────────────────────────────────────────
+
+export type RefineActionPlanResult =
+  | {
+      kind: 'action_plan_refined';
+      plan: ActionPlan;
+      campaignId: string;
+      editAxis: ActionPlanEditAxis;
+    }
+  | {
+      kind: 'analyzer_unavailable';
+      message: string;
+      campaignId: string;
+    }
+  | {
+      kind: 'no_plan_to_refine';
+      message: string;
+      campaignId: string;
+    }
+  | {
+      kind: 'bounds_violation';
+      message: string;
+      campaignId: string;
+      /** Which strategy bound was violated. */
+      strategy: z.infer<typeof CampaignStrategyEnum>;
+      attemptedStageCount: number;
+    }
+  | {
+      kind: 'concurrent_edit_conflict';
+      message: string;
+      campaignId: string;
+      /** Current persisted plan operator should re-apply on top of. */
+      currentPlan: ActionPlan;
+    };
+
+export type RevertActionPlanRefinementResult =
+  | {
+      kind: 'action_plan_reverted';
+      plan: ActionPlan;
+      campaignId: string;
+    }
+  | {
+      kind: 'no_refinement_to_revert';
+      message: string;
+      campaignId: string;
+    }
+  | {
+      kind: 'analyzer_unavailable';
+      message: string;
+      campaignId: string;
+    };

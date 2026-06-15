@@ -412,12 +412,22 @@ import type {
   // first-actions output for the post-confirmation UI affordance).
   ActionPlan,
   ActionPlanResult,
+  // KAN-1186 — Action Plan refiner types (4-family discriminated edit union +
+  // refine/revert discriminated results for the post-generation affordance).
+  ActionPlanEdit,
+  ActionPlanEditAxis,
+  RefineActionPlanResult,
+  RevertActionPlanRefinementResult,
 } from "@growth/shared";
 export type {
   ConversationState,
   ChatTurnResult,
   ActionPlan,
   ActionPlanResult,
+  ActionPlanEdit,
+  ActionPlanEditAxis,
+  RefineActionPlanResult,
+  RevertActionPlanRefinementResult,
 } from "@growth/shared";
 // KAN-826: IngestRequest + IngestStatus removed — legacy KAN-707 ingestion API
 // (knowledgeIngestApi) deleted along with the dead /settings/knowledge admin
@@ -2659,6 +2669,43 @@ export const campaignsApi = {
     campaignId: string;
   }) =>
     trpcMutation<ActionPlanResult>('campaigns.generateActionPlan', input),
+
+  /**
+   * KAN-1186 — Action Plan refiner.
+   *
+   * Operator-initiated NL refinement. LLM classifies into ONE of 4 edit-axis
+   * families (stage / first_actions / audience / dimension) and dispatches.
+   * Reasoning-tier ONLY (NEW-A — no cheap-tier fast-path).
+   *
+   * Pass `expectedUpdatedAt` (ISO string of Campaign.updatedAt at request time)
+   * for optimistic concurrency (NEW-B); mismatched token returns
+   * `concurrent_edit_conflict` with the current plan to re-apply on top of.
+   *
+   * Returns `RefineActionPlanResult` discriminated union — fail-safe (never throws):
+   *   - 'action_plan_refined'        — refinement applied + persisted
+   *   - 'bounds_violation'           — stage edit violates STRATEGY_STAGE_BOUNDS
+   *   - 'no_plan_to_refine'          — Campaign.proposedPlan IS NULL
+   *   - 'concurrent_edit_conflict'   — Campaign.updatedAt drifted
+   *   - 'analyzer_unavailable'       — DB/LLM transient
+   */
+  refineActionPlan: (input: {
+    campaignId: string;
+    refinementMessage: string;
+    expectedUpdatedAt?: string;
+  }) =>
+    trpcMutation<RefineActionPlanResult>('campaigns.refineActionPlan', input),
+
+  /**
+   * KAN-1186 — Revert last Action Plan refinement (E8 lock).
+   *
+   * Materializes the most recent refinement's `before` snapshot from audit_log
+   * back into Campaign.proposedPlan. Emits a separate audit row
+   * (campaign.action_plan_refinement_reverted) — never destroys forensic history.
+   */
+  revertLastActionPlanRefinement: (input: {
+    campaignId: string;
+  }) =>
+    trpcMutation<RevertActionPlanRefinementResult>('campaigns.revertLastActionPlanRefinement', input),
 
   /**
    * KAN-1001 Slice 3a — commit a validated proposal into Campaign +

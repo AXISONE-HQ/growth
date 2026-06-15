@@ -7297,6 +7297,40 @@ async function loadActionPlanGenerator(): Promise<ActionPlanGeneratorModule> {
   return _actionPlanGeneratorModule;
 }
 
+// KAN-1186 — Action Plan refiner loader. KAN-689 cohort variable-specifier
+// dynamic import. Operator-initiated dispatch — NOT auto-chained from chat
+// or from generator (E1 + E6 locks).
+interface ActionPlanRefinerModule {
+  refineActionPlan: (
+    prisma: unknown,
+    redis: unknown,
+    llm: unknown,
+    countAudience: unknown,
+    params: {
+      campaignId: string;
+      tenantId: string;
+      refinementMessage: string;
+      expectedUpdatedAt?: string;
+      todayUtc?: Date;
+    },
+  ) => Promise<unknown>;
+  revertLastRefinement: (
+    prisma: unknown,
+    params: {
+      campaignId: string;
+      tenantId: string;
+      todayUtc?: Date;
+    },
+  ) => Promise<unknown>;
+}
+let _actionPlanRefinerModule: ActionPlanRefinerModule | null = null;
+async function loadActionPlanRefiner(): Promise<ActionPlanRefinerModule> {
+  if (_actionPlanRefinerModule) return _actionPlanRefinerModule;
+  const spec = "../../../packages/api/src/services/action-plan-refiner.js";
+  _actionPlanRefinerModule = (await import(spec)) as ActionPlanRefinerModule;
+  return _actionPlanRefinerModule;
+}
+
 // LLM client wrapper — matches the LLMCompleteFn shape the campaigns
 // module expects. Real llm-client imported the same way (variable
 // specifier) so the apps/api tsc rootDir doesn't complain.
@@ -7495,6 +7529,73 @@ const campaignsRouter = router({
           tenantId: ctx.tenantId,
         },
       );
+    }),
+
+  // KAN-1186 — Action Plan refiner (Campaign Module Reset PR 5).
+  //
+  // Operator-initiated NL refinement of an existing Campaign.proposedPlan.
+  // LLM classifies into ONE of 4 edit-axis families (stage / first_actions /
+  // audience / dimension) and dispatches to family-specific handler. E2 lock.
+  //
+  // Locks honored:
+  //   E1   — refiner does NOT regenerate; returns no_plan_to_refine if plan missing
+  //   E3   — stage edits validated against STRATEGY_STAGE_BOUNDS
+  //   E4   — unconditional gap recompute on every successful refinement
+  //   E5   — campaign.action_plan_refined audit row with before/after delta
+  //   E6   — ZERO callsites in conversational-orchestrator.ts (separate surface)
+  //   E7   — confidence preserved on stage/first-actions/audience edits
+  //   NEW-A — reasoning tier ONLY (no cheap-tier fast-path)
+  //   NEW-B — optimistic concurrency via Campaign.updatedAt token
+  //   NEW-C — no_plan_to_refine variant when proposedPlan IS NULL
+  //   NEW-D — dimension-axis edits write Campaign columns + emit separate
+  //           audit type campaign.dimension_post_confirm_edit
+  refineActionPlan: protectedProcedure
+    .input(
+      z.object({
+        campaignId: z.string().uuid(),
+        refinementMessage: z.string().min(1).max(2000),
+        /** Optional optimistic concurrency token (NEW-B). */
+        expectedUpdatedAt: z.string().datetime().optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const [refinerMod, llmMod, audienceMod] = await Promise.all([
+        loadActionPlanRefiner(),
+        loadLlmModule(),
+        loadCampaignsModule(),
+      ]);
+      return refinerMod.refineActionPlan(
+        ctx.prisma,
+        null,
+        llmMod.complete,
+        audienceMod.countAudience,
+        {
+          campaignId: input.campaignId,
+          tenantId: ctx.tenantId,
+          refinementMessage: input.refinementMessage,
+          expectedUpdatedAt: input.expectedUpdatedAt,
+        },
+      );
+    }),
+
+  // KAN-1186 — Revert last Action Plan refinement (E8 lock).
+  //
+  // Walks audit_log for the most recent campaign.action_plan_refined row;
+  // materializes the `before` snapshot to Campaign.proposedPlan; emits
+  // campaign.action_plan_refinement_reverted audit row. NEVER destroys
+  // forensic history.
+  revertLastActionPlanRefinement: protectedProcedure
+    .input(
+      z.object({
+        campaignId: z.string().uuid(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const refinerMod = await loadActionPlanRefiner();
+      return refinerMod.revertLastRefinement(ctx.prisma, {
+        campaignId: input.campaignId,
+        tenantId: ctx.tenantId,
+      });
     }),
 
   // KAN-1001 Campaign Layer Slice 3a — commit & materialize (INERT).
