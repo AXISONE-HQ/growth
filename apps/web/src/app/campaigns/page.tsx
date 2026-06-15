@@ -249,15 +249,14 @@ export default function CampaignsPage() {
     },
   ];
 
-  // [+ New Campaign] CTA is intentionally disabled until the conversational
-  // builder ships (KAN-1188). title-attribute hover hint is the doctrine-
-  // honored affordance — no new Tooltip primitive dep needed for one-off use.
+  // [+ New Campaign] CTA — KAN-1187 enables; navigates to the conversational
+  // builder at /campaigns/new (chat substrate that talks operators through the
+  // 4 dimensions Product → Objectives → Timeline → Audience).
   const newCampaignCta = (
     <Button
       variant="gradient"
       size="sm"
-      disabled
-      title="Coming soon — conversational builder lands in KAN-1188"
+      onClick={() => router.push('/campaigns/new')}
     >
       <Plus className="h-4 w-4" />
       New Campaign

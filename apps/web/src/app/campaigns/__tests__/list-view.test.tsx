@@ -110,15 +110,13 @@ describe("KAN-1183 — /campaigns list view", () => {
     });
   });
 
-  it("[+ New Campaign] CTA is disabled with the KAN-1188 tooltip", async () => {
+  it("[+ New Campaign] CTA is enabled and navigates to /campaigns/new (KAN-1187)", async () => {
     listMock.mockResolvedValueOnce(fixturePage([]));
     renderPage();
     const cta = await screen.findByRole("button", { name: /New Campaign/i });
-    expect(cta).toBeDisabled();
-    expect(cta).toHaveAttribute(
-      "title",
-      "Coming soon — conversational builder lands in KAN-1188",
-    );
+    expect(cta).toBeEnabled();
+    await userEvent.click(cta);
+    expect(pushMock).toHaveBeenCalledWith("/campaigns/new");
   });
 
   it("empty state renders the locked verbatim copy", async () => {

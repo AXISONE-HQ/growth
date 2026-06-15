@@ -11,7 +11,7 @@
  * leaf components. This file's job is purely the kind-switch.
  */
 import type { FeasibilityCounselResult } from "@growth/shared";
-import { AnalyzerUnavailableCard } from "./AnalyzerUnavailableCard";
+import { AnalyzerUnavailableCard } from "../../_components/AnalyzerUnavailableCard";
 import { ColdStartCounselCard } from "./ColdStartCounselCard";
 import { FeasibilityCounselDetailCard } from "./FeasibilityCounselDetailCard";
 

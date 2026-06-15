@@ -15,7 +15,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ChatThread } from "../ChatThread";
 import { EmptyState } from "../EmptyState";
-import { AnalyzerUnavailableCard } from "../AnalyzerUnavailableCard";
+import { AnalyzerUnavailableCard } from "../../../_components/AnalyzerUnavailableCard";
 import { counselResultFeasibility } from "./fixtures";
 
 describe("KAN-1166 PR 3-tests — shell components", () => {
