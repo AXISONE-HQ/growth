@@ -283,7 +283,15 @@ export default function CampaignsPage() {
         hasMore={hasMore}
         onLoadMore={() => void refetch()}
         isFetchingMore={isFetching && pages.length > 0}
-        onRowClick={(c) => router.push(`/campaigns/${c.id}`)}
+        onRowClick={(c) =>
+          // KAN-1189 H4 — draft Campaigns resume the conversational builder;
+          // non-drafts open the existing /campaigns/[id] chat surface.
+          router.push(
+            c.status === 'draft'
+              ? `/campaigns/new?campaignId=${c.id}`
+              : `/campaigns/${c.id}`,
+          )
+        }
         loading={isLoading}
         error={isError ? (error as Error) : null}
         onRetry={() => void refetch()}
