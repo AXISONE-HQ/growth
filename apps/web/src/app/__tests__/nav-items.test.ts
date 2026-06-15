@@ -23,15 +23,12 @@ import { navItems } from "../layout";
 // Reproduce the AppShell filter (skipping demoMode + adminOnly gating —
 // the test assumes prod-default = no demo, non-admin user, which is the
 // founder-locked baseline).
-// KAN-1000 — Campaigns rail entry is gated by NEXT_PUBLIC_CAMPAIGN_LAYER_DEMO
-// at module-load time. To keep this test deterministic regardless of the
-// runtime env, we filter the Campaigns entry out of the "target-8 baseline"
-// view + assert its config separately below. With the flag OFF (prod
-// default), Campaigns is hideFromRail anyway, so this filter is a no-op
-// in CI; with the flag ON (Slice 1+2 internal preview), the filter
-// preserves the founder-locked target-8 assertion.
+// KAN-1183 — Campaigns rail entry is now always visible (the
+// NEXT_PUBLIC_CAMPAIGN_LAYER_DEMO Slice 2 internal-preview gate retired
+// with the KAN-1181 Doctrine Lock #7 "PROD is the product"). Target-9
+// baseline now includes Campaigns slotted between Dashboard and Pipelines
+// per the founder lock.
 const visibleProdRail = navItems
-  .filter((item) => item.href !== "/campaigns")
   .filter((item) => !item.hideFromRail)
   .filter((item) => !item.demoOnly)
   .filter(
@@ -41,10 +38,11 @@ const visibleProdRail = navItems
 const topSection = visibleProdRail.filter((i) => !i.pinBottom);
 const bottomSection = visibleProdRail.filter((i) => i.pinBottom);
 
-describe("KAN-992 Phase D.2 — rail composition", () => {
-  it("Top section is exactly the founder-locked target-8 in order", () => {
+describe("KAN-992 Phase D.2 + KAN-1183 — rail composition", () => {
+  it("Top section is exactly the founder-locked target-9 in order (Campaigns post-KAN-1183)", () => {
     expect(topSection.map((i) => i.label)).toEqual([
       "Dashboard",
+      "Campaigns",
       "Pipelines",
       "Leads",
       "Contacts",
@@ -58,6 +56,7 @@ describe("KAN-992 Phase D.2 — rail composition", () => {
   it("Top section hrefs match the founder-locked routes (entity routes unchanged from D.1)", () => {
     expect(topSection.map((i) => i.href)).toEqual([
       "/dashboard",
+      "/campaigns", // KAN-1183 — Campaigns slotted post-Dashboard, pre-Pipelines
       "/pipelines",
       "/opportunities", // Leads (entity Deal preserved)
       "/customers", //     Contacts (entity Contact preserved)
@@ -73,8 +72,8 @@ describe("KAN-992 Phase D.2 — rail composition", () => {
     expect(bottomSection[0]!.href).toBe("/settings");
   });
 
-  it("Total visible rail = top-8 + Settings bottom = 9 (no Notifications, no Recommendations)", () => {
-    expect(visibleProdRail.length).toBe(9);
+  it("Total visible rail = top-9 + Settings bottom = 10 (no Notifications, no Recommendations)", () => {
+    expect(visibleProdRail.length).toBe(10);
     expect(visibleProdRail.find((i) => i.label === "Notifications")).toBeUndefined();
     expect(visibleProdRail.find((i) => i.label === "Recommendations")).toBeUndefined();
   });
@@ -88,13 +87,8 @@ describe("KAN-992 Phase D.2 — rail composition", () => {
 });
 
 describe("KAN-992 Phase D.2 — hideFromRail movers (preserved for direct nav + D.3 Settings sub-tabs)", () => {
-  it("Exactly 5 D.2 movers carry hideFromRail:true (KAN-1000 — Campaigns excluded; conditional)", () => {
-    // KAN-1000 adjustment — Campaigns also has hideFromRail (env-gated)
-    // but it's a Slice 2 conditional, not a D.2 mover. Filter by href to
-    // pin only the D.2 mover set.
-    const hidden = navItems
-      .filter((i) => i.hideFromRail)
-      .filter((i) => i.href !== "/campaigns");
+  it("Exactly 5 D.2 movers carry hideFromRail:true (Campaigns no longer hidden post-KAN-1183)", () => {
+    const hidden = navItems.filter((i) => i.hideFromRail);
     expect(hidden.map((i) => i.label).sort()).toEqual(
       ["Account", "Audit Log", "Imports", "Knowledge Center", "Objectives"].sort(),
     );
@@ -102,10 +96,7 @@ describe("KAN-992 Phase D.2 — hideFromRail movers (preserved for direct nav + 
 
   it("Hidden movers retain their original hrefs (no route churn — D.3 wires via router-push)", () => {
     const hiddenByLabel = Object.fromEntries(
-      navItems
-        .filter((i) => i.hideFromRail)
-        .filter((i) => i.href !== "/campaigns")
-        .map((i) => [i.label, i.href]),
+      navItems.filter((i) => i.hideFromRail).map((i) => [i.label, i.href]),
     );
     expect(hiddenByLabel["Objectives"]).toBe("/settings/objectives");
     expect(hiddenByLabel["Imports"]).toBe("/imports");
@@ -115,16 +106,18 @@ describe("KAN-992 Phase D.2 — hideFromRail movers (preserved for direct nav + 
   });
 });
 
-describe("KAN-1000 Slice 2 — Campaigns rail entry (env-gated)", () => {
-  it("Campaigns entry exists in navItems with the founder-locked href + label + icon slot", () => {
+describe("KAN-1183 — Campaigns rail entry (always visible)", () => {
+  it("Campaigns entry exists in navItems with the founder-locked href + label", () => {
     const campaigns = navItems.find((i) => i.href === "/campaigns");
     expect(campaigns).toBeDefined();
     expect(campaigns?.label).toBe("Campaigns");
-    // hideFromRail is computed from NEXT_PUBLIC_CAMPAIGN_LAYER_DEMO at
-    // module-load. Either boolean is acceptable; what matters is the
-    // entry is present so direct nav + pageTitle resolution work
-    // regardless of flag state.
-    expect(typeof campaigns?.hideFromRail).toBe("boolean");
+  });
+
+  it("Campaigns entry is NOT hideFromRail (KAN-1181 Doctrine Lock #7 — PROD is the product)", () => {
+    const campaigns = navItems.find((i) => i.href === "/campaigns");
+    // Either undefined or false — both encode "always visible." Post-KAN-1183
+    // the property is omitted entirely; defensive assertion accepts either.
+    expect(campaigns?.hideFromRail).toBeFalsy();
   });
 
   it("Campaigns slotted after Dashboard, before Pipelines (per founder lock)", () => {

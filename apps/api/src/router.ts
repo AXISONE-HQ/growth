@@ -7211,6 +7211,44 @@ async function loadCampaignsModule(): Promise<CampaignsRouterModule> {
   return _campaignsModule;
 }
 
+// KAN-1183 — campaigns-list loader. Same KAN-689 cohort variable-specifier
+// dynamic-import discipline as the audience-router loader above.
+interface CampaignsListModule {
+  listCampaigns: (
+    prisma: unknown,
+    tenantId: string,
+    input: {
+      search?: string;
+      status?: string;
+      limit: number;
+      cursor?: string;
+      includeAlwaysOn?: boolean;
+    },
+  ) => Promise<{
+    items: Array<{
+      id: string;
+      name: string;
+      status: string;
+      goalType: string | null;
+      goalTarget: number | null;
+      goalDescription: string | null;
+      feasibilityAnalysisKind: string | null;
+      achievability: string | null;
+      activatedAt: string | null;
+      updatedAt: string;
+    }>;
+    nextCursor: string | null;
+    totalCount: number;
+  }>;
+}
+let _campaignsListModule: CampaignsListModule | null = null;
+async function loadCampaignsListModule(): Promise<CampaignsListModule> {
+  if (_campaignsListModule) return _campaignsListModule;
+  const spec = "../../../packages/api/src/services/campaigns-list.js";
+  _campaignsListModule = (await import(spec)) as CampaignsListModule;
+  return _campaignsListModule;
+}
+
 // LLM client wrapper — matches the LLMCompleteFn shape the campaigns
 // module expects. Real llm-client imported the same way (variable
 // specifier) so the apps/api tsc rootDir doesn't complain.
@@ -7257,6 +7295,28 @@ const campaignsRouter = router({
     .query(async ({ ctx, input }) => {
       const { countAudience } = await loadCampaignsModule();
       return countAudience(ctx.prisma, ctx.tenantId, input);
+    }),
+
+  // KAN-1183 — Filterable Campaign list for the operator-facing /campaigns
+  // page. Mirrors the canonical list shape (companies.list / contacts.list):
+  // search + status + cursor + limit, returns CursorPage<CampaignListItem>.
+  // Always-On Campaigns are hidden by default (Q-ADD F lock); pass
+  // includeAlwaysOn: true to surface them for debugging.
+  list: protectedProcedure
+    .input(
+      z.object({
+        search: z.string().optional(),
+        // Loose string so the API tolerates legacy values; service-level
+        // Prisma rejects anything truly invalid.
+        status: z.string().optional(),
+        limit: z.number().int().min(1).max(200).default(50),
+        cursor: z.string().optional(),
+        includeAlwaysOn: z.boolean().optional(),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      const { listCampaigns } = await loadCampaignsListModule();
+      return listCampaigns(ctx.prisma, ctx.tenantId, input);
     }),
 
   // KAN-1166 PR 3 — Campaign read for chat UI (/campaigns/[id]). Tenant-scoped
