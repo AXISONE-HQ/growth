@@ -299,3 +299,76 @@ export type RevertActionPlanRefinementResult =
       message: string;
       campaignId: string;
     };
+
+// ─────────────────────────────────────────────
+// KAN-1190 — Commit multi-Pipeline result (J8 lock — discriminated)
+//
+// Commit flips Campaign.status draft → committed (J4 lock — NOT → active;
+// preserves KAN-1001 INERT-post-commit doctrine) + materializes N Pipelines
+// + N×M Stages in a single prisma.$transaction (J2 lock). First-actions
+// are persisted ONLY as ActionPlanPipeline.firstActions on
+// Campaign.committedPlan — no Action row writes this PR (J6 INERT lock;
+// enqueue execution substrate tracked in KAN-1199 V1 follow-up).
+//
+// Discriminated variants:
+//   committed                 — happy path; N pipelines + status flipped
+//   already_committed         — idempotent re-commit (J8); same IDs
+//   bounds_violation          — STRATEGY_STAGE_BOUNDS re-check failed
+//                               at commit time (J3 defense-in-depth — plan
+//                               was valid at refine time but drifted)
+//   concurrent_edit_conflict  — Campaign.updatedAt drifted (J11 lock —
+//                               matches refiner NEW-B variant shape)
+//   analyzer_unavailable      — transient DB/tx failure; UI surfaces retry
+// ─────────────────────────────────────────────
+
+/** Snapshot of what got committed — mirrored to Campaign.committedPlan
+ *  (Json column) so audit + future UI can replay the commit-time shape
+ *  without joining N Pipeline/Stage rows. */
+export interface CommittedPlanSnapshot {
+  /** Operator-readable Campaign name at commit time. */
+  campaignName: string;
+  /** ISO-8601 commit timestamp (also written to audit_log.payload). */
+  committedAt: string;
+  /** The ActionPlan that was committed (deep copy of proposedPlan). */
+  plan: ActionPlan;
+  /** Per-Pipeline persisted IDs (parallel to plan.pipelines). */
+  pipelineIds: string[];
+}
+
+export type CommitActionPlanResult =
+  | {
+      kind: 'committed';
+      campaignId: string;
+      /** Persisted Pipeline IDs in plan.pipelines order. */
+      pipelineIds: string[];
+      /** Per-Pipeline Stage IDs (parallel to pipelineIds × proposedStages). */
+      stageIds: string[][];
+      /** Snapshot persisted to Campaign.committedPlan. */
+      committedPlan: CommittedPlanSnapshot;
+    }
+  | {
+      kind: 'already_committed';
+      campaignId: string;
+      pipelineIds: string[];
+      /** Snapshot read back from Campaign.committedPlan. */
+      committedPlan: CommittedPlanSnapshot;
+    }
+  | {
+      kind: 'bounds_violation';
+      message: string;
+      campaignId: string;
+      strategy: z.infer<typeof CampaignStrategyEnum>;
+      attemptedStageCount: number;
+    }
+  | {
+      kind: 'concurrent_edit_conflict';
+      message: string;
+      campaignId: string;
+      /** Current persisted plan operator should re-apply on top of. */
+      currentPlan: ActionPlan;
+    }
+  | {
+      kind: 'analyzer_unavailable';
+      message: string;
+      campaignId: string;
+    };

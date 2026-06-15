@@ -2,11 +2,13 @@
 
 /**
  * KAN-1188 G1 — ActionPlan header sub-card.
+ * KAN-1190 J9 — Extended with Commit button placed next to Undo.
  *
  * Surfaces: campaign name + tenant-level confidence badge + brief gap
- * summary + generatedAt + Undo button (G9 rollback affordance).
+ * summary + generatedAt + Undo (G9 rollback) + Commit (J9 — materializes
+ * N Pipelines + flips Campaign.status → committed).
  */
-import { Undo2 } from "lucide-react";
+import { Undo2, CheckCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ActionPlanConfidenceBadge } from "../../_components/ActionPlanConfidenceBadge";
 import type { ActionPlan } from "@/lib/api";
@@ -18,6 +20,12 @@ export interface ActionPlanHeaderCardProps {
   isReverting: boolean;
   revertDisabled: boolean;
   revertDisabledReason?: string;
+  // KAN-1190 J9 — Commit affordance
+  onCommit: () => void;
+  isCommitting: boolean;
+  /** True when Campaign.status is already 'committed' — header surfaces
+   *  the success state above this card, but we still hide Commit here. */
+  commitHidden?: boolean;
 }
 
 function formatGeneratedAt(iso: string): string {
@@ -42,6 +50,9 @@ export function ActionPlanHeaderCard({
   isReverting,
   revertDisabled,
   revertDisabledReason,
+  onCommit,
+  isCommitting,
+  commitHidden,
 }: ActionPlanHeaderCardProps) {
   const gapSummary = `Goal ${plan.gapAnalysis.goalTarget} · projected ${plan.gapAnalysis.projectedOrganic} (${plan.gapAnalysis.gapPercent.toFixed(0)}% short)`;
   return (
@@ -62,18 +73,33 @@ export function ActionPlanHeaderCard({
       </div>
       <div className="flex items-center justify-between gap-3">
         <p className="text-sm text-foreground">{gapSummary}</p>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={onRevert}
-          disabled={revertDisabled || isReverting}
-          title={revertDisabledReason}
-          className="gap-1.5"
-        >
-          <Undo2 className="h-3.5 w-3.5" />
-          {isReverting ? "Reverting…" : "Undo last edit"}
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={onRevert}
+            disabled={revertDisabled || isReverting || isCommitting}
+            title={revertDisabledReason}
+            className="gap-1.5"
+          >
+            <Undo2 className="h-3.5 w-3.5" />
+            {isReverting ? "Reverting…" : "Undo last edit"}
+          </Button>
+          {!commitHidden && (
+            <Button
+              type="button"
+              variant="gradient"
+              size="sm"
+              onClick={onCommit}
+              disabled={isCommitting || isReverting}
+              className="gap-1.5"
+            >
+              <CheckCheck className="h-3.5 w-3.5" />
+              {isCommitting ? "Committing…" : "Commit plan"}
+            </Button>
+          )}
+        </div>
       </div>
     </div>
   );

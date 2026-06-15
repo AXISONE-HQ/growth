@@ -418,6 +418,11 @@ import type {
   ActionPlanEditAxis,
   RefineActionPlanResult,
   RevertActionPlanRefinementResult,
+  // KAN-1190 — Commit Action Plan types (discriminated commit result +
+  // committed-plan snapshot for the ActionPlanCard commit button + success
+  // state rendering).
+  CommitActionPlanResult,
+  CommittedPlanSnapshot,
 } from "@growth/shared";
 export type {
   ConversationState,
@@ -428,6 +433,8 @@ export type {
   ActionPlanEditAxis,
   RefineActionPlanResult,
   RevertActionPlanRefinementResult,
+  CommitActionPlanResult,
+  CommittedPlanSnapshot,
 } from "@growth/shared";
 // KAN-826: IngestRequest + IngestStatus removed — legacy KAN-707 ingestion API
 // (knowledgeIngestApi) deleted along with the dead /settings/knowledge admin
@@ -2734,6 +2741,31 @@ export const campaignsApi = {
     campaignId: string;
   }) =>
     trpcMutation<RevertActionPlanRefinementResult>('campaigns.revertLastActionPlanRefinement', input),
+
+  /**
+   * KAN-1190 — Commit multi-Pipeline Action Plan.
+   *
+   * Sibling to the legacy `commit` mutation below — input shape diverges
+   * fundamentally (no proposal payload; reads Campaign.proposedPlan). Materializes
+   * N Pipelines + N×M Stages in a single transaction; flips Campaign.status
+   * draft → committed (J4 — NOT active; preserves INERT-post-commit doctrine).
+   *
+   * Pass `expectedUpdatedAt` (ISO string of Campaign.updatedAt at commit-button-
+   * press time) for optimistic concurrency (J11); mismatched token returns
+   * `concurrent_edit_conflict` with the current plan to re-confirm.
+   *
+   * Returns `CommitActionPlanResult` discriminated union — fail-safe (never throws):
+   *   - 'committed'                  — N pipelines materialized + status flipped
+   *   - 'already_committed'          — idempotent re-commit (J8); same IDs
+   *   - 'bounds_violation'           — STRATEGY_STAGE_BOUNDS re-check failed (J3)
+   *   - 'concurrent_edit_conflict'   — Campaign.updatedAt drifted (J11)
+   *   - 'analyzer_unavailable'       — DB/tx transient
+   */
+  commitActionPlan: (input: {
+    campaignId: string;
+    expectedUpdatedAt?: string;
+  }) =>
+    trpcMutation<CommitActionPlanResult>('campaigns.commitActionPlan', input),
 
   /**
    * KAN-1001 Slice 3a — commit a validated proposal into Campaign +
