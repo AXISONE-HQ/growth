@@ -2630,6 +2630,34 @@ export const campaignsApi = {
     ),
 
   /**
+   * KAN-1189 — Conversation history retrieval for /campaigns/new?campaignId=
+   * restoration. Cursor-paginated; default 100/page (H5 lock).
+   *
+   * Returns turns ordered by `createdAt ASC`. Tenant-scoped server-side
+   * via the protectedProcedure context. The hook layer (useCampaignBuilder)
+   * applies `replayConversationState` (from @growth/shared) to derive
+   * the operator's chip-group state from these turns.
+   */
+  getConversationHistory: (input: {
+    campaignId: string;
+    cursor?: string;
+    limit?: number;
+  }) =>
+    trpcQuery<{
+      items: Array<{
+        id: string;
+        turnType: string;
+        content: string;
+        proposalSnapshot: unknown | null;
+        dataRequest: unknown | null;
+        dataIngestionEvent: unknown | null;
+        createdAt: string;
+      }>;
+      nextCursor: string | null;
+      totalCount: number;
+    }>('campaigns.getConversationHistory', input),
+
+  /**
    * KAN-1184 — Conversational orchestrator turn. Multi-turn dialogue
    * extracts the 4 dimensions (Product / Objectives / Timeline / Audience)
    * in canonical order; orchestrator persists each turn to

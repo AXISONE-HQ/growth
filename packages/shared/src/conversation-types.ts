@@ -94,6 +94,47 @@ export interface ConversationTurn {
   createdAt: string;
 }
 
+/**
+ * KAN-1189 Z1 lock — Replay persisted turns into a ConversationState.
+ *
+ * Pure logic, zero IO. Consumed by:
+ *   - apps/web useCampaignBuilder hook on /campaigns/new?campaignId= restoration
+ *   - future server-side admin/debugging tools (TBD)
+ *
+ * Walks turns chronologically and accumulates dimensions. Honors the
+ * KAN-1187 X3 reset-turn doctrine: when a turn carries
+ * `dimensionsExtracted = emptyConversationState()` (the reset marker), the
+ * accumulator restarts. Subsequent confirmations layer on top of the empty
+ * baseline, exactly as the live orchestrator would have driven them.
+ *
+ * Turns are expected in `createdAt ASC` order (same as the DB index). The
+ * function preserves this assumption — it does not sort defensively, since
+ * silently re-ordering a corrupted history would mask a bug.
+ */
+export function replayConversationState(
+  turns: readonly ConversationTurn[],
+): ConversationState {
+  let state = emptyConversationState();
+  for (const turn of turns) {
+    if (!turn.dimensionsExtracted) continue;
+    // Reset turns carry a fully-empty dimensionsExtracted snapshot. Detect
+    // by checking all 4 keys are `kind: 'empty'` — the orchestrator emits
+    // this exact shape on KAN-1184 Q-ADD C6 reset triggers.
+    const allEmpty = DIMENSION_ORDER.every(
+      (k) => turn.dimensionsExtracted?.[k]?.kind === 'empty',
+    );
+    if (allEmpty) {
+      state = emptyConversationState();
+      continue;
+    }
+    state = {
+      ...state,
+      ...(turn.dimensionsExtracted as Partial<ConversationState>),
+    };
+  }
+  return state;
+}
+
 // ─────────────────────────────────────────────
 // ChatTurnResult — discriminated result from campaigns.chat
 // ─────────────────────────────────────────────

@@ -7401,6 +7401,51 @@ const campaignsRouter = router({
       return listCampaigns(ctx.prisma, ctx.tenantId, input);
     }),
 
+  // KAN-1189 — Conversation history read for /campaigns/new?campaignId= restoration.
+  //
+  // Separate from campaigns.get (H2 lock) to preserve single-Campaign-fetch
+  // ergonomics for KAN-1166/1187/1188 consumers; this procedure handles the
+  // distinct concern of paginated turn retrieval.
+  //
+  // Cursor-based pagination matches KAN-1183 list-view doctrine. Default
+  // limit 100 (H5 lock) — turns are small payloads; typical conversation
+  // arc fits in one round-trip. Cursor preserved for the rare 100+ case.
+  //
+  // Tenant-scoped via where: { campaignId, campaign: { tenantId } } —
+  // never leak cross-tenant conversation data.
+  getConversationHistory: protectedProcedure
+    .input(
+      z.object({
+        campaignId: z.string().uuid(),
+        cursor: z.string().optional(),
+        limit: z.number().int().min(1).max(200).default(100),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      const turns = await (ctx.prisma as any).campaignConversationTurn.findMany({
+        where: {
+          campaignId: input.campaignId,
+          tenantId: ctx.tenantId,
+        },
+        select: {
+          id: true,
+          turnType: true,
+          content: true,
+          proposalSnapshot: true,
+          dataRequest: true,
+          dataIngestionEvent: true,
+          createdAt: true,
+        },
+        orderBy: { createdAt: "asc" },
+        take: input.limit + 1, // one extra for cursor detection
+        ...(input.cursor ? { cursor: { id: input.cursor }, skip: 1 } : {}),
+      });
+      const hasMore = turns.length > input.limit;
+      const items = hasMore ? turns.slice(0, input.limit) : turns;
+      const nextCursor = hasMore ? items[items.length - 1].id : null;
+      return { items, nextCursor, totalCount: items.length };
+    }),
+
   // KAN-1166 PR 3 — Campaign read for chat UI (/campaigns/[id]). Tenant-scoped
   // via where: { id, tenantId } — never leak cross-tenant Campaign data.
   // Selects only the fields the chat substrate reads (goal triplet +

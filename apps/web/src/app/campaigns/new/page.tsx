@@ -22,15 +22,21 @@
  *   X3 — reset turn renders inline delimiter; sidebar chips clear
  */
 import { useEffect } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
+import { AlertTriangle } from "lucide-react";
 import { useAuth } from "@/lib/AuthContext";
 import { useCampaignBuilder } from "@/lib/hooks/useCampaignBuilder";
+import { Button } from "@/components/ui/button";
+import { LoadingState } from "../_components/LoadingState";
 import { BuilderChatThread } from "./_components/BuilderChatThread";
 import { DimensionSidebar } from "./_components/DimensionSidebar";
 import { ActionPlanCard } from "./_components/ActionPlanCard";
 
 export default function CampaignBuilderPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  // H4 lock — single route, optional ?campaignId=<uuid> triggers restoration
+  const restoreCampaignId = searchParams?.get("campaignId") ?? undefined;
   const { user, loading } = useAuth();
   const {
     state,
@@ -44,7 +50,10 @@ export default function CampaignBuilderPage() {
     generatePlan,
     allDimensionsConfirmed,
     campaignId,
-  } = useCampaignBuilder();
+    isLoadingHistory,
+    historyError,
+    retryLoadHistory,
+  } = useCampaignBuilder({ initialCampaignId: restoreCampaignId });
 
   useEffect(() => {
     document.title = "New Campaign · Campaigns";
@@ -69,6 +78,32 @@ export default function CampaignBuilderPage() {
           can edit.
         </p>
       </div>
+
+      {/* KAN-1189 H7 — history fetch state surfacing */}
+      {isLoadingHistory && (
+        <div className="mb-4 rounded-md border border-border bg-muted/30 p-3">
+          <LoadingState />
+        </div>
+      )}
+      {historyError && (
+        <div
+          role="alert"
+          className="mb-4 flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900"
+        >
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          <div className="flex-1">
+            <p>Couldn&apos;t load the conversation history. You can still start fresh below.</p>
+          </div>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={retryLoadHistory}
+          >
+            Retry
+          </Button>
+        </div>
+      )}
 
       <div className="flex flex-col gap-4 md:flex-row md:gap-6">
         <BuilderChatThread
