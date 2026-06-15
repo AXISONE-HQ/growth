@@ -2533,7 +2533,50 @@ export interface CampaignDetail {
   updatedAt: string;
 }
 
+// KAN-1183 — Compact list-item shape projected server-side from Campaign.
+// Q-ADD A3 lock: feasibilityAnalysisKind + achievability are derived from
+// the full FeasibilityCounselResult JSON on Campaign.feasibilityAnalysis
+// to keep list-page payload bytes-cheap. Full structured counsel stays on
+// /campaigns/[id] (campaigns.get → CampaignDetail).
+export interface CampaignListItem {
+  id: string;
+  name: string;
+  status:
+    | 'draft'
+    | 'committed'
+    | 'active'
+    | 'paused'
+    | 'completed'
+    | 'archived';
+  goalType: CampaignGoalType | null;
+  goalTarget: number | null;
+  goalDescription: string | null;
+  feasibilityAnalysisKind:
+    | 'cold_start_counsel'
+    | 'feasibility_counsel'
+    | 'analyzer_unavailable'
+    | null;
+  achievability: 'feasible' | 'stretch' | 'unrealistic' | null;
+  activatedAt: string | null;
+  updatedAt: string;
+}
+
 export const campaignsApi = {
+  /**
+   * KAN-1183 — Filterable Campaign list for the operator-facing /campaigns
+   * page. Server hides Always-On Campaigns by default (Q-ADD F);
+   * `includeAlwaysOn: true` surfaces them for debugging only. Cursor
+   * pagination via the canonical CursorPage<T> shape.
+   */
+  list: (input: {
+    search?: string;
+    status?: string;
+    limit?: number;
+    cursor?: string;
+    includeAlwaysOn?: boolean;
+  }) =>
+    trpcQuery<CursorPage<CampaignListItem>>('campaigns.list', input),
+
   /**
    * KAN-1166 PR 3 — Campaign read for the chat UI. Tenant-scoped on the
    * server (where: { id, tenantId }); 404 on cross-tenant probe.

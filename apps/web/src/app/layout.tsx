@@ -17,8 +17,9 @@ import {
   Receipt,
   Upload,
   Workflow,
-  // KAN-1000 Slice 2 — Campaigns rail item (after Dashboard, before
-  // Pipelines per founder; gated by NEXT_PUBLIC_CAMPAIGN_LAYER_DEMO).
+  // KAN-1183 — Campaigns rail item always visible (KAN-1181 epic Doctrine
+  // Lock #7 "PROD is the product" retired the NEXT_PUBLIC_CAMPAIGN_LAYER_DEMO
+  // flag gate from the Slice 2 internal-preview era).
   Megaphone,
 } from 'lucide-react';
 import { AuthProvider, useAuth } from '@/lib/AuthContext';
@@ -73,18 +74,10 @@ export const navItems: Array<{
 }> = [
   // Target-8 rail (ordered, founder-locked):
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  // KAN-1000 Slice 2 — Campaigns rail item. Slotted AFTER Dashboard,
-  // BEFORE Pipelines per founder lock. `hideFromRail` resolves to the
-  // negation of the build-time flag so prod users don't see a
-  // propose-but-can't-commit half-feature until Slice 3 ships activation.
-  // Direct nav to /campaigns still resolves via the pageTitle map even
-  // when hidden — same hideFromRail discipline as D.2 movers.
-  {
-    href: '/campaigns',
-    label: 'Campaigns',
-    icon: Megaphone,
-    hideFromRail: process.env.NEXT_PUBLIC_CAMPAIGN_LAYER_DEMO !== 'true',
-  },
+  // KAN-1183 — Campaigns rail item. Slotted AFTER Dashboard, BEFORE
+  // Pipelines per founder lock. Always visible in the rail (the prior
+  // hideFromRail gate retired with the Slice 2 internal-preview surface).
+  { href: '/campaigns', label: 'Campaigns', icon: Megaphone },
   { href: '/pipelines', label: 'Pipelines', icon: Workflow },
   // KAN-991 Phase D.1 — display label renamed Opportunities → Leads. Route
   // stays /opportunities, entity stays Deal, route literal stays.
