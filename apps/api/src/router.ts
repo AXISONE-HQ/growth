@@ -4988,6 +4988,14 @@ const pipelinesRouter = router({
         // aren't bound to an Objective row, i.e. the KAN-793 fixture).
         // Nullable: legacy fixtures + pre-slice-2a tenants will have null.
         objectiveId: (p.objectiveId as string | null) ?? null,
+        // KAN-1211 — campaignId surfaced for the Pipelines board's filter
+        // to recognize chat-flow Pipelines (V3 lock binds them to Campaign
+        // instead of Objective; commit-action-plan.ts:344 sets
+        // `objectiveId: null` + `campaignId: <campaign-id>` deliberately).
+        // Without this, chat-flow Pipelines share the NULL objectiveId
+        // shape with the KAN-793 fixture and get silently excluded.
+        // See `legacy_filter_predicate_doctrine` memo.
+        campaignId: (p.campaignId as string | null) ?? null,
         stages: (p.stages ?? []) as Array<{
           id: string;
           name: string;

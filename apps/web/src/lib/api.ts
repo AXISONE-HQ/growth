@@ -531,6 +531,11 @@ export interface PipelineWithStages {
   name: string;
   description: string | null;
   objectiveId: string | null;
+  // KAN-1211 — Discriminator for chat-flow Pipelines (V3 lock binds them to
+  // Campaign, not Objective). Required so /pipelines page filter can
+  // partition real Pipelines vs KAN-793 fixture without excluding chat-flow
+  // by accident. See `legacy_filter_predicate_doctrine` memo.
+  campaignId: string | null;
   stages: Array<{
     id: string;
     name: string;

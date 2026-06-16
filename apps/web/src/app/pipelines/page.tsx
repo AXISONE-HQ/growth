@@ -71,11 +71,23 @@ export default function PipelinesPage() {
     );
   }
 
-  // Filter to objective-bound pipelines only. The fixture pipeline (KAN-793
-  // bootstrap, objectiveId=null) is intentionally excluded — it stays
-  // active for routing fallback but doesn't belong on this board.
+  // KAN-1211 — Filter to "real" pipelines (objective- OR Campaign-bound).
+  // Originally KAN-968 used `objectiveId !== null` alone as the proxy for
+  // "real Pipeline vs KAN-793 test fixture (both NULL)." That assumption
+  // held until KAN-1190's V3 lock began binding chat-flow Pipelines to
+  // Campaign instead of Objective (commit-action-plan.ts:344 sets
+  // `objectiveId: null` + `campaignId: <campaign-id>` deliberately).
+  // Chat-flow Pipelines then shared the NULL `objectiveId` shape with the
+  // KAN-793 fixture and were silently excluded from this board even though
+  // they are real operational pipelines. Path A: extend the filter to
+  // recognize the Campaign discriminator. Partition restored:
+  //   - KAN-793 fixture (both NULL) → excluded ✓
+  //   - Chat-flow (campaignId set) → included ✓
+  //   - Legacy commit (objectiveId set) → included ✓
+  // See `legacy_filter_predicate_doctrine` memo for the canonical pattern.
   const boardPipelines = (pipelines ?? []).filter(
-    (p): p is PipelineWithStages => p.objectiveId !== null,
+    (p): p is PipelineWithStages =>
+      p.objectiveId !== null || p.campaignId !== null,
   );
 
   if (boardPipelines.length === 0) {
