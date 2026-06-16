@@ -390,11 +390,26 @@ export async function commitActionPlan(
       // INERT-post-commit doctrine: a committed Campaign is observable but
       // no autonomous consumer evaluates it. 'active' reserved for the
       // engine-active state set by a separate activation transition.
+      //
+      // KAN-1208 — Populate `audienceEvaluatedAt` + `audienceSnapshotCount`
+      // at commit time. The legacy KAN-1002 flow ran a separate `audience.evaluate`
+      // step between commit and activate; the chat-flow short-cut consolidated
+      // those into commit (operator confirms audienceConditions during chat,
+      // so commit IS the evaluation point). Without these columns,
+      // `campaign-activation.ts:329` rejects every chat-flow activate with
+      // `reason='audience_not_evaluated'`. See `boundary_integration_gap_subclass`
+      // memo for the audit pattern that should catch this class.
+      const audienceSnapshotCount = plan.pipelines.reduce(
+        (sum, p) => sum + (p.audienceCount ?? 0),
+        0,
+      );
       await tx.campaign.update({
         where: { id: params.campaignId },
         data: {
           status: "committed",
           activatedAt: todayUtc,
+          audienceEvaluatedAt: todayUtc,
+          audienceSnapshotCount,
           committedPlan: committedPlan as unknown as object,
         },
       });

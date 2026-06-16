@@ -109,6 +109,17 @@ export function CommittedCampaignView({
       const res = await campaignsApi.activate(campaign.id);
       if (res.kind === "activated" || res.kind === "already_active") {
         onStatusChanged?.("active");
+      } else if (res.kind === "rejected") {
+        // KAN-1208 — discriminated_union_rejected_variant_doctrine. The
+        // server returns `kind: 'rejected'` (HTTP 200, not thrown) for
+        // pre-activation guard failures (e.g. audience_not_evaluated,
+        // status_paused). Without this branch the variant fell through
+        // silently and the operator saw NOTHING change on click. The
+        // sibling handlePause handler already had this pattern;
+        // handleActivate now matches for symmetry. Every handler that
+        // consumes a discriminated-union mutation result MUST branch on
+        // rejected and surface res.reason to the operator.
+        setStatusError(`Activate rejected: ${res.reason}`);
       }
     } catch (e) {
       setStatusError(e instanceof Error ? e.message : "Activation failed");
