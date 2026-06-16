@@ -473,23 +473,34 @@ export function parseDimensionExtraction(
 // Persistence helpers
 // ─────────────────────────────────────────────
 
-async function createDraftCampaign(
+// KAN-1200 — Exported so the KAN-1200 integration test can exercise this
+// path against REAL Prisma (closes the loader-vs-canonical test divergence
+// that let KAN-1184 ship with a zero-UUID FK-violating placeholder; unit
+// tests injected campaignId and never invoked this function).
+export async function createDraftCampaign(
   prisma: OrchestratorPrisma,
   tenantId: string,
 ): Promise<{ id: string }> {
-  // Minimum valid Campaign row — name placeholder + empty audience conditions
-  // (orchestrator fills these in as dimensions confirm).
-  // objectiveId left null is not allowed by schema — we use a placeholder
-  // approach: the Action Plan generator (KAN-1185) writes the real
-  // objectiveId at commit time. For now we need a tenant-owned objective.
-  // SIMPLIFICATION (Phase 2 build pragmatic): defer Campaign-row creation
-  // semantics to the consumer; for unit tests we accept a campaignId.
+  // KAN-1200 — Mint a draft Campaign WITHOUT an objectiveId. The earlier
+  // KAN-1184 implementation hardcoded a zero-UUID placeholder which violated
+  // campaigns_objective_id_fkey on every first chat turn; the test substrate
+  // injected a campaignId and never exercised this code path against real
+  // Prisma, so the FK violation only surfaced when Fred ran the first
+  // end-to-end UI smoke in PROD after KAN-1190 deployed.
+  //
+  // The fix is doctrinally clean: KAN-1167 shifted goal semantics from
+  // Objective-owned to Campaign-owned (goalType / goalTarget / goalProductId
+  // / goalDescription live on the Campaign row), and KAN-1190 V3 already
+  // established the nullable-objective pattern for Pipeline.objectiveId on
+  // Action Plan commits. Campaign.objectiveId is now nullable too (see
+  // schema.prisma KAN-1200 doctrine comment + the matching migration). The
+  // operator MAY bind an Objective later via the dimensions UI; commit-time
+  // resolution stays available via the regular Campaign.update path.
   return prisma.campaign.create({
     data: {
       tenantId,
       name: 'Draft Campaign',
       audienceConditions: {},
-      objectiveId: '00000000-0000-0000-0000-000000000000', // Placeholder; resolved at commit
       status: 'draft',
     },
     select: { id: true },

@@ -1,0 +1,26 @@
+-- KAN-1200 — Campaign.objectiveId nullable + createDraftCampaign FK fix
+--
+-- KAN-1184 conversational orchestrator mints a draft Campaign on the first
+-- chat turn BEFORE the operator has bound an Objective; the hardcoded
+-- zero-UUID placeholder ('00000000-0000-0000-0000-000000000000') violates
+-- the foreign key constraint campaigns_objective_id_fkey (no Objective row
+-- has that id), 500ing every first chat turn in PROD.
+--
+-- Doctrine: KAN-1167 shifted goal semantics from Objective-owned to
+-- Campaign-owned (goalType/goalTarget/goalProductId/goalDescription on
+-- Campaign). KAN-1190 V3 lock already established nullable
+-- Pipeline.objectiveId. This migration extends the same pattern to
+-- Campaign.objectiveId.
+--
+-- Migration shape: additive nullable, metadata-only Postgres operation,
+-- atomic + instant on any table size. Existing rows keep their objectiveId
+-- values; only the NOT NULL constraint is dropped. FK relation kept with
+-- onDelete: Restrict — Objective deletion still blocked while any Campaign
+-- references it (the FK itself is unchanged; only the column's NOT NULL
+-- constraint is being dropped).
+--
+-- Rollback: ALTER TABLE campaigns ALTER COLUMN objective_id SET NOT NULL;
+-- viable as long as no Campaign rows have been written with objectiveId
+-- IS NULL since this migration ran. Viability gate empirically verifiable
+-- via: SELECT COUNT(*) FROM campaigns WHERE objective_id IS NULL;
+ALTER TABLE "campaigns" ALTER COLUMN "objective_id" DROP NOT NULL;
