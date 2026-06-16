@@ -501,6 +501,10 @@ export function buildExtractionPrompt(
 
   const dimensionDescriptor = describeDimension(dim);
   const vocabulary = dim === 'audience' ? `\n\n${AUDIENCE_VOCABULARY}` : '';
+  // KAN-1203 — concrete JSON examples are the primary defense against
+  // LLM-output / persist-schema field-name drift. Replaces the prior vague
+  // "<dimension-specific shape>" placeholder.
+  const valueShapeContract = dimensionValueExample(dim);
 
   return `${DOCTRINE_PREAMBLE}
 
@@ -511,14 +515,18 @@ Target dimension to extract: ${dim} — ${dimensionDescriptor}
 
 Today's date (UTC): ${today}${vocabulary}
 
-# Output schema (return ONE JSON object)
+# Output envelope (return ONE JSON object)
 
 {
   "kind": "extracted" | "clarification",
-  "value"?: <dimension-specific shape; only when kind=extracted>,
+  "value"?: <see "value shape contract" below; only when kind=extracted>,
   "confidence": "high" | "medium" | "low",
   "aiMessage": "<operator-facing message — what you extracted, what you'd like to confirm, or what you need clarified>"
 }
+
+# Value shape contract (KAN-1203 — STRICT)
+
+${valueShapeContract}
 
 # Confidence routing
 
@@ -539,6 +547,71 @@ function describeDimension(dim: DimensionKey): string {
       return 'Campaign window — windowStart + windowEnd (ISO 8601 UTC).';
     case 'audience':
       return 'AudienceConditions tree using the leaf vocabulary above. Surface the audience count if you compute one.';
+  }
+}
+
+/**
+ * KAN-1203 — Concrete JSON shape example per dimension. Pre-KAN-1203 the
+ * extraction prompt used vague "<dimension-specific shape>" placeholder
+ * text; the LLM emitted shapes that diverged from Campaign-column field
+ * names (`numericTarget` vs `goalTarget`, `outcomeType` vs `goalType`)
+ * and the orchestrator's permissive-on-fail persist code silently dropped
+ * everything. The normalizer in persistDimensionToCampaign is now generous
+ * enough to translate the natural-language variants — but the prompt
+ * tightening here is the primary path: LLMs follow concrete examples
+ * MUCH more reliably than prose schemas.
+ *
+ * Doctrine: documented examples are the canonical contract; the normalizer
+ * is defense-in-depth. Both layers together close the dual-state-drift
+ * anti-pattern (in-memory state vs persisted state).
+ */
+function dimensionValueExample(dim: DimensionKey): string {
+  switch (dim) {
+    case 'product':
+      return `Return value as a STRING containing the product/offering name. Example:
+  "value": "Growth Platform Pro"
+
+If the operator mentions a specific product, use that name verbatim.
+Do NOT wrap in an object; return the raw string.`;
+    case 'objectives':
+      return `Return value as a JSON OBJECT with EXACTLY these field names:
+  {
+    "goalType": "revenue" | "units" | "deals" | "meetings" | "custom",
+    "goalTarget": <number>,
+    "goalDescription": "<one-sentence operator-facing summary>"
+  }
+
+The goalType MUST be one of the 5 enum values listed above. If the operator's
+intent doesn't fit revenue/units/deals/meetings, use "custom".
+
+Example for "I want to sell 50 subscriptions of Growth Platform":
+  "value": {
+    "goalType": "custom",
+    "goalTarget": 50,
+    "goalDescription": "Sell 50 subscriptions of Growth Platform"
+  }`;
+    case 'timeline':
+      return `Return value as a JSON OBJECT with EXACTLY these field names:
+  {
+    "windowStart": "<ISO 8601 UTC timestamp>",
+    "windowEnd": "<ISO 8601 UTC timestamp>"
+  }
+
+Both fields are required. Example for "campaign runs July 2026":
+  "value": {
+    "windowStart": "2026-07-01T00:00:00.000Z",
+    "windowEnd": "2026-07-31T23:59:59.999Z"
+  }`;
+    case 'audience':
+      return `Return value as an AudienceConditions tree per the leaf vocabulary above.
+Example for "leads from Quebec who bought in last 30 days":
+  "value": {
+    "allOf": [
+      { "field": "lifecycleStage", "op": "in", "values": ["lead"] },
+      { "field": "region", "op": "in", "values": ["QC"] },
+      { "field": "orders.placedAt", "op": "gte", "value": "<ISO timestamp 30d ago>" }
+    ]
+  }`;
   }
 }
 
@@ -657,6 +730,159 @@ export async function createDraftCampaign(
   });
 }
 
+// ─────────────────────────────────────────────
+// KAN-1203 — LLM-output → Campaign-schema normalizers (per-dimension)
+//
+// Pre-KAN-1203 `persistDimensionToCampaign` strict-checked for Campaign-schema
+// field names exactly (`goalType` / `goalTarget` / `goalDescription`); when the
+// LLM emitted natural-language-flavored names (`outcomeType` / `numericTarget`
+// / `description`) the conditional silently dropped them and the Campaign row
+// stayed NULL — even though the in-memory ConversationState showed the
+// dimension confirmed with valid data. Operator clicked Generate, generator
+// returned `insufficient_dimensions` because the row was empty.
+//
+// This is the "dual-state-source-of-truth-drift anti-pattern": ConversationState
+// (in-memory) diverged from Campaign row (persistence) because the persist
+// coercion was permissive-on-fail (silent drop) rather than strict-on-fail
+// (Zod reject + clarification). The fix accepts BOTH the canonical schema
+// names AND common LLM-natural variants, normalizes to canonical, and emits
+// a structured console.warn when normalization fails so future drift is
+// surfaced rather than swallowed.
+//
+// Same class as KAN-1200 (FK violation hidden by test substrate) + KAN-1201
+// (state machine never advanced past docstring). Operator-experience
+// verification gap (see `operator_experience_verification` memo).
+//
+// LLM prompt at `buildExtractionPrompt` ALSO tightened with concrete JSON
+// shape examples per dimension — the LLM follows examples better than prose
+// schemas; the normalizer below is the runtime defense in depth.
+// ─────────────────────────────────────────────
+
+/** Compact description of a value's shape for drift logging — surfaces
+ *  enough structure for forensic debugging without dumping the whole
+ *  payload (which may be operator-sensitive). */
+function describeValueShape(value: unknown): string {
+  if (value === null) return 'null';
+  if (value === undefined) return 'undefined';
+  if (typeof value !== 'object') return `${typeof value}`;
+  if (Array.isArray(value)) return `array[${value.length}]`;
+  const keys = Object.keys(value as Record<string, unknown>).slice(0, 8).join(',');
+  return `object{${keys}}`;
+}
+
+/** Pick the first string value at any of the given keys; returns undefined
+ *  if none match. Centralizes the multi-key-name lookup so each dimension
+ *  normalizer reads as a flat list of expected names. */
+function pickString(obj: Record<string, unknown>, keys: readonly string[]): string | undefined {
+  for (const k of keys) {
+    const v = obj[k];
+    if (typeof v === 'string' && v.trim().length > 0) return v;
+  }
+  return undefined;
+}
+
+function pickNumber(obj: Record<string, unknown>, keys: readonly string[]): number | undefined {
+  for (const k of keys) {
+    const v = obj[k];
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+  }
+  return undefined;
+}
+
+/** Canonical goalType enum from KAN-1167 schema. LLM may emit any of these
+ *  values OR plural variants ("customers" / "units" with -s); we coerce to
+ *  the canonical singular enum value. Unknown values fall back to 'custom'
+ *  (which is the legitimate catch-all per `parseGoalShape`'s switch). */
+const GOAL_TYPE_NORMALIZERS: Record<string, 'revenue' | 'units' | 'deals' | 'meetings' | 'custom'> = {
+  revenue: 'revenue',
+  revenues: 'revenue',
+  unit: 'units',
+  units: 'units',
+  deal: 'deals',
+  deals: 'deals',
+  meeting: 'meetings',
+  meetings: 'meetings',
+  custom: 'custom',
+  // KAN-1203 — pluralized natural-language variants from Fred's session
+  customer: 'custom',
+  customers: 'custom',
+  subscription: 'custom',
+  subscriptions: 'custom',
+  sale: 'custom',
+  sales: 'custom',
+};
+
+function normalizeGoalType(raw: string): 'revenue' | 'units' | 'deals' | 'meetings' | 'custom' {
+  return GOAL_TYPE_NORMALIZERS[raw.trim().toLowerCase()] ?? 'custom';
+}
+
+/** Normalize the LLM's product-dimension value into a single goalProductId
+ *  string. Accepts: a raw string (canonical) OR an object with one of several
+ *  natural-language field names (LLM-flavored). */
+function normalizeProduct(value: unknown): { goalProductId: string } | null {
+  if (typeof value === 'string' && value.trim().length > 0) {
+    return { goalProductId: value.trim() };
+  }
+  if (value && typeof value === 'object') {
+    const v = value as Record<string, unknown>;
+    const productId = pickString(v, ['goalProductId', 'productId', 'name', 'productName', 'product', 'value', 'id']);
+    if (productId) return { goalProductId: productId };
+  }
+  return null;
+}
+
+/** Normalize the LLM's objectives-dimension value. Accepts both canonical
+ *  ({goalType, goalTarget, goalDescription}) AND Fred-confirmed LLM-natural
+ *  ({outcomeType, numericTarget, description}). Returns partial if some
+ *  fields are missing — the caller writes whichever fields normalized
+ *  successfully (matches pre-KAN-1203 partial-write semantics for
+ *  doctrine-preserving compatibility). */
+function normalizeObjectives(value: unknown): Partial<{
+  goalType: string;
+  goalTarget: number;
+  goalDescription: string;
+}> {
+  if (!value || typeof value !== 'object') return {};
+  const v = value as Record<string, unknown>;
+  const result: Partial<{ goalType: string; goalTarget: number; goalDescription: string }> = {};
+
+  const rawType = pickString(v, ['goalType', 'outcomeType', 'type', 'metric', 'kpi']);
+  if (rawType) result.goalType = normalizeGoalType(rawType);
+
+  const target = pickNumber(v, ['goalTarget', 'numericTarget', 'target', 'count', 'quantity', 'amount']);
+  if (target != null) result.goalTarget = target;
+
+  const description = pickString(v, ['goalDescription', 'description', 'goal', 'objective', 'summary']);
+  if (description) result.goalDescription = description;
+
+  return result;
+}
+
+/** Normalize the LLM's timeline-dimension value to {windowStart, windowEnd}
+ *  as Date objects. Pre-KAN-1203 accepted only ISO strings via `new Date()`
+ *  (which silently returns Invalid Date on bad input); KAN-1203 surfaces
+ *  Invalid Date as a normalization failure so the field stays NULL rather
+ *  than corrupting the column. */
+function normalizeTimeline(value: unknown): Partial<{ windowStart: Date; windowEnd: Date }> {
+  if (!value || typeof value !== 'object') return {};
+  const v = value as Record<string, unknown>;
+  const result: Partial<{ windowStart: Date; windowEnd: Date }> = {};
+
+  const startRaw = pickString(v, ['windowStart', 'start', 'startDate', 'from', 'beginAt']);
+  if (startRaw) {
+    const d = new Date(startRaw);
+    if (!Number.isNaN(d.getTime())) result.windowStart = d;
+  }
+
+  const endRaw = pickString(v, ['windowEnd', 'end', 'endDate', 'to', 'finishAt']);
+  if (endRaw) {
+    const d = new Date(endRaw);
+    if (!Number.isNaN(d.getTime())) result.windowEnd = d;
+  }
+
+  return result;
+}
+
 async function persistDimensionToCampaign(
   prisma: OrchestratorPrisma,
   campaignId: string,
@@ -666,35 +892,54 @@ async function persistDimensionToCampaign(
 ): Promise<void> {
   const data: Record<string, unknown> = {};
   switch (dim) {
-    case 'product':
-      if (typeof value === 'string') data.goalProductId = value;
-      break;
-    case 'objectives':
-      if (value && typeof value === 'object') {
-        const v = value as {
-          goalType?: unknown;
-          goalTarget?: unknown;
-          goalDescription?: unknown;
-        };
-        if (typeof v.goalType === 'string') data.goalType = v.goalType;
-        if (typeof v.goalTarget === 'number') data.goalTarget = v.goalTarget;
-        if (typeof v.goalDescription === 'string') {
-          data.goalDescription = v.goalDescription;
-        }
+    case 'product': {
+      const normalized = normalizeProduct(value);
+      if (normalized) {
+        data.goalProductId = normalized.goalProductId;
+      } else {
+        // KAN-1203 — surface drift so future PROD sessions don't need
+        // DevTools to diagnose. Operator-experience verification gap.
+        console.warn(
+          `[orchestrator] product-persist-drift campaignId=${campaignId} valueShape=${describeValueShape(value)}`,
+        );
       }
       break;
-    case 'timeline':
-      if (value && typeof value === 'object') {
-        const v = value as { windowStart?: unknown; windowEnd?: unknown };
-        if (typeof v.windowStart === 'string') {
-          data.windowStart = new Date(v.windowStart);
-        }
-        if (typeof v.windowEnd === 'string') {
-          data.windowEnd = new Date(v.windowEnd);
-        }
+    }
+    case 'objectives': {
+      const normalized = normalizeObjectives(value);
+      if (normalized.goalType) data.goalType = normalized.goalType;
+      if (normalized.goalTarget != null) data.goalTarget = normalized.goalTarget;
+      if (normalized.goalDescription) data.goalDescription = normalized.goalDescription;
+      const dropped: string[] = [];
+      if (!normalized.goalType) dropped.push('goalType');
+      if (normalized.goalTarget == null) dropped.push('goalTarget');
+      if (!normalized.goalDescription) dropped.push('goalDescription');
+      if (dropped.length > 0) {
+        console.warn(
+          `[orchestrator] objectives-persist-drift campaignId=${campaignId} dropped=${dropped.join(',')} valueShape=${describeValueShape(value)}`,
+        );
       }
       break;
+    }
+    case 'timeline': {
+      const normalized = normalizeTimeline(value);
+      if (normalized.windowStart) data.windowStart = normalized.windowStart;
+      if (normalized.windowEnd) data.windowEnd = normalized.windowEnd;
+      const dropped: string[] = [];
+      if (!normalized.windowStart) dropped.push('windowStart');
+      if (!normalized.windowEnd) dropped.push('windowEnd');
+      if (dropped.length > 0) {
+        console.warn(
+          `[orchestrator] timeline-persist-drift campaignId=${campaignId} dropped=${dropped.join(',')} valueShape=${describeValueShape(value)}`,
+        );
+      }
+      break;
+    }
     case 'audience':
+      // KAN-1203 — audience passes through to Campaign.audienceConditions
+      // JSON column; downstream validation (generator/refiner) runs
+      // AudienceConditionsSchema.parse separately. Logging drift here would
+      // false-positive on schema-valid-but-non-trivial trees.
       data.audienceConditions = value;
       break;
   }
