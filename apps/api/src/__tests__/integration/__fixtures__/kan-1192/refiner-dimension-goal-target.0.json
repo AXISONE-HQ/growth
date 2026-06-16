@@ -1,0 +1,10 @@
+{
+  "scenario": "refiner-dimension-goal-target",
+  "callIndex": 0,
+  "callerTag": "action-plan-refiner:classify",
+  "tier": "reasoning",
+  "text": "{\"axis\": \"dimension\", \"field\": \"goalTarget\", \"newValue\": 200}",
+  "model": "claude-sonnet-4-6",
+  "inputTokens": 530,
+  "outputTokens": 30
+}

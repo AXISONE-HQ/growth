@@ -1,0 +1,10 @@
+{
+  "scenario": "generator-multi-pipeline-split",
+  "callIndex": 0,
+  "callerTag": "action-plan-generator:per-pipeline",
+  "tier": "reasoning",
+  "text": "{\"name\": \"Inbound Lead Pipeline\", \"strategy\": \"direct\", \"proposedStages\": [{\"name\": \"Outreach\", \"order\": 0, \"description\": \"Day-0 outbound to lead cohort with product fit hook.\"}, {\"name\": \"Qualify\", \"order\": 1, \"description\": \"Discovery questions to validate fit + budget.\"}, {\"name\": \"Close\", \"order\": 2, \"description\": \"Propose terms and close lead cohort.\"}], \"firstActions\": [{\"day\": 0, \"channel\": \"email\", \"intent\": \"outreach\", \"description\": \"Day-0 outbound to lead cohort with value proposition.\"}]}",
+  "model": "claude-sonnet-4-6",
+  "inputTokens": 380,
+  "outputTokens": 165
+}
