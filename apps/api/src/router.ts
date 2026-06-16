@@ -7331,6 +7331,30 @@ async function loadActionPlanRefiner(): Promise<ActionPlanRefinerModule> {
   return _actionPlanRefinerModule;
 }
 
+// KAN-1190 — Commit Action Plan loader. KAN-689 cohort variable-specifier
+// dynamic import. Sibling to legacy KAN-1001 campaign-commit.ts; preserves
+// both surfaces (legacy CampaignProposal vs ActionPlan) per substrate-
+// discovery sibling-vs-extend doctrine.
+interface CommitActionPlanModule {
+  commitActionPlan: (
+    prisma: unknown,
+    params: {
+      campaignId: string;
+      tenantId: string;
+      expectedUpdatedAt?: string;
+      userId?: string;
+      todayUtc?: Date;
+    },
+  ) => Promise<unknown>;
+}
+let _commitActionPlanModule: CommitActionPlanModule | null = null;
+async function loadCommitActionPlanModule(): Promise<CommitActionPlanModule> {
+  if (_commitActionPlanModule) return _commitActionPlanModule;
+  const spec = "../../../packages/api/src/services/commit-action-plan.js";
+  _commitActionPlanModule = (await import(spec)) as CommitActionPlanModule;
+  return _commitActionPlanModule;
+}
+
 // LLM client wrapper — matches the LLMCompleteFn shape the campaigns
 // module expects. Real llm-client imported the same way (variable
 // specifier) so the apps/api tsc rootDir doesn't complain.
@@ -7640,6 +7664,48 @@ const campaignsRouter = router({
       return refinerMod.revertLastRefinement(ctx.prisma, {
         campaignId: input.campaignId,
         tenantId: ctx.tenantId,
+      });
+    }),
+
+  // KAN-1190 — Commit multi-Pipeline Action Plan (Campaign Module Reset PR 9).
+  //
+  // Sibling to legacy `commit` procedure above — the input shape diverges
+  // fundamentally (proposedPlan column read vs. CampaignProposal payload),
+  // so re-wiring the existing surface would erase load-bearing audience-
+  // snapshot semantics. The two coexist until KAN-1001's propose-preview
+  // consumers retire (none in active surfaces post-KAN-1183 list view).
+  //
+  // Locks honored:
+  //   J1 — distinct procedure name (avoids legacy collision)
+  //   J2 — service uses single prisma.$transaction wrapping all writes
+  //   J3 — ActionPlanSchema.parse + STRATEGY_STAGE_BOUNDS re-validation
+  //        at commit time (defense-in-depth — refiner enforces, commit
+  //        re-checks against on-disk state)
+  //   J4 — status flips to 'committed' NOT 'active' (preserves KAN-1001
+  //        INERT-post-commit doctrine)
+  //   J5 — per-Pipeline strategy from ActionPlanPipeline.strategy
+  //   J6 — first-actions INERT (KAN-1199 follow-up enqueues execution)
+  //   J7 — campaign.action_plan_committed audit type (distinct from legacy
+  //        campaign.commit; dual-audit-type discipline)
+  //   J8 — idempotent via already_committed discriminated variant
+  //   J11 — optimistic concurrency via expectedUpdatedAt token (matches
+  //         refiner NEW-B variant shape)
+  commitActionPlan: protectedProcedure
+    .input(
+      z.object({
+        campaignId: z.string().uuid(),
+        /** Optimistic concurrency token (J11). Caller passes
+         *  Campaign.updatedAt observed at commit-button-press time. */
+        expectedUpdatedAt: z.string().datetime().optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const commitMod = await loadCommitActionPlanModule();
+      return commitMod.commitActionPlan(ctx.prisma, {
+        campaignId: input.campaignId,
+        tenantId: ctx.tenantId,
+        expectedUpdatedAt: input.expectedUpdatedAt,
+        userId: ctx.firebaseUser?.uid,
       });
     }),
 

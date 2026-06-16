@@ -20,6 +20,8 @@ import type { ActionPlan } from "@/lib/api";
 
 const refineMock = vi.fn();
 const revertMock = vi.fn();
+const commitMock = vi.fn();
+const pushMock = vi.fn();
 
 vi.mock("@/lib/api", async (orig) => {
   const actual = await (orig as () => Promise<Record<string, unknown>>)();
@@ -29,9 +31,27 @@ vi.mock("@/lib/api", async (orig) => {
       ...(actual as { campaignsApi?: Record<string, unknown> }).campaignsApi,
       refineActionPlan: (input: unknown) => refineMock(input),
       revertLastActionPlanRefinement: (input: unknown) => revertMock(input),
+      // KAN-1190 — commitActionPlan added to ActionPlanCard via useActionPlanCard
+      // hook. Mock prevents real tRPC dispatch when hook initializes its mutation.
+      commitActionPlan: (input: unknown) => commitMock(input),
     },
   };
 });
+
+// KAN-1190 — useRouter is consumed by ActionPlanCard for the J10 success-state
+// "Open Campaign" navigation. Tests run outside the Next app-router provider,
+// so we stub useRouter() to a deterministic mock — pushMock asserts navigation
+// targets are correct in future J10-coverage tests (deferred to KAN-1191).
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({
+    push: pushMock,
+    replace: vi.fn(),
+    back: vi.fn(),
+    forward: vi.fn(),
+    refresh: vi.fn(),
+    prefetch: vi.fn(),
+  }),
+}));
 
 import { ActionPlanCard } from "../_components/ActionPlanCard";
 
@@ -96,6 +116,8 @@ function renderCard(plan: ActionPlan = PLAN) {
 beforeEach(() => {
   refineMock.mockReset();
   revertMock.mockReset();
+  commitMock.mockReset();
+  pushMock.mockReset();
 });
 
 // ─────────────────────────────────────────────
