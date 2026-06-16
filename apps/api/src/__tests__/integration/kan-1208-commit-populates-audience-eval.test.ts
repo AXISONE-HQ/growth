@@ -129,9 +129,13 @@ async function persistCanonicalPlan(
         strategy: 're_engage',
         audienceConditions: { field: 'lifecycleStage', op: 'in', values: ['customer'] },
         audienceCount: 250,
+        // re_engage strategy requires minStages: 3 per STRATEGY_STAGE_BOUNDS
+        // at action-plan-types.ts:155-159. Initial draft of this test used
+        // 2 stages and bounds_violation'd on first CI run.
         proposedStages: [
           { name: 'Re-intro', order: 0, description: 'Touch base' },
-          { name: 'Offer', order: 1, description: 'Value proposition' },
+          { name: 'Pain Check', order: 1, description: 'Reconfirm value need' },
+          { name: 'Offer', order: 2, description: 'Value proposition' },
         ],
         firstActions: [
           { day: 0, channel: 'email', intent: 'reengage', description: 'Re-intro touch' },
