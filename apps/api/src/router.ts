@@ -4944,47 +4944,60 @@ const pipelinesRouter = router({
   // isTerminal). Separate procedure from `list` (which returns stage IDs
   // only + summary metadata for the pipeline-management UI) to avoid
   // regressing that UI's shape.
-  listWithStages: protectedProcedure.query(async ({ ctx }) => {
-    const pipelines: any[] =
-      (await (ctx.prisma as any).pipeline?.findMany({
-        where: { tenantId: ctx.tenantId, isActive: true },
-        orderBy: [{ order: "asc" }, { createdAt: "asc" }],
-        include: {
-          stages: {
-            orderBy: { order: "asc" },
-            select: {
-              id: true,
-              name: true,
-              order: true,
-              isInitial: true,
-              isTerminal: true,
-              // KAN-968 — outcomeType lets the board distinguish won/lost
-              // terminal stages for the column-header accent treatment.
-              outcomeType: true,
+  //
+  // KAN-1206 — Optional `campaignId` filter. When present, only Pipelines
+  // bound to the given Campaign are returned. Drives the post-commit
+  // /campaigns/[id] CommittedCampaignView; existing callers omit the input
+  // and continue to receive all active tenant Pipelines (back-compat).
+  listWithStages: protectedProcedure
+    .input(z.object({ campaignId: z.string().uuid().optional() }).optional())
+    .query(async ({ ctx, input }) => {
+      const where: Record<string, unknown> = {
+        tenantId: ctx.tenantId,
+        isActive: true,
+      };
+      if (input?.campaignId) where.campaignId = input.campaignId;
+
+      const pipelines: any[] =
+        (await (ctx.prisma as any).pipeline?.findMany({
+          where,
+          orderBy: [{ order: "asc" }, { createdAt: "asc" }],
+          include: {
+            stages: {
+              orderBy: { order: "asc" },
+              select: {
+                id: true,
+                name: true,
+                order: true,
+                isInitial: true,
+                isTerminal: true,
+                // KAN-968 — outcomeType lets the board distinguish won/lost
+                // terminal stages for the column-header accent treatment.
+                outcomeType: true,
+              },
             },
           },
-        },
-      })) ?? [];
+        })) ?? [];
 
-    return pipelines.map((p) => ({
-      id: p.id,
-      name: p.name,
-      description: p.description ?? null,
-      // KAN-968 — objectiveId surfaced for the Pipelines board's
-      // objective-bound filter (board hides isActive=true pipelines that
-      // aren't bound to an Objective row, i.e. the KAN-793 fixture).
-      // Nullable: legacy fixtures + pre-slice-2a tenants will have null.
-      objectiveId: (p.objectiveId as string | null) ?? null,
-      stages: (p.stages ?? []) as Array<{
-        id: string;
-        name: string;
-        order: number;
-        isInitial: boolean;
-        isTerminal: boolean;
-        outcomeType: "open" | "terminal_won" | "terminal_lost";
-      }>,
-    }));
-  }),
+      return pipelines.map((p) => ({
+        id: p.id,
+        name: p.name,
+        description: p.description ?? null,
+        // KAN-968 — objectiveId surfaced for the Pipelines board's
+        // objective-bound filter (board hides isActive=true pipelines that
+        // aren't bound to an Objective row, i.e. the KAN-793 fixture).
+        // Nullable: legacy fixtures + pre-slice-2a tenants will have null.
+        objectiveId: (p.objectiveId as string | null) ?? null,
+        stages: (p.stages ?? []) as Array<{
+          id: string;
+          name: string;
+          order: number;
+          isInitial: boolean;
+          isTerminal: boolean;
+          outcomeType: "open" | "terminal_won" | "terminal_lost";
+        }>,
+      }));
+    }),
 
   // List the tenant's pipelines with computed counts (active leads + stages)
   // and the current period's target progress where a Target row exists.
