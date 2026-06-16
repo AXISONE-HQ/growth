@@ -165,6 +165,61 @@ export async function handleChatTurn(
     };
   }
 
+  // KAN-1201 L1 — Operator confirmation intent early-exit.
+  // If the current targetDim is already 'proposed' AND the operator's
+  // message is a bare confirmation, upgrade to 'confirmed' and skip the
+  // LLM call entirely. The substrate HAD the confirmation regex in
+  // selectTier() (line ~297) but only used it for tier routing — per
+  // memo `detected_signals_drive_substrate_not_just_orchestration`,
+  // detected signals should drive state transitions FIRST, then inform
+  // orchestration decisions downstream.
+  const currentDimState = params.state[targetDim];
+  if (
+    currentDimState.kind === 'proposed' &&
+    isOperatorConfirmation(params.message)
+  ) {
+    const priorValue = currentDimState.value;
+    const confirmedState: ConversationState = {
+      ...params.state,
+      [targetDim]: { kind: 'confirmed', value: priorValue } as DimensionState,
+    };
+    const allConfirmed = DIMENSION_ORDER.every(
+      (d) => confirmedState[d].kind === 'confirmed',
+    );
+    const ackMessage = allConfirmed
+      ? 'All 4 dimensions confirmed. Ready to generate your Action Plan.'
+      : buildConfirmationAck(targetDim);
+    await prisma.campaignConversationTurn.create({
+      data: {
+        tenantId: params.tenantId,
+        campaignId,
+        turnType: 'ai',
+        content: ackMessage,
+        proposalSnapshot: {
+          dimensionKey: targetDim,
+          kind: 'confirmed',
+          value: priorValue,
+        },
+      },
+    });
+    // KAN-1201 L5 — All-confirmed early return (don't wait for next turn).
+    if (allConfirmed) {
+      return {
+        kind: 'all_dimensions_confirmed',
+        aiMessage: ackMessage,
+        state: confirmedState,
+        campaignId,
+      };
+    }
+    return {
+      kind: 'dimension_confirmed',
+      aiMessage: ackMessage,
+      state: confirmedState,
+      campaignId,
+      dimensionKey: targetDim,
+    };
+  }
+
   // Build extraction prompt for the target dimension
   const systemPrompt = buildExtractionPrompt(
     targetDim,
@@ -233,13 +288,35 @@ export async function handleChatTurn(
     }
   }
 
-  const proposedState: ConversationState = {
+  // KAN-1201 L2/L3/L4 — Confidence-routed transitions per Q-ADD C5 doctrine.
+  //   L2 (HIGH + empty)    → auto-confirm  (Q-ADD C5 'high → auto-transition')
+  //   L3 (HIGH + proposed) → auto-confirm  (V2 doctrine extended: operator
+  //                          continued past a proposal without correcting =
+  //                          implicit confirmation)
+  //   L4 (MEDIUM)          → propose        (Q-ADD C5 'medium → operator-
+  //                          confirmation'; operator must explicitly confirm
+  //                          via the L1 early-exit on a subsequent turn)
+  //
+  // Pre-KAN-1201, this block hardcoded `kind: 'proposed'` for ALL confidence
+  // levels. The docstring at lines 12-19 described all 3 confidence-routing
+  // behaviors but only the LOW path (→ clarification, already returned above
+  // in the extraction.kind === 'clarification' branch) was wired. The HIGH
+  // and MEDIUM transitions existed in the docstring only. See memo
+  // `documented_doctrine_ne_implemented_doctrine`.
+  const priorKindAtTarget = params.state[targetDim].kind;
+  const shouldConfirm =
+    extraction.confidence === 'high' &&
+    (priorKindAtTarget === 'empty' || priorKindAtTarget === 'proposed');
+
+  const updatedState: ConversationState = {
     ...params.state,
-    [targetDim]: {
-      kind: 'proposed',
-      value: extraction.value,
-      confidence: extraction.confidence,
-    } as DimensionState,
+    [targetDim]: shouldConfirm
+      ? ({ kind: 'confirmed', value: extraction.value } as DimensionState)
+      : ({
+          kind: 'proposed',
+          value: extraction.value,
+          confidence: extraction.confidence,
+        } as DimensionState),
   };
 
   // Persist updated state to Campaign row for chat-history resume
@@ -258,17 +335,45 @@ export async function handleChatTurn(
       campaignId,
       turnType: 'ai',
       content: aiMessage,
-      proposalSnapshot: { dimensionKey: targetDim, value: extraction.value },
+      proposalSnapshot: {
+        dimensionKey: targetDim,
+        kind: shouldConfirm ? 'confirmed' : 'proposed',
+        value: extraction.value,
+      },
     },
   });
 
-  return {
-    kind: 'dimension_proposed',
-    aiMessage,
-    state: proposedState,
-    campaignId,
-    dimensionKey: targetDim,
-  };
+  // KAN-1201 L5 — If this confirmation closed the 4-dimension set, return
+  // all_dimensions_confirmed directly (without waiting for the operator to
+  // send another turn). Mirrors the entry-time check at line ~147 but fires
+  // on the exit path.
+  if (
+    shouldConfirm &&
+    DIMENSION_ORDER.every((d) => updatedState[d].kind === 'confirmed')
+  ) {
+    return {
+      kind: 'all_dimensions_confirmed',
+      aiMessage,
+      state: updatedState,
+      campaignId,
+    };
+  }
+
+  return shouldConfirm
+    ? {
+        kind: 'dimension_confirmed',
+        aiMessage,
+        state: updatedState,
+        campaignId,
+        dimensionKey: targetDim,
+      }
+    : {
+        kind: 'dimension_proposed',
+        aiMessage,
+        state: updatedState,
+        campaignId,
+        dimensionKey: targetDim,
+      };
 }
 
 // ─────────────────────────────────────────────
@@ -323,6 +428,51 @@ export function isResetIntent(message: string): boolean {
       trimmed,
     )
   );
+}
+
+/**
+ * KAN-1201 L1 — Operator confirmation intent detection.
+ *
+ * Conservative pattern; requires confirmation token at message START + word
+ * boundary so partial words and embedded confirmations ("we still need to
+ * confirm the audience") don't false-positive. Exported so the multi-turn
+ * integration test asserts this gate directly + so the apps/web client can
+ * locally short-circuit the API call in a future UX enhancement if useful.
+ *
+ * The substrate already had a similar regex in `selectTier` (above) but only
+ * used it to pick LLM tier. Per memo
+ * `detected_signals_drive_substrate_not_just_orchestration`, the same signal
+ * must drive STATE TRANSITIONS first; orchestration decisions are downstream.
+ * Pre-KAN-1201, an operator typing "confirmed" routed to cheap-tier LLM and
+ * the LLM re-proposed the SAME dimension — state never advanced because the
+ * confirmation signal never reached the state machine.
+ */
+export function isOperatorConfirmation(message: string): boolean {
+  const trimmed = message.trim();
+  return /^(yes|yeah|yep|confirm(ed)?|ok(ay)?|sure|correct|right|sounds good|all good|that's right|✓)\b/i.test(
+    trimmed,
+  );
+}
+
+/**
+ * KAN-1201 — Operator-facing acknowledgement when a dimension auto-confirms
+ * via L1 early-exit. Names the dimension that just confirmed + cues the
+ * operator on the NEXT dimension. Honest counsel: the ack message describes
+ * exactly the state transition the orchestrator just performed (Defect 3
+ * fix — pre-KAN-1201 the LLM's prose said "next, let's nail down your
+ * objective" but state never advanced, violating the doctrine preamble).
+ */
+function buildConfirmationAck(dim: DimensionKey): string {
+  switch (dim) {
+    case 'product':
+      return "Got it — Product confirmed. Next, let's nail down your objective: what specific outcome (revenue / units / deals / meetings) and target number do you want to hit?";
+    case 'objectives':
+      return "Objective confirmed. Next: what's the timeline — when does this Campaign start and end?";
+    case 'timeline':
+      return 'Timeline confirmed. Last dimension: the audience — who are we sending this to?';
+    case 'audience':
+      return 'Audience confirmed. All 4 dimensions are in place — ready to generate your Action Plan.';
+  }
 }
 
 // ─────────────────────────────────────────────

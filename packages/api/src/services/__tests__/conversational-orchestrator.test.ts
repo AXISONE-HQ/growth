@@ -333,7 +333,13 @@ describe('KAN-1184 — handleChatTurn (full state-machine integration)', () => {
     expect(spies.campaignCreate).toHaveBeenCalledTimes(1);
     // Operator turn + AI turn persisted = 2 calls
     expect(spies.turnCreate.mock.calls.length).toBeGreaterThanOrEqual(2);
-    expect(result.kind).toBe('dimension_proposed');
+    // KAN-1201 L2 — confidence=high + prior kind=empty → auto-confirm.
+    // Pre-KAN-1201 this returned 'dimension_proposed' (which encoded the
+    // state-machine bug as expected behavior; the test passed because the
+    // assertion matched the broken hardcoded `kind:'proposed'` at the orchestrator's
+    // build-state line). Q-ADD C5 docstring (lines 12-19) explicitly said
+    // `high → auto-transition`; KAN-1201 wires the missing transition.
+    expect(result.kind).toBe('dimension_confirmed');
   });
 
   it('reset intent → kind=reset; ConversationState resets to all-empty', async () => {
@@ -417,10 +423,17 @@ describe('KAN-1184 — handleChatTurn (full state-machine integration)', () => {
       state: tilAudience,
     });
 
-    expect(result.kind).toBe('dimension_proposed');
-    if (result.kind === 'dimension_proposed') {
+    // KAN-1201 — fixture has product+objectives+timeline already CONFIRMED
+    // and audience EMPTY; an LLM response with confidence=high confirms
+    // audience (L2), which closes the 4-set → L5 fires all_dimensions_confirmed.
+    // Pre-KAN-1201 this asserted `dimension_proposed` because the orchestrator
+    // could never reach all-confirmed (hardcoded kind:'proposed' on every
+    // extraction). The audience-count annotation persists into the aiMessage
+    // regardless of the result kind (annotation is appended before the
+    // shouldConfirm branch).
+    expect(result.kind).toBe('all_dimensions_confirmed');
+    if (result.kind === 'all_dimensions_confirmed') {
       expect(result.aiMessage).toMatch(/1,247 contacts match/);
-      expect(result.dimensionKey).toBe('audience');
     }
   });
 
