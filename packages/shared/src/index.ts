@@ -115,3 +115,10 @@ export * from "./action-plan-types.js";
 // (Decimal(12,2) + USD-default) discipline per codebase precedent (Deal/Order),
 // NOT Stripe Int cents — see codebase_precedent_over_external_convention memo.
 export * from "./products.js";
+// KAN-1214 (Slice 1 PR 2 of KAN-1212 epic) — ProductVariant schema. Sibling
+// to products.ts; carries variant attributes (Json) + nullable price override
+// with INHERIT-from-parent semantic (Memo 43 — same_mechanism_different_semantic).
+// SKU explicitly rejected per Q-ADD B4 (zero codebase anchor); attribute-based
+// discrimination only. KAN-1216 CRUD implements the runtime price resolution
+// `variant.price ?? variant.product.price ?? null`.
+export * from "./product-variants.js";
