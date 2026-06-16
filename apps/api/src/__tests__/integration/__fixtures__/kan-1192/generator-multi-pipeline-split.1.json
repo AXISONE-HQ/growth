@@ -1,0 +1,10 @@
+{
+  "scenario": "generator-multi-pipeline-split",
+  "callIndex": 1,
+  "callerTag": "action-plan-generator:per-pipeline",
+  "tier": "reasoning",
+  "text": "{\"name\": \"Returning Customer Pipeline\", \"strategy\": \"guided\", \"proposedStages\": [{\"name\": \"Educate\", \"order\": 0, \"description\": \"Customer tier overview and benefits.\"}, {\"name\": \"Compare\", \"order\": 1, \"description\": \"Compare current tier to upgrade options.\"}, {\"name\": \"Recommend\", \"order\": 2, \"description\": \"Personalized recommendation to customer cohort.\"}, {\"name\": \"Close\", \"order\": 3, \"description\": \"Close customer upgrade with incentive.\"}], \"firstActions\": [{\"day\": 0, \"channel\": \"email\", \"intent\": \"educate\", \"description\": \"Day-0 customer tier overview email to returning_customers cohort.\"}]}",
+  "model": "claude-sonnet-4-6",
+  "inputTokens": 380,
+  "outputTokens": 180
+}

@@ -1,0 +1,10 @@
+{
+  "scenario": "refiner-bounds-violation",
+  "callIndex": 0,
+  "callerTag": "action-plan-refiner:classify",
+  "tier": "reasoning",
+  "text": "{\"axis\": \"stage\", \"pipelineIndex\": 0, \"op\": \"add\", \"newName\": \"Negotiation\", \"newOrder\": 3, \"newDescription\": \"Negotiate terms before final close.\"}",
+  "model": "claude-sonnet-4-6",
+  "inputTokens": 540,
+  "outputTokens": 55
+}

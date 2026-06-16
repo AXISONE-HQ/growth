@@ -1,0 +1,10 @@
+{
+  "scenario": "refiner-audience-edit",
+  "callIndex": 0,
+  "callerTag": "action-plan-refiner:classify",
+  "tier": "reasoning",
+  "text": "{\"axis\": \"audience\", \"newAudienceConditions\": {\"allOf\": [{\"field\": \"lifecycleStage\", \"op\": \"in\", \"values\": [\"customer\"]}, {\"field\": \"region\", \"op\": \"in\", \"values\": [\"QC\"]}]}}",
+  "model": "claude-sonnet-4-6",
+  "inputTokens": 540,
+  "outputTokens": 70
+}
