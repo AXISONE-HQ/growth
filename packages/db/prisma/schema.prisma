@@ -184,6 +184,11 @@ model Tenant {
   // scoped relations above. Slice 1 of the catalog module; full CRUD lands
   // in KAN-1216, FK upgrade of Campaign.goalProductId in KAN-1225.
   products                Product[]
+  // KAN-1214 — ProductVariant tenant back-relation. Variants carry denormalized
+  // tenantId for hot-path tenant-scoped list queries (CampaignMembership:692
+  // precedent — tenant-scoped child models declare both parent FK and tenant FK).
+  // Cascade matches Product's pattern.
+  productVariants         ProductVariant[]
 
   //   tenantSettings  TenantSettings[]  // commented out for smoke build (model missing on main)
   channelConnections    ChannelConnection[]
@@ -3591,6 +3596,9 @@ model Product {
   // Relations — Cascade mirrors sibling tenant-scoped models. Product is a
   // tenant-owned asset; tenant deletion (rare) takes the catalog with it.
   tenant          Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  // KAN-1214 — ProductVariant back-relation. Cascade from Product → variants
+  // (variants die with parent product; matches Slice 1 lifecycle contract).
+  variants        ProductVariant[]
 
   @@index([tenantId])
   @@index([tenantId, status])
@@ -3608,4 +3616,100 @@ enum ProductStatus {
   archived // soft-deleted; excluded from default listProducts; preserves FK integrity
 
   @@map("product_status")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// KAN-1214 — ProductVariant substrate (Slice 1 PR 2 of KAN-1212 epic).
+//
+// Variant permutations of a parent Product. Holds attribute discriminators
+// (size/color/tier) in a Json column + an optional price override. NO own
+// status column — variant lifecycle is fully owned by parent Product.status
+// per the CampaignMembership precedent (schema.prisma:679-701 — tenant-scoped
+// child models that inherit parent status carry no `status` column).
+//
+// # Differential-semantic doctrine (Memo 43)
+//
+// `ProductVariant.price` is `Decimal? @db.Decimal(12, 2)` — IDENTICAL SQL type
+// to `Product.price` (schema.prisma:3576). But the application-layer semantic
+// of `null` DIFFERS:
+//
+//   - `Product.price = null`        — "no price set; treat as unpriced"
+//   - `ProductVariant.price = null` — "INHERIT from parent Product.price at runtime"
+//
+// Runtime resolution rule (implemented in KAN-1216 CRUD service):
+//
+//   const resolvedPrice = variant.price ?? variant.product.price ?? null;
+//   // null at the bottom level = unpriced (terminal); never coalesce to 0.
+//
+// Service-layer test contract (deferred to KAN-1216): assert three cases —
+// (variant.price=X, product.price=Y) → X; (variant.price=null, product.price=Y) → Y;
+// (variant.price=null, product.price=null) → null. See
+// `same_mechanism_different_semantic_schema_pattern` memo for the discipline.
+//
+// # Attribute shape (Q-A10 lock — packages/shared/src/product-variants.ts)
+//
+// `attributes Json @default("{}")` matches 5 sibling-model anchors for
+// typed-but-flexible Json payloads (Deal.customFields:2001, Deal.aiContext:2002,
+// Deal.microObjectiveProgress:1977, Product.customFields:3584, Order.lineItems:2621).
+// Shape: `{ size?: string, color?: string, tier?: string, [k: string]: unknown }`.
+// Zod parse-at-write enforces known keys at CRUD entry; NO @@unique([productId,
+// attributes]) constraint (KAN-1214 Q-ADD B8 verdict — zero sibling precedent
+// across 67 models). Service-layer dedup deferred to KAN-1216.
+//
+// # SKU explicitly REJECTED (Q-ADD B4 verdict + Memo 39)
+//
+// Zero schema anchor for `sku` across 67 models. Only `sku` references in repo
+// are the zombie tRPC procedures at apps/api/src/router.ts:3099,3119 (origin
+// commit 076fa20 Apr 2026). KAN-1218 deletes the zombies atomically with the
+// canonical /settings/products UI. KAN-1214 explicitly does NOT ship `sku`;
+// variant differentiation lives entirely in `attributes`. See
+// `codebase_precedent_over_external_convention` memo + KAN-1218 scope addendum
+// extension (Jira comment 11735 on epic).
+//
+// # Index discipline (Q-ADD B7 verdict)
+//
+// Two lone indexes (no composites in Slice 1):
+//   - (productId) — FK-lookup primary access pattern (listVariants by product;
+//     CampaignMembership:698 precedent)
+//   - (tenantId)  — denormalized hot-path tenant-scoped list queries; matches
+//     KAN-1213 Product's @@index([tenantId]) fallback pattern (3595)
+//
+// Composite indexes deferred to KAN-1216 once query shapes stabilize through
+// the CRUD surface.
+//
+// # Soft-delete deferred (Q-A11)
+//
+// NO archivedAt on ProductVariant — variant lifecycle fully owned by parent
+// Product.status. Variant-level archive (if UX ever requires it) lands as a
+// follow-up; for MVP, archiving a Product also archives its variants
+// transitively via status inheritance.
+// ─────────────────────────────────────────────────────────────────────────
+model ProductVariant {
+  id           String   @id @default(uuid())
+  tenantId     String   @map("tenant_id")
+  productId    String   @map("product_id")
+
+  // Discriminators — {size?, color?, tier?, ...} per Q-A10 lock. Zod
+  // VariantAttributesSchema parses at write in KAN-1216 CRUD.
+  attributes   Json     @default("{}")
+
+  // Money — Decimal(12,2) matches Product.price (KAN-1213) and Deal.value
+  // (1974) and Order.{subtotal,grandTotal} (2609-2613). null = "inherit from
+  // parent Product.price at runtime" per Memo 43; NOT "unpriced" (that's
+  // Product.price semantic). See model header for full doctrine.
+  price        Decimal? @db.Decimal(12, 2)
+
+  // Lifecycle (no archivedAt — see header)
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  // Relations — Cascade from parent Product (variants die with parent) +
+  // Cascade from Tenant (catalog dies with tenant). Mirrors
+  // CampaignMembership:692 dual-parent-FK pattern.
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([productId])
+  @@index([tenantId])
+  @@map("product_variants")
 }
