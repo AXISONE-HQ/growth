@@ -535,7 +535,16 @@ model Campaign {
   // which captures TRANSIENT proposals the user previewed-but-didn't-
   // commit. Both surfaces matter for text-to-segment quality review.
   nlIntent    String?           @map("nl_intent")
-  objectiveId String            @map("objective_id")
+  // KAN-1200 — Nullable. KAN-1184 chat orchestrator mints draft Campaigns
+  // BEFORE an Objective is bound; pre-KAN-1167 doctrine that Campaigns
+  // are Objective-owned has been retired (goal semantics live on Campaign
+  // columns goalType/goalTarget/goalProductId/goalDescription). KAN-1190
+  // V3 already nullified Pipeline.objectiveId on Action Plan commits; this
+  // extends the same nullable-objective pattern to Campaign to unblock
+  // conversational draft creation. FK relation kept with onDelete: Restrict
+  // — a nullable FK with Restrict is still safe; if an Objective IS bound,
+  // it cannot be dropped while the Campaign references it.
+  objectiveId String?           @map("objective_id")
   // 4 user-facing strategies (the 6-value StrategyType enum's escalate +
   // wait are decision-engine control-flow primitives, not campaign
   // strategies). Nullable — committed without explicit strategy = default
@@ -608,7 +617,11 @@ model Campaign {
   tenant            Tenant                     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   // Restrict — you can't drop an Objective with live Campaigns hanging off it.
   // Mirrors TenantObjectiveSelection.objective relation posture.
-  objective         Objective                  @relation(fields: [objectiveId], references: [id], onDelete: Restrict)
+  // KAN-1200 — Optional relation (objectiveId is nullable). Drafts from the
+  // KAN-1184 chat orchestrator have NULL objectiveId until/unless the
+  // operator binds one. Restrict still applies when an Objective IS bound:
+  // the Objective cannot be dropped while any Campaign references it.
+  objective         Objective?                 @relation(fields: [objectiveId], references: [id], onDelete: Restrict)
   pipelines         Pipeline[]
   memberships       CampaignMembership[]
   stackEntries      ContactObjectiveStack[]
