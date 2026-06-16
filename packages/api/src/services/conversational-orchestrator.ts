@@ -23,7 +23,11 @@ import type {
   DimensionState,
   ChatTurnResult,
 } from '@growth/shared';
-import { DIMENSION_ORDER, emptyConversationState } from '@growth/shared';
+import {
+  AudienceConditionsSchema,
+  DIMENSION_ORDER,
+  emptyConversationState,
+} from '@growth/shared';
 
 // ─────────────────────────────────────────────
 // Public API
@@ -604,14 +608,43 @@ Both fields are required. Example for "campaign runs July 2026":
   }`;
     case 'audience':
       return `Return value as an AudienceConditions tree per the leaf vocabulary above.
+
+# Canonical leaf shapes (use EXACTLY these)
+
+  { "field": "lifecycleStage", "op": "in", "values": [<"lead"|"mql"|"sql"|"customer"|"lost">, ...] }
+  { "field": "segment",        "op": "in", "values": [<string>, ...] }
+  { "field": "source",         "op": "in", "values": [<"email_inbox"|"web_form"|"meta_ad"|...>, ...] }
+  { "field": "country",        "op": "in", "values": [<"CA"|"US"|...>, ...] }   // ISO-3166-1 alpha-2
+  { "field": "region",         "op": "in", "values": [<string>, ...] }          // state/province free-text
+  { "field": "city",           "op": "in", "values": [<string>, ...] }
+  { "field": "createdAt",      "op": "between", "fromUtc": "<ISO>", "toUtcExclusive": "<ISO>" }
+  { "field": "orders.placedAt", "op": "between", "fromUtc": "<ISO>", "toUtcExclusive": "<ISO>" }
+  { "field": "orders.refundedAt", "op": "between", "fromUtc": "<ISO>", "toUtcExclusive": "<ISO>" }
+  { "field": "orders.cancelledAt", "op": "between", "fromUtc": "<ISO>", "toUtcExclusive": "<ISO>" }
+  { "field": "orders.exists",  "op": "eq", "value": <true|false> }
+  { "field": "deal.value.gte", "op": "gte", "value": <number-usd> }
+  { "field": "deal.value.lte", "op": "lte", "value": <number-usd> }
+  { "field": "deal.value.between", "op": "between", "minUsd": <number>, "maxUsdExclusive": <number> }
+
+# IMPORTANT (KAN-1204 lessons)
+
+- Date filters MUST use \`op: "between"\` with \`fromUtc\` + \`toUtcExclusive\` (NOT \`lte\`/\`gte\` with a single \`value\`)
+- lifecycleStage MUST use ONLY the 5 canonical values (lead/mql/sql/customer/lost) — "contact" or "prospect" are invalid
+- country MUST be uppercase 2-letter ISO codes (NOT "Canada" or "United States")
+
 Example for "leads from Quebec who bought in last 30 days":
   "value": {
     "allOf": [
       { "field": "lifecycleStage", "op": "in", "values": ["lead"] },
       { "field": "region", "op": "in", "values": ["QC"] },
-      { "field": "orders.placedAt", "op": "gte", "value": "<ISO timestamp 30d ago>" }
+      { "field": "orders.placedAt", "op": "between",
+        "fromUtc": "2026-05-17T00:00:00.000Z",
+        "toUtcExclusive": "2026-06-16T00:00:00.000Z" }
     ]
-  }`;
+  }
+
+Trees compose with \`allOf\` and \`anyOf\`:
+  "value": { "anyOf": [<tree1>, <tree2>] }`;
   }
 }
 
@@ -858,6 +891,218 @@ function normalizeObjectives(value: unknown): Partial<{
   return result;
 }
 
+// ─────────────────────────────────────────────
+// KAN-1204 — Audience tree normalizer
+//
+// Walks the recursive AudienceConditions tree (allOf/anyOf/leaf) and
+// rewrites each leaf into a canonical shape that AudienceConditionsSchema.parse
+// accepts. Handles three classes of LLM divergence empirically observed
+// in Fred's PROD session:
+//
+//   1. Date filters emitted as single-value comparisons
+//      ({field: 'orders.placedAt', op: 'lte', value: ISO})
+//      → canonical between with sentinel bounds
+//      ({field: 'orders.placedAt', op: 'between', fromUtc: EPOCH_ISO,
+//        toUtcExclusive: ISO})
+//
+//   2. Invalid enum values in lifecycleStage/source filters
+//      ({values: ['customer', 'contact']} — 'contact' isn't a valid stage)
+//      → filter values to canonical enum members; drop leaf entirely if
+//      all values become invalid
+//
+//   3. Country values not in ISO-3166-1 alpha-2 shape
+//      ({values: ['Canada']}) → uppercase 2-char attempt; drop if can't coerce
+//
+// Returns ok with the normalized tree OR err with the reason for surfacing
+// in the persist-drift log. Caller writes data.audienceConditions only on ok.
+// ─────────────────────────────────────────────
+
+/** ISO sentinel bounds for converting single-sided date comparisons into
+ *  canonical between intervals. Distant past + distant future so the
+ *  resulting [from, toExclusive) covers everything operator likely meant. */
+const EPOCH_ISO = '1970-01-01T00:00:00.000Z';
+const FAR_FUTURE_ISO = '2099-12-31T23:59:59.999Z';
+
+/** Canonical LifecycleStage enum values (mirrored from packages/shared
+ *  enums.ts to avoid a circular shared-import for runtime data). Drift
+ *  between this list and `LifecycleStageEnum` is caught by the integration
+ *  test scenarios. */
+const CANONICAL_LIFECYCLE_STAGES = new Set([
+  'lead',
+  'mql',
+  'sql',
+  'customer',
+  'lost',
+]);
+
+const CANONICAL_CONTACT_SOURCES = new Set([
+  'email_inbox',
+  'web_form',
+  'meta_ad',
+  'manual',
+  'csv_import',
+  'api',
+  'hubspot',
+  'stripe',
+  'shopify',
+  'other',
+]);
+
+/** Date-leaf field names that the canonical schema constrains to
+ *  `op: 'between'` with `fromUtc` + `toUtcExclusive`. The LLM frequently
+ *  emits single-value `op: 'lte'` / `op: 'gte'` for these; normalizer
+ *  converts to the canonical between shape with sentinel bounds. */
+const DATE_LEAF_FIELDS = new Set([
+  'createdAt',
+  'orders.placedAt',
+  'orders.refundedAt',
+  'orders.cancelledAt',
+]);
+
+function isIsoDateString(v: unknown): v is string {
+  if (typeof v !== 'string') return false;
+  const d = new Date(v);
+  return !Number.isNaN(d.getTime());
+}
+
+function normalizeAudienceLeaf(leaf: Record<string, unknown>): Record<string, unknown> | null {
+  const field = leaf.field;
+  if (typeof field !== 'string') return null;
+
+  // Date leaves: coerce lte/gte/eq with ISO `value` into canonical between.
+  if (DATE_LEAF_FIELDS.has(field)) {
+    if (leaf.op === 'between' && typeof leaf.fromUtc === 'string' && typeof leaf.toUtcExclusive === 'string') {
+      return { field, op: 'between', fromUtc: leaf.fromUtc, toUtcExclusive: leaf.toUtcExclusive };
+    }
+    // lte: between [EPOCH, value)
+    if (leaf.op === 'lte' && isIsoDateString(leaf.value)) {
+      return { field, op: 'between', fromUtc: EPOCH_ISO, toUtcExclusive: leaf.value as string };
+    }
+    // gte: between [value, FAR_FUTURE)
+    if (leaf.op === 'gte' && isIsoDateString(leaf.value)) {
+      return { field, op: 'between', fromUtc: leaf.value as string, toUtcExclusive: FAR_FUTURE_ISO };
+    }
+    // Common LLM variant: `fromUtc` + `to` (without 'Exclusive' suffix)
+    if (leaf.op === 'between' && typeof leaf.fromUtc === 'string' && typeof leaf.to === 'string') {
+      return { field, op: 'between', fromUtc: leaf.fromUtc, toUtcExclusive: leaf.to };
+    }
+    return null;
+  }
+
+  // lifecycleStage: filter values to canonical enum members.
+  if (field === 'lifecycleStage' && leaf.op === 'in' && Array.isArray(leaf.values)) {
+    const filtered = (leaf.values as unknown[]).filter(
+      (v): v is string => typeof v === 'string' && CANONICAL_LIFECYCLE_STAGES.has(v),
+    );
+    if (filtered.length === 0) return null;
+    return { field: 'lifecycleStage', op: 'in', values: filtered };
+  }
+
+  // source: filter values to canonical enum members.
+  if (field === 'source' && leaf.op === 'in' && Array.isArray(leaf.values)) {
+    const filtered = (leaf.values as unknown[]).filter(
+      (v): v is string => typeof v === 'string' && CANONICAL_CONTACT_SOURCES.has(v),
+    );
+    if (filtered.length === 0) return null;
+    return { field: 'source', op: 'in', values: filtered };
+  }
+
+  // country: 2-char ISO uppercase. LLM may emit "Canada"; we can't safely
+  // coerce country names → ISO without a lookup table, so reject non-shape
+  // values + log for follow-up.
+  if (field === 'country' && leaf.op === 'in' && Array.isArray(leaf.values)) {
+    const filtered = (leaf.values as unknown[]).filter(
+      (v): v is string => typeof v === 'string' && /^[A-Z]{2}$/.test(v),
+    );
+    if (filtered.length === 0) return null;
+    return { field: 'country', op: 'in', values: filtered };
+  }
+
+  // segment, region, city: free-text array; pass through with string filter.
+  if (
+    (field === 'segment' || field === 'region' || field === 'city') &&
+    leaf.op === 'in' &&
+    Array.isArray(leaf.values)
+  ) {
+    const filtered = (leaf.values as unknown[]).filter(
+      (v): v is string => typeof v === 'string' && v.length > 0,
+    );
+    if (filtered.length === 0) return null;
+    return { field, op: 'in', values: filtered };
+  }
+
+  // orders.exists: boolean comparison.
+  if (field === 'orders.exists' && leaf.op === 'eq' && typeof leaf.value === 'boolean') {
+    return { field: 'orders.exists', op: 'eq', value: leaf.value };
+  }
+
+  // deal.value.{gte,lte,between}: numeric comparison.
+  if (field === 'deal.value.gte' && leaf.op === 'gte' && typeof leaf.value === 'number' && leaf.value >= 0) {
+    return { field: 'deal.value.gte', op: 'gte', value: leaf.value };
+  }
+  if (field === 'deal.value.lte' && leaf.op === 'lte' && typeof leaf.value === 'number' && leaf.value >= 0) {
+    return { field: 'deal.value.lte', op: 'lte', value: leaf.value };
+  }
+  if (field === 'deal.value.between' && leaf.op === 'between' && typeof leaf.minUsd === 'number' && typeof leaf.maxUsdExclusive === 'number') {
+    return { field: 'deal.value.between', op: 'between', minUsd: leaf.minUsd, maxUsdExclusive: leaf.maxUsdExclusive };
+  }
+
+  // Unmappable shape: drop with warn-via-null-return.
+  return null;
+}
+
+function normalizeAudienceNode(node: unknown): Record<string, unknown> | null {
+  if (!node || typeof node !== 'object') return null;
+  const n = node as Record<string, unknown>;
+
+  // Recursive: allOf/anyOf
+  if (Array.isArray(n.allOf)) {
+    const children = (n.allOf as unknown[])
+      .map((c) => normalizeAudienceNode(c))
+      .filter((c): c is Record<string, unknown> => c !== null);
+    if (children.length === 0) return null;
+    if (children.length === 1) return children[0]; // unwrap single-child allOf
+    return { allOf: children };
+  }
+  if (Array.isArray(n.anyOf)) {
+    const children = (n.anyOf as unknown[])
+      .map((c) => normalizeAudienceNode(c))
+      .filter((c): c is Record<string, unknown> => c !== null);
+    if (children.length === 0) return null;
+    if (children.length === 1) return children[0]; // unwrap single-child anyOf
+    return { anyOf: children };
+  }
+
+  // Leaf
+  if (typeof n.field === 'string') {
+    return normalizeAudienceLeaf(n);
+  }
+
+  return null;
+}
+
+/** Top-level audience normalizer. Walks tree, normalizes each leaf, and
+ *  validates the result against AudienceConditionsSchema.parse before
+ *  returning. Returns discriminated result for caller introspection. */
+function normalizeAudienceTree(
+  value: unknown,
+): { kind: 'ok'; tree: unknown } | { kind: 'err'; reason: string } {
+  const normalized = normalizeAudienceNode(value);
+  if (!normalized) {
+    return { kind: 'err', reason: 'all-leaves-unmappable' };
+  }
+  // Validate via the canonical Zod schema before persisting. Imported lazily
+  // via @growth/shared the same way other types are.
+  try {
+    // The schema is already imported at the top of this file via @growth/shared
+    // (AudienceConditionsSchema). We call .parse to throw on invalid shape.
+    AudienceConditionsSchema.parse(normalized);
+    return { kind: 'ok', tree: normalized };
+  } catch (err) {
+    return { kind: 'err', reason: `schema-parse-failed: ${(err as Error).message.slice(0, 120)}` };
+  }
+}
+
 /** Normalize the LLM's timeline-dimension value to {windowStart, windowEnd}
  *  as Date objects. Pre-KAN-1203 accepted only ISO strings via `new Date()`
  *  (which silently returns Invalid Date on bad input); KAN-1203 surfaces
@@ -935,13 +1180,34 @@ async function persistDimensionToCampaign(
       }
       break;
     }
-    case 'audience':
-      // KAN-1203 — audience passes through to Campaign.audienceConditions
-      // JSON column; downstream validation (generator/refiner) runs
-      // AudienceConditionsSchema.parse separately. Logging drift here would
-      // false-positive on schema-valid-but-non-trivial trees.
-      data.audienceConditions = value;
+    case 'audience': {
+      // KAN-1204 — Audience normalizer. Pre-KAN-1204 was passthrough; the
+      // LLM emitted creative shapes that failed AudienceConditionsSchema.parse
+      // downstream at the generator's validation gate (Fred's smoke saw
+      // amber banner "Campaign audienceConditions failed schema validation").
+      //
+      // Worse: the KAN-1203 prompt example for audience contained a
+      // NON-canonical shape (`{field: 'orders.placedAt', op: 'gte', ...}` —
+      // only `op: 'between'` is canonical for date leaves). The LLM
+      // faithfully followed the wrong example. Both layers fixed: prompt
+      // example corrected below + normalizer wired here.
+      //
+      // The normalizer walks the recursive (allOf/anyOf/leaf) tree, fixes
+      // common LLM divergences at each leaf, drops unmappable leaves, and
+      // validates the final shape via AudienceConditionsSchema.parse before
+      // persisting. If parse fails, no write happens (Campaign.audienceConditions
+      // stays as {} from createDraftCampaign and the generator surfaces
+      // insufficient_dimensions honestly to the operator).
+      const normalized = normalizeAudienceTree(value);
+      if (normalized.kind === 'ok') {
+        data.audienceConditions = normalized.tree;
+      } else {
+        console.warn(
+          `[orchestrator] audience-persist-drift campaignId=${campaignId} reason=${normalized.reason} valueShape=${describeValueShape(value)}`,
+        );
+      }
       break;
+    }
   }
   if (Object.keys(data).length > 0) {
     await prisma.campaign.update({ where: { id: campaignId }, data });
