@@ -108,3 +108,10 @@ export * from "./conversation-types.js";
 // post-confirmation UI affordance (apps/web). D5 lock: single tenant-level
 // confidence — no per-Pipeline confidence field.
 export * from "./action-plan-types.js";
+// KAN-1213 (Slice 1 of KAN-1212 epic) — Product Catalog Module schema. Single
+// source of truth for Product shape + ProductStatus enum + ProductListResponse
+// across apps/api (products.list), apps/web (Settings catalog UI, KAN-1214),
+// and apps/connectors (scrape-UX import target, KAN-1223). Money column
+// (Decimal(12,2) + USD-default) discipline per codebase precedent (Deal/Order),
+// NOT Stripe Int cents — see codebase_precedent_over_external_convention memo.
+export * from "./products.js";
