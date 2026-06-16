@@ -47,7 +47,31 @@
  * sidesteps TS6059.
  */
 import { describe, expect, it } from 'vitest';
-import { createTenant, withRollback } from './setup.js';
+import { createTenant, withCleanup } from './setup.js';
+
+/**
+ * KAN-1205 fix-forward — switched from `withRollback` to `withCleanup`.
+ *
+ * `commitActionPlan` opens its own `prisma.$transaction(...)` at
+ * commit-action-plan.ts:330 (J2 lock — single tx wrapping Campaign.update +
+ * N Pipeline.create). Prisma forbids nested `$transaction` calls, so the
+ * `withRollback` outer-transaction pattern surfaces as a
+ * `TypeError: prisma.$transaction is not a function` swallowed by the
+ * commit service into `kind: 'analyzer_unavailable'`.
+ *
+ * `withCleanup` runs against the real database with committed writes;
+ * the cleanup callback deletes test rows in FK order:
+ *   1. AuditLog (best-effort post-commit; auditLog has no FK to delete here)
+ *   2. Pipeline (cascades to PipelineStage + child decision/action rows)
+ *   3. Campaign
+ *   4. Tenant
+ *
+ * Sibling memo: `integration_test_isolation_pattern_must_match_service_tx_shape`
+ * (banked from KAN-1205 fix-forward).
+ *
+ * Pattern reference: `kan-1119-deferredsend-claim.test.ts` (concurrency tests
+ * that also need committed writes — same `withCleanup` shape).
+ */
 
 const commitActionPlanSpec =
   '../../../../../packages/api/src/services/commit-action-plan.js';
@@ -134,32 +158,52 @@ const TODAY = new Date('2026-06-16T13:00:00.000Z');
 // Defect reproduction — UI hook calls commit without expectedUpdatedAt
 // ─────────────────────────────────────────────
 
+/** Cleanup tenant + all FK-owned children created by KAN-1205 test scenarios.
+ *  Pipeline.delete cascades to PipelineStage; AuditLog has no FK to delete
+ *  here (rows are tenant-scoped and orphan-safe after Tenant delete). */
+async function cleanupTenant(
+  prisma: import('@prisma/client').PrismaClient,
+  tenantId: string,
+): Promise<void> {
+  await prisma.auditLog.deleteMany({ where: { tenantId } });
+  await prisma.pipeline.deleteMany({ where: { tenantId } });
+  await prisma.campaign.deleteMany({ where: { tenantId } });
+  await prisma.tenant.deleteMany({ where: { id: tenantId } });
+}
+
 describe('KAN-1205 — commit-after-generate succeeds without false concurrent_edit_conflict', () => {
   it('returns committed (NOT concurrent_edit_conflict) when expectedUpdatedAt is omitted', async () => {
     const { commitActionPlan } = (await import(commitActionPlanSpec)) as CommitModule;
     const { createDraftCampaign } = (await import(orchestratorSpec)) as OrchestratorModule;
-    await withRollback(async (prisma) => {
-      const tenant = await createTenant(prisma);
-      const draft = await createDraftCampaign(prisma, tenant.id);
-      await persistCanonicalPlan(prisma, draft.id);
+    let tenantId = '';
+    await withCleanup(
+      async (prisma) => {
+        const tenant = await createTenant(prisma);
+        tenantId = tenant.id;
+        const draft = await createDraftCampaign(prisma, tenant.id);
+        await persistCanonicalPlan(prisma, draft.id);
 
-      // Post-KAN-1205 UI hook does NOT pass expectedUpdatedAt. Server's
-      // J11 check is bypassed; commit proceeds.
-      const result = await commitActionPlan(prisma, {
-        campaignId: draft.id,
-        tenantId: tenant.id,
-        // expectedUpdatedAt intentionally omitted — this is the post-fix hook
-        // behavior.
-        todayUtc: TODAY,
-      });
+        // Post-KAN-1205 UI hook does NOT pass expectedUpdatedAt. Server's
+        // J11 check is bypassed; commit proceeds.
+        const result = await commitActionPlan(prisma, {
+          campaignId: draft.id,
+          tenantId: tenant.id,
+          // expectedUpdatedAt intentionally omitted — this is the post-fix hook
+          // behavior.
+          todayUtc: TODAY,
+        });
 
-      expect(result.kind).toBe('committed');
-      // Pre-KAN-1205 this returned 'concurrent_edit_conflict' because the
-      // UI hook passed plan.generatedAt (which never matches
-      // Campaign.updatedAt set by Prisma @updatedAt on the generator's
-      // write). Asserting 'committed' here would have failed pre-fix.
-      expect(result.kind).not.toBe('concurrent_edit_conflict');
-    });
+        expect(result.kind).toBe('committed');
+        // Pre-KAN-1205 this returned 'concurrent_edit_conflict' because the
+        // UI hook passed plan.generatedAt (which never matches
+        // Campaign.updatedAt set by Prisma @updatedAt on the generator's
+        // write). Asserting 'committed' here would have failed pre-fix.
+        expect(result.kind).not.toBe('concurrent_edit_conflict');
+      },
+      async (prisma) => {
+        if (tenantId) await cleanupTenant(prisma, tenantId);
+      },
+    );
   });
 
   it('returns concurrent_edit_conflict when expectedUpdatedAt mismatches (direct API consumer path preserved)', async () => {
@@ -169,21 +213,28 @@ describe('KAN-1205 — commit-after-generate succeeds without false concurrent_e
     // integration that read Campaign.updatedAt from an earlier getCampaign).
     const { commitActionPlan } = (await import(commitActionPlanSpec)) as CommitModule;
     const { createDraftCampaign } = (await import(orchestratorSpec)) as OrchestratorModule;
-    await withRollback(async (prisma) => {
-      const tenant = await createTenant(prisma);
-      const draft = await createDraftCampaign(prisma, tenant.id);
-      await persistCanonicalPlan(prisma, draft.id);
+    let tenantId = '';
+    await withCleanup(
+      async (prisma) => {
+        const tenant = await createTenant(prisma);
+        tenantId = tenant.id;
+        const draft = await createDraftCampaign(prisma, tenant.id);
+        await persistCanonicalPlan(prisma, draft.id);
 
-      const result = await commitActionPlan(prisma, {
-        campaignId: draft.id,
-        tenantId: tenant.id,
-        // Stale token from "earlier" — server-side J11 still fires.
-        expectedUpdatedAt: '2020-01-01T00:00:00.000Z',
-        todayUtc: TODAY,
-      });
+        const result = await commitActionPlan(prisma, {
+          campaignId: draft.id,
+          tenantId: tenant.id,
+          // Stale token from "earlier" — server-side J11 still fires.
+          expectedUpdatedAt: '2020-01-01T00:00:00.000Z',
+          todayUtc: TODAY,
+        });
 
-      expect(result.kind).toBe('concurrent_edit_conflict');
-    });
+        expect(result.kind).toBe('concurrent_edit_conflict');
+      },
+      async (prisma) => {
+        if (tenantId) await cleanupTenant(prisma, tenantId);
+      },
+    );
   });
 });
 
@@ -195,30 +246,37 @@ describe('KAN-1205 — J8 idempotency protects against UI double-click without J
   it('second commit call returns already_committed (sufficient guard without J11)', async () => {
     const { commitActionPlan } = (await import(commitActionPlanSpec)) as CommitModule;
     const { createDraftCampaign } = (await import(orchestratorSpec)) as OrchestratorModule;
-    await withRollback(async (prisma) => {
-      const tenant = await createTenant(prisma);
-      const draft = await createDraftCampaign(prisma, tenant.id);
-      await persistCanonicalPlan(prisma, draft.id);
+    let tenantId = '';
+    await withCleanup(
+      async (prisma) => {
+        const tenant = await createTenant(prisma);
+        tenantId = tenant.id;
+        const draft = await createDraftCampaign(prisma, tenant.id);
+        await persistCanonicalPlan(prisma, draft.id);
 
-      // First commit — succeeds.
-      const result1 = await commitActionPlan(prisma, {
-        campaignId: draft.id,
-        tenantId: tenant.id,
-        todayUtc: TODAY,
-      });
-      expect(result1.kind).toBe('committed');
-      const firstPipelineIds = result1.pipelineIds;
+        // First commit — succeeds.
+        const result1 = await commitActionPlan(prisma, {
+          campaignId: draft.id,
+          tenantId: tenant.id,
+          todayUtc: TODAY,
+        });
+        expect(result1.kind).toBe('committed');
+        const firstPipelineIds = result1.pipelineIds;
 
-      // Operator double-clicks — second commit returns idempotent variant.
-      const result2 = await commitActionPlan(prisma, {
-        campaignId: draft.id,
-        tenantId: tenant.id,
-        todayUtc: TODAY,
-      });
-      expect(result2.kind).toBe('already_committed');
-      // J8 contract: same Pipeline IDs returned so UI can route to same
-      // success state.
-      expect(result2.pipelineIds).toEqual(firstPipelineIds);
-    });
+        // Operator double-clicks — second commit returns idempotent variant.
+        const result2 = await commitActionPlan(prisma, {
+          campaignId: draft.id,
+          tenantId: tenant.id,
+          todayUtc: TODAY,
+        });
+        expect(result2.kind).toBe('already_committed');
+        // J8 contract: same Pipeline IDs returned so UI can route to same
+        // success state.
+        expect(result2.pipelineIds).toEqual(firstPipelineIds);
+      },
+      async (prisma) => {
+        if (tenantId) await cleanupTenant(prisma, tenantId);
+      },
+    );
   });
 });

@@ -200,7 +200,14 @@ describe("ChatRefinementInput (G3 4-family chips + send)", () => {
     expect((input as HTMLInputElement).value).toBe("Rename stage 1 to ");
   });
 
-  it("Send dispatches refineMock with refinementMessage + expectedUpdatedAt", async () => {
+  // KAN-1205 — refineMutation no longer passes expectedUpdatedAt. plan.generatedAt
+  // (LLM generation timestamp T1) never matches Campaign.updatedAt (Prisma
+  // @updatedAt T2 — set on persist), so the server-side J11 check always
+  // false-positived as concurrent_edit_conflict on operator-driven refine.
+  // Server-side J11 stays operational for direct API consumers (admin tools,
+  // third-party integrations); UI relies on J8 idempotency for double-click
+  // protection. See j11_j8_redundancy_doctrine memo.
+  it("Send dispatches refineMock with refinementMessage (no expectedUpdatedAt per KAN-1205)", async () => {
     refineMock.mockResolvedValueOnce({
       kind: "action_plan_refined",
       plan: PLAN,
@@ -215,7 +222,6 @@ describe("ChatRefinementInput (G3 4-family chips + send)", () => {
       expect(refineMock).toHaveBeenCalledWith({
         campaignId: "campaign-1",
         refinementMessage: "Rename stage 1 to Discovery",
-        expectedUpdatedAt: PLAN.generatedAt,
       });
     });
   });
