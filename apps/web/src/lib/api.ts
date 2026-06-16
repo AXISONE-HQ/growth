@@ -545,8 +545,11 @@ export const pipelinesApi = {
   list: () => trpcQuery<PipelineSummary[]>('pipelines.list'),
 
   // KAN-932 — nested stages for cascading picker UX (Deal form first user).
-  listWithStages: () =>
-    trpcQuery<PipelineWithStages[]>('pipelines.listWithStages'),
+  // KAN-1206 — Optional `campaignId` filter for the post-commit Campaign
+  // destination view. When omitted, returns all active tenant Pipelines
+  // (back-compat with KAN-932 callers).
+  listWithStages: (input?: { campaignId?: string }) =>
+    trpcQuery<PipelineWithStages[]>('pipelines.listWithStages', input),
 
   getById: (id: string) => trpcQuery<PipelineDetail>('pipelines.getById', { id }),
 

@@ -2,17 +2,21 @@
 
 /**
  * KAN-1166 PR 3-core-shell — /campaigns/[id] Campaign-as-Conversation route.
+ * KAN-1206 — Status-branching destination view: draft → existing
+ * FeasibilityChat substrate; all other statuses → CommittedCampaignView.
  *
- * Renders the chat substrate for an outcome Campaign. The hook
+ * For draft: renders the chat substrate for an outcome Campaign. The hook
  * (useCampaignChat) loads the Campaign + auto-triggers feasibility analysis
  * on first visit when goal triplet is set and feasibilityAnalysis is null.
  *
- * MVP scope (PR 3-core-shell): one operator message (goalDescription) + one
- * AI message rendering one of LoadingState | AnalyzerUnavailableCard |
- * cold_start_counsel.message | feasibility_counsel.honestAssessment. The
- * full counsel cards + achievable-paths grid land in PR 3-variants.
+ * For committed / active / paused / archived / completed: renders the
+ * CommittedCampaignView (Action Plan snapshot + LIVE Pipelines list +
+ * status-dispatched action header). Surface-completeness doctrine — every
+ * Campaign.status enum value has a destination view, so an operator never
+ * lands on the pre-Action-Plan chat surface after Pipelines have been
+ * materialized. See `surface_completeness_doctrine` + `operator_session_reveals_scope_gaps`.
  */
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import { MessageSquare } from "lucide-react";
 import {
@@ -23,6 +27,7 @@ import { Badge } from "@/components/ui/badge";
 import { useCampaignChat } from "@/lib/hooks/useCampaignChat";
 import { ChatThread } from "./_components/ChatThread";
 import { EmptyState } from "./_components/EmptyState";
+import { CommittedCampaignView } from "./_components/CommittedCampaignView";
 
 type CampaignStatus =
   | "draft"
@@ -66,6 +71,16 @@ export default function CampaignChatPage() {
     analyzeError,
     triggerAnalyze,
   } = useCampaignChat(id);
+
+  // KAN-1206 — locally-overridden status so the badge updates immediately
+  // after an Activate/Pause/Resume mutation without a Campaign refetch.
+  // Resets when `campaign.status` from the server changes (e.g., page revisit).
+  const [statusOverride, setStatusOverride] = useState<
+    CampaignStatus | null
+  >(null);
+  useEffect(() => {
+    setStatusOverride(null);
+  }, [campaign?.status]);
 
   useEffect(() => {
     if (campaign?.name) document.title = `${campaign.name} · Campaigns`;
@@ -112,6 +127,33 @@ export default function CampaignChatPage() {
     !!campaign.goalType &&
     campaign.goalTarget != null &&
     !!campaign.goalDescription;
+  const effectiveStatus: CampaignStatus = statusOverride ?? campaign.status;
+
+  // KAN-1206 — Status branching: draft → existing FeasibilityChat surface;
+  // all other statuses → CommittedCampaignView. Surface-completeness
+  // doctrine: every Campaign.status enum value has a destination view.
+  if (effectiveStatus !== "draft") {
+    return (
+      <DetailPageShell
+        backHref="/campaigns"
+        backLabel="Back to Campaigns"
+        title={campaign.name}
+        logoMark={MessageSquare}
+        headerBadge={
+          <Badge variant={campaignStatusVariant(effectiveStatus)}>
+            {effectiveStatus}
+          </Badge>
+        }
+        mainSlot={
+          <CommittedCampaignView
+            campaign={{ ...campaign, status: effectiveStatus }}
+            onStatusChanged={(next) => setStatusOverride(next)}
+          />
+        }
+        sideSlot={null}
+      />
+    );
+  }
 
   return (
     <DetailPageShell
@@ -119,7 +161,11 @@ export default function CampaignChatPage() {
       backLabel="Back to Campaigns"
       title={campaign.name}
       logoMark={MessageSquare}
-      headerBadge={<Badge variant={campaignStatusVariant(campaign.status)}>{campaign.status}</Badge>}
+      headerBadge={
+        <Badge variant={campaignStatusVariant(effectiveStatus)}>
+          {effectiveStatus}
+        </Badge>
+      }
       mainSlot={
         <SectionCard title="Conversation">
           {hasGoalTriplet ? (
