@@ -31,6 +31,11 @@ function pipelineFixture(
     name: "Inbound Lead Pipeline",
     description: null,
     objectiveId: "obj-1",
+    // KAN-1213 fix-forward — KAN-1211 (merged 3 min after KAN-1191) added
+    // `campaignId: string | null` to PipelineWithStages; this fixture was
+    // authored by KAN-1191 just before the field landed. Sub-cat 8 surgical
+    // baseline-drift fix (same archetype as the KAN-1191 lint fix-forward).
+    campaignId: null,
     stages: [
       {
         id: "stage-1",

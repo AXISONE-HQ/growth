@@ -179,6 +179,11 @@ model Tenant {
   // KAN-1001 Campaign Slice 0 — Campaign Layer back-relations.
   campaigns               Campaign[]
   campaignMemberships     CampaignMembership[]
+  // KAN-1213 — Product Catalog Module foundation (KAN-1212 epic). Reverse
+  // relation for Product.tenant FK; Cascade delete mirrors sibling tenant-
+  // scoped relations above. Slice 1 of the catalog module; full CRUD lands
+  // in KAN-1216, FK upgrade of Campaign.goalProductId in KAN-1225.
+  products                Product[]
 
   //   tenantSettings  TenantSettings[]  // commented out for smoke build (model missing on main)
   channelConnections    ChannelConnection[]
@@ -3511,4 +3516,96 @@ model ParseRuleVersion {
 
   @@index([tenantId])
   @@map("parse_rule_versions")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// KAN-1213 — Product Catalog Module substrate (Slice 1 of KAN-1212 epic).
+//
+// Tenant-scoped catalog of marketable goods/services. First consumer of this
+// model is Campaign.goalProductId (already exists as a SOFT pointer at
+// Campaign.goalProductId — schema.prisma:589, declared without an FK
+// relation in KAN-1167 specifically to defer this model). KAN-1225 (Slice 5)
+// upgrades that pointer to a proper @relation FK once the catalog has
+// stabilized through KAN-1216 (full CRUD) and KAN-1223 (scrape UX).
+//
+// # Money column discipline (codebase_precedent_over_external_convention memo)
+//
+// price + currency mirror Deal.value (schema.prisma:1974) and Order.{subtotal,
+// grandTotal} (schema.prisma:2609-2613) exactly:
+//   - Decimal @db.Decimal(12, 2) — money stored as exact decimal, not Int cents
+//   - String @default("USD") @db.VarChar(3) — ISO 4217 3-char code
+// SPO Phase 1 pre-leaned Int cents (Stripe convention); CC empirical
+// inventory across 4 sibling money columns refuted; codebase precedent wins
+// to avoid per-entity money-formatting fork. Multi-currency convergence (if
+// ever needed) lands at the Deal/Order/Product trio simultaneously, NOT
+// here in Slice 1. See KAN-1132 for multi-currency deferral context.
+//
+// # Soft-delete pattern
+//
+// archivedAt nullable timestamp mirrors Campaign.archivedAt (schema.prisma:581)
+// and Order.deletedAt (schema.prisma:2649). status='archived' is the
+// queryable enum state; archivedAt is the timestamp companion. listProducts
+// excludes archived by default (Q-ADD-11 lock).
+//
+// # Index discipline
+//
+// 4 composite indexes pre-optimize the Slice-N list-view aggregation patterns
+// established by audit_log_table_pre_optimized_for_tier_2_aggregation memo:
+//   - (tenantId)               — bulk tenant scans (rare; fallback)
+//   - (tenantId, status)       — status-filtered list queries
+//   - (tenantId, name)         — search/sort by name (alphabetical, prefix)
+//   - (tenantId, externalUrl)  — scrape-UX dedup (KAN-1223 consumer)
+//
+// # KAN-689 cohort discipline
+//
+// Substrate only in this PR. apps/api/src/router.ts gets a minimal
+// products.list query stub (inline Prisma, no service module yet) per the
+// variable-specifier dynamic-import discipline. KAN-1216 follow-up adds the
+// service module + full CRUD when the surface stabilizes.
+model Product {
+  id              String        @id @default(uuid())
+  tenantId        String        @map("tenant_id")
+
+  // Identity
+  name            String
+  description     String?
+  status          ProductStatus @default(draft)
+
+  // Money — Decimal(12,2) + USD per codebase precedent (NOT Int cents).
+  // See model-level doctrine block above for full Phase 1 reasoning.
+  price           Decimal?      @db.Decimal(12, 2)
+  currency        String        @default("USD") @db.VarChar(3)
+
+  // External references
+  externalUrl     String?       @map("external_url")
+  primaryImageUrl String?       @map("primary_image_url")
+
+  // Extension
+  customFields    Json          @default("{}") @map("custom_fields")
+
+  // Lifecycle
+  archivedAt      DateTime?     @map("archived_at")
+  createdAt       DateTime      @default(now()) @map("created_at")
+  updatedAt       DateTime      @updatedAt @map("updated_at")
+
+  // Relations — Cascade mirrors sibling tenant-scoped models. Product is a
+  // tenant-owned asset; tenant deletion (rare) takes the catalog with it.
+  tenant          Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@index([tenantId, name])
+  @@index([tenantId, externalUrl])
+  @@map("products")
+}
+
+// KAN-1213 — Product lifecycle. Three-state minimal set; widened in later
+// slices if scrape UX needs an intermediate "draft → pending_review → active"
+// gate. KAN-1004 post-canonical enum syntax (NOT String-with-comments).
+enum ProductStatus {
+  draft    // operator authoring; not yet bound to any Campaign
+  active   // bound and usable as Campaign.goalProductId target
+  archived // soft-deleted; excluded from default listProducts; preserves FK integrity
+
+  @@map("product_status")
 }

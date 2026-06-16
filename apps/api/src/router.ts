@@ -8304,6 +8304,60 @@ const campaignsRouter = router({
     }),
 });
 
+// ─────────────────────────────────────────────────────────────────────────
+// KAN-1213 — Product Catalog Module router stub (Slice 1 of KAN-1212 epic).
+//
+// This slice ships the minimal `list` query as a substrate sanity-check —
+// the route exists, is tenant-scoped via protectedProcedure, and returns the
+// canonical CursorPage<Product> shape established by KAN-1183 campaigns.list.
+//
+// # Scope deferral (KAN-1216)
+//
+// Full CRUD (create / update / archive / scrape-ingest) lands in KAN-1216
+// once the schema has stabilized through this slice's first deploy. Inline
+// Prisma findMany matches the KAN-1189 getConversationHistory pattern
+// (apps/api/src/router.ts:7461-7492) — NO service module yet because the
+// shape is read-only + filterless in Slice 1. KAN-1216 hoists to a
+// `loadProductsListModule()` loader when query complexity demands it
+// (filters, joins, aggregates).
+//
+// # Tenant scoping
+//
+// `where: { tenantId: ctx.tenantId }` — never leak cross-tenant catalog data.
+// Same posture as campaigns.list / contacts.list / companies.list (canonical
+// list-shape convention).
+//
+// # Archived default-hide (Q-ADD-11 lock from Phase 1)
+//
+// `archivedAt: null` excludes soft-deleted Products by default. KAN-1216
+// adds an `includeArchived: boolean` input mirroring the campaigns.list
+// `includeAlwaysOn` discipline.
+// ─────────────────────────────────────────────────────────────────────────
+const productsRouter = router({
+  list: protectedProcedure
+    .input(
+      z.object({
+        limit: z.number().int().min(1).max(200).default(50),
+        cursor: z.string().optional(),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      const products = await (ctx.prisma as any).product.findMany({
+        where: {
+          tenantId: ctx.tenantId,
+          archivedAt: null,
+        },
+        orderBy: { createdAt: "desc" },
+        take: input.limit + 1, // one extra for cursor detection
+        ...(input.cursor ? { cursor: { id: input.cursor }, skip: 1 } : {}),
+      });
+      const hasMore = products.length > input.limit;
+      const items = hasMore ? products.slice(0, input.limit) : products;
+      const nextCursor = hasMore ? items[items.length - 1].id : null;
+      return { items, nextCursor, totalCount: items.length };
+    }),
+});
+
 const usersRouter = router({
   list: protectedProcedure
     .input(
@@ -8625,6 +8679,9 @@ export const appRouter = router({
   account: accountRouter,
   // KAN-997 — Campaign Layer Slice 1 — text-to-segment (read-only).
   campaigns: campaignsRouter,
+  // KAN-1213 — Product Catalog Module substrate (Slice 1 of KAN-1212 epic).
+  // List-only stub this slice; KAN-1216 expands to full CRUD.
+  products: productsRouter,
   // KAN-1005 M2-4 — Circuit breaker admin surface (status/reset/trip).
   circuitBreaker: circuitBreakerRouter,
   // M3-1c — Sub-objective gap-state read + operator manual transition.
