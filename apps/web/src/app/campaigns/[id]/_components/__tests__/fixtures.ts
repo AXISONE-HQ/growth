@@ -12,6 +12,8 @@ import type {
   FeasibilityCounselResult,
   AchievabilityVerdict,
   FeasibilityConfidence,
+  ActionPlan,
+  CommittedPlanSnapshot,
 } from "@growth/shared";
 
 export function feasibilityCounselFixture(
@@ -133,3 +135,75 @@ export const ALL_CONFIDENCES: FeasibilityConfidence[] = [
   "low",
   "insufficient_data",
 ];
+
+// ─────────────────────────────────────────────
+// KAN-1191 — ActionPlan + CommittedPlanSnapshot fixtures.
+//
+// Canonical ActionPlan with `direct` strategy (minStages=2 / maxStages=4 per
+// STRATEGY_STAGE_BOUNDS) at 3 stages — avoids the re_engage minStages=3 lower
+// bound issue surfaced by KAN-1208 fix-forward. Single-pipeline default; pass
+// `overrides.pipelines` to test multi-pipeline rendering. Audience uses the
+// simplest valid leaf shape (field + op + values) per AudienceConditionsSchema.
+//
+// Memos: discriminated_union_rejected_variant_doctrine + surface_completeness_doctrine
+// ─────────────────────────────────────────────
+
+export function actionPlanFixture(
+  overrides: Partial<ActionPlan> = {},
+): ActionPlan {
+  return {
+    pipelines: [
+      {
+        name: "Inbound Lead Pipeline",
+        segment: "new_leads",
+        strategy: "direct",
+        audienceConditions: {
+          field: "lifecycleStage",
+          op: "in",
+          values: ["lead"],
+        },
+        audienceCount: 300,
+        proposedStages: [
+          { name: "Outreach", order: 0, description: "Day-0 outbound" },
+          { name: "Qualify", order: 1, description: "Discovery call" },
+          { name: "Close", order: 2, description: "Proposal + close" },
+        ],
+        firstActions: [
+          {
+            day: 0,
+            channel: "email",
+            intent: "outreach",
+            description: "Day-0 personalized intro",
+          },
+        ],
+        projectedContribution: 15,
+        shareOfGoal: 30,
+      },
+    ],
+    confidence: "high",
+    confidenceReason: "200+ closed deals over 365d",
+    gapAnalysis: {
+      goalTarget: 50,
+      projectedOrganic: 15,
+      gapAbsolute: 35,
+      gapPercent: 70,
+      goalWindowDays: 90,
+    },
+    modelUsed: "claude-sonnet-4-6",
+    generatedAt: "2026-06-15T19:00:00.000Z",
+    ...overrides,
+  };
+}
+
+export function committedPlanSnapshotFixture(
+  overrides: Partial<CommittedPlanSnapshot> = {},
+): CommittedPlanSnapshot {
+  const plan = overrides.plan ?? actionPlanFixture();
+  return {
+    campaignName: "Q3 Push",
+    committedAt: "2026-06-15T20:00:00.000Z",
+    plan,
+    pipelineIds: ["pipeline-1"],
+    ...overrides,
+  };
+}
