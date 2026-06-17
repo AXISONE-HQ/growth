@@ -1,0 +1,59 @@
+-- KAN-1217 — Tenant marketing domain config (Slice 3 of KAN-1212 epic).
+--
+-- # Additive-only contract
+--
+-- This migration is ADDITIVE: one new nullable column + one composite index.
+-- No existing column/table modified. Rollback is clean (DROP INDEX + DROP
+-- COLUMN reverses); existing rows stay valid (nullable column accepts NULL).
+--
+-- # Why a substrate-only PR for one column (Slice 3 split)
+--
+-- KAN-1217 Phase 1 trace surfaced D-H4 (settingsRouter co-location per Memo 39
+-- codebase-precedent-over-external-convention — no tenantRouter exists) +
+-- D-H3 (subdomain matching deferred to KAN-1218 scraper bootstrap). This PR
+-- ships the column + the read/write tRPC procedures the operator UI in
+-- KAN-1218 will consume; scraper subdomain-matching lives in KAN-1218.
+--
+-- # KAN-1218 scraper consumer contract (Memo 41 zombie-prevention)
+--
+-- The scraper (Slice 4 of KAN-1212) requires `marketing_domain` non-null;
+-- requests for a tenant without a configured domain are rejected with the
+-- discriminated variant `tenant_marketing_domain_not_configured`. Stored as
+-- plain hostname (no protocol/path); scraper accepts the configured domain
+-- + any subdomain via hostname-suffix match (defined at KAN-1218 boundary).
+--
+-- # Field shape (VarChar(255))
+--
+-- VarChar(255) matches RFC 1035 max FQDN length (253 chars) + headroom.
+-- Stored lowercased (extractMarketingHostname normalises at the procedure
+-- boundary via `new URL(input).hostname.toLowerCase()`) so KAN-1218 hostname
+-- match is case-insensitive without per-query LOWER() cost.
+--
+-- # Composite index discipline
+--
+-- (id, marketing_domain) supports the KAN-1218 scraper's per-tenant lookup:
+--   findUnique({ where: { id }, select: { marketingDomain: true } })
+-- The id PK index already serves this, but the composite covers the
+-- read-only projection (index-only scan) without touching the row heap.
+-- Tenant row count is ≤10^4 in PROD (audit_log_table_pre_optimized_for_tier_2
+-- baseline) so the extra index cost is negligible (<5MB).
+--
+-- # Why nullable
+--
+-- Operator-configured columns are nullable so non-operator paths (KAN-1218
+-- scrape UX bootstrap, future M&A migration) don't accidentally populate
+-- the wrong value. KAN-1218 service layer enforces non-null at scrape time
+-- via the discriminated rejection variant. Matches the inboxSlug nullable
+-- precedent ("legacy tenants stay null until first regenerateSlug call").
+--
+-- # Migration discipline (KAN-1080 lesson + KAN-1213/14/15/16a precedent)
+--
+-- Hand-authored migration SQL since local dev DB is unavailable; CI
+-- deploy-api workflow runs `npx prisma migrate deploy` on first post-merge
+-- deploy. Shape mirrors KAN-1216a substrate migration.
+
+-- AddColumn — marketing_domain nullable VarChar(255)
+ALTER TABLE "tenants" ADD COLUMN "marketing_domain" VARCHAR(255);
+
+-- CreateIndex — (id, marketing_domain) for KAN-1218 scraper per-tenant lookup
+CREATE INDEX "tenants_id_marketing_domain_idx" ON "tenants"("id", "marketing_domain");

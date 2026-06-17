@@ -4316,6 +4316,30 @@ function mapChannelConnectionToDto(conn: ChannelConnection): CommunicationChanne
   };
 }
 
+// KAN-1217 — extract a plain hostname (lowercased FQDN) from an operator-
+// supplied URL. Storage shape is plain hostname (no protocol/path); KAN-1218
+// scraper consumes this directly for per-tenant hostname-suffix matching.
+// Hostname extraction at procedure boundary. Mirrors the established
+// precedent at account-detect-html-fetcher.ts:60
+// (`new URL(rootUrl).origin`). This is the 2nd hostname-extraction site
+// in apps/api/src (account-detect-html-fetcher being 1st) and the 1st
+// `new URL()` site in router.ts. Pattern reuse — not first-instance.
+function extractMarketingHostname(input: string): string {
+  try {
+    const url = new URL(input);
+    if (!url.hostname) {
+      throw new Error("URL missing hostname");
+    }
+    return url.hostname.toLowerCase();
+  } catch {
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message:
+        "Invalid marketing domain — must be a valid URL (e.g., https://store.mysite.com).",
+    });
+  }
+}
+
 const settingsRouter = router({
   // KAN-450 — AI Configuration. tenant-scoped via ctx.tenantId (replaces the
   // prior input.tenantId pattern, which was both a tenant-isolation hole AND
@@ -4703,6 +4727,48 @@ const settingsRouter = router({
         return { items, total, limit, offset };
       }),
   }),
+
+  // KAN-1217 — Tenant marketing domain config (Slice 3 of KAN-1212 epic).
+  // Co-located in settingsRouter per Memo 39 (codebase-precedent-over-external-
+  // convention) 3rd application anchor — no tenantRouter exists; engine-config
+  // family (autoApproveEnabled / autoTransitionSubObjectives / inboxSlug /
+  // sendRedirectEnabled) all live here. KAN-1218 scraper consumes
+  // getMarketingDomain; deferred UI surface (Memo H5 Path B) consumes both.
+  getMarketingDomain: protectedProcedure.query(async ({ ctx }) => {
+    const tenant = await ctx.prisma.tenant.findUnique({
+      where: { id: ctx.tenantId },
+      select: { marketingDomain: true },
+    });
+    return { marketingDomain: tenant?.marketingDomain ?? null };
+  }),
+
+  setMarketingDomain: protectedProcedure
+    .input(z.object({ domain: z.string().url() }))
+    .mutation(async ({ ctx, input }) => {
+      const hostname = extractMarketingHostname(input.domain);
+
+      const updated = await ctx.prisma.$transaction(async (tx) => {
+        const tenant = await tx.tenant.update({
+          where: { id: ctx.tenantId },
+          data: { marketingDomain: hostname },
+          select: { id: true, marketingDomain: true },
+        });
+
+        await tx.auditLog.create({
+          data: {
+            tenantId: tenant.id,
+            actor: ctx.firebaseUser?.uid ?? "unknown",
+            actionType: "tenant.marketing_domain_updated",
+            payload: { marketingDomain: hostname },
+            reasoning: "tenant.marketing_domain_updated",
+          },
+        });
+
+        return tenant;
+      });
+
+      return { marketingDomain: updated.marketingDomain };
+    }),
 });
 
 // ============================================================================

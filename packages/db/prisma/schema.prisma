@@ -107,6 +107,29 @@ model Tenant {
   // reject DKIM=fail AND DKIM=none). Tenant can flip to false via UI for
   // accommodating contacts on legacy mail servers without DKIM signing.
   inboxDkimStrict                 Boolean               @default(true) @map("inbox_dkim_strict")
+  // KAN-1217 — Tenant's configured marketing site domain (FQDN, e.g.,
+  // "store.mysite.com"). Stored as plain hostname (no protocol/path)
+  // lowercased; normalisation happens at the settingsRouter procedure
+  // boundary via `new URL(input).hostname.toLowerCase()` (inboxRouter is the
+  // 1st `new URL()` site in packages/api; this is the 2nd — informal Memo 40
+  // anchor).
+  //
+  // # KAN-1218 scraper consumer contract (Memo 41 zombie-prevention)
+  //
+  // The KAN-1218 scraper requires this field non-null; requests for a tenant
+  // without a configured domain are rejected with the discriminated variant
+  // `tenant_marketing_domain_not_configured`. Scraper accepts the configured
+  // domain + any subdomain via hostname-suffix match (defined at KAN-1218
+  // boundary, NOT this PR).
+  //
+  // # Why nullable
+  //
+  // Operator-configured columns are nullable so non-operator paths (KAN-1218
+  // scrape UX bootstrap, future M&A migration) don't accidentally populate
+  // the wrong value. Service layer at the KAN-1218 boundary enforces non-null
+  // via the discriminated rejection variant. Mirrors the inboxSlug nullable
+  // precedent ("legacy tenants stay null until first regenerateSlug call").
+  marketingDomain                 String?               @map("marketing_domain")
   strategyPermissions             Json                  @default("{}") @map("strategy_permissions")
   guardrailSettings               Json                  @default("{}") @map("guardrail_settings")
   settings                        Json                  @default("{}")
