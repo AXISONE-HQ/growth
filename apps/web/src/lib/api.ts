@@ -167,18 +167,7 @@ export const knowledgeApi = {
   updateCompanyInfo: (data: { vision?: string; mission?: string; websiteUrl?: string | null }) =>
     trpcMutation<CompanyInfo>('knowledge.updateCompanyInfo', data),
 
-  // Products
-  listProducts: (params?: { page?: number; limit?: number; category?: string; search?: string }) =>
-    trpcQuery<{ products: Product[] } & Paginated<Product>>('knowledge.listProducts', params || {}),
-
-  createProduct: (data: { name: string; category?: string; price?: string; description?: string; sku?: string }) =>
-    trpcMutation<Product>('knowledge.createProduct', data),
-
-  updateProduct: (data: { id: string; name?: string; category?: string; price?: string; description?: string; sku?: string }) =>
-    trpcMutation<Product>('knowledge.updateProduct', data),
-
-  deleteProduct: (id: string) =>
-    trpcMutation<Product>('knowledge.deleteProduct', { id }),
+  // Products: moved to canonical productsRouter (KAN-1218); use trpc.products.* via @growth/api client
 
   // Policies
   listPolicies: (params?: { category?: 'warranty' | 'financing' | 'rule'; page?: number; limit?: number }) =>
@@ -2975,4 +2964,138 @@ export const subObjectivesApi = {
     toState: 'known' | 'not_applicable';
     value?: string | number | null;
   }) => trpcMutation<{ ok: true; previousState: SubObjectiveStateValue }>('subObjectives.transitionState', input),
+};
+
+/* ── KAN-1218 — Canonical Products / Variants / Categories API ───────────────
+ *
+ * Replaces the deleted knowledge.*Product zombie procedures. Wraps the
+ * canonical productsRouter / productVariantsRouter / productCategoriesRouter
+ * landed in KAN-1213/1216b/1216c/1216d. Consumed by /settings/products page.
+ *
+ * Price is `number | null` (Prisma Decimal serialized as number). Status is
+ * the canonical enum from KAN-1213 schema. Variant.effectivePrice is
+ * resolved server-side per M2 INHERIT-from-parent semantic — child variant
+ * may declare price=null to mean "inherit parent product price".
+ */
+
+export type ProductStatus = 'draft' | 'active' | 'archived';
+
+export interface ProductListItem {
+  id: string;
+  tenantId: string;
+  name: string;
+  description: string | null;
+  status: ProductStatus;
+  price: number | null;
+  currency: string;
+  externalUrl: string | null;
+  primaryImageUrl: string | null;
+  customFields: Record<string, unknown> | null;
+  archivedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProductVariantListItem {
+  id: string;
+  tenantId: string;
+  productId: string;
+  attributes: Record<string, unknown>;
+  price: number | null;
+  effectivePrice: number | null;
+  createdAt: string;
+  updatedAt: string;
+  product: { id: string; price: number | null };
+}
+
+export interface ProductCategoryListItem {
+  id: string;
+  tenantId: string;
+  name: string;
+  description: string | null;
+  parentId: string | null;
+  status: ProductStatus;
+  archivedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const productsApi = {
+  list: (input?: { limit?: number; cursor?: string }) =>
+    trpcQuery<CursorPage<ProductListItem>>('products.list', input ?? { limit: 50 }),
+
+  create: (data: {
+    name: string;
+    description?: string | null;
+    status?: ProductStatus;
+    price?: number | null;
+    currency?: string;
+    externalUrl?: string | null;
+    primaryImageUrl?: string | null;
+    customFields?: Record<string, unknown>;
+  }) => trpcMutation<ProductListItem>('products.create', data),
+
+  update: (data: {
+    id: string;
+    name?: string;
+    description?: string | null;
+    status?: ProductStatus;
+    price?: number | null;
+    currency?: string;
+    externalUrl?: string | null;
+    primaryImageUrl?: string | null;
+    customFields?: Record<string, unknown>;
+  }) => trpcMutation<ProductListItem>('products.update', data),
+
+  archive: (id: string) =>
+    trpcMutation<ProductListItem>('products.archive', { id }),
+};
+
+export const productVariantsApi = {
+  list: (input: { productId: string; limit?: number; cursor?: string }) =>
+    trpcQuery<CursorPage<ProductVariantListItem>>('productVariants.list', input),
+
+  create: (data: {
+    productId: string;
+    attributes: Record<string, unknown>;
+    price?: number | null;
+  }) => trpcMutation<ProductVariantListItem>('productVariants.create', data),
+
+  update: (data: {
+    id: string;
+    attributes?: Record<string, unknown>;
+    price?: number | null;
+  }) => trpcMutation<ProductVariantListItem>('productVariants.update', data),
+};
+
+export const productCategoriesApi = {
+  list: (input?: { parentId?: string | null; limit?: number; cursor?: string; includeArchived?: boolean }) =>
+    trpcQuery<CursorPage<ProductCategoryListItem>>('productCategories.list', input ?? { limit: 50 }),
+
+  create: (data: {
+    name: string;
+    parentId?: string | null;
+    description?: string | null;
+    status?: ProductStatus;
+  }) => trpcMutation<ProductCategoryListItem>('productCategories.create', data),
+
+  update: (data: {
+    id: string;
+    name?: string;
+    parentId?: string | null;
+    description?: string | null;
+    status?: ProductStatus;
+  }) => trpcMutation<ProductCategoryListItem>('productCategories.update', data),
+
+  archive: (id: string) =>
+    trpcMutation<ProductCategoryListItem>('productCategories.archive', { id }),
+};
+
+// KAN-1217 marketingDomain — consumed by /settings/products scraper UX.
+export const marketingDomainApi = {
+  get: () =>
+    trpcQuery<{ marketingDomain: string | null }>('settings.getMarketingDomain'),
+
+  set: (domain: string) =>
+    trpcMutation<{ marketingDomain: string | null }>('settings.setMarketingDomain', { domain }),
 };

@@ -3043,116 +3043,7 @@ const knowledgeRouter = router({
       });
     }),
 
-  // ---- Products ----
-  listProducts: protectedProcedure
-    .input(
-      z.object({
-        page: z.number().min(1).default(1),
-        limit: z.number().min(1).max(100).default(20),
-        category: z.string().optional(),
-        search: z.string().optional(),
-      })
-    )
-    .query(async ({ ctx, input }) => {
-      const skip = (input.page - 1) * input.limit;
-
-      const where = {
-        tenantId: ctx.tenantId,
-        active: true,
-        ...(input.category && { category: input.category }),
-        ...(input.search && {
-          OR: [
-            { name: { contains: input.search, mode: "insensitive" as const } },
-            { sku: { contains: input.search, mode: "insensitive" as const } },
-          ],
-        }),
-      };
-
-      const [products, total] = await Promise.all([
-        ctx.prisma.product.findMany({
-          where,
-          skip,
-          take: input.limit,
-          orderBy: { createdAt: "desc" },
-        }),
-        ctx.prisma.product.count({ where }),
-      ]);
-
-      return {
-        products,
-        pagination: {
-          page: input.page,
-          limit: input.limit,
-          total,
-          pages: Math.ceil(total / input.limit),
-        },
-      };
-    }),
-
-  createProduct: protectedProcedure
-    .input(
-      z.object({
-        name: z.string().min(1),
-        category: z.string().optional(),
-        price: z.string().optional(),
-        description: z.string().optional(),
-        sku: z.string().optional(),
-      })
-    )
-    .mutation(async ({ ctx, input }) => {
-      return ctx.prisma.product.create({
-        data: {
-          ...input,
-          tenantId: ctx.tenantId,
-        },
-      });
-    }),
-
-  updateProduct: protectedProcedure
-    .input(
-      z.object({
-        id: z.string().uuid(),
-        name: z.string().optional(),
-        category: z.string().optional(),
-        price: z.string().optional(),
-        description: z.string().optional(),
-        sku: z.string().optional(),
-        active: z.boolean().optional(),
-      })
-    )
-    .mutation(async ({ ctx, input }) => {
-      const { id, ...data } = input;
-
-      const existing = await ctx.prisma.product.findFirst({
-        where: { id, tenantId: ctx.tenantId },
-      });
-
-      if (!existing) {
-        throw new Error("Product not found");
-      }
-
-      return ctx.prisma.product.update({
-        where: { id },
-        data,
-      });
-    }),
-
-  deleteProduct: protectedProcedure
-    .input(z.object({ id: z.string().uuid() }))
-    .mutation(async ({ ctx, input }) => {
-      const existing = await ctx.prisma.product.findFirst({
-        where: { id: input.id, tenantId: ctx.tenantId },
-      });
-
-      if (!existing) {
-        throw new Error("Product not found");
-      }
-
-      return ctx.prisma.product.update({
-        where: { id: input.id },
-        data: { active: false },
-      });
-    }),
+  // ---- Products: moved to canonical productsRouter / productVariantsRouter / productCategoriesRouter (KAN-1218) ----
 
   // ---- Policy Rules (warranties, financing, rules) ----
   listPolicies: protectedProcedure
@@ -3980,7 +3871,7 @@ const salesObjectionsRouter = router({
             where: { tenantId: ctx.tenantId },
           });
           const products = await ctx.prisma.product.findMany({
-            where: { tenantId: ctx.tenantId, active: true },
+            where: { tenantId: ctx.tenantId, status: 'active', archivedAt: null },
             take: 10,
           });
 
