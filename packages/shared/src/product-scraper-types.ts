@@ -63,6 +63,43 @@ export const SCRAPER_TIMEOUT_MS = 5000;
 export const SCRAPER_MAX_RESPONSE_BYTES = 200 * 1024;
 
 // ─────────────────────────────────────────────
+// Title-sanitization vocabulary (KAN-1219 fix-forward)
+//
+// Hoisted to packages/shared per Memo 37 (cross-workspace algorithm hoist):
+// product-scraper consumes both lists at runtime, but a future site-config
+// linter (apps/web /settings/products) needs the same vocabulary at lint
+// time to flag operator-entered names that look auto-generated. Single
+// source of truth eliminates byte-stability drift between workspaces.
+// ─────────────────────────────────────────────
+
+/**
+ * Generic page-chrome h1 strings that occur on listing/landing pages and
+ * MUST NOT be accepted as a product name. Anchor: KAN-1219 PROD incident
+ * (4mkauto.com inventory page h1='Inventory' polluted product.name).
+ * Match is case-insensitive on trimmed text.
+ */
+export const GENERIC_H1_WHITELIST: ReadonlyArray<string> = [
+  "Inventory",
+  "Home",
+  "Products",
+  "Services",
+  "Shop",
+  "Store",
+  "Catalog",
+  "Collections",
+  "Page",
+  "Untitled",
+];
+
+/**
+ * Separator characters that link a product title to its site-name suffix.
+ * Order matters only for documentation; the regex built from this list is
+ * a character class. Examples: " - 4MK Auto", " | Acme Co", " :: Brand",
+ * " — Brand" (em-dash). Anchor: KAN-1219 PROD og:title pollution.
+ */
+export const SITE_SUFFIX_SEPARATORS: ReadonlyArray<string> = ["-", "|", "—", "–", "::"];
+
+// ─────────────────────────────────────────────
 // ProductScraperResult — discriminated return shape (6 variants)
 // ─────────────────────────────────────────────
 
