@@ -3699,6 +3699,34 @@ model ProductVariant {
   // VariantAttributesSchema parses at write in KAN-1216 CRUD.
   attributes   Json     @default("{}")
 
+  // KAN-1216a — Content hash of `attributes` for service-layer dedup. Computed
+  // at write time via `sha256(JSON.stringify(attrs)).slice(0, 12)` matching
+  // 3 sibling-service precedents (knowledge-retrieval:146, feasibility-context:111,
+  // message-shaper:262). Nullable for pre-1216a rows + future bulk-imports that
+  // bypass the service-layer hasher.
+  //
+  // # Why a column instead of @@unique on Json (Memo 39 + Q-ADD B8 verdict)
+  //
+  // Postgres jsonb equality is technically supported but no sibling model
+  // uses `@@unique([..., jsonColumn])` across the 68-model schema (KAN-1214
+  // Phase 1 B8 verdict). Service-layer content-hash dedup is the canonical
+  // pattern for typed-but-flexible Json payloads.
+  //
+  // # Why nullable not required-with-default
+  //
+  // Pre-existing variants (none in PROD yet; column added before any catalog
+  // data) AND bulk-import paths that may bypass the hasher (KAN-1223 scrape
+  // UX, etc.) need the option to leave hash absent. Service layer enforces
+  // non-null at create/update for operator-facing CRUD; bulk paths self-document
+  // the omission. Aligns with `customFields Json @default("{}")` precedent —
+  // operator-managed columns are nullable so non-operator paths don't accidentally
+  // populate the wrong value.
+  //
+  // KAN-1216c CRUD seeds the M1 `service_layer_content_hash_dedup_discipline`
+  // memo at the resolving site; KAN-1216a is the substrate that the M1 memo
+  // requires.
+  attributesHash String? @map("attributes_hash") @db.VarChar(16)
+
   // Money — Decimal(12,2) matches Product.price (KAN-1213) and Deal.value
   // (1974) and Order.{subtotal,grandTotal} (2609-2613). null = "inherit from
   // parent Product.price at runtime" per Memo 43; NOT "unpriced" (that's
@@ -3717,6 +3745,12 @@ model ProductVariant {
 
   @@index([productId])
   @@index([tenantId])
+  // KAN-1216a — dedup-lookup index. KAN-1216c service-layer hasher checks
+  // `findFirst({where: {productId, attributesHash}})` before insert; without
+  // the composite index this would be O(N) per insert. Hash is 12 hex chars
+  // (VarChar(16) for future-proof) — collision probability ≈ 2^-48 per pair,
+  // negligible for tenant-scoped variant counts.
+  @@index([productId, attributesHash])
   @@map("product_variants")
 }
 

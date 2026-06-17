@@ -1,0 +1,56 @@
+-- KAN-1216a — Variant attributes hash substrate (Slice 2 PR 1a of KAN-1212 epic).
+--
+-- # Additive-only contract
+--
+-- This migration is ADDITIVE: one new nullable column, one new composite index.
+-- No existing column/table modified. Rollback is clean (DROP INDEX + DROP
+-- COLUMN reverses); existing rows stay valid (nullable column accepts NULL).
+--
+-- # Why a substrate-only PR for one column
+--
+-- The KAN-1216 Phase 1 trace surfaced D4 (variant attributes dedup) as
+-- requiring a schema migration NOT pure CRUD code. Per Override A2 verdict
+-- + Override B2 4-PR split: substrate stays substrate; CRUD stays CRUD.
+-- KAN-1216a ships the column + index that KAN-1216c (Variant CRUD) requires
+-- to ship the M1 (`service_layer_content_hash_dedup_discipline`) memo.
+--
+-- # Hash field design
+--
+-- VarChar(16) — first 12 hex chars of sha256(JSON.stringify(attrs)) per
+-- 3 sibling-service precedents:
+--   - knowledge-retrieval-service.ts:146 — sha256 → slice(0, 16) for query dedup
+--   - feasibility-context-service.ts:111 — same pattern
+--   - message-shaper.ts:262 — sha256 for identical-payload collision detection
+--
+-- 12 hex chars = 48 bits of entropy; collision probability ≈ 2^-48 per pair,
+-- negligible for tenant-scoped variant counts (assumed <10^4 per tenant).
+-- VarChar(16) leaves headroom if a future hash strategy widens.
+--
+-- # Composite index discipline
+--
+-- (product_id, attributes_hash) supports the canonical dedup-lookup:
+--   findFirst({ where: { productId, attributesHash } })
+-- The existing (product_id) lone index from KAN-1214 stays — it still serves
+-- the listVariants-by-product query. Adding the composite costs ~256 bytes
+-- per variant row (estimated <10^4 per tenant → <2.5MB/tenant), well under
+-- the audit_log_table_pre_optimized_for_tier_2_aggregation memo budget.
+--
+-- # Why nullable
+--
+-- Operator-managed columns are nullable so non-operator paths (KAN-1223
+-- scrape UX, bulk import, future M&A data migration) don't accidentally
+-- populate the wrong value. Service-layer KAN-1216c enforces non-null at
+-- create/update; bulk paths self-document the omission. Matches
+-- `customFields Json @default("{}")` precedent style.
+--
+-- # Migration discipline (KAN-1080 lesson + KAN-1213/14/15 precedent)
+--
+-- Hand-authored migration SQL since local dev DB is unavailable; CI
+-- deploy-api workflow runs `npx prisma migrate deploy` on first post-merge
+-- deploy. Shape mirrors KAN-1213/14/15 substrate migrations.
+
+-- AddColumn — attributes_hash nullable VarChar(16)
+ALTER TABLE "product_variants" ADD COLUMN "attributes_hash" VARCHAR(16);
+
+-- CreateIndex — (product_id, attributes_hash) for service-layer dedup lookup
+CREATE INDEX "product_variants_product_id_attributes_hash_idx" ON "product_variants"("product_id", "attributes_hash");
