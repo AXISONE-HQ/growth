@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@types/papaparse": "^5.5.2",
+    "cheerio": "^1.2.0",
     "fastest-levenshtein": "^1.0.16",
     "papaparse": "^5.5.3",
     "xlsx": "^0.18.5"

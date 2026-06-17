@@ -130,3 +130,10 @@ export * from "./product-variants.js";
 // the NULL ≠ NULL semantic + partial-unique-index pattern if global uniqueness
 // across roots is ever required.
 export * from "./product-categories.js";
+// KAN-1219 (Slice 5 of KAN-1212 epic) — Product scraper output contract.
+// Discriminated union (6 variants: scraped / domain_not_allowed / fetch_failed /
+// parse_failed / response_too_large / tenant_marketing_domain_not_configured) +
+// ProductScraperInputSchema + resource-limit constants (SCRAPER_TIMEOUT_MS,
+// SCRAPER_MAX_RESPONSE_BYTES). 6th Memo 39 application anchor (resource-limit
+// inheritance: account-detect 500KB sibling → product scraper 200KB scaled).
+export * from "./product-scraper-types.js";

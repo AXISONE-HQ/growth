@@ -25,6 +25,8 @@ import {
   LogoFinalizeInputSchema,
   // KAN-1140 PR 9a — tenant parser customization rule schema
   ParseRuleBodySchema,
+  // KAN-1219 (Slice 5 of KAN-1212 epic) — product scraper input schema.
+  ProductScraperInputSchema,
 } from "@growth/shared";
 // KAN-852 — Account Page publisher + flag. Cross-rootDir static imports
 // trigger TS6059 (KAN-689 cohort), so we use the variable-specifier
@@ -7336,6 +7338,29 @@ async function loadProductCategoryServiceModule(): Promise<ProductCategoryServic
   return _productCategoryServiceModule;
 }
 
+// KAN-1219 — product-scraper loader. KAN-689 cohort variable-specifier
+// dynamic import. Wraps cheerio + heuristic-extract + auto-save pipeline
+// behind a discriminated-union result contract (6 variants). Subdomain
+// matching at the service boundary per KAN-1217 H3 deferral.
+interface ProductScraperServiceModule {
+  scrapeProduct: (
+    prisma: unknown,
+    tenantId: string,
+    input: unknown,
+    actor: string,
+    hooks: unknown,
+  ) => Promise<unknown>;
+}
+let _productScraperServiceModule: ProductScraperServiceModule | null = null;
+async function loadProductScraperServiceModule(): Promise<ProductScraperServiceModule> {
+  if (_productScraperServiceModule) return _productScraperServiceModule;
+  const spec = "../../../packages/api/src/services/product-scraper.js";
+  _productScraperServiceModule = (await import(
+    spec
+  )) as ProductScraperServiceModule;
+  return _productScraperServiceModule;
+}
+
 // KAN-1184 — conversational orchestrator loader. KAN-689 cohort variable-
 // specifier dynamic import.
 interface ConversationalOrchestratorModule {
@@ -8520,6 +8545,24 @@ const productsRouter = router({
         ctx.prisma,
         ctx.tenantId,
         input.id,
+        ctx.firebaseUser?.uid ?? "system",
+        buildProductHooks(),
+      );
+    }),
+
+  // KAN-1219 — scrape mutation. Wraps the cheerio + heuristic-extract +
+  // auto-save pipeline behind a discriminated-union result (6 variants).
+  // UI consumer MUST branch on every variant per Memo 41. AuditLog hook
+  // reused from buildProductHooks() — scraper persists via
+  // product-service.createProduct internally.
+  scrape: protectedProcedure
+    .input(ProductScraperInputSchema)
+    .mutation(async ({ ctx, input }) => {
+      const { scrapeProduct } = await loadProductScraperServiceModule();
+      return scrapeProduct(
+        ctx.prisma,
+        ctx.tenantId,
+        input,
         ctx.firebaseUser?.uid ?? "system",
         buildProductHooks(),
       );
