@@ -257,8 +257,11 @@ describe("KAN-1218 Scenario 6 — variant inline expansion", () => {
     variantsListMock.mockResolvedValue(fixturePage([v]));
     renderPage();
     await waitFor(() => expect(screen.getByText("Zeta")).toBeInTheDocument());
-    // Row toggle is the button wrapping the chevron + name.
-    const toggle = screen.getByRole("button", { name: /Zeta/i });
+    // Row toggle is the button wrapping the chevron + name. Multiple buttons
+    // include the product name in their accessible name (row toggle + edit
+    // action button on the row); pick the first DOM-order match which is the
+    // structurally-first toggle button by render order.
+    const toggle = screen.getAllByRole("button", { name: /Zeta/i })[0];
     await userEvent.click(toggle);
     await waitFor(() =>
       expect(variantsListMock).toHaveBeenCalledWith(
