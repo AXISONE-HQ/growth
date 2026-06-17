@@ -64,9 +64,35 @@ function statusBadgeVariant(s: ProductStatus): "muted" | "green" | "rose" {
   return "muted";
 }
 
-function formatPrice(price: number | null, currency: string): string {
+/**
+ * KAN-1230 — defensive Decimal coercion at the JSON boundary.
+ *
+ * Prisma serializes `Decimal? @db.Decimal(12, 2)` columns to JSON strings
+ * (e.g., `"29.99"`), NOT JavaScript numbers. The TypeScript types at
+ * `lib/api.ts:2989` declare `price: number | null` but that's compile-time
+ * only — the runtime value is `string | null` for Decimal columns.
+ *
+ * The original implementation called `price.toFixed(2)` after a null check.
+ * String values passed the null check but threw at the .toFixed() call:
+ *   TypeError: e.toFixed is not a function
+ *
+ * Surface anchor: caused a PROD client-side exception on /settings/products
+ * when KAN-1228 (Memo 52 visibility-guarantee) made a product with a
+ * Decimal-serialized price visible in the list. KAN-1228 itself was innocent;
+ * it unmasked a latent KAN-1218 render bug. RTL tests used canonical fixtures
+ * with numeric prices and missed the Decimal-string shape.
+ *
+ * 2nd anchor for the informal "Decimal-coercion-at-boundary" pattern (1st was
+ * KAN-1216c integration test boundary). Formalize at 3+ anchors.
+ */
+function formatPrice(
+  price: number | string | null | undefined,
+  currency: string,
+): string {
   if (price == null) return "—";
-  return `${currency} ${price.toFixed(2)}`;
+  const n = typeof price === "number" ? price : Number(price);
+  if (!Number.isFinite(n)) return "—";
+  return `${currency} ${n.toFixed(2)}`;
 }
 
 /* ── Top-level Page ──────────────────────────────────────────────────── */
