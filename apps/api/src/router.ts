@@ -7270,6 +7270,38 @@ async function loadCampaignsListModule(): Promise<CampaignsListModule> {
   return _campaignsListModule;
 }
 
+// KAN-1216c — product-variant-service loader. KAN-689 cohort variable-
+// specifier dynamic import. Seeds M1 (content-hash dedup) + M2 (price
+// inheritance) memos at the resolving service module.
+interface ProductVariantServiceModule {
+  createVariant: (
+    prisma: unknown,
+    tenantId: string,
+    input: unknown,
+    actor: string,
+    hooks: unknown,
+  ) => Promise<{ variant: unknown; auditLogId: string; isDedup: boolean }>;
+  updateVariant: (
+    prisma: unknown,
+    tenantId: string,
+    variantId: string,
+    input: unknown,
+    actor: string,
+    hooks: unknown,
+  ) => Promise<{ variant: unknown; auditLogId: string }>;
+  resolveEffectivePrice: (
+    variant: { price: number | null },
+    product: { price: number | null },
+  ) => number | null;
+}
+let _productVariantServiceModule: ProductVariantServiceModule | null = null;
+async function loadProductVariantServiceModule(): Promise<ProductVariantServiceModule> {
+  if (_productVariantServiceModule) return _productVariantServiceModule;
+  const spec = "../../../packages/api/src/services/product-variant-service.js";
+  _productVariantServiceModule = (await import(spec)) as ProductVariantServiceModule;
+  return _productVariantServiceModule;
+}
+
 // KAN-1216b — product-service loader. KAN-689 cohort variable-specifier
 // dynamic import. Seeds M4 (soft_delete_archive_only_crud_discipline) memo
 // at the resolving service module header.
@@ -8495,6 +8527,88 @@ const productsRouter = router({
     }),
 });
 
+// KAN-1216c — ProductVariant CRUD router. Service layer at
+// packages/api/src/services/product-variant-service.ts (M1 + M2 canonical
+// anchors). Reuses buildProductHooks() — same AuditLog hook shape as
+// product mutations. .archive mutation deferred to KAN-1218 follow-up
+// (variant-level archive not in MVP per KAN-1214 schema doctrine).
+const productVariantsRouter = router({
+  // List variants for a given product. Eager-loads parent for M2 price
+  // inheritance resolution at response shaping.
+  list: protectedProcedure
+    .input(
+      z.object({
+        productId: z.string().uuid(),
+        limit: z.number().int().min(1).max(200).default(50),
+        cursor: z.string().optional(),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      const { resolveEffectivePrice } = await loadProductVariantServiceModule();
+      const variants = (await (ctx.prisma as any).productVariant.findMany({
+        where: { tenantId: ctx.tenantId, productId: input.productId },
+        include: { product: { select: { id: true, price: true } } },
+        orderBy: { createdAt: "desc" },
+        take: input.limit + 1,
+        ...(input.cursor ? { cursor: { id: input.cursor }, skip: 1 } : {}),
+      })) as Array<{
+        id: string;
+        price: number | null;
+        product: { price: number | null };
+      }>;
+      const hasMore = variants.length > input.limit;
+      const items = (hasMore ? variants.slice(0, input.limit) : variants).map(
+        (v) => ({
+          ...v,
+          effectivePrice: resolveEffectivePrice(v, v.product),
+        }),
+      );
+      const nextCursor = hasMore ? items[items.length - 1].id : null;
+      return { items, nextCursor, totalCount: items.length };
+    }),
+
+  // Create with content-hash dedup (Path α — idempotent-return on collision).
+  create: protectedProcedure
+    .input(
+      z.object({
+        productId: z.string().uuid(),
+        attributes: z.record(z.unknown()),
+        price: z.number().nullable().optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const { createVariant } = await loadProductVariantServiceModule();
+      return createVariant(
+        ctx.prisma,
+        ctx.tenantId,
+        input,
+        ctx.firebaseUser?.uid ?? "system",
+        buildProductHooks(),
+      );
+    }),
+
+  update: protectedProcedure
+    .input(
+      z.object({
+        id: z.string().uuid(),
+        attributes: z.record(z.unknown()).optional(),
+        price: z.number().nullable().optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const { updateVariant } = await loadProductVariantServiceModule();
+      const { id, ...rest } = input;
+      return updateVariant(
+        ctx.prisma,
+        ctx.tenantId,
+        id,
+        rest,
+        ctx.firebaseUser?.uid ?? "system",
+        buildProductHooks(),
+      );
+    }),
+});
+
 const usersRouter = router({
   list: protectedProcedure
     .input(
@@ -8819,6 +8933,10 @@ export const appRouter = router({
   // KAN-1213 — Product Catalog Module substrate (Slice 1 of KAN-1212 epic).
   // List-only stub this slice; KAN-1216 expands to full CRUD.
   products: productsRouter,
+  // KAN-1216c — ProductVariant CRUD with content-hash dedup (M1 Path α) +
+  // price-inheritance resolution (M2). Variant-level archive deferred per
+  // KAN-1214 schema doctrine.
+  productVariants: productVariantsRouter,
   // KAN-1005 M2-4 — Circuit breaker admin surface (status/reset/trip).
   circuitBreaker: circuitBreakerRouter,
   // M3-1c — Sub-objective gap-state read + operator manual transition.
