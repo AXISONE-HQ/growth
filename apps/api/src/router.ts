@@ -7337,6 +7337,48 @@ async function loadProductServiceModule(): Promise<ProductServiceModule> {
   return _productServiceModule;
 }
 
+// KAN-1216d — product-category-service loader. KAN-689 cohort variable-
+// specifier dynamic import. Seeds M3 (recursive_tree_depth_guard_service_pattern)
+// memo at the resolving service module header — paired depth-guard +
+// cycle-prevention on parentId mutation.
+interface ProductCategoryServiceModule {
+  createCategory: (
+    prisma: unknown,
+    tenantId: string,
+    input: unknown,
+    actor: string,
+    hooks: unknown,
+  ) => Promise<{ category: unknown; auditLogId: string }>;
+  updateCategory: (
+    prisma: unknown,
+    tenantId: string,
+    categoryId: string,
+    input: unknown,
+    actor: string,
+    hooks: unknown,
+  ) => Promise<{ category: unknown; auditLogId: string }>;
+  archiveCategory: (
+    prisma: unknown,
+    tenantId: string,
+    categoryId: string,
+    actor: string,
+    hooks: unknown,
+  ) => Promise<{
+    category: unknown;
+    auditLogId: string;
+    alreadyArchived: boolean;
+  }>;
+}
+let _productCategoryServiceModule: ProductCategoryServiceModule | null = null;
+async function loadProductCategoryServiceModule(): Promise<ProductCategoryServiceModule> {
+  if (_productCategoryServiceModule) return _productCategoryServiceModule;
+  const spec = "../../../packages/api/src/services/product-category-service.js";
+  _productCategoryServiceModule = (await import(
+    spec
+  )) as ProductCategoryServiceModule;
+  return _productCategoryServiceModule;
+}
+
 // KAN-1184 — conversational orchestrator loader. KAN-689 cohort variable-
 // specifier dynamic import.
 interface ConversationalOrchestratorModule {
@@ -8609,6 +8651,134 @@ const productVariantsRouter = router({
     }),
 });
 
+// KAN-1216d — ProductCategory CRUD router. Service layer at
+// packages/api/src/services/product-category-service.ts (M3 canonical
+// anchor — recursive tree depth-guard + cycle-prevention on parentId
+// mutation). Reuses buildProductHooks() — same AuditLog hook shape as
+// product / variant mutations. Closes Slice 2 substrate of KAN-1212 epic.
+const productCategoriesRouter = router({
+  // List categories. Default `archivedAt: null` filter mirrors Product.list
+  // archived-default-hide discipline (KAN-1213).
+  list: protectedProcedure
+    .input(
+      z.object({
+        parentId: z.string().uuid().nullable().optional(),
+        limit: z.number().int().min(1).max(200).default(50),
+        cursor: z.string().optional(),
+        includeArchived: z.boolean().default(false),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      const where: Record<string, unknown> = { tenantId: ctx.tenantId };
+      if (!input.includeArchived) where.archivedAt = null;
+      // parentId === null → root list. Filter omitted → list all.
+      if (input.parentId !== undefined) where.parentId = input.parentId;
+      const categories = await (ctx.prisma as any).productCategory.findMany({
+        where,
+        orderBy: [{ name: "asc" }, { createdAt: "desc" }],
+        take: input.limit + 1,
+        ...(input.cursor ? { cursor: { id: input.cursor }, skip: 1 } : {}),
+      });
+      const hasMore = categories.length > input.limit;
+      const items = hasMore ? categories.slice(0, input.limit) : categories;
+      const nextCursor = hasMore ? items[items.length - 1].id : null;
+      return { items, nextCursor, totalCount: items.length };
+    }),
+
+  create: protectedProcedure
+    .input(
+      z.object({
+        name: z.string().min(1),
+        parentId: z.string().uuid().nullable().optional(),
+        description: z.string().nullable().optional(),
+        status: z.enum(["draft", "active", "archived"]).optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const svc = await loadProductCategoryServiceModule();
+      try {
+        return await svc.createCategory(
+          ctx.prisma,
+          ctx.tenantId,
+          input,
+          ctx.firebaseUser?.uid ?? "system",
+          buildProductHooks(),
+        );
+      } catch (err) {
+        throw mapProductCategoryError(err);
+      }
+    }),
+
+  update: protectedProcedure
+    .input(
+      z.object({
+        id: z.string().uuid(),
+        name: z.string().min(1).optional(),
+        parentId: z.string().uuid().nullable().optional(),
+        description: z.string().nullable().optional(),
+        status: z.enum(["draft", "active", "archived"]).optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const svc = await loadProductCategoryServiceModule();
+      const { id, ...rest } = input;
+      try {
+        return await svc.updateCategory(
+          ctx.prisma,
+          ctx.tenantId,
+          id,
+          rest,
+          ctx.firebaseUser?.uid ?? "system",
+          buildProductHooks(),
+        );
+      } catch (err) {
+        throw mapProductCategoryError(err);
+      }
+    }),
+
+  archive: protectedProcedure
+    .input(z.object({ id: z.string().uuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const svc = await loadProductCategoryServiceModule();
+      try {
+        return await svc.archiveCategory(
+          ctx.prisma,
+          ctx.tenantId,
+          input.id,
+          ctx.firebaseUser?.uid ?? "system",
+          buildProductHooks(),
+        );
+      } catch (err) {
+        throw mapProductCategoryError(err);
+      }
+    }),
+});
+
+// Map typed product-category service errors to TRPCError. NOT_FOUND for
+// FK-shaped missing-row errors; BAD_REQUEST for the four user-input
+// invariant violations (depth, cycle, already-exists, archived-mutation).
+function mapProductCategoryError(err: unknown): unknown {
+  const name = (err as { name?: string })?.name ?? "";
+  if (name === "CategoryNotFoundError" || name === "ParentCategoryNotFoundError") {
+    return new TRPCError({
+      code: "NOT_FOUND",
+      message: (err as Error).message,
+    });
+  }
+  if (
+    name === "CategoryDepthLimitExceededError" ||
+    name === "CategoryCycleDetectedError" ||
+    name === "CategoryAlreadyExistsError" ||
+    name === "ArchivedCategoryMutationError"
+  ) {
+    return new TRPCError({
+      code: "BAD_REQUEST",
+      message: (err as Error).message,
+    });
+  }
+  return err;
+}
+
 const usersRouter = router({
   list: protectedProcedure
     .input(
@@ -8937,6 +9107,11 @@ export const appRouter = router({
   // price-inheritance resolution (M2). Variant-level archive deferred per
   // KAN-1214 schema doctrine.
   productVariants: productVariantsRouter,
+  // KAN-1216d — ProductCategory CRUD with M3 (recursive tree depth-guard +
+  // cycle prevention on parentId mutation). Closes Slice 2 substrate of
+  // KAN-1212 epic; banks the 50th memo across the joint KAN-1181 + KAN-1212
+  // doctrine framework.
+  productCategories: productCategoriesRouter,
   // KAN-1005 M2-4 — Circuit breaker admin surface (status/reset/trip).
   circuitBreaker: circuitBreakerRouter,
   // M3-1c — Sub-objective gap-state read + operator manual transition.
