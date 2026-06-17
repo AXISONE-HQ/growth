@@ -451,6 +451,11 @@ function ProductsTab() {
         onOpenChange={setCreateOpen}
         onCreated={() => {
           setCreateOpen(false);
+          // KAN-1228 — operator-visibility guarantee per Memo 52
+          // (operator-perception-vs-substrate-reality). Clear status filter so
+          // the newly-created draft product is visible regardless of the
+          // operator's previously-selected status chip.
+          setStatusFilter(null);
           setPages([]);
           void refetch();
         }}
@@ -463,6 +468,10 @@ function ProductsTab() {
         }}
         onSaved={() => {
           setEditing(null);
+          // KAN-1228 — same Memo 52 guarantee on edit. A status transition
+          // (e.g., draft → active) would otherwise hide the just-edited product
+          // from the current filter.
+          setStatusFilter(null);
           setPages([]);
           void refetch();
         }}
@@ -597,11 +606,15 @@ function CreateProductModal({
         currency: draft.currency,
       });
       toast.success("Product created");
+      // KAN-1228 — clear saving state BEFORE onCreated() so the modal close
+      // and parent list refetch happen with the button no longer disabled.
+      // Avoids the "saving lingers a tick after success" UX flicker.
+      setSaving(false);
       onCreated();
     } catch (e) {
       toast.error((e as Error)?.message ?? "Failed to create product");
+      setSaving(false);
     }
-    setSaving(false);
   }
 
   return (
@@ -673,11 +686,13 @@ function EditProductModal({
         currency: draft.currency,
       });
       toast.success("Product updated");
+      // KAN-1228 — Memo 52: clear saving before close to avoid flicker.
+      setSaving(false);
       onSaved();
     } catch (e) {
       toast.error((e as Error)?.message ?? "Failed to update product");
+      setSaving(false);
     }
-    setSaving(false);
   }
 
   return (
@@ -834,11 +849,13 @@ function CreateVariantModal({
         price: priceNum,
       });
       toast.success("Variant created");
+      // KAN-1228 — Memo 52: clear saving before close to avoid flicker.
+      setSaving(false);
       onCreated();
     } catch (e) {
       setError((e as Error)?.message ?? "Failed to create variant");
+      setSaving(false);
     }
-    setSaving(false);
   }
 
   return (
@@ -1064,11 +1081,13 @@ function CreateCategoryModal({
         status: draft.status,
       });
       toast.success("Category created");
+      // KAN-1228 — Memo 52: clear saving before close to avoid flicker.
+      setSaving(false);
       onCreated();
     } catch (e) {
       setError((e as Error)?.message ?? "Failed to create category");
+      setSaving(false);
     }
-    setSaving(false);
   }
 
   return (
@@ -1135,11 +1154,13 @@ function EditCategoryModal({
         status: draft.status,
       });
       toast.success("Category updated");
+      // KAN-1228 — Memo 52: clear saving before close to avoid flicker.
+      setSaving(false);
       onSaved();
     } catch (e) {
       setError((e as Error)?.message ?? "Failed to update category");
+      setSaving(false);
     }
-    setSaving(false);
   }
 
   // When editing, the parent dropdown must exclude self + descendants to
