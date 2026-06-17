@@ -4319,8 +4319,11 @@ function mapChannelConnectionToDto(conn: ChannelConnection): CommunicationChanne
 // KAN-1217 — extract a plain hostname (lowercased FQDN) from an operator-
 // supplied URL. Storage shape is plain hostname (no protocol/path); KAN-1218
 // scraper consumes this directly for per-tenant hostname-suffix matching.
-// 2nd `new URL()` site in packages/api (inboxRouter is 1st — informal Memo 40
-// anchor).
+// Hostname extraction at procedure boundary. Mirrors the established
+// precedent at account-detect-html-fetcher.ts:60
+// (`new URL(rootUrl).origin`). This is the 2nd hostname-extraction site
+// in apps/api/src (account-detect-html-fetcher being 1st) and the 1st
+// `new URL()` site in router.ts. Pattern reuse — not first-instance.
 function extractMarketingHostname(input: string): string {
   try {
     const url = new URL(input);
