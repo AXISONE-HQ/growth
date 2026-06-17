@@ -137,7 +137,9 @@ describe("KAN-1216c — ProductVariant CRUD service", () => {
         expect(result.isDedup).toBe(false);
         expect(result.variant.productId).toBe(product.id);
         expect(result.variant.attributesHash).toMatch(/^[0-9a-f]{16}$/); // M1: 16 hex chars
-        expect(result.variant.price).toBe(49.99);
+        // Prisma returns Decimal objects for Decimal(12,2) columns; coerce to
+        // number for value comparison. Same pattern as KAN-1192 fixture handling.
+        expect(Number(result.variant.price)).toBe(49.99);
         const audit = await prisma.auditLog.findUnique({
           where: { id: result.auditLogId },
         });
@@ -172,7 +174,7 @@ describe("KAN-1216c — ProductVariant CRUD service", () => {
           buildTestHooks(),
         );
 
-        expect(result.variant.price).toBe(59);
+        expect(Number(result.variant.price)).toBe(59); // Prisma Decimal coercion
         expect(result.variant.attributesHash).not.toBe(originalHash);
         const audit = await prisma.auditLog.findUnique({
           where: { id: result.auditLogId },
@@ -270,13 +272,14 @@ describe("KAN-1216c — ProductVariant CRUD service", () => {
           buildTestHooks(),
         );
 
-        expect(created.variant.price).toBe(49);
+        expect(Number(created.variant.price)).toBe(49); // Prisma Decimal coercion
 
         const resolved = svc.resolveEffectivePrice(
-          { price: created.variant.price },
+          { price: created.variant.price as unknown as number | null },
           { price: 99 },
         );
-        expect(resolved).toBe(49);
+        // Resolver passes Decimal through unchanged when present; coerce result.
+        expect(Number(resolved)).toBe(49);
       },
       (prisma: PrismaClient) => cleanupTenant(prisma, tenantId),
     );
