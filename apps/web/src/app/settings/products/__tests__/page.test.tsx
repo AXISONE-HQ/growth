@@ -323,3 +323,53 @@ describe("KAN-1218 Scenario 8 — empty state", () => {
     expect(screen.getByText(/click create to add your first product/i)).toBeInTheDocument();
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────
+// KAN-1230 Scenario 9 — Decimal-coercion + null-safe price rendering
+//
+// Anchored against the PROD incident where a Decimal-serialized
+// price string (e.g. "29.99") crashed the list render because
+// formatPrice called .toFixed() without coercion. The defensive
+// formatPrice now handles:
+//   - null      → "—"
+//   - undefined → "—"
+//   - number    → format normally
+//   - string    → coerce via Number()
+//   - NaN/Infinity → "—"
+//
+// Mixed-shape fixture covers the boundary; renders without
+// exception confirms the latent KAN-1218 bug is closed.
+// ─────────────────────────────────────────────────────────────────────
+describe("KAN-1230 Scenario 9 — Decimal-coercion + null-safe price rendering", () => {
+  it("renders mixed null/number/Decimal-string prices without exception", async () => {
+    const nullProduct = fixtureProduct({ id: "p-null", name: "NoPrice", price: null });
+    const numProduct = fixtureProduct({ id: "p-num", name: "Numeric", price: 49.5 });
+    // Simulate Prisma Decimal JSON serialization: string at runtime,
+    // typed as number at compile-time (the bug condition reproduced).
+    const decimalStringProduct = fixtureProduct({
+      id: "p-dec",
+      name: "DecimalStr",
+      price: "29.99" as unknown as number,
+    });
+    productsListMock.mockResolvedValue(
+      fixturePage([nullProduct, numProduct, decimalStringProduct], null),
+    );
+    renderPage();
+
+    // All three rows render (no exception thrown — the bug would have
+    // crashed the entire list at the Decimal-string row).
+    await waitFor(() => expect(screen.getByText("NoPrice")).toBeInTheDocument());
+    expect(screen.getByText("Numeric")).toBeInTheDocument();
+    expect(screen.getByText("DecimalStr")).toBeInTheDocument();
+
+    // Null price → em-dash fallback.
+    const nullRow = screen.getByText("NoPrice").closest("tr") ?? screen.getByText("NoPrice").parentElement;
+    expect(nullRow?.textContent ?? "").toContain("—");
+
+    // Numeric price → formatted with currency + 2 decimals.
+    expect(screen.getByText(/49\.50/)).toBeInTheDocument();
+
+    // Decimal-string price → coerced + formatted (would have crashed pre-KAN-1230).
+    expect(screen.getByText(/29\.99/)).toBeInTheDocument();
+  });
+});
