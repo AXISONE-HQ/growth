@@ -78,10 +78,12 @@ export const ProductVariantSchema = z.object({
   productId: z.string().uuid(),
   attributes: VariantAttributesSchema,
   // KAN-1216a — Content hash of `attributes` for service-layer dedup.
-  // 12 hex chars (sha256 slice). Nullable for pre-1216c rows + bulk-import
-  // paths that bypass the service-layer hasher; the M1 memo
-  // (`service_layer_content_hash_dedup_discipline`) lands at KAN-1216c with
-  // the canonical computation + dedup contract.
+  // 16 hex chars (sha256 slice; KAN-1216c retrofitted from 12 to 16 per
+  // Memo 39 codebase-precedent over 3 sha256 sibling services).
+  // Nullable for pre-1216c rows + bulk-import paths that bypass the
+  // service-layer hasher; the M1 memo
+  // (`service_layer_content_hash_dedup_discipline`) lands at KAN-1216c
+  // with the canonical computation + dedup contract.
   attributesHash: z.string().nullable(),
   // Money — Decimal(12,2) at DB; number at JSON boundary. NOT Int cents.
   // null = "inherit from Product.price at runtime" (NOT "unpriced" — that's

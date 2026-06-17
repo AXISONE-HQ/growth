@@ -3700,10 +3700,18 @@ model ProductVariant {
   attributes   Json     @default("{}")
 
   // KAN-1216a — Content hash of `attributes` for service-layer dedup. Computed
-  // at write time via `sha256(JSON.stringify(attrs)).slice(0, 12)` matching
+  // at write time via `sha256(JSON.stringify(attrs)).slice(0, 16)` matching
   // 3 sibling-service precedents (knowledge-retrieval:146, feasibility-context:111,
   // message-shaper:262). Nullable for pre-1216a rows + future bulk-imports that
   // bypass the service-layer hasher.
+  //
+  // KAN-1216c retrofit (2026-06-17): hash length corrected from 12 to 16 chars
+  // to match the 3 precedents per Memo 39 (codebase-precedent-over-external-
+  // convention). KAN-1216a's original "12 chars" was an unforced doctrinal
+  // divergence; VarChar(16) column width accommodates either; the M1 memo
+  // (`service_layer_content_hash_dedup_discipline`) locks 16 chars at the
+  // service implementation site. Memo 39 audit hook extension: re-grep
+  // precedents at Phase 2 build time, not just Phase 1.
   //
   // # Why a column instead of @@unique on Json (Memo 39 + Q-ADD B8 verdict)
   //
@@ -3747,9 +3755,9 @@ model ProductVariant {
   @@index([tenantId])
   // KAN-1216a — dedup-lookup index. KAN-1216c service-layer hasher checks
   // `findFirst({where: {productId, attributesHash}})` before insert; without
-  // the composite index this would be O(N) per insert. Hash is 12 hex chars
-  // (VarChar(16) for future-proof) — collision probability ≈ 2^-48 per pair,
-  // negligible for tenant-scoped variant counts.
+  // the composite index this would be O(N) per insert. Hash is 16 hex chars
+  // (KAN-1216c retrofit; see column doctrine above) — 64 bits entropy;
+  // collision probability ≈ 2^-64 per pair, negligible at any tenant scale.
   @@index([productId, attributesHash])
   @@map("product_variants")
 }
