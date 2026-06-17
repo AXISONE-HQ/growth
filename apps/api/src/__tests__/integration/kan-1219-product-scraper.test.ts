@@ -183,7 +183,7 @@ describe("KAN-1219 — Product scraper service", () => {
         const audit = audits[0];
         const payload = audit?.payload as { productId: string; externalUrl: string; extractGaps: string[] };
         expect(payload.productId).toBe(result.productId);
-        expect(payload.externalUrl).toBe("https://example.com/product/widget");
+        expect(payload.externalUrl).toBe("https://example.com/products/widget");
         expect(payload.extractGaps).toEqual([]);
 
         // Negative assertion: no product.created rows leaked.
