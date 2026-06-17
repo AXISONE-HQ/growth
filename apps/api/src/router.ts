@@ -7270,6 +7270,41 @@ async function loadCampaignsListModule(): Promise<CampaignsListModule> {
   return _campaignsListModule;
 }
 
+// KAN-1216b — product-service loader. KAN-689 cohort variable-specifier
+// dynamic import. Seeds M4 (soft_delete_archive_only_crud_discipline) memo
+// at the resolving service module header.
+interface ProductServiceModule {
+  createProduct: (
+    prisma: unknown,
+    tenantId: string,
+    input: unknown,
+    actor: string,
+    hooks: unknown,
+  ) => Promise<{ product: unknown; auditLogId: string }>;
+  updateProduct: (
+    prisma: unknown,
+    tenantId: string,
+    productId: string,
+    input: unknown,
+    actor: string,
+    hooks: unknown,
+  ) => Promise<{ product: unknown; auditLogId: string }>;
+  archiveProduct: (
+    prisma: unknown,
+    tenantId: string,
+    productId: string,
+    actor: string,
+    hooks: unknown,
+  ) => Promise<{ product: unknown; auditLogId: string; alreadyArchived: boolean }>;
+}
+let _productServiceModule: ProductServiceModule | null = null;
+async function loadProductServiceModule(): Promise<ProductServiceModule> {
+  if (_productServiceModule) return _productServiceModule;
+  const spec = "../../../packages/api/src/services/product-service.js";
+  _productServiceModule = (await import(spec)) as ProductServiceModule;
+  return _productServiceModule;
+}
+
 // KAN-1184 — conversational orchestrator loader. KAN-689 cohort variable-
 // specifier dynamic import.
 interface ConversationalOrchestratorModule {
@@ -8333,7 +8368,42 @@ const campaignsRouter = router({
 // adds an `includeArchived: boolean` input mirroring the campaigns.list
 // `includeAlwaysOn` discipline.
 // ─────────────────────────────────────────────────────────────────────────
+// KAN-1216b — AuditLog hook shape (mirrors campaignsRouter.commit:7772+).
+interface ProductRouterAuditTx {
+  auditLog: { create: (args: unknown) => Promise<{ id: string }> };
+}
+function buildProductHooks() {
+  return {
+    auditLog: {
+      writeInTx: async (
+        tx: ProductRouterAuditTx,
+        payload: {
+          tenantId: string;
+          actor: string;
+          actionType: string;
+          payload: Record<string, unknown>;
+          reasoning: string;
+        },
+      ): Promise<{ id: string }> =>
+        tx.auditLog.create({
+          data: {
+            tenantId: payload.tenantId,
+            actor: payload.actor,
+            actionType: payload.actionType,
+            payload: payload.payload,
+            reasoning: payload.reasoning,
+          },
+        }),
+    },
+  };
+}
+
 const productsRouter = router({
+  // KAN-1213 — list stub (substrate-only landing). Stays inline this PR
+  // per KAN-1216b Phase 1 Observation B; sibling .create/.update/.archive
+  // adopt the loader pattern.
+  // TODO(KAN-1216): migrate `.list` to `loadProductServiceModule().listProducts`
+  // for consistency with mutations. Tracked at Slice 2 close.
   list: protectedProcedure
     .input(
       z.object({
@@ -8355,6 +8425,73 @@ const productsRouter = router({
       const items = hasMore ? products.slice(0, input.limit) : products;
       const nextCursor = hasMore ? items[items.length - 1].id : null;
       return { items, nextCursor, totalCount: items.length };
+    }),
+
+  // KAN-1216b — Product CRUD mutations. Service layer at
+  // packages/api/src/services/product-service.ts (M4 doctrine canonical
+  // anchor). Defensive Zod parse runs at service entry (E3 lock).
+  create: protectedProcedure
+    .input(
+      z.object({
+        name: z.string().min(1),
+        description: z.string().nullable().optional(),
+        status: z.enum(["draft", "active", "archived"]).optional(),
+        price: z.number().nullable().optional(),
+        currency: z.string().length(3).optional(),
+        externalUrl: z.string().url().nullable().optional(),
+        primaryImageUrl: z.string().url().nullable().optional(),
+        customFields: z.record(z.unknown()).optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const { createProduct } = await loadProductServiceModule();
+      return createProduct(
+        ctx.prisma,
+        ctx.tenantId,
+        input,
+        ctx.firebaseUser?.uid ?? "system",
+        buildProductHooks(),
+      );
+    }),
+
+  update: protectedProcedure
+    .input(
+      z.object({
+        id: z.string().uuid(),
+        name: z.string().min(1).optional(),
+        description: z.string().nullable().optional(),
+        status: z.enum(["draft", "active", "archived"]).optional(),
+        price: z.number().nullable().optional(),
+        currency: z.string().length(3).optional(),
+        externalUrl: z.string().url().nullable().optional(),
+        primaryImageUrl: z.string().url().nullable().optional(),
+        customFields: z.record(z.unknown()).optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const { updateProduct } = await loadProductServiceModule();
+      const { id, ...rest } = input;
+      return updateProduct(
+        ctx.prisma,
+        ctx.tenantId,
+        id,
+        rest,
+        ctx.firebaseUser?.uid ?? "system",
+        buildProductHooks(),
+      );
+    }),
+
+  archive: protectedProcedure
+    .input(z.object({ id: z.string().uuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const { archiveProduct } = await loadProductServiceModule();
+      return archiveProduct(
+        ctx.prisma,
+        ctx.tenantId,
+        input.id,
+        ctx.firebaseUser?.uid ?? "system",
+        buildProductHooks(),
+      );
     }),
 });
 
