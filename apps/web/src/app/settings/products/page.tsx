@@ -491,6 +491,11 @@ function ProductsTab() {
         onOpenChange={setScrapeOpen}
         onScraped={() => {
           setScrapeOpen(false);
+          // KAN-1228 Memo 52 — operator-visibility guarantee. Scraper auto-saves
+          // partial extracts as draft + full extracts as active; clearing the
+          // status filter ensures the new product is visible regardless of the
+          // operator's previously-selected chip.
+          setStatusFilter(null);
           setPages([]);
           void refetch();
         }}

@@ -172,10 +172,25 @@ describe("KAN-1219 — Product scraper service", () => {
         expect(product?.status).toBe("active");
         expect(product?.name).toBe("Premium Widget");
 
+        // Memo 53 — scraper-origin audit_log row carries product.scraped
+        // (NOT product.created). Provenance distinguishability is mandatory
+        // per the dual-audit-type discipline (Memo 32 family + KAN-1190 J7).
         const audits = await prisma.auditLog.findMany({
-          where: { tenantId, actionType: "product.created" },
+          where: { tenantId, actionType: "product.scraped" },
         });
         expect(audits.length).toBe(1);
+        // Also assert payload carries scraper-specific fields.
+        const audit = audits[0];
+        const payload = audit?.payload as { productId: string; externalUrl: string; extractGaps: string[] };
+        expect(payload.productId).toBe(result.productId);
+        expect(payload.externalUrl).toBe("https://example.com/product/widget");
+        expect(payload.extractGaps).toEqual([]);
+
+        // Negative assertion: no product.created rows leaked.
+        const createdAudits = await prisma.auditLog.findMany({
+          where: { tenantId, actionType: "product.created" },
+        });
+        expect(createdAudits.length).toBe(0);
       },
       (prisma: PrismaClient) => cleanupTenant(prisma, tenantId),
     );

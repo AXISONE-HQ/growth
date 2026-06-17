@@ -34,8 +34,11 @@
  * import (KAN-689 cohort) from apps/api/src/router.ts.
  *
  * AuditLog hook contract mirrors product-service.ts buildProductHooks shape.
- * Reuses createProduct() from product-service.ts internally — the scraper is
- * a producer + consumer pair (fetch + parse → invoke CRUD).
+ * Per Memo 53 (AuditLog action_type provenance distinguishability), persists
+ * scraped products directly with action_type='product.scraped' rather than
+ * reusing product-service.createProduct() (which writes 'product.created').
+ * Provenance must be queryable at the row level, NOT via cross-reference
+ * reconstruction. See step 7 inline doctrine block for full reasoning.
  */
 import * as cheerio from "cheerio";
 import {
@@ -46,11 +49,7 @@ import {
   SCRAPER_MAX_RESPONSE_BYTES,
 } from "@growth/shared";
 
-import {
-  createProduct,
-  type CreateProductInput,
-  type ProductServiceHooks,
-} from "./product-service.js";
+import type { ProductServiceHooks } from "./product-service.js";
 
 // ─────────────────────────────────────────────
 // Prisma surface (typed loosely — same posture as product-service.ts)
@@ -276,33 +275,66 @@ export async function scrapeProduct(
   const isScrapeSuccess = extractGaps.length === 0;
   const status: "active" | "draft" = isScrapeSuccess ? "active" : "draft";
 
-  // ── Step 7: persist via product-service.createProduct (re-uses M4 audit hooks) ─
-  const createInput: CreateProductInput = {
-    name: fields.name,
-    description: fields.description,
-    status,
-    price: fields.price,
-    currency: "USD",
-    externalUrl: parsed.url,
-    primaryImageUrl: fields.primaryImageUrl,
-    customFields: {
-      scrapedAt: new Date().toISOString(),
-      scrapedFrom: parsed.url,
-      extractGaps,
-    },
-  };
-
-  const created = await createProduct(
-    prisma as unknown as Parameters<typeof createProduct>[0],
-    tenantId,
-    createInput,
-    actor,
-    hooks,
-  );
-
+  // ── Step 7: persist directly + write `product.scraped` audit_log ───────
+  //
+  // Memo 53 — AuditLog action_type provenance distinguishability.
+  // We do NOT reuse product-service.createProduct() because that writes
+  // `product.created` audit rows, conflating operator-origin with
+  // scraper-origin entities. Per Memo 32 family + KAN-1190 J7 dual-audit-
+  // type discipline, distinct commit paths emit distinct action_types so
+  // audit-replay queryability is preserved at the row level (operational
+  // analytics like "how many products did operators create vs scrape this
+  // week" need distinguishable rows, NOT cross-reference reconstruction).
+  //
+  // Payload includes: productId, externalUrl, extractedFields snapshot,
+  // extractGaps[], scrapedAt — everything downstream forensic queries
+  // need to reconstruct the scrape decision.
+  const scrapedAt = new Date().toISOString();
+  const { product, auditId } = await prisma.$transaction(async (tx) => {
+    const txt = tx as unknown as {
+      product: { create: (args: unknown) => Promise<{ id: string }> };
+    };
+    const prod = await txt.product.create({
+      data: {
+        tenantId,
+        name: fields.name,
+        description: fields.description,
+        status,
+        price: fields.price,
+        currency: "USD",
+        externalUrl: parsed.url,
+        primaryImageUrl: fields.primaryImageUrl,
+        customFields: {
+          scrapedAt,
+          scrapedFrom: parsed.url,
+          extractGaps,
+        },
+      },
+    });
+    const audit = await hooks.auditLog.writeInTx(tx, {
+      tenantId,
+      actor,
+      actionType: "product.scraped",
+      payload: {
+        productId: prod.id,
+        externalUrl: parsed.url,
+        extractedFields: {
+          name: fields.name,
+          description: fields.description,
+          price: fields.price,
+          primaryImageUrl: fields.primaryImageUrl,
+        },
+        extractGaps,
+        scrapedAt,
+      },
+      reasoning: `scraper (${actor}) scraped product from ${parsed.url} (gaps: ${extractGaps.length === 0 ? "none" : extractGaps.join(",")})`,
+    });
+    return { product: prod, auditId: audit.id };
+  });
+  void auditId; // auditId is referenced via audit-log; we don't return it.
   return {
     kind: "scraped",
-    productId: (created.product as { id: string }).id,
+    productId: product.id,
     isScrapeSuccess,
     extractGaps,
   };
