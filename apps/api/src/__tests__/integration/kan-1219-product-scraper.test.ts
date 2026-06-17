@@ -332,6 +332,95 @@ describe("KAN-1219 — Product scraper service", () => {
     );
   });
 
+  it("scenario 7 — Pattern A strips og:site_name suffix from og:title", async () => {
+    let tenantId = "";
+    await withCleanup(
+      async (prisma: PrismaClient) => {
+        const t = await createTenant(prisma);
+        tenantId = t.id;
+        await prisma.tenant.update({
+          where: { id: tenantId },
+          data: { marketingDomain: "4mkauto.com" },
+        });
+
+        // KAN-1219 PROD anchor: 4mkauto.com sets og:site_name="4mk Auto"
+        // and og:title="<product> - 4mk Auto". Pattern A case-insensitive
+        // match strips the suffix cleanly.
+        const html = `
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta property="og:title" content="2024 Toyota Camry XLE - 4MK Auto" />
+    <meta property="og:site_name" content="4MK Auto" />
+    <meta property="og:description" content="Pre-owned 2024 Toyota Camry XLE." />
+    <meta property="og:image" content="https://4mkauto.com/camry.jpg" />
+  </head>
+  <body><p>Price: $28,500</p></body>
+</html>`;
+
+        const result = await svc.scrapeProduct(
+          prisma as unknown as object,
+          tenantId,
+          { url: "https://4mkauto.com/inventory/camry" },
+          "operator-1",
+          buildTestHooks(),
+          buildMockFetch(html),
+        );
+        expect(result.kind).toBe("scraped");
+        if (result.kind !== "scraped") throw new Error("type narrow");
+        const product = await (prisma as unknown as {
+          product: { findUnique: (args: unknown) => Promise<{ name: string } | null> };
+        }).product.findUnique({ where: { id: result.productId } });
+        expect(product?.name).toBe("2024 Toyota Camry XLE");
+      },
+      (prisma: PrismaClient) => cleanupTenant(prisma, tenantId),
+    );
+  });
+
+  it("scenario 8 — generic-h1 rejection falls through to h2", async () => {
+    let tenantId = "";
+    await withCleanup(
+      async (prisma: PrismaClient) => {
+        const t = await createTenant(prisma);
+        tenantId = t.id;
+        await prisma.tenant.update({
+          where: { id: tenantId },
+          data: { marketingDomain: "example.com" },
+        });
+
+        // NO og:title; h1 is generic page-chrome ("Inventory"); h2 carries
+        // the real product name. Expect h1 rejected, h2 wins.
+        const html = `
+<!DOCTYPE html>
+<html>
+  <head><title>Inventory Page</title></head>
+  <body>
+    <h1>Inventory</h1>
+    <h2>Toyota Camry XLE</h2>
+    <p>Price: $28,500</p>
+  </body>
+</html>`;
+
+        const result = await svc.scrapeProduct(
+          prisma as unknown as object,
+          tenantId,
+          { url: "https://example.com/inventory/camry" },
+          "operator-1",
+          buildTestHooks(),
+          buildMockFetch(html),
+        );
+
+        expect(result.kind).toBe("scraped");
+        if (result.kind !== "scraped") throw new Error("type narrow");
+        const product = await (prisma as unknown as {
+          product: { findUnique: (args: unknown) => Promise<{ name: string } | null> };
+        }).product.findUnique({ where: { id: result.productId } });
+        expect(product?.name).toBe("Toyota Camry XLE");
+      },
+      (prisma: PrismaClient) => cleanupTenant(prisma, tenantId),
+    );
+  });
+
   it("partial extract — only name → isScrapeSuccess=false + status='draft' + extractGaps", async () => {
     let tenantId = "";
     await withCleanup(

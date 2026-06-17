@@ -39,6 +39,40 @@
  * reusing product-service.createProduct() (which writes 'product.created').
  * Provenance must be queryable at the row level, NOT via cross-reference
  * reconstruction. See step 7 inline doctrine block for full reasoning.
+ *
+ * # Title-sanitization doctrine (KAN-1219 fix-forward)
+ *
+ * 5. **stripSiteSuffix is Pattern A only, NOT B or C.** Pattern A strips
+ *    the og:site_name (when meta present) appended via separator characters
+ *    (- | — :: –). Case-insensitive site match. Pattern C — naive
+ *    last-segment strip regardless of match — was rejected because
+ *    legitimate product names commonly contain separators
+ *    ("Widget - Pro Edition" must NOT clip to "Widget").
+ *
+ *    **Pattern B (hostname-derived candidate) DEFERRED to KAN-1221** per
+ *    Memo 54 empirical-priority-discipline. PROD anchor: 4mkauto.com sets
+ *    og:site_name="4mk Auto" — Pattern A alone handles the original bug.
+ *    Pattern B (when og:site_name absent) was speculative defensive scope
+ *    that fails on hostname↔suffix lexical mismatch (`4mkauto` hostname
+ *    vs `4mk auto` suffix is not regex-decomposable without vocabulary).
+ *    Reopen KAN-1221 when an empirical PROD site with absent og:site_name
+ *    AND raw-hostname suffix appears.
+ *
+ * 6. **GENERIC_H1_WHITELIST is hoisted to packages/shared** per Memo 37
+ *    (cross-workspace algorithm hoist eliminates byte-stability drift).
+ *    Future apps/web /settings/products lint surface will consume the
+ *    same vocabulary at name-entry time. Re-implement-per-workspace is
+ *    silent-drift-prone.
+ *
+ * 7. **Doctrine anchors** —
+ *    - Memo 39 #7: symptom-vs-root-cause classification (KAN-1230 +
+ *      KAN-1219 forced upward reclassification when title-sanitization
+ *      gap surfaced as silent name-pollution rather than null name).
+ *    - Memo 51 #5: stripSiteSuffix is the 5th test-author CI fix-forward
+ *      anchored to the cross-workspace algorithm-hoist cohort.
+ *    - Memo 54 #4: Pattern B deferral validates empirical-priority
+ *      discipline — defensive scope without empirical signal is removed,
+ *      not shipped narrower.
  */
 import * as cheerio from "cheerio";
 import {
@@ -47,6 +81,8 @@ import {
   ProductScraperInputSchema,
   SCRAPER_TIMEOUT_MS,
   SCRAPER_MAX_RESPONSE_BYTES,
+  GENERIC_H1_WHITELIST,
+  SITE_SUFFIX_SEPARATORS,
 } from "@growth/shared";
 
 import type { ProductServiceHooks } from "./product-service.js";
@@ -129,16 +165,94 @@ export interface ExtractedFields {
 
 const PRICE_REGEX = /\$\s?([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{1,2})?)/;
 
+/**
+ * isGenericH1 — case-insensitive whitelist rejection.
+ *
+ * Rejects strings matching GENERIC_H1_WHITELIST (page chrome like "Inventory"
+ * / "Home" / "Products"). Returns TRUE when the text should be rejected as
+ * a name candidate. Whitespace-trimmed comparison; empty input → false
+ * (caller already filters nulls).
+ */
+export function isGenericH1(text: string): boolean {
+  const normalized = text.trim().toLowerCase();
+  if (normalized.length === 0) return false;
+  return GENERIC_H1_WHITELIST.some((g) => g.toLowerCase() === normalized);
+}
+
+/**
+ * stripSiteSuffix — Pattern A only (og:site_name).
+ *
+ * Pattern A: when og:site_name meta present, strip ` <sep> <site>` from end.
+ *   Separators per SITE_SUFFIX_SEPARATORS (-, |, —, –, ::). Case-insensitive
+ *   site match.
+ *
+ * Pattern B (hostname-derived) is DEFERRED to KAN-1221 — see module
+ * header doctrine #5 for empirical-priority rationale. Pattern C (naive
+ * last-segment strip) is REJECTED — would clip "Widget - Pro Edition".
+ *
+ * Safety: if the strip would leave < 3 chars OR og:site_name is absent,
+ * return the original raw string unchanged.
+ */
+export function stripSiteSuffix(raw: string, $: cheerio.CheerioAPI): string {
+  const input = raw.trim();
+  if (input.length === 0) return raw;
+
+  const siteName = pickMeta($, 'meta[property="og:site_name"]');
+  if (!siteName) return input;
+
+  const trimmedCand = siteName.trim();
+  if (trimmedCand.length === 0) return input;
+
+  const stripped = applySuffixStrip(input, trimmedCand);
+  if (stripped !== null && stripped.length >= 3) return stripped;
+  return input;
+}
+
+/**
+ * applySuffixStrip — case-insensitive end-match of ` <sep> <candidate>`.
+ * Returns null when no separator-bridged suffix matches; returns the
+ * trimmed prefix otherwise.
+ */
+function applySuffixStrip(input: string, candidate: string): string | null {
+  const lower = input.toLowerCase();
+  const candLower = candidate.toLowerCase();
+  for (const sep of SITE_SUFFIX_SEPARATORS) {
+    // Match `<whitespace?><sep><whitespace?><candidate>` at end.
+    const needle = `${sep.toLowerCase()} ${candLower}`;
+    const idx = lower.lastIndexOf(needle);
+    if (idx === -1) continue;
+    // Verify it really IS at the end (allow trailing whitespace).
+    const tail = lower.slice(idx + needle.length).trim();
+    if (tail.length !== 0) continue;
+    // Walk left through any leading whitespace before the separator.
+    let cut = idx;
+    while (cut > 0 && /\s/.test(input.charAt(cut - 1))) cut--;
+    if (cut <= 0) return null;
+    return input.slice(0, cut).trim();
+  }
+  return null;
+}
+
 export function extractProductFields(html: string): ExtractedFields {
   const $ = cheerio.load(html);
 
   // ── Name (priority order: og:title meta > h1 > h2 > title meta) ────────
-  const name =
-    pickMeta($, 'meta[property="og:title"]') ??
-    pickText($, "h1") ??
-    pickText($, "h2") ??
-    pickMeta($, 'meta[name="title"]') ??
-    null;
+  // Each candidate runs through stripSiteSuffix (Pattern A — og:site_name)
+  // to remove site-name pollution ("X - Brand"). h1/h2 candidates
+  // additionally run through isGenericH1 to reject page-chrome like
+  // "Inventory" / "Home" / "Products". KAN-1219 fix-forward — anchor:
+  // 4mkauto.com og:title="2024 Toyota Camry XLE - 4mk Auto" with
+  // og:site_name="4mk Auto" shipped with suffix intact before this fix.
+  const ogTitle = pickMeta($, 'meta[property="og:title"]');
+  const h1 = pickText($, "h1");
+  const h2 = pickText($, "h2");
+  const metaTitle = pickMeta($, 'meta[name="title"]');
+
+  const cleanedOgTitle = ogTitle ? stripSiteSuffix(ogTitle, $) : null;
+  const cleanedH1 = h1 && !isGenericH1(h1) ? stripSiteSuffix(h1, $) : null;
+  const cleanedH2 = h2 && !isGenericH1(h2) ? stripSiteSuffix(h2, $) : null;
+
+  const name = cleanedOgTitle ?? cleanedH1 ?? cleanedH2 ?? metaTitle ?? null;
 
   // ── Description (og:description > meta description > .product-description) ─
   const description =
