@@ -122,3 +122,11 @@ export * from "./products.js";
 // discrimination only. KAN-1216 CRUD implements the runtime price resolution
 // `variant.price ?? variant.product.price ?? null`.
 export * from "./product-variants.js";
+// KAN-1215 (Slice 1 PR 3 of KAN-1212 epic) — ProductCategory schema. Tenant-scoped
+// hierarchical taxonomy with self-referencing SetNull FK (Contact.currentPipelineId
+// precedent). Reuses ProductStatusEnum from products.js (NEW-Q3 lock — no separate
+// CategoryStatus). FIRST instance of @@unique([..., nullableColumn]) in the
+// codebase — see Memo 45 (sql_null_semantics_in_prisma_unique_constraints) for
+// the NULL ≠ NULL semantic + partial-unique-index pattern if global uniqueness
+// across roots is ever required.
+export * from "./product-categories.js";

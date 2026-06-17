@@ -189,6 +189,12 @@ model Tenant {
   // precedent — tenant-scoped child models declare both parent FK and tenant FK).
   // Cascade matches Product's pattern.
   productVariants         ProductVariant[]
+  // KAN-1215 — ProductCategory tenant back-relation. Tenant-scoped hierarchical
+  // catalog taxonomy (self-FK SetNull for tree structure). Cascade matches the
+  // Product + ProductVariant pattern; tenant deletion takes the category tree
+  // with it. See ProductCategory model for the Memo 45 doctrine block on
+  // SQL NULL semantics in the @@unique([tenantId, parentId, name]) constraint.
+  productCategories       ProductCategory[]
 
   //   tenantSettings  TenantSettings[]  // commented out for smoke build (model missing on main)
   channelConnections    ChannelConnection[]
@@ -3712,4 +3718,110 @@ model ProductVariant {
   @@index([productId])
   @@index([tenantId])
   @@map("product_variants")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// KAN-1215 — ProductCategory substrate (Slice 1 PR 3 of KAN-1212 epic).
+//
+// Tenant-scoped hierarchical taxonomy for the catalog. Self-referencing tree
+// with `parentId String?` + SetNull cascade (Contact.currentPipelineId:374
+// precedent for named self-FK + SetNull). Root categories have NULL parentId;
+// deletion of a parent does NOT cascade-delete children — children become
+// root-level (operator can re-parent or re-organize without data loss).
+//
+// # SQL NULL semantics in @@unique constraint (Memo 45 — FIRST INSTANCE)
+//
+// `@@unique([tenantId, parentId, name])` is the FIRST `@@unique([..., nullableColumn])`
+// instance across 68 Prisma models in this codebase. Future PRs adding similar
+// nullable-column uniqueness should reference this doctrine block AND the
+// `sql_null_semantics_in_prisma_unique_constraints` memo at the resolving site.
+//
+// SQL standard (and Postgres): NULL ≠ NULL in unique constraints. This means:
+//
+//   ✓ ALLOWED:  Two root categories named "Imports" per tenant
+//               (each has parentId=NULL; NULL ≠ NULL → both rows permitted)
+//   ✓ ALLOWED:  One "Imports" under parent A AND one "Imports" under parent B
+//               (different parentId; constraint only fires on full match)
+//   ✗ REJECTED: Two categories named "Imports" under the SAME parent A
+//               (parentId matches non-null → duplicate; constraint enforces)
+//
+// **This is the INTENDED behavior.** Operators may legitimately want multiple
+// unrelated root trees with the same name (e.g., separate fiscal-year or
+// product-line groupings). KAN-1215 deliberately does NOT add a partial
+// unique index for global-uniqueness-across-roots; if a future tenant UX
+// surfaces "duplicate root name" as a bug, file a fix-forward to add:
+//
+//   CREATE UNIQUE INDEX product_categories_tenant_root_name_unique
+//     ON product_categories (tenant_id, name)
+//     WHERE parent_id IS NULL;
+//
+// Reference: Prisma docs "Unique constraints with nullable columns" + SQL
+// standard "Null Values and Comparisons."
+//
+// # No status enum reuse (Q-ADD C4 + NEW-Q3 — reuse Product enum)
+//
+// `status ProductStatus @default(draft)` reuses the KAN-1213 ProductStatus
+// enum (draft/active/archived). Doctrinally shared across catalog models;
+// keeps migration versioning + Zod export clean. Do NOT create a new
+// CategoryStatus enum. Compound soft-delete: `status='archived'` +
+// `archivedAt=now()` mirrors KAN-1213 Product exactly (router filter
+// `archivedAt: null` per Product.list:8348 precedent).
+//
+// # sortOrder explicitly OMITTED (Q-ADD C6 + NEW-Q2)
+//
+// SPO pre-leaned `sortOrder Int @default(0)`; CC empirical refute — ZERO
+// codebase precedent for sortOrder/displayOrder/position rank-like columns
+// across 68 models (Memo 39 enforcement). MVP uses lexical sort by `name`.
+// If KAN-1216 UX surfaces drag-to-reorder as required, file fix-forward to
+// add `sortOrder Int @default(0)` + composite index. Deliberate omission;
+// not an oversight.
+//
+// # Depth limit deferred to service layer (Q-ADD C3)
+//
+// No DB-level depth column. KAN-1216 CRUD service enforces max-5-level
+// nesting at write time. Codebase precedent: ZERO `depth: Int` / `level: Int`
+// columns across 68 models — app-layer guards are the canonical pattern.
+//
+// # Product.categoryId deferred (Q-ADD C5)
+//
+// Product → ProductCategory FK is NOT added in this PR. KAN-1216 or a
+// dedicated PR will declare `Product.categoryId String?` once the catalog
+// taxonomy is operator-visible (KAN-1218). Atomic ProductCategory-only
+// substrate landing per Override A discipline.
+//
+// # Index discipline (Q-ADD C9)
+//
+// Three indexes — `(tenantId)` fallback + `(tenantId, parentId)` for
+// tree traversal + `(tenantId, status)` for list-view archived-filter
+// (matches KAN-1213 Product.list pattern + CampaignMembership precedent).
+// ─────────────────────────────────────────────────────────────────────────
+model ProductCategory {
+  id          String        @id @default(uuid())
+  tenantId    String        @map("tenant_id")
+
+  // Self-FK: nullable for root categories. SetNull means children become
+  // root-level on parent delete (operator can re-parent without data loss).
+  parentId    String?       @map("parent_id")
+
+  // Identity
+  name        String
+  description String?
+  status      ProductStatus @default(draft)
+
+  // Lifecycle — compound soft-delete: status='archived' + archivedAt=now()
+  archivedAt  DateTime?     @map("archived_at")
+  createdAt   DateTime      @default(now()) @map("created_at")
+  updatedAt   DateTime      @updatedAt @map("updated_at")
+
+  // Relations — Cascade from Tenant; SetNull from self-parent.
+  tenant   Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  parent   ProductCategory?  @relation("CategoryHierarchy", fields: [parentId], references: [id], onDelete: SetNull)
+  children ProductCategory[] @relation("CategoryHierarchy")
+
+  // See model header for Memo 45 NULL-semantic doctrine on this @@unique.
+  @@unique([tenantId, parentId, name])
+  @@index([tenantId])
+  @@index([tenantId, parentId])
+  @@index([tenantId, status])
+  @@map("product_categories")
 }
