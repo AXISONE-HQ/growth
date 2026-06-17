@@ -218,6 +218,12 @@ model Tenant {
   // with it. See ProductCategory model for the Memo 45 doctrine block on
   // SQL NULL semantics in the @@unique([tenantId, parentId, name]) constraint.
   productCategories       ProductCategory[]
+  // KAN-1212 (Slice 1 of KAN-1211 epic) — Vehicle inventory tenant back-relation.
+  // Auto-vertical entity sibling to Product (separate vertical, not a product
+  // specialization). Cascade matches the catalog pattern; tenant deletion takes
+  // the inventory with it. See Vehicle model for the Memo 45 doctrine block on
+  // SQL NULL semantics in the @@unique([tenantId, vin]) constraint.
+  vehicles                Vehicle[]
 
   //   tenantSettings  TenantSettings[]  // commented out for smoke build (model missing on main)
   channelConnections    ChannelConnection[]
@@ -1141,20 +1147,20 @@ enum KnowledgeCategory {
 }
 
 model Pipeline {
-  id                       String           @id @default(uuid())
-  tenantId                 String           @map("tenant_id")
+  id                       String            @id @default(uuid())
+  tenantId                 String            @map("tenant_id")
   name                     String
   description              String?
-  isActive                 Boolean          @default(true) @map("is_active")
-  order                    Int              @default(0)
-  objectiveType            ObjectiveType    @map("objective_type")
-  objectiveDescription     String?          @map("objective_description")
+  isActive                 Boolean           @default(true) @map("is_active")
+  order                    Int               @default(0)
+  objectiveType            ObjectiveType     @map("objective_type")
+  objectiveDescription     String?           @map("objective_description")
   // KAN-959 — Pipeline binds to an Objective row (Pipeline = the path to the
   // Objective). Nullable during slice 1: the fixture pipeline (KAN-702 Verify
   // Pipeline) stays NULL per Phase 1 strict-fixture decision. The legacy
   // `objectiveType` enum + `objectiveDescription` columns remain parallel
   // this slice; consolidation deferred.
-  objectiveId              String?          @map("objective_id")
+  objectiveId              String?           @map("objective_id")
   // KAN-962 (slice 2a) — segment marker. Distinguishes pipelines that serve
   // different audiences of the SAME objective (a tenant pursuing
   // book_appointment may have a `new_leads` pipeline AND a `closed_lost_recovery`
@@ -1162,12 +1168,12 @@ model Pipeline {
   // lead-assignment filters on (segment=new_leads, objectiveId=<primary>) so
   // future winback pipelines never catch fresh inbound. Nullable for back-compat
   // with KAN-702 fixture + pre-slice-2a pipelines.
-  segment                  PipelineSegment? @map("segment")
+  segment                  PipelineSegment?  @map("segment")
   // KAN-704: pipeline-tier auto-approve defaults. Resolution order is
   // Stage.autoApproveMatrix → this column → Tenant.autoApproveEnabled
   // (kill-switch) → platform default (auto-approve-defaults.ts). NULL means
   // "skip this tier" (same posture as Stage.autoApproveMatrix when empty).
-  defaultAutoApproveMatrix Json?            @map("default_auto_approve_matrix")
+  defaultAutoApproveMatrix Json?             @map("default_auto_approve_matrix")
   // KAN-1001 Campaign Slice 0 — back-link to the owning Campaign. NULLABLE
   // in Phase 1 because (a) the backfill migration populates this for every
   // objective-bound Pipeline; (b) the legacy fixture Pipeline (KAN-702
@@ -1179,13 +1185,13 @@ model Pipeline {
   // but application-level guards in pipelinesRouter.create + update enforce
   // required-ness post-backfill (closes the FK-nullable defensive window
   // identified as Q-ADD-PIPELINE-FK-NULLABLE-WINDOW in Phase 1).
-  campaignId               String?          @map("campaign_id")
+  campaignId               String?           @map("campaign_id")
   // KAN-1167 — multi-motion Pipeline orchestration (1:N under outcome Campaign).
   // When an outcome Campaign spawns multiple Pipelines (New Leads + Upsell +
   // Winback), each carries its motion + projected contribution toward the
   // parent goal. NULL for legacy Pipelines + Always-On-attached Pipelines.
-  motion                   String?          @map("motion")
-  projectedContribution    Int?             @map("projected_contribution")
+  motion                   String?           @map("motion")
+  projectedContribution    Int?              @map("projected_contribution")
   // KAN-1182 — Per-Pipeline strategy override. NULL = Campaign-level default
   // (Campaign.strategy) applies. Multi-Pipeline Campaigns from KAN-1188
   // ActionPlanCard set distinct per-Pipeline strategies (e.g., direct on
@@ -1193,8 +1199,8 @@ model Pipeline {
   // Option 2 additive lock — backwards-compatible with single-Pipeline
   // legacy Campaigns; no backfill needed.
   strategy                 CampaignStrategy? @map("strategy")
-  createdAt                DateTime         @default(now()) @map("created_at")
-  updatedAt                DateTime         @updatedAt @map("updated_at")
+  createdAt                DateTime          @default(now()) @map("created_at")
+  updatedAt                DateTime          @updatedAt @map("updated_at")
 
   tenant           Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   stages           Stage[]
@@ -3597,37 +3603,37 @@ model ParseRuleVersion {
 // variable-specifier dynamic-import discipline. KAN-1216 follow-up adds the
 // service module + full CRUD when the surface stabilizes.
 model Product {
-  id              String        @id @default(uuid())
-  tenantId        String        @map("tenant_id")
+  id       String @id @default(uuid())
+  tenantId String @map("tenant_id")
 
   // Identity
-  name            String
-  description     String?
-  status          ProductStatus @default(draft)
+  name        String
+  description String?
+  status      ProductStatus @default(draft)
 
   // Money — Decimal(12,2) + USD per codebase precedent (NOT Int cents).
   // See model-level doctrine block above for full Phase 1 reasoning.
-  price           Decimal?      @db.Decimal(12, 2)
-  currency        String        @default("USD") @db.VarChar(3)
+  price    Decimal? @db.Decimal(12, 2)
+  currency String   @default("USD") @db.VarChar(3)
 
   // External references
-  externalUrl     String?       @map("external_url")
-  primaryImageUrl String?       @map("primary_image_url")
+  externalUrl     String? @map("external_url")
+  primaryImageUrl String? @map("primary_image_url")
 
   // Extension
-  customFields    Json          @default("{}") @map("custom_fields")
+  customFields Json @default("{}") @map("custom_fields")
 
   // Lifecycle
-  archivedAt      DateTime?     @map("archived_at")
-  createdAt       DateTime      @default(now()) @map("created_at")
-  updatedAt       DateTime      @updatedAt @map("updated_at")
+  archivedAt DateTime? @map("archived_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
 
   // Relations — Cascade mirrors sibling tenant-scoped models. Product is a
   // tenant-owned asset; tenant deletion (rare) takes the catalog with it.
-  tenant          Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenant   Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   // KAN-1214 — ProductVariant back-relation. Cascade from Product → variants
   // (variants die with parent product; matches Slice 1 lifecycle contract).
-  variants        ProductVariant[]
+  variants ProductVariant[]
 
   @@index([tenantId])
   @@index([tenantId, status])
@@ -3640,8 +3646,8 @@ model Product {
 // slices if scrape UX needs an intermediate "draft → pending_review → active"
 // gate. KAN-1004 post-canonical enum syntax (NOT String-with-comments).
 enum ProductStatus {
-  draft    // operator authoring; not yet bound to any Campaign
-  active   // bound and usable as Campaign.goalProductId target
+  draft // operator authoring; not yet bound to any Campaign
+  active // bound and usable as Campaign.goalProductId target
   archived // soft-deleted; excluded from default listProducts; preserves FK integrity
 
   @@map("product_status")
@@ -3714,13 +3720,13 @@ enum ProductStatus {
 // transitively via status inheritance.
 // ─────────────────────────────────────────────────────────────────────────
 model ProductVariant {
-  id           String   @id @default(uuid())
-  tenantId     String   @map("tenant_id")
-  productId    String   @map("product_id")
+  id        String @id @default(uuid())
+  tenantId  String @map("tenant_id")
+  productId String @map("product_id")
 
   // Discriminators — {size?, color?, tier?, ...} per Q-A10 lock. Zod
   // VariantAttributesSchema parses at write in KAN-1216 CRUD.
-  attributes   Json     @default("{}")
+  attributes Json @default("{}")
 
   // KAN-1216a — Content hash of `attributes` for service-layer dedup. Computed
   // at write time via `sha256(JSON.stringify(attrs)).slice(0, 16)` matching
@@ -3762,11 +3768,11 @@ model ProductVariant {
   // (1974) and Order.{subtotal,grandTotal} (2609-2613). null = "inherit from
   // parent Product.price at runtime" per Memo 43; NOT "unpriced" (that's
   // Product.price semantic). See model header for full doctrine.
-  price        Decimal? @db.Decimal(12, 2)
+  price Decimal? @db.Decimal(12, 2)
 
   // Lifecycle (no archivedAt — see header)
-  createdAt    DateTime @default(now()) @map("created_at")
-  updatedAt    DateTime @updatedAt @map("updated_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
   // Relations — Cascade from parent Product (variants die with parent) +
   // Cascade from Tenant (catalog dies with tenant). Mirrors
@@ -3861,12 +3867,12 @@ model ProductVariant {
 // (matches KAN-1213 Product.list pattern + CampaignMembership precedent).
 // ─────────────────────────────────────────────────────────────────────────
 model ProductCategory {
-  id          String        @id @default(uuid())
-  tenantId    String        @map("tenant_id")
+  id       String @id @default(uuid())
+  tenantId String @map("tenant_id")
 
   // Self-FK: nullable for root categories. SetNull means children become
   // root-level on parent delete (operator can re-parent without data loss).
-  parentId    String?       @map("parent_id")
+  parentId String? @map("parent_id")
 
   // Identity
   name        String
@@ -3874,9 +3880,9 @@ model ProductCategory {
   status      ProductStatus @default(draft)
 
   // Lifecycle — compound soft-delete: status='archived' + archivedAt=now()
-  archivedAt  DateTime?     @map("archived_at")
-  createdAt   DateTime      @default(now()) @map("created_at")
-  updatedAt   DateTime      @updatedAt @map("updated_at")
+  archivedAt DateTime? @map("archived_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
 
   // Relations — Cascade from Tenant; SetNull from self-parent.
   tenant   Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -3889,4 +3895,125 @@ model ProductCategory {
   @@index([tenantId, parentId])
   @@index([tenantId, status])
   @@map("product_categories")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+/// KAN-1212 (Slice 1 of KAN-1211 epic) — Auto Vehicle Inventory.
+///
+/// # Memo 45 NULL semantics — @@unique([tenantId, vin])
+///
+/// VIN is nullable for vehicles without recorded VIN (legacy inventory,
+/// non-VIN-tracked private sales, pre-1981 vehicles outside ISO 3779 scope).
+/// SQL @@unique with a nullable column allows MULTIPLE rows with NULL vin
+/// per tenant because NULL ≠ NULL under SQL three-valued logic. This is
+/// intentional. When VIN is present, it must be unique within the tenant.
+///
+/// # Memo 53 audit provenance
+///
+/// audit_log action_types: vehicle.created / vehicle.updated / vehicle.archived
+/// (distinct from product.* — vehicle is a separate vertical entity, not a
+/// product specialization).
+///
+/// # M4 archive-only discipline
+///
+/// No hard delete. Archive = status='archived' + archivedAt=now() in single
+/// service-layer tx. Mirrors Product service pattern at
+/// packages/api/src/services/product-service.ts:191-246.
+///
+/// # dealerLot deferral
+///
+/// dealerLot is a free-form String column in Slice 1. Future normalization
+/// to a separate DealerLot entity tracked in **KAN-1213**. Trigger
+/// conditions documented there (multi-lot dealer customer OR analytics
+/// signal of cardinality ≥3 per tenant OR operator-session duplicate-
+/// variation signal). Per Memo 54 empirical-priority discipline — no
+/// speculative normalization without measured demand.
+model Vehicle {
+  id            String           @id @default(uuid())
+  tenantId      String           @map("tenant_id")
+  year          Int
+  make          String
+  model         String
+  trim          String?
+  vin           String?
+  mileage       Int?
+  bodyStyle     BodyStyle        @map("body_style")
+  transmission  Transmission
+  fuelType      FuelType         @map("fuel_type")
+  exteriorColor String?          @map("exterior_color")
+  interiorColor String?          @map("interior_color")
+  drivetrain    Drivetrain
+  condition     VehicleCondition
+  stockNumber   String?          @map("stock_number")
+  dealerLot     String?          @map("dealer_lot")
+  status        VehicleStatus    @default(draft)
+  archivedAt    DateTime?        @map("archived_at")
+  createdAt     DateTime         @default(now()) @map("created_at")
+  updatedAt     DateTime         @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  // See model header for Memo 45 NULL-semantic doctrine on this @@unique.
+  @@unique([tenantId, vin])
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@map("vehicles")
+}
+
+enum VehicleStatus {
+  draft
+  active
+  archived
+
+  @@map("vehicle_status")
+}
+
+enum BodyStyle {
+  suv
+  sedan
+  truck
+  hatchback
+  coupe
+  convertible
+  minivan
+  van
+  wagon
+
+  @@map("body_style")
+}
+
+enum Transmission {
+  automatic
+  manual
+  cvt
+  dct
+
+  @@map("transmission")
+}
+
+enum FuelType {
+  gas
+  diesel
+  hybrid
+  electric
+  plugin_hybrid
+
+  @@map("fuel_type")
+}
+
+enum Drivetrain {
+  fwd
+  rwd
+  awd
+  four_wd
+
+  @@map("drivetrain")
+}
+
+enum VehicleCondition {
+  new
+  used
+  cpo
+
+  @@map("vehicle_condition")
 }

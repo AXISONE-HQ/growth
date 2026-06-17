@@ -1,0 +1,120 @@
+/**
+ * KAN-1212 (Slice 1 of KAN-1211 epic) — Vehicle Inventory shared schema.
+ *
+ * Single source of truth for Vehicle shape across workspaces:
+ *   - apps/api    — vehicles.list / create / update / archive procedures
+ *                   (substrate in this slice; service module deferred to Slice 2)
+ *   - apps/web    — Settings vehicle inventory UI (Slice 3)
+ *   - apps/connectors — feed-import target (deferred)
+ *
+ * # Memo 45 NULL semantics — VIN nullable uniqueness
+ *
+ * VIN is OPTIONAL at the Zod boundary (`z.string().regex(VIN_REGEX).nullable().optional()`).
+ * The Prisma `@@unique([tenantId, vin])` constraint allows multiple NULL-VIN
+ * rows per tenant because NULL ≠ NULL under SQL three-valued logic. This
+ * matches the doctrine documented at the Vehicle model header. Operators
+ * inserting unidentified inventory (legacy / private sale / pre-1981) skip
+ * the VIN check; insertions with a present VIN must be tenant-unique.
+ *
+ * # Memo 53 audit provenance
+ *
+ * Service-layer consumers (KAN-1212 Slice 2) emit audit_log action_types
+ * `vehicle.created` / `vehicle.updated` / `vehicle.archived` — distinct from
+ * `product.*` because Vehicle is a separate vertical entity, not a Product
+ * specialization. The taxonomy keeps cross-entity audit queries unambiguous.
+ *
+ * # dealerLot deferral (KAN-1213 forward reference)
+ *
+ * `dealerLot` is a free-form `String?` column in this slice. Future
+ * normalization to a dedicated DealerLot entity tracked in KAN-1213. Per
+ * Memo 54 empirical-priority discipline — no speculative normalization
+ * without measured cardinality signal.
+ *
+ * # VIN regex (ISO 3779)
+ *
+ * 17 alphanumeric characters EXCLUDING I, O, Q (avoid digit ambiguity per
+ * ISO 3779). Application-layer enforcement; the DB column is plain TEXT.
+ *
+ * # Year bounds
+ *
+ * Lower bound 1900 covers pre-war collector cars; upper bound `CURRENT_YEAR + 2`
+ * supports MY-ahead-of-CY ordering pattern (e.g. 2027 MY orderable in 2026).
+ */
+import { z } from "zod";
+
+export const VEHICLE_STATUSES = ["draft", "active", "archived"] as const;
+export const VehicleStatusEnum = z.enum(VEHICLE_STATUSES);
+export type VehicleStatus = z.infer<typeof VehicleStatusEnum>;
+
+export const BODY_STYLES = [
+  "suv",
+  "sedan",
+  "truck",
+  "hatchback",
+  "coupe",
+  "convertible",
+  "minivan",
+  "van",
+  "wagon",
+] as const;
+export const BodyStyleEnum = z.enum(BODY_STYLES);
+export type BodyStyle = z.infer<typeof BodyStyleEnum>;
+
+export const TRANSMISSIONS = ["automatic", "manual", "cvt", "dct"] as const;
+export const TransmissionEnum = z.enum(TRANSMISSIONS);
+export type Transmission = z.infer<typeof TransmissionEnum>;
+
+export const FUEL_TYPES = [
+  "gas",
+  "diesel",
+  "hybrid",
+  "electric",
+  "plugin_hybrid",
+] as const;
+export const FuelTypeEnum = z.enum(FUEL_TYPES);
+export type FuelType = z.infer<typeof FuelTypeEnum>;
+
+export const DRIVETRAINS = ["fwd", "rwd", "awd", "four_wd"] as const;
+export const DrivetrainEnum = z.enum(DRIVETRAINS);
+export type Drivetrain = z.infer<typeof DrivetrainEnum>;
+
+export const VEHICLE_CONDITIONS = ["new", "used", "cpo"] as const;
+export const VehicleConditionEnum = z.enum(VEHICLE_CONDITIONS);
+export type VehicleCondition = z.infer<typeof VehicleConditionEnum>;
+
+// ISO 3779 VIN: 17 alphanumeric chars excluding I, O, Q (avoid digit ambiguity).
+const VIN_REGEX = /^[A-HJ-NPR-Z0-9]{17}$/;
+const CURRENT_YEAR = 2026;
+
+export const VehicleCreateInputSchema = z.object({
+  year: z.number().int().min(1900).max(CURRENT_YEAR + 2),
+  make: z.string().min(1),
+  model: z.string().min(1),
+  trim: z.string().nullable().optional(),
+  vin: z.string().regex(VIN_REGEX).nullable().optional(),
+  mileage: z.number().int().min(0).max(999_999).nullable().optional(),
+  bodyStyle: BodyStyleEnum,
+  transmission: TransmissionEnum,
+  fuelType: FuelTypeEnum,
+  exteriorColor: z.string().nullable().optional(),
+  interiorColor: z.string().nullable().optional(),
+  drivetrain: DrivetrainEnum,
+  condition: VehicleConditionEnum,
+  stockNumber: z.string().nullable().optional(),
+  dealerLot: z.string().nullable().optional(),
+  status: VehicleStatusEnum.default("draft"),
+});
+
+export type VehicleCreateInput = z.infer<typeof VehicleCreateInputSchema>;
+
+export const VehicleUpdateInputSchema = VehicleCreateInputSchema.partial();
+export type VehicleUpdateInput = z.infer<typeof VehicleUpdateInputSchema>;
+
+export const VehicleSchema = VehicleCreateInputSchema.extend({
+  id: z.string().uuid(),
+  tenantId: z.string(),
+  archivedAt: z.date().nullable(),
+  createdAt: z.date(),
+  updatedAt: z.date(),
+});
+export type Vehicle = z.infer<typeof VehicleSchema>;

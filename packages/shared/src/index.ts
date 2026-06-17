@@ -130,6 +130,15 @@ export * from "./product-variants.js";
 // the NULL ≠ NULL semantic + partial-unique-index pattern if global uniqueness
 // across roots is ever required.
 export * from "./product-categories.js";
+// KAN-1212 (Slice 1 of KAN-1211 epic) — Vehicle Inventory schema. Sibling to
+// products.ts for the auto vertical (separate vertical entity, NOT a Product
+// specialization). 6 enum families (status / bodyStyle / transmission / fuelType /
+// drivetrain / condition) + VIN nullable uniqueness per Memo 45 (NULL ≠ NULL
+// allows multi-NULL-VIN rows per tenant; ISO 3779 17-char validation at the Zod
+// boundary when VIN is present). dealerLot free-form String; normalization to a
+// dedicated DealerLot entity deferred to KAN-1213 per Memo 54 empirical-priority
+// discipline.
+export * from "./vehicles.js";
 // KAN-1219 (Slice 5 of KAN-1212 epic) — Product scraper output contract.
 // Discriminated union (6 variants: scraped / domain_not_allowed / fetch_failed /
 // parse_failed / response_too_large / tenant_marketing_domain_not_configured) +
