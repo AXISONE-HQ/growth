@@ -12,7 +12,6 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   knowledgeApi,
   type CompanyInfo,
-  type Product,
   type PolicyRule,
   type FAQ,
   type KnowledgeDocument,
@@ -250,11 +249,7 @@ export default function KnowledgeCenterPage() {
   const [companyDraft, setCompanyDraft] = useState({ vision: '', mission: '', websiteUrl: '' });
   const [documents, setDocuments] = useState<KnowledgeDocument[]>([]);
 
-  // ── Products state ──
-  const [products, setProducts] = useState<Product[]>([]);
-  const [editingProduct, setEditingProduct] = useState<string | null>(null);
-  const [showAddProduct, setShowAddProduct] = useState(false);
-  const [productDraft, setProductDraft] = useState({ name: '', category: '', price: '', description: '', sku: '' });
+  // Products state: removed — moved to /settings/products (KAN-1218)
 
   // ── Policies state (Warranties & Financing) ──
   const [warranties, setWarranties] = useState<PolicyRule[]>([]);
@@ -383,15 +378,7 @@ export default function KnowledgeCenterPage() {
     }
   }, []);
 
-  const loadProducts = useCallback(async () => {
-    try {
-      const res = await knowledgeApi.listProducts({ limit: 100 });
-      setProducts(res.products);
-    } catch (e) {
-      console.error('Failed to load products:', e);
-      showToast('Failed to load products', 'error');
-    }
-  }, []);
+  // loadProducts: removed — products moved to /settings/products (KAN-1218)
 
   const loadPolicies = useCallback(async () => {
     try {
@@ -423,11 +410,11 @@ export default function KnowledgeCenterPage() {
   useEffect(() => {
     const loadAll = async () => {
       setLoading(true);
-      await Promise.all([loadCompanyData(), loadProducts(), loadPolicies(), loadFAQs()]);
+      await Promise.all([loadCompanyData(), loadPolicies(), loadFAQs()]);
       setLoading(false);
     };
     loadAll();
-  }, [loadCompanyData, loadProducts, loadPolicies, loadFAQs]);
+  }, [loadCompanyData, loadPolicies, loadFAQs]);
 
   /* ── Company Truth Handlers ──────────────────────────── */
 
@@ -478,76 +465,7 @@ export default function KnowledgeCenterPage() {
     setSaving(false);
   };
 
-  /* ── Product Handlers ────────────────────────────────── */
-
-  const saveProduct = async () => {
-    if (!productDraft.name.trim()) return;
-    setSaving(true);
-    try {
-      if (editingProduct) {
-        const updated = await knowledgeApi.updateProduct({
-          id: editingProduct,
-          name: productDraft.name,
-          category: productDraft.category || undefined,
-          price: productDraft.price || undefined,
-          description: productDraft.description || undefined,
-          sku: productDraft.sku || undefined,
-        });
-        setProducts(products.map(p => p.id === editingProduct ? updated : p));
-        setEditingProduct(null);
-        showToast('Product updated');
-      } else {
-        const created = await knowledgeApi.createProduct({
-          name: productDraft.name,
-          category: productDraft.category || undefined,
-          price: productDraft.price || undefined,
-          description: productDraft.description || undefined,
-          sku: productDraft.sku || undefined,
-        });
-        setProducts([...products, created]);
-        setShowAddProduct(false);
-        showToast('Product created');
-      }
-      setProductDraft({ name: '', category: '', price: '', description: '', sku: '' });
-    } catch (e) {
-      showToast('Failed to save product', 'error');
-    }
-    setSaving(false);
-  };
-
-  const startEditProduct = (p: Product) => {
-    setProductDraft({
-      name: p.name,
-      category: p.category || '',
-      price: p.price || '',
-      description: p.description || '',
-      sku: p.sku || '',
-    });
-    setEditingProduct(p.id);
-    setShowAddProduct(false);
-  };
-
-  const deleteProduct = async (id: string) => {
-    setSaving(true);
-    try {
-      await knowledgeApi.deleteProduct(id);
-      setProducts(products.filter(p => p.id !== id));
-      if (editingProduct === id) {
-        setEditingProduct(null);
-        setProductDraft({ name: '', category: '', price: '', description: '', sku: '' });
-      }
-      showToast('Product deleted');
-    } catch (e) {
-      showToast('Failed to delete product', 'error');
-    }
-    setSaving(false);
-  };
-
-  const cancelProductEdit = () => {
-    setEditingProduct(null);
-    setShowAddProduct(false);
-    setProductDraft({ name: '', category: '', price: '', description: '', sku: '' });
-  };
+  /* ── Product Handlers: moved to /settings/products (KAN-1218) ── */
 
   /* ── Warranties & Financing Handlers ─────────────────── */
 
@@ -854,87 +772,15 @@ export default function KnowledgeCenterPage() {
       )}
 
       {/* ══════════════════════════════════════════════════ */}
-      {/* TAB 2 — Products                                 */}
+      {/* TAB 2 — Products: moved to /settings/products (KAN-1218) */}
       {/* ══════════════════════════════════════════════════ */}
       {activeTab === 'products' && (
         <div className="space-y-6">
           <div className="bg-white border border-gray-200 rounded-xl p-6">
-            <div className="flex items-center justify-between mb-6">
-              <div>
-                <h2 className="text-lg font-semibold text-gray-900">Products</h2>
-                <p className="text-sm text-gray-500 mt-1">Manage your product catalog — the AI references these for pricing, descriptions, and recommendations</p>
-              </div>
-              {!showAddProduct && editingProduct === null && (
-                <button onClick={() => { setShowAddProduct(true); setProductDraft({ name: '', category: '', price: '', description: '', sku: '' }); }} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 transition-colors">
-                  <Plus className="w-4 h-4" /> Add Product
-                </button>
-              )}
-            </div>
-
-            {(showAddProduct || editingProduct !== null) && (
-              <div className="border border-indigo-200 bg-indigo-50/50 rounded-xl p-5 mb-6">
-                <h3 className="text-sm font-semibold text-gray-900 mb-4">{editingProduct !== null ? 'Edit Product' : 'New Product'}</h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-xs font-medium text-gray-600 mb-1">Product Name</label>
-                    <input value={productDraft.name} onChange={e => setProductDraft({ ...productDraft, name: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none" placeholder="e.g. Growth Suite Pro" />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-gray-600 mb-1">Category</label>
-                    <input value={productDraft.category} onChange={e => setProductDraft({ ...productDraft, category: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none" placeholder="e.g. SaaS Platform" />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-gray-600 mb-1">Price</label>
-                    <input value={productDraft.price} onChange={e => setProductDraft({ ...productDraft, price: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none" placeholder="e.g. $299/mo" />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-gray-600 mb-1">SKU</label>
-                    <input value={productDraft.sku} onChange={e => setProductDraft({ ...productDraft, sku: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none" placeholder="e.g. GSP-001" />
-                  </div>
-                  <div className="md:col-span-2">
-                    <label className="block text-xs font-medium text-gray-600 mb-1">Description</label>
-                    <textarea value={productDraft.description} onChange={e => setProductDraft({ ...productDraft, description: e.target.value })} rows={3} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none" placeholder="Describe the product for the AI..." />
-                  </div>
-                </div>
-                <div className="flex justify-end gap-2 mt-4">
-                  <button onClick={cancelProductEdit} className="px-4 py-2 border border-gray-300 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-50 transition-colors">Cancel</button>
-                  <button onClick={saveProduct} disabled={!productDraft.name.trim() || saving} className="px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
-                    <span className="flex items-center gap-2">
-                      {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-                      {editingProduct !== null ? 'Update' : 'Save'}
-                    </span>
-                  </button>
-                </div>
-              </div>
-            )}
-
-            <div className="space-y-3">
-              {products.map(p => (
-                <div key={p.id} className={`border rounded-xl p-4 transition-colors ${editingProduct === p.id ? 'border-indigo-300 bg-indigo-50/30' : 'border-gray-200 hover:border-gray-300'}`}>
-                  <div className="flex items-start justify-between">
-                    <div className="flex-1">
-                      <div className="flex items-center gap-3 mb-1">
-                        <h3 className="text-sm font-semibold text-gray-900">{p.name}</h3>
-                        {p.category && <span className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">{p.category}</span>}
-                        {p.price && <span className="text-xs font-semibold text-indigo-600">{p.price}</span>}
-                      </div>
-                      {p.description && <p className="text-sm text-gray-500">{p.description}</p>}
-                      {p.sku && <p className="text-xs text-gray-400 mt-1">SKU: {p.sku}</p>}
-                    </div>
-                    <div className="flex items-center gap-1 ml-4">
-                      <button onClick={() => startEditProduct(p)} className="p-1.5 text-gray-400 hover:text-indigo-600 rounded-md hover:bg-gray-100 transition-colors"><Edit3 className="w-4 h-4" /></button>
-                      <button onClick={() => deleteProduct(p.id)} className="p-1.5 text-gray-400 hover:text-red-600 rounded-md hover:bg-gray-100 transition-colors"><Trash2 className="w-4 h-4" /></button>
-                    </div>
-                  </div>
-                </div>
-              ))}
-              {products.length === 0 && (
-                <div className="text-center py-12 text-gray-400">
-                  <Package className="w-10 h-10 mx-auto mb-3 opacity-50" />
-                  <p className="text-sm font-medium">No products yet</p>
-                  <p className="text-xs mt-1">Click &quot;Add Product&quot; to create your first product</p>
-                </div>
-              )}
+            <div className="text-center py-12 text-gray-400">
+              <Package className="w-10 h-10 mx-auto mb-3 opacity-50" />
+              <p className="text-sm font-medium">Products moved to Settings</p>
+              <p className="text-xs mt-1">Manage your product catalog at <a href="/settings/products" className="text-indigo-600 hover:underline">Settings → Products</a></p>
             </div>
           </div>
         </div>
