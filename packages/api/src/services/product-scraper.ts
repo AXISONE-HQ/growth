@@ -42,15 +42,21 @@
  *
  * # Title-sanitization doctrine (KAN-1219 fix-forward)
  *
- * 5. **stripSiteSuffix is Pattern A/B, NOT C.** Pattern A strips the
- *    og:site_name (when meta present) appended via separator characters
- *    (- | — :: –). Pattern B falls back to hostname-derived candidate
- *    (`4mkauto.com` → `4mkauto`, with digit-letter split for `4mk auto`)
- *    when og:site_name is absent. Pattern C — naive last-segment strip —
- *    was rejected because legitimate product names commonly contain
- *    separators ("Widget - Pro Edition" must NOT clip to "Widget").
- *    Anchor: KAN-1219 PROD 4mkauto.com incident, og:title="2024 Toyota
- *    Camry XLE - 4MK Auto" was accepted verbatim.
+ * 5. **stripSiteSuffix is Pattern A only, NOT B or C.** Pattern A strips
+ *    the og:site_name (when meta present) appended via separator characters
+ *    (- | — :: –). Case-insensitive site match. Pattern C — naive
+ *    last-segment strip regardless of match — was rejected because
+ *    legitimate product names commonly contain separators
+ *    ("Widget - Pro Edition" must NOT clip to "Widget").
+ *
+ *    **Pattern B (hostname-derived candidate) DEFERRED to KAN-1221** per
+ *    Memo 54 empirical-priority-discipline. PROD anchor: 4mkauto.com sets
+ *    og:site_name="4mk Auto" — Pattern A alone handles the original bug.
+ *    Pattern B (when og:site_name absent) was speculative defensive scope
+ *    that fails on hostname↔suffix lexical mismatch (`4mkauto` hostname
+ *    vs `4mk auto` suffix is not regex-decomposable without vocabulary).
+ *    Reopen KAN-1221 when an empirical PROD site with absent og:site_name
+ *    AND raw-hostname suffix appears.
  *
  * 6. **GENERIC_H1_WHITELIST is hoisted to packages/shared** per Memo 37
  *    (cross-workspace algorithm hoist eliminates byte-stability drift).
@@ -64,6 +70,9 @@
  *      gap surfaced as silent name-pollution rather than null name).
  *    - Memo 51 #5: stripSiteSuffix is the 5th test-author CI fix-forward
  *      anchored to the cross-workspace algorithm-hoist cohort.
+ *    - Memo 54 #4: Pattern B deferral validates empirical-priority
+ *      discipline — defensive scope without empirical signal is removed,
+ *      not shipped narrower.
  */
 import * as cheerio from "cheerio";
 import {
@@ -171,68 +180,31 @@ export function isGenericH1(text: string): boolean {
 }
 
 /**
- * stripSiteSuffix — Pattern A (og:site_name) then Pattern B (hostname).
+ * stripSiteSuffix — Pattern A only (og:site_name).
  *
  * Pattern A: when og:site_name meta present, strip ` <sep> <site>` from end.
  *   Separators per SITE_SUFFIX_SEPARATORS (-, |, —, –, ::). Case-insensitive
  *   site match.
  *
- * Pattern B: when og:site_name absent, derive candidate(s) from URL host:
- *   - Strip `www.` prefix.
- *   - Strip TLD (last dot-segment).
- *   - Also emit a digit-letter-split variant ("4mkauto" → "4mk auto") to
- *     catch hand-formatted suffixes.
+ * Pattern B (hostname-derived) is DEFERRED to KAN-1221 — see module
+ * header doctrine #5 for empirical-priority rationale. Pattern C (naive
+ * last-segment strip) is REJECTED — would clip "Widget - Pro Edition".
  *
- * Pattern C (naive last-segment strip) is REJECTED — would clip
- * "Widget - Pro Edition" → "Widget". See module header doctrine #5.
- *
- * Safety: if the strip would leave < 3 chars OR the candidate is empty,
+ * Safety: if the strip would leave < 3 chars OR og:site_name is absent,
  * return the original raw string unchanged.
  */
-export function stripSiteSuffix(raw: string, $: cheerio.CheerioAPI, url: string): string {
+export function stripSiteSuffix(raw: string, $: cheerio.CheerioAPI): string {
   const input = raw.trim();
   if (input.length === 0) return raw;
 
-  // ── Pattern A: og:site_name ──────────────────────────────────────────────
   const siteName = pickMeta($, 'meta[property="og:site_name"]');
-  const candidates: string[] = [];
-  if (siteName) candidates.push(siteName);
+  if (!siteName) return input;
 
-  // ── Pattern B: hostname-derived ──────────────────────────────────────────
-  // Even when Pattern A is available, also try Pattern B (some sites set
-  // og:site_name to a brand string that differs from the appended suffix).
-  let host: string | null = null;
-  try {
-    host = new URL(url).hostname.toLowerCase();
-  } catch {
-    host = null;
-  }
-  if (host) {
-    const withoutWww = host.replace(/^www\./, "");
-    const parts = withoutWww.split(".");
-    // Strip the TLD (last segment). For multi-part hosts ("a.b.example.com")
-    // we take everything-except-last as the candidate stem, then the last
-    // pre-TLD segment as a narrower candidate.
-    if (parts.length >= 2) {
-      const preTld = parts[parts.length - 2]; // "4mkauto" in "4mkauto.com"
-      if (preTld && preTld.length > 0) {
-        candidates.push(preTld);
-        // Digit-letter split for hand-formatted suffixes: "4mkauto" → "4mk auto".
-        const split = preTld.replace(/([0-9]+)([a-z])/gi, "$1 $2");
-        if (split !== preTld) candidates.push(split);
-      }
-    }
-  }
+  const trimmedCand = siteName.trim();
+  if (trimmedCand.length === 0) return input;
 
-  // ── Apply each candidate; first successful strip wins ────────────────────
-  for (const candidate of candidates) {
-    const trimmedCand = candidate.trim();
-    if (trimmedCand.length === 0) continue;
-    const stripped = applySuffixStrip(input, trimmedCand);
-    if (stripped !== null && stripped.length >= 3) {
-      return stripped;
-    }
-  }
+  const stripped = applySuffixStrip(input, trimmedCand);
+  if (stripped !== null && stripped.length >= 3) return stripped;
   return input;
 }
 
@@ -261,23 +233,24 @@ function applySuffixStrip(input: string, candidate: string): string | null {
   return null;
 }
 
-export function extractProductFields(html: string, url: string): ExtractedFields {
+export function extractProductFields(html: string): ExtractedFields {
   const $ = cheerio.load(html);
 
   // ── Name (priority order: og:title meta > h1 > h2 > title meta) ────────
-  // Each candidate runs through stripSiteSuffix to remove site-name pollution
-  // ("X - Brand"). h1/h2 candidates additionally run through isGenericH1 to
-  // reject page-chrome like "Inventory" / "Home" / "Products". KAN-1219
-  // fix-forward — anchor: 4mkauto.com og:title="2024 Toyota Camry XLE - 4MK Auto"
-  // shipped with suffix intact before this fix.
+  // Each candidate runs through stripSiteSuffix (Pattern A — og:site_name)
+  // to remove site-name pollution ("X - Brand"). h1/h2 candidates
+  // additionally run through isGenericH1 to reject page-chrome like
+  // "Inventory" / "Home" / "Products". KAN-1219 fix-forward — anchor:
+  // 4mkauto.com og:title="2024 Toyota Camry XLE - 4mk Auto" with
+  // og:site_name="4mk Auto" shipped with suffix intact before this fix.
   const ogTitle = pickMeta($, 'meta[property="og:title"]');
   const h1 = pickText($, "h1");
   const h2 = pickText($, "h2");
   const metaTitle = pickMeta($, 'meta[name="title"]');
 
-  const cleanedOgTitle = ogTitle ? stripSiteSuffix(ogTitle, $, url) : null;
-  const cleanedH1 = h1 && !isGenericH1(h1) ? stripSiteSuffix(h1, $, url) : null;
-  const cleanedH2 = h2 && !isGenericH1(h2) ? stripSiteSuffix(h2, $, url) : null;
+  const cleanedOgTitle = ogTitle ? stripSiteSuffix(ogTitle, $) : null;
+  const cleanedH1 = h1 && !isGenericH1(h1) ? stripSiteSuffix(h1, $) : null;
+  const cleanedH2 = h2 && !isGenericH1(h2) ? stripSiteSuffix(h2, $) : null;
 
   const name = cleanedOgTitle ?? cleanedH1 ?? cleanedH2 ?? metaTitle ?? null;
 
@@ -403,9 +376,7 @@ export async function scrapeProduct(
   }
 
   // ── Step 5: parse with cheerio + heuristic extract ─────────────────────
-  // URL threaded through for stripSiteSuffix Pattern B (hostname-derived
-  // candidate when og:site_name absent). KAN-1219 fix-forward signature change.
-  const fields = extractProductFields(responseText, parsed.url);
+  const fields = extractProductFields(responseText);
   if (!fields.name) {
     return { kind: "parse_failed", reason: "no name extracted" };
   }
