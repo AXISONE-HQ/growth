@@ -3049,7 +3049,27 @@ export const productsApi = {
 
   archive: (id: string) =>
     trpcMutation<ProductListItem>('products.archive', { id }),
+
+  // KAN-1219 — scrape mutation. Returns ProductScraperResult discriminated
+  // union (6 variants); UI consumer MUST branch on `kind`.
+  scrape: (url: string) =>
+    trpcMutation<ProductScraperResult>('products.scrape', { url }),
 };
+
+// KAN-1219 — Product scraper result discriminated union mirror.
+// Source of truth: packages/shared/src/product-scraper-types.ts.
+export type ProductScraperResult =
+  | {
+      kind: 'scraped';
+      productId: string;
+      isScrapeSuccess: boolean;
+      extractGaps: string[];
+    }
+  | { kind: 'domain_not_allowed'; hostname: string; configuredDomain: string }
+  | { kind: 'fetch_failed'; reason: string }
+  | { kind: 'parse_failed'; reason: string }
+  | { kind: 'response_too_large'; maxBytes: number; actualBytes: number }
+  | { kind: 'tenant_marketing_domain_not_configured' };
 
 export const productVariantsApi = {
   list: (input: { productId: string; limit?: number; cursor?: string }) =>

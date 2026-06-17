@@ -40,6 +40,7 @@ import {
   type ProductVariantListItem,
   type ProductCategoryListItem,
   type ProductStatus,
+  type ProductScraperResult,
   type CursorPage,
 } from "@/lib/api";
 
@@ -264,6 +265,7 @@ function ProductsTab() {
   const [statusFilter, setStatusFilter] = useState<ProductStatus | null>(null);
   const [pages, setPages] = useState<CursorPage<ProductListItem>[]>([]);
   const [createOpen, setCreateOpen] = useState(false);
+  const [scrapeOpen, setScrapeOpen] = useState(false);
   const [editing, setEditing] = useState<ProductListItem | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
@@ -365,10 +367,7 @@ function ProductsTab() {
             size="sm"
             disabled={!marketingDomain?.marketingDomain}
             title={!marketingDomain?.marketingDomain ? "Configure marketing domain first to enable scraping" : "Scrape products from your website"}
-            onClick={() => {
-              // TODO(KAN-1219+): wire scrape mutation when scraper subscriber lands.
-              toast.info("Scraping will be enabled in a future release");
-            }}
+            onClick={() => setScrapeOpen(true)}
           >
             <Globe className="h-4 w-4" />
             Scrape from website
@@ -481,6 +480,21 @@ function ProductsTab() {
           // (operator-perception-vs-substrate-reality). Clear status filter so
           // the newly-created draft product is visible regardless of the
           // operator's previously-selected status chip.
+          setStatusFilter(null);
+          setPages([]);
+          void refetch();
+        }}
+      />
+
+      <ScrapeProductModal
+        open={scrapeOpen}
+        onOpenChange={setScrapeOpen}
+        onScraped={() => {
+          setScrapeOpen(false);
+          // KAN-1228 Memo 52 — operator-visibility guarantee. Scraper auto-saves
+          // partial extracts as draft + full extracts as active; clearing the
+          // status filter ensures the new product is visible regardless of the
+          // operator's previously-selected chip.
           setStatusFilter(null);
           setPages([]);
           void refetch();
@@ -739,6 +753,133 @@ function EditProductModal({
           </Button>
           <Button onClick={handleSubmit} disabled={saving}>
             {saving ? "Saving..." : "Save"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/* ── Scrape Product Modal (KAN-1219) ─────────────────────────────────── */
+
+function ScrapeProductModal({
+  open,
+  onOpenChange,
+  onScraped,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onScraped: () => void;
+}) {
+  const [url, setUrl] = useState("");
+  const [scraping, setScraping] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) {
+      setUrl("");
+      setScraping(false);
+      setError(null);
+    }
+  }, [open]);
+
+  const validUrl = (() => {
+    if (!url) return false;
+    try {
+      new URL(url);
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+
+  // KAN-1219 / Memo 41 — discriminated-union handler MUST branch on every
+  // variant. Silent fall-through is the click-does-nothing UX bug class.
+  function handleResult(result: ProductScraperResult) {
+    switch (result.kind) {
+      case "scraped":
+        if (result.isScrapeSuccess) {
+          toast.success("Product scraped and saved as active");
+        } else {
+          const gaps = result.extractGaps.join(", ");
+          toast.success(`Product scraped as draft — review missing fields: ${gaps}`);
+        }
+        onScraped();
+        return;
+      case "domain_not_allowed":
+        toast.error(
+          `URL is not on your configured marketing domain (${result.configuredDomain}). Scrape only URLs under that domain.`,
+        );
+        return;
+      case "fetch_failed":
+        toast.error(`Couldn't fetch the page: ${result.reason}`);
+        return;
+      case "parse_failed":
+        toast.error(`Couldn't parse the page: ${result.reason}`);
+        return;
+      case "response_too_large":
+        toast.error(
+          `Page too large to scrape (${Math.round(result.actualBytes / 1024)}KB > ${Math.round(result.maxBytes / 1024)}KB limit)`,
+        );
+        return;
+      case "tenant_marketing_domain_not_configured":
+        toast.error("Configure your marketing domain first to enable scraping");
+        return;
+      default: {
+        // Exhaustiveness guard — TS will error here if a new variant is added
+        // and not handled. Memo 41 surface-completeness doctrine.
+        const _exhaustive: never = result;
+        void _exhaustive;
+        toast.error("Unknown scraper result");
+      }
+    }
+  }
+
+  async function handleScrape() {
+    if (!validUrl) {
+      setError("Please enter a valid product URL");
+      return;
+    }
+    setScraping(true);
+    setError(null);
+    try {
+      const result = (await productsApi.scrape(url)) as ProductScraperResult;
+      handleResult(result);
+    } catch (e) {
+      setError((e as Error)?.message ?? "Failed to scrape product");
+    }
+    setScraping(false);
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Scrape product from URL</DialogTitle>
+          <DialogDescription>
+            Enter a product page URL on your configured marketing domain. The AI extracts name, price, description, and image.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-2 py-2">
+          <Label htmlFor="scrape-url">Product URL</Label>
+          <Input
+            id="scrape-url"
+            type="url"
+            placeholder="https://example.com/products/widget"
+            value={url}
+            onChange={(e) => {
+              setUrl(e.target.value);
+              setError(null);
+            }}
+          />
+          {error && <p className="text-sm text-destructive">{error}</p>}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={scraping}>
+            Cancel
+          </Button>
+          <Button onClick={handleScrape} disabled={!validUrl || scraping}>
+            {scraping ? "Scraping..." : "Scrape"}
           </Button>
         </DialogFooter>
       </DialogContent>
