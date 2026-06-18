@@ -146,3 +146,11 @@ export * from "./vehicles.js";
 // SCRAPER_MAX_RESPONSE_BYTES). 6th Memo 39 application anchor (resource-limit
 // inheritance: account-detect 500KB sibling → product scraper 200KB scaled).
 export * from "./product-scraper-types.js";
+// KAN-1216 (Slice 4 of KAN-1211 epic) — Dealer-page vehicle scraper output
+// contract. 7-variant discriminated union (Q1 KEEP — extracted_full /
+// extracted_partial / tenant_marketing_domain_not_configured / hostname_mismatch /
+// fetch_timeout / response_too_large / extraction_failed) + VehicleScraperInputSchema.
+// Reuses SCRAPER_TIMEOUT_MS + SCRAPER_MAX_RESPONSE_BYTES from product-scraper-types
+// (re-exports for single-import-path discipline). Memo 41 discriminated-union
+// + Memo 53 audit provenance (vehicle.scraped, 4th sibling of product.* family).
+export * from "./vehicle-scraper-types.js";
