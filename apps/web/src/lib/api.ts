@@ -3168,7 +3168,59 @@ export const vehiclesApi = {
 
   archive: (id: string) =>
     trpcMutation<VehicleListItem>('vehicles.archive', { id }),
+
+  // KAN-1219 (Slice 5 of KAN-1211 epic) — Full-inventory crawler endpoints.
+  startCrawl: (listingUrl: string) =>
+    trpcMutation<{
+      crawlJob: CrawlJobRecord;
+      publishedMessageId: string | null;
+    }>('vehicles.startCrawl', { listingUrl }),
+
+  crawlStatus: (id: string) =>
+    trpcQuery<CrawlJobRecord>('vehicles.crawlStatus', { id }),
+
+  cancelCrawl: (id: string, reason = 'operator cancelled') =>
+    trpcMutation<{ cancelled: boolean; crawlJob: CrawlJobRecord | null }>(
+      'vehicles.cancelCrawl',
+      { id, reason },
+    ),
 };
+
+// KAN-1219 — CrawlJob record shape mirrored from packages/api
+// inventory-crawler.ts (CrawlJobRecord interface).
+export type CrawlJobStatus =
+  | 'pending'
+  | 'running'
+  | 'completed'
+  | 'completed_with_errors'
+  | 'cancelled'
+  | 'failed';
+
+export interface CrawlJobErrorSample {
+  url: string;
+  errorVariant: string;
+  message: string;
+}
+
+export interface CrawlJobRecord {
+  id: string;
+  tenantId: string;
+  createdByUserId: string;
+  listingUrl: string;
+  adapter: string;
+  status: CrawlJobStatus;
+  discoveredCount: number;
+  extractedCount: number;
+  skippedVinDuplicateCount: number;
+  failedCount: number;
+  errorSamples: CrawlJobErrorSample[] | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  cancelledAt: string | null;
+  cancelReason: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
 
 // KAN-1217 marketingDomain — consumed by /settings/products scraper UX.
 export const marketingDomainApi = {

@@ -48,6 +48,10 @@ import { decisionRunPushApp } from "./subscribers/decision-run-push.js";
 // push AND auto-dead-lettered transient retries that exhausted
 // maxAttempts=5. Structured-logs + ACKs; no retry (DLQ is terminal).
 import { decisionRunDlqApp } from "./subscribers/decision-run-dlq.js";
+// KAN-1219 (Slice 5 of KAN-1211 epic) — vehicle.crawl_requested push subscriber.
+// Consumes the topic published by vehiclesRouter.startCrawl; drives the
+// inventory-crawler worker loop (runCrawlJob).
+import { vehicleCrawlPushApp } from "./subscribers/vehicle-crawl-push.js";
 import { leadApiApp } from "./routes/lead-api.js";
 import { knowledgeSourcesApp } from "./routes/knowledge-sources.js";
 import { faqEntriesApp } from "./routes/faq-entries.js";
@@ -137,6 +141,8 @@ app.route("/pubsub", knowledgeSourceIngestedPushApp);
 app.route("/pubsub", campaignMaterializePushApp);
 app.route("/pubsub", decisionRunPushApp);
 app.route("/pubsub", decisionRunDlqApp);
+// KAN-1219 — vehicle.crawl_requested → runCrawlJob worker driver
+app.route("/pubsub", vehicleCrawlPushApp);
 
 // KAN-814 — Cloud Scheduler cron HTTP target. Mounted at
 // /internal/cron/deferred-send-evaluator. OIDC-protected (reuses

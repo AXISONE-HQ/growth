@@ -207,6 +207,9 @@ model Tenant {
   // scoped relations above. Slice 1 of the catalog module; full CRUD lands
   // in KAN-1216, FK upgrade of Campaign.goalProductId in KAN-1225.
   products                Product[]
+  // KAN-1219 — Full-inventory crawler (Slice 5 of KAN-1211 epic). Reverse
+  // relation for CrawlJob.tenant FK; Cascade mirrors sibling Vehicle relation.
+  crawlJobs               CrawlJob[]
   // KAN-1214 — ProductVariant tenant back-relation. Variants carry denormalized
   // tenantId for hot-path tenant-scoped list queries (CampaignMembership:692
   // precedent — tenant-scoped child models declare both parent FK and tenant FK).
@@ -4016,4 +4019,60 @@ enum VehicleCondition {
   cpo
 
   @@map("vehicle_condition")
+}
+
+/// KAN-1219 (Slice 5 of KAN-1211 epic) — Full-inventory crawler job state.
+///
+/// Mirrors ImportJob:2793 pattern. Status state machine per Memo 42 affordance-
+/// honesty (completed_with_errors distinct from completed). Pub/Sub push
+/// (Memo 39 anchor #11) drives the worker loop; this row is the operator-
+/// visible state.
+///
+/// # Cancel discipline
+///
+/// Worker reads CrawlJob.status between each URL extract (DB-status-check
+/// precedent per deferred-send-evaluator-concurrent-claim:314,324). Operator
+/// cancellation: tenant-scoped updateMany WHERE status='running' → cancelled
+/// flips status; worker observes between URLs and breaks loop.
+///
+/// # errorSamples cap
+///
+/// Array<{url, errorVariant, message}> first 50 only (memory + payload bound).
+/// Counter columns (failedCount + skippedVinDuplicateCount) carry exact totals.
+model CrawlJob {
+  id                       String         @id @default(uuid())
+  tenantId                 String         @map("tenant_id")
+  createdByUserId          String         @map("created_by_user_id")
+  listingUrl               String         @map("listing_url")
+  adapter                  String // 'drivegood' V1
+  status                   CrawlJobStatus @default(pending)
+  discoveredCount          Int            @default(0) @map("discovered_count")
+  extractedCount           Int            @default(0) @map("extracted_count")
+  skippedVinDuplicateCount Int            @default(0) @map("skipped_vin_duplicate_count")
+  failedCount              Int            @default(0) @map("failed_count")
+  /// Array<{url, errorVariant, message}> cap 50 first entries.
+  errorSamples             Json?          @map("error_samples")
+  startedAt                DateTime?      @map("started_at")
+  completedAt              DateTime?      @map("completed_at")
+  cancelledAt              DateTime?      @map("cancelled_at")
+  cancelReason             String?        @map("cancel_reason")
+  createdAt                DateTime       @default(now()) @map("created_at")
+  updatedAt                DateTime       @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@map("crawl_jobs")
+}
+
+enum CrawlJobStatus {
+  pending
+  running
+  completed
+  completed_with_errors
+  cancelled
+  failed
+
+  @@map("crawl_job_status")
 }
