@@ -3111,6 +3111,65 @@ export const productCategoriesApi = {
     trpcMutation<ProductCategoryListItem>('productCategories.archive', { id }),
 };
 
+// ─────────────────────────────────────────────────────────────────────
+// KAN-1217 — Vehicle Inventory UI (Slice 3 of KAN-1211 epic).
+//
+// Consumes apps/api vehiclesRouter (KAN-1214 Slice 2). Shape mirrors
+// productsApi precedent above; Decimal-coercion not required (Vehicle
+// schema has no Decimal columns — mileage is Int, year is Int).
+// ─────────────────────────────────────────────────────────────────────
+
+export type VehicleStatus = 'draft' | 'active' | 'archived';
+
+export interface VehicleListItem {
+  id: string;
+  tenantId: string;
+  year: number;
+  make: string;
+  model: string;
+  trim: string | null;
+  vin: string | null;
+  mileage: number | null;
+  bodyStyle: string;
+  transmission: string;
+  fuelType: string;
+  drivetrain: string;
+  condition: string;
+  exteriorColor: string | null;
+  interiorColor: string | null;
+  stockNumber: string | null;
+  dealerLot: string | null;
+  status: VehicleStatus;
+  archivedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export const vehiclesApi = {
+  list: (input?: {
+    status?: VehicleStatus;
+    includeArchived?: boolean;
+    limit?: number;
+    cursor?: string;
+  }) =>
+    trpcQuery<CursorPage<VehicleListItem>>(
+      'vehicles.list',
+      input ?? { limit: 50 },
+    ),
+
+  get: (id: string, includeArchived = false) =>
+    trpcQuery<VehicleListItem>('vehicles.get', { id, includeArchived }),
+
+  create: (data: Partial<VehicleListItem>) =>
+    trpcMutation<VehicleListItem>('vehicles.create', data),
+
+  update: (data: { id: string } & Partial<VehicleListItem>) =>
+    trpcMutation<VehicleListItem>('vehicles.update', data),
+
+  archive: (id: string) =>
+    trpcMutation<VehicleListItem>('vehicles.archive', { id }),
+};
+
 // KAN-1217 marketingDomain — consumed by /settings/products scraper UX.
 export const marketingDomainApi = {
   get: () =>
