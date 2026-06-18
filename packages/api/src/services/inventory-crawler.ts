@@ -5,6 +5,24 @@
  * → invokes KAN-1216 scrapeVehicleUrl per URL → persists extracted_full via
  * KAN-1214 vehicle-service.createVehicle (with VIN dedup).
  *
+ * # Memo 57 anchor #4 — defense-in-depth dispatcher
+ *
+ * pickCrawlerAdapter implements triple-fallback per Memo 57:
+ *   Layer 1: hostname-based exact match (precise; KEEP existing)
+ *   Layer 2: fingerprint-based meta inspection (handles SaaS-backed
+ *            dealers serving on vanity domains — e.g. 4mkauto.com served
+ *            by drivegood/Potenza)
+ *   Layer 3: generic hostname-restricted link-walk (always-matches
+ *            sentinel; degraded extraction but functional)
+ *
+ * Dispatcher NEVER returns null. Memo 19/42 affordance-honesty —
+ * graceful degradation, no hard-fail on unknown platforms.
+ *
+ * Trigger: operator-mediated test on www.4mkauto.com surfaced hostname-
+ * only dispatcher gap that integration tests missed (test fixtures used
+ * drivegood hostname directly). Memo 51 anchor #8 — operator-found
+ * dispatcher-vs-substrate-reality mismatch.
+ *
  * # SPO verdict locks
  *
  * - Q1: Pub/Sub push subscriber pattern (Memo 39 anchor #11) — startCrawl
@@ -75,10 +93,20 @@ import {
   drivegoodAdapter,
   type DealerAdapter,
 } from "./dealer-adapters/drivegood.js";
+import { genericHostnameRestrictedAdapter } from "./dealer-adapters/generic.js";
 
+// Layer 1 + Layer 2 adapters (hostname/fingerprint-precise). Layer 3
+// generic adapter is NOT in this list — it's the unconditional fallback.
 const ADAPTERS: ReadonlyArray<DealerAdapter> = [drivegoodAdapter];
 
-export function pickCrawlerAdapter(hostname: string): DealerAdapter | null {
+/**
+ * KAN-1219 fix-forward — Memo 57 anchor #4. Layer 1 only (sync). Used at
+ * startCrawl pre-flight where we don't have the listing HTML yet. Returns
+ * null on no hostname match; caller decides whether to defer to worker.
+ */
+export function pickCrawlerAdapterByHostname(
+  hostname: string,
+): DealerAdapter | null {
   const lower = hostname.toLowerCase();
   for (const adapter of ADAPTERS) {
     if (lower === adapter.hostname || lower.endsWith(`.${adapter.hostname}`)) {
@@ -86,6 +114,39 @@ export function pickCrawlerAdapter(hostname: string): DealerAdapter | null {
     }
   }
   return null;
+}
+
+/**
+ * KAN-1219 fix-forward — Memo 57 anchor #4. Full triple-fallback dispatch
+ * (Layer 1 hostname → Layer 2 fingerprint → Layer 3 generic). NEVER returns
+ * null. Used at worker-time where the listing HTML is available.
+ *
+ * The `fetchListingHtml` callback is invoked only if Layer 1 misses. Layer
+ * 2 fingerprint inspection requires the listing HTML (or any same-host
+ * page); caller supplies the fetch via callback for laziness.
+ */
+export async function pickCrawlerAdapter(
+  hostname: string,
+  fetchListingHtml: () => Promise<string | null>,
+): Promise<DealerAdapter> {
+  // Layer 1: hostname-based exact match.
+  const layer1 = pickCrawlerAdapterByHostname(hostname);
+  if (layer1) return layer1;
+
+  // Layer 2: fingerprint-based meta inspection.
+  const html = await fetchListingHtml();
+  if (html) {
+    const cheerioMod = (await import("cheerio")) as typeof cheerio;
+    const $ = cheerioMod.load(html);
+    for (const adapter of ADAPTERS) {
+      if (adapter.fingerprint($)) {
+        return adapter;
+      }
+    }
+  }
+
+  // Layer 3: generic hostname-restricted link-walk (always-matches sentinel).
+  return genericHostnameRestrictedAdapter;
 }
 
 function extractHostnameFromConfigured(configured: string): string {
@@ -348,11 +409,14 @@ export async function startCrawl(
     throw new HostnameMismatchError(inputHost, configuredHost);
   }
 
-  // ── Step 3: adapter dispatch ─────────────────────────────────────────
-  const adapter = pickCrawlerAdapter(inputHost);
-  if (!adapter) {
-    throw new Error(`No adapter for hostname ${inputHost}`);
-  }
+  // ── Step 3: adapter dispatch (Layer 1 only — Memo 57 anchor #4) ─────
+  // Phase-2 fingerprint + Phase-3 generic fallback happen lazily at
+  // worker-time when the listing page is already fetched. Pre-flight only
+  // tags the job with the best-known hostname-match adapter; the worker
+  // re-runs the full triple-fallback. `pendingAdapter` here is purely an
+  // operator-visible hint; runWorker is authoritative.
+  const pendingAdapter = pickCrawlerAdapterByHostname(inputHost);
+  const adapterTag = pendingAdapter?.hostname ?? "pending";
 
   // ── Step 4: concurrent-prevention (Q-LOCK: only one running per tenant) ─
   const running = await prisma.crawlJob.findFirst({
@@ -368,7 +432,7 @@ export async function startCrawl(
       tenantId,
       createdByUserId,
       listingUrl: input.listingUrl,
-      adapter: adapter.hostname,
+      adapter: adapterTag,
       status: "pending",
     },
   });
@@ -523,7 +587,7 @@ export async function runCrawlJob(
   const tenantId = initialJob.tenantId;
   const listingUrl = initialJob.listingUrl;
 
-  // ── Adapter dispatch ─────────────────────────────────────────────────
+  // ── Adapter dispatch (Memo 57 anchor #4 — triple-fallback) ───────────
   let listingHost: string;
   try {
     listingHost = new URL(listingUrl).hostname;
@@ -535,20 +599,27 @@ export async function runCrawlJob(
       counts: { discovered: 0, extracted: 0, skipped: 0, failed: 0 },
     });
   }
-  const adapter = pickCrawlerAdapter(listingHost);
-  if (!adapter) {
-    return await finalizeJob(prisma, crawlJobId, tenantId, {
-      status: "failed",
-      cancelReason: `No adapter for hostname ${listingHost}`,
-      errorSamples: [],
-      counts: { discovered: 0, extracted: 0, skipped: 0, failed: 0 },
-    });
+
+  // ── Fetch listing page once (used by both dispatcher Layer 2 and
+  //    parseInventoryListing below) ─────────────────────────────────────
+  const errorSamples: ErrorSample[] = [];
+  let listingHtml: string | null = null;
+  let listingFetchError: Error | null = null;
+  try {
+    listingHtml = await fetchListingHtml(listingUrl, fetchImpl);
+  } catch (err) {
+    listingFetchError = err as Error;
   }
+
+  // Triple-fallback dispatch — never returns null. Hard-fail removed
+  // (KAN-1219 fix-forward Memo 57 anchor #4). Layer 2 reuses the already-
+  // fetched listingHtml via a closure; Layer 3 generic is the sentinel.
+  const adapter = await pickCrawlerAdapter(listingHost, async () => listingHtml);
 
   // ── Status → running + vehicle.crawl_started audit ───────────────────
   await prisma.crawlJob.update({
     where: { id: crawlJobId },
-    data: { status: "running", startedAt: new Date() },
+    data: { status: "running", startedAt: new Date(), adapter: adapter.hostname },
   });
   await prisma.auditLog.create({
     data: {
@@ -560,19 +631,25 @@ export async function runCrawlJob(
     },
   });
 
-  // ── Fetch + parse listing page ───────────────────────────────────────
-  const errorSamples: ErrorSample[] = [];
+  // ── Parse listing page ───────────────────────────────────────────────
   let discoveredUrls: string[] = [];
+  if (listingFetchError || listingHtml === null) {
+    return await finalizeJob(prisma, crawlJobId, tenantId, {
+      status: "failed",
+      cancelReason: `Failed to fetch listing: ${listingFetchError?.message ?? "no HTML"}`,
+      errorSamples,
+      counts: { discovered: 0, extracted: 0, skipped: 0, failed: 0 },
+    });
+  }
   try {
-    const html = await fetchListingHtml(listingUrl, fetchImpl);
     // Lazy cheerio import (matches vehicle-scraper pattern).
     const cheerioMod = (await import("cheerio")) as typeof cheerio;
-    const $ = cheerioMod.load(html);
-    discoveredUrls = adapter.parseInventoryListing(html, $, listingUrl);
+    const $ = cheerioMod.load(listingHtml);
+    discoveredUrls = adapter.parseInventoryListing(listingHtml, $, listingUrl);
   } catch (err) {
     return await finalizeJob(prisma, crawlJobId, tenantId, {
       status: "failed",
-      cancelReason: `Failed to fetch listing: ${(err as Error)?.message ?? String(err)}`,
+      cancelReason: `Failed to parse listing: ${(err as Error)?.message ?? String(err)}`,
       errorSamples,
       counts: { discovered: 0, extracted: 0, skipped: 0, failed: 0 },
     });
@@ -887,6 +964,7 @@ async function finalizeJob(
 /** Test seam — exposed for unit-level helper coverage. */
 export const _internalForTest = {
   pickCrawlerAdapter,
+  pickCrawlerAdapterByHostname,
   extractHostnameFromConfigured,
   hostnameMatches,
   parseRobotsTxt,
