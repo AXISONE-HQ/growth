@@ -922,6 +922,488 @@ describe("KAN-1219 — Inventory crawler", () => {
       (prisma: PrismaClient) => cleanupTenant(prisma, tenantId),
     );
   });
+
+  // ───────────────────────────────────────────────────────────────────────
+  // KAN-1219 fix-forward — Memo 57 anchor #4 triple-fallback dispatcher.
+  //
+  // Trigger: operator-mediated test on www.4mkauto.com surfaced
+  // "No adapter for hostname 4mkauto.com" hard-fail. Spec'd Layer 2
+  // fingerprint + Layer 3 generic were NOT implemented at Phase 2.
+  // Scenarios 11-14 cover the triple-fallback contract.
+  // ───────────────────────────────────────────────────────────────────────
+
+  it("scenario 11 — Layer 1 hostname match (regression): drivegood.com → drivegoodAdapter", async () => {
+    let tenantId = "";
+    await withCleanup(
+      async (prisma: PrismaClient) => {
+        const t = await createTenant(prisma);
+        tenantId = t.id;
+        await prisma.tenant.update({
+          where: { id: tenantId },
+          data: { marketingDomain: "drivegood.com" },
+        });
+        const pubsub = buildStubPubSub();
+        const started = await crawler.startCrawl(
+          prisma as unknown as object,
+          tenantId,
+          "operator-1",
+          { listingUrl: "https://drivegood.com/inventory" },
+          pubsub,
+        );
+
+        const finalFetch = (async (input: unknown) => {
+          const url =
+            typeof input === "string"
+              ? input
+              : (input as { url?: string }).url ?? String(input);
+          if (url.endsWith("/robots.txt")) {
+            return makeResponse("User-agent: *\nAllow: /");
+          }
+          if (url.endsWith("/inventory")) {
+            return makeResponse(buildListingHtml([VINS[0]!]));
+          }
+          const m = /\/inventory\/([A-HJ-NPR-Z0-9]{17})/i.exec(url);
+          if (m) return makeResponse(buildVdpHtmlFull(m[1]!));
+          throw new Error(`Unmatched URL ${url}`);
+        }) as unknown as typeof fetch;
+
+        const final = await crawler.runCrawlJob(
+          prisma as unknown as object,
+          started.crawlJob.id,
+          {
+            scrapeVehicleUrl: scraperMod.scrapeVehicleUrl,
+            scraperHooks: buildTestHooks(),
+            redis: buildStubRedis(),
+            fetchImpl: finalFetch,
+            sleep: fastSleep,
+          },
+        );
+        expect(final.status).toBe("completed");
+        // adapter tag should be drivegood.com (Layer 1 match).
+        const job = await (prisma as unknown as {
+          crawlJob: { findUnique: (args: unknown) => Promise<{ adapter: string } | null> };
+        }).crawlJob.findUnique({ where: { id: started.crawlJob.id } });
+        expect(job?.adapter).toBe("drivegood.com");
+      },
+      (prisma: PrismaClient) => cleanupTenant(prisma, tenantId),
+    );
+  });
+
+  it("scenario 12 — Layer 2 fingerprint match (4mkauto pattern): vanity domain + drivegood og:image", async () => {
+    let tenantId = "";
+    await withCleanup(
+      async (prisma: PrismaClient) => {
+        const t = await createTenant(prisma);
+        tenantId = t.id;
+        await prisma.tenant.update({
+          where: { id: tenantId },
+          data: { marketingDomain: "4mkauto.com" },
+        });
+        const pubsub = buildStubPubSub();
+        const started = await crawler.startCrawl(
+          prisma as unknown as object,
+          tenantId,
+          "operator-1",
+          { listingUrl: "https://4mkauto.com/en/inventory" },
+          pubsub,
+        );
+        expect(started.crawlJob.status).toBe("pending");
+
+        // Listing HTML on 4mkauto vanity domain, BUT with drivegood
+        // fingerprint signatures (og:image points at cdn.drivegood.com).
+        const listingHtmlFingerprinted = `<!DOCTYPE html><html><head>
+          <meta property="og:image" content="https://cdn.drivegood.com/static/og.png" />
+          <meta name="author" content="Potenza Global Solutions" />
+        </head><body>
+          <h1>Inventory</h1>
+          <a href="/inventory/${VINS[0]}/sedan-detail">Car 1</a>
+        </body></html>`;
+
+        const finalFetch = (async (input: unknown) => {
+          const url =
+            typeof input === "string"
+              ? input
+              : (input as { url?: string }).url ?? String(input);
+          if (url.endsWith("/robots.txt")) {
+            return makeResponse("User-agent: *\nAllow: /");
+          }
+          if (url.endsWith("/inventory") || url.endsWith("/en/inventory")) {
+            return makeResponse(listingHtmlFingerprinted);
+          }
+          const m = /\/inventory\/([A-HJ-NPR-Z0-9]{17})/i.exec(url);
+          if (m) return makeResponse(buildVdpHtmlFull(m[1]!));
+          throw new Error(`Unmatched URL ${url}`);
+        }) as unknown as typeof fetch;
+
+        const final = await crawler.runCrawlJob(
+          prisma as unknown as object,
+          started.crawlJob.id,
+          {
+            scrapeVehicleUrl: scraperMod.scrapeVehicleUrl,
+            scraperHooks: buildTestHooks(),
+            redis: buildStubRedis(),
+            fetchImpl: finalFetch,
+            sleep: fastSleep,
+          },
+        );
+
+        // Layer 2 fingerprint picked drivegoodAdapter — extraction works
+        // at drivegood quality. Status completed (1 URL extracted).
+        expect(final.status).toBe("completed");
+        const job = await (prisma as unknown as {
+          crawlJob: { findUnique: (args: unknown) => Promise<{
+            adapter: string;
+            discoveredCount: number;
+            extractedCount: number;
+          } | null> };
+        }).crawlJob.findUnique({ where: { id: started.crawlJob.id } });
+        // adapter tag updated by worker after Layer 2 dispatch → drivegood.
+        expect(job?.adapter).toBe("drivegood.com");
+        expect(job?.discoveredCount).toBe(1);
+        expect(job?.extractedCount).toBe(1);
+
+        // No "No adapter for hostname" audit (dispatcher never hard-failed).
+        const failedAudits = await prisma.auditLog.findMany({
+          where: { tenantId, actionType: "vehicle.crawl_failed" },
+        });
+        expect(failedAudits.length).toBe(0);
+      },
+      (prisma: PrismaClient) => cleanupTenant(prisma, tenantId),
+    );
+  });
+
+  it("scenario 13 — Layer 3 generic fallback: unknown platform → generic adapter discovers VDPs", async () => {
+    let tenantId = "";
+    await withCleanup(
+      async (prisma: PrismaClient) => {
+        const t = await createTenant(prisma);
+        tenantId = t.id;
+        await prisma.tenant.update({
+          where: { id: tenantId },
+          data: { marketingDomain: "customdealer.com" },
+        });
+        const pubsub = buildStubPubSub();
+        const started = await crawler.startCrawl(
+          prisma as unknown as object,
+          tenantId,
+          "operator-1",
+          { listingUrl: "https://customdealer.com/inventory" },
+          pubsub,
+        );
+
+        // Vanilla HTML — no drivegood/Potenza signature. Layer 1 + 2 miss.
+        const vanillaListing = `<!DOCTYPE html><html><head>
+          <title>Custom Dealer Inventory</title>
+        </head><body>
+          <h1>Vehicles</h1>
+          <a href="/inventory/${VINS[0]}/vehicle">Vehicle 1</a>
+          <a href="/inventory/${VINS[1]}/vehicle">Vehicle 2</a>
+          <a href="/inventory/${VINS[2]}/vehicle">Vehicle 3</a>
+        </body></html>`;
+
+        const finalFetch = (async (input: unknown) => {
+          const url =
+            typeof input === "string"
+              ? input
+              : (input as { url?: string }).url ?? String(input);
+          if (url.endsWith("/robots.txt")) {
+            return makeResponse("User-agent: *\nAllow: /");
+          }
+          if (url.endsWith("/inventory")) {
+            return makeResponse(vanillaListing);
+          }
+          const m = /\/inventory\/([A-HJ-NPR-Z0-9]{17})/i.exec(url);
+          if (m) return makeResponse(buildVdpHtmlFull(m[1]!));
+          throw new Error(`Unmatched URL ${url}`);
+        }) as unknown as typeof fetch;
+
+        const final = await crawler.runCrawlJob(
+          prisma as unknown as object,
+          started.crawlJob.id,
+          {
+            scrapeVehicleUrl: scraperMod.scrapeVehicleUrl,
+            scraperHooks: buildTestHooks(),
+            redis: buildStubRedis(),
+            fetchImpl: finalFetch,
+            sleep: fastSleep,
+          },
+        );
+
+        // Layer 3 generic adapter picked — adapter tag is "*" sentinel.
+        const job = await (prisma as unknown as {
+          crawlJob: { findUnique: (args: unknown) => Promise<{
+            adapter: string;
+            discoveredCount: number;
+            status: string;
+          } | null> };
+        }).crawlJob.findUnique({ where: { id: started.crawlJob.id } });
+        expect(job?.adapter).toBe("*");
+        // Generic parseInventoryListing discovered all 3 VDP URLs via
+        // VIN-slug + path-pattern heuristics.
+        expect(job?.discoveredCount).toBe(3);
+        // No hard-fail; status finalized normally (completed or
+        // completed_with_errors depending on per-URL extraction).
+        expect(["completed", "completed_with_errors"]).toContain(final.status);
+      },
+      (prisma: PrismaClient) => cleanupTenant(prisma, tenantId),
+    );
+  });
+
+  it("scenario 14 — Dispatcher NEVER hard-fails: no 'No adapter for hostname' audit/cancelReason path", async () => {
+    let tenantId = "";
+    await withCleanup(
+      async (prisma: PrismaClient) => {
+        const t = await createTenant(prisma);
+        tenantId = t.id;
+        // Unknown vanity hostname; no drivegood fingerprint.
+        await prisma.tenant.update({
+          where: { id: tenantId },
+          data: { marketingDomain: "obscuredealer.io" },
+        });
+        const pubsub = buildStubPubSub();
+        const started = await crawler.startCrawl(
+          prisma as unknown as object,
+          tenantId,
+          "operator-1",
+          { listingUrl: "https://obscuredealer.io/inventory" },
+          pubsub,
+        );
+
+        const vanillaListing = `<!DOCTYPE html><html><body>
+          <a href="/inventory/${VINS[0]}/v">V</a>
+        </body></html>`;
+
+        const finalFetch = (async (input: unknown) => {
+          const url =
+            typeof input === "string"
+              ? input
+              : (input as { url?: string }).url ?? String(input);
+          if (url.endsWith("/robots.txt")) {
+            return makeResponse("User-agent: *\nAllow: /");
+          }
+          if (url.endsWith("/inventory")) {
+            return makeResponse(vanillaListing);
+          }
+          const m = /\/inventory\/([A-HJ-NPR-Z0-9]{17})/i.exec(url);
+          if (m) return makeResponse(buildVdpHtmlFull(m[1]!));
+          throw new Error(`Unmatched URL ${url}`);
+        }) as unknown as typeof fetch;
+
+        const final = await crawler.runCrawlJob(
+          prisma as unknown as object,
+          started.crawlJob.id,
+          {
+            scrapeVehicleUrl: scraperMod.scrapeVehicleUrl,
+            scraperHooks: buildTestHooks(),
+            redis: buildStubRedis(),
+            fetchImpl: finalFetch,
+            sleep: fastSleep,
+          },
+        );
+
+        // Dispatcher never produces "No adapter for hostname" error path.
+        expect(final.status).not.toBe("failed");
+
+        const job = await (prisma as unknown as {
+          crawlJob: { findUnique: (args: unknown) => Promise<{
+            status: string;
+            cancelReason: string | null;
+          } | null> };
+        }).crawlJob.findUnique({ where: { id: started.crawlJob.id } });
+        // Specifically: NEVER finalized as 'failed' with the "No adapter
+        // for hostname" message (the deleted hard-fail branch).
+        expect(job?.status).not.toBe("failed");
+        if (job?.cancelReason) {
+          expect(job.cancelReason).not.toMatch(/No adapter for hostname/);
+        }
+
+        // And no crawl_failed audit with that message either.
+        const failedAudits = await prisma.auditLog.findMany({
+          where: { tenantId, actionType: "vehicle.crawl_failed" },
+        });
+        for (const audit of failedAudits) {
+          const reasoning = (audit as unknown as { reasoning: string }).reasoning;
+          expect(reasoning).not.toMatch(/No adapter for hostname/);
+        }
+      },
+      (prisma: PrismaClient) => cleanupTenant(prisma, tenantId),
+    );
+  });
+
+  // ── KAN-1219 fix-forward Memo 57 anchor #5 Layer 2 (publish-failure) ──
+  it("scenario 15 — Pub/Sub publish failure: CrawlJob.status='failed' + cancelReason='publish_infrastructure_gap' + errorSamples populated + vehicle.crawl_failed audit", async () => {
+    let tenantId = "";
+    await withCleanup(
+      async (prisma: PrismaClient) => {
+        const t = await createTenant(prisma);
+        tenantId = t.id;
+        await prisma.tenant.update({
+          where: { id: tenantId },
+          data: { marketingDomain: "drivegood.com" },
+        });
+
+        // Pub/Sub that throws NOT_FOUND on publish (canonical PROD trigger
+        // 2026-06-17 — topic vehicle.crawl_requested unprovisioned in GCP).
+        const failingPubsub = {
+          publish: async (): Promise<string> => {
+            const err = new Error(
+              "5 NOT_FOUND: Resource not found (resource=vehicle.crawl_requested)",
+            );
+            (err as { code?: number }).code = 5;
+            throw err;
+          },
+        };
+
+        const started = await crawler.startCrawl(
+          prisma as unknown as object,
+          tenantId,
+          "operator-1",
+          { listingUrl: "https://drivegood.com/inventory" },
+          failingPubsub,
+        );
+
+        // Mutation returns success-shaped (no thrown exception); but the
+        // CrawlJob row carries the honest failed state.
+        expect(started.publishedMessageId).toBeNull();
+        expect(started.crawlJob.status).toBe("failed");
+
+        const job = await (prisma as unknown as {
+          crawlJob: { findUnique: (args: unknown) => Promise<{
+            status: string;
+            cancelReason: string | null;
+            errorSamples: unknown;
+            completedAt: Date | null;
+          } | null> };
+        }).crawlJob.findUnique({ where: { id: started.crawlJob.id } });
+        expect(job?.status).toBe("failed");
+        expect(job?.cancelReason).toBe("publish_infrastructure_gap");
+        expect(job?.completedAt).not.toBeNull();
+
+        const samples = job?.errorSamples as Array<{
+          url: string;
+          errorVariant: string;
+          message: string;
+        }>;
+        expect(samples).toBeDefined();
+        expect(samples.length).toBe(1);
+        expect(samples[0]?.errorVariant).toBe("publish_failed");
+        expect(samples[0]?.url).toBe("https://drivegood.com/inventory");
+        expect(samples[0]?.message).toMatch(/NOT_FOUND/);
+
+        // Audit row written with explicit reasoning.
+        const audits = await prisma.auditLog.findMany({
+          where: { tenantId, actionType: "vehicle.crawl_failed" },
+        });
+        expect(audits.length).toBe(1);
+        const reasoning = (audits[0] as unknown as { reasoning: string })
+          .reasoning;
+        expect(reasoning).toMatch(/publish to vehicle\.crawl_requested failed/);
+      },
+      (prisma: PrismaClient) => cleanupTenant(prisma, tenantId),
+    );
+  });
+
+  // ── KAN-1219 fix-forward Memo 57 anchor #5 Layer 1 (boot self-heal) ──
+  it("scenario 16 — boot-time idempotent topic+subscription self-heal: ensurePubsubInfrastructure creates absent + no-ops on present", async () => {
+    interface StubSub {
+      exists: () => Promise<[boolean]>;
+    }
+    interface StubTopic {
+      exists: () => Promise<[boolean]>;
+      create: () => Promise<unknown>;
+      subscription: (name: string) => StubSub;
+      createSubscription: (
+        name: string,
+        opts: { pushConfig: { pushEndpoint: string; oidcToken: { serviceAccountEmail: string } } },
+      ) => Promise<unknown>;
+    }
+    function buildStubPubsub(opts: {
+      topicExists: boolean;
+      subExists: boolean;
+    }): {
+      pubsub: { topic: (name: string) => StubTopic };
+      created: { topics: string[]; subscriptions: Array<{ name: string; pushEndpoint: string }> };
+    } {
+      const created = {
+        topics: [] as string[],
+        subscriptions: [] as Array<{ name: string; pushEndpoint: string }>,
+      };
+      const pubsub = {
+        topic: (name: string): StubTopic => ({
+          exists: async () => [opts.topicExists],
+          create: async () => {
+            created.topics.push(name);
+            return {};
+          },
+          subscription: (_subName: string): StubSub => ({
+            exists: async () => [opts.subExists],
+          }),
+          createSubscription: async (subName: string, subOpts: {
+            pushConfig: { pushEndpoint: string; oidcToken: { serviceAccountEmail: string } };
+          }) => {
+            created.subscriptions.push({
+              name: subName,
+              pushEndpoint: subOpts.pushConfig.pushEndpoint,
+            });
+            return {};
+          },
+        }),
+      };
+      return { pubsub, created };
+    }
+
+    const bootstrapSpec = "../../internal/pubsub-bootstrap.js";
+    const mod = (await import(bootstrapSpec)) as {
+      ensurePubsubInfrastructure: (
+        pubsub: unknown,
+        env?: NodeJS.ProcessEnv,
+      ) => Promise<{
+        topicsEnsured: string[];
+        subscriptionsEnsured: string[];
+        errors: string[];
+      }>;
+    };
+
+    // Case A: both topic + subscription absent → both created exactly once.
+    {
+      const { pubsub, created } = buildStubPubsub({
+        topicExists: false,
+        subExists: false,
+      });
+      const env = {
+        API_PUBLIC_URL: "https://growth-api.example.com",
+        PUBSUB_INVOKER_SA: "pubsub-invoker@example.iam.gserviceaccount.com",
+      } as NodeJS.ProcessEnv;
+      const summary = await mod.ensurePubsubInfrastructure(pubsub, env);
+      expect(summary.topicsEnsured).toContain("vehicle.crawl_requested");
+      expect(summary.subscriptionsEnsured).toContain("growth-api-vehicle-crawl");
+      expect(summary.errors).toEqual([]);
+      expect(created.topics).toEqual(["vehicle.crawl_requested"]);
+      expect(created.subscriptions.length).toBe(1);
+      expect(created.subscriptions[0]?.name).toBe("growth-api-vehicle-crawl");
+      expect(created.subscriptions[0]?.pushEndpoint).toBe(
+        "https://growth-api.example.com/pubsub/vehicle-crawl",
+      );
+    }
+
+    // Case B: both present → idempotent no-op (no .create() / .createSubscription()).
+    {
+      const { pubsub, created } = buildStubPubsub({
+        topicExists: true,
+        subExists: true,
+      });
+      const env = {
+        API_PUBLIC_URL: "https://growth-api.example.com",
+        PUBSUB_INVOKER_SA: "pubsub-invoker@example.iam.gserviceaccount.com",
+      } as NodeJS.ProcessEnv;
+      const summary = await mod.ensurePubsubInfrastructure(pubsub, env);
+      expect(summary.topicsEnsured).toContain("vehicle.crawl_requested");
+      expect(summary.subscriptionsEnsured).toContain("growth-api-vehicle-crawl");
+      expect(summary.errors).toEqual([]);
+      expect(created.topics).toEqual([]);
+      expect(created.subscriptions).toEqual([]);
+    }
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────

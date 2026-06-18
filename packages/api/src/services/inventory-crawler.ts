@@ -30,6 +30,23 @@
  * Per-URL scrape returning extracted_partial does NOT persist (substrate
  * requires non-null enums). Log to CrawlJob.errorSamples; continue loop.
  * Operator can manually complete via /settings/inventory Create form.
+ *
+ * # Memo 57 anchor #5 — defense-in-depth at infrastructure seams
+ *
+ * Pub/Sub publish failures (e.g. unprovisioned GCP topic, transient gRPC
+ * outage) are persisted as CrawlJob.status='failed' +
+ * cancelReason='publish_infrastructure_gap' + errorSamples populated +
+ * vehicle.crawl_failed audit entry. NEVER silently swallowed. Memo 42
+ * affordance-honesty: the operator sees the explicit failed state in
+ * /settings/inventory (no "stuck pending" UX).
+ *
+ * Combined with Layer 1 boot-time idempotent topic + push-subscription
+ * self-heal at `apps/api/src/internal/pubsub-bootstrap.ts`, publish
+ * failures should be rare; when they occur, they are honest. The
+ * canonical PROD trigger that motivated this layer (2026-06-17,
+ * www.4mkauto.com) was a Terraform-not-applied gap; the silent-swallow
+ * here masked the gap end-to-end with a success toast + a forever-
+ * pending row. Memo 51 anchor #9.
  */
 
 // ─────────────────────────────────────────────
@@ -384,9 +401,48 @@ export async function startCrawl(
       crawlJobId: job.id,
     });
   } catch (err) {
-    // Best-effort publish; job row already exists. Operator can re-publish
-    // via a future fix-forward procedure if Pub/Sub was down.
+    // KAN-1219 fix-forward — Memo 57 anchor #5 Layer 2 + Memo 42 affordance-
+    // honesty: a publish failure (canonical PROD trigger 2026-06-17: GCP
+    // topic NOT_FOUND because Terraform had not been applied) used to be
+    // silently swallowed here, leaving the row in `pending` forever. Now we
+    // persist `failed` + cancelReason='publish_infrastructure_gap' + a
+    // populated errorSamples entry + a vehicle.crawl_failed audit row. The
+    // mutation still returns successfully (the job row exists; the operator
+    // sees an explicit `failed` state in /settings/inventory), so callers do
+    // NOT need to branch on a thrown exception.
+    const errMessage = (err as Error)?.message ?? String(err);
     console.error("[inventory-crawler] Pub/Sub publish failed:", err);
+
+    const failedJob = await prisma.crawlJob.update({
+      where: { id: job.id },
+      data: {
+        status: "failed",
+        cancelReason: "publish_infrastructure_gap",
+        errorSamples: [
+          {
+            url: input.listingUrl,
+            errorVariant: "publish_failed",
+            message: errMessage,
+          },
+        ],
+        completedAt: new Date(),
+      },
+    });
+    await prisma.auditLog.create({
+      data: {
+        tenantId,
+        actor: "inventory-crawler",
+        actionType: "vehicle.crawl_failed",
+        payload: {
+          crawlJobId: job.id,
+          cancelReason: "publish_infrastructure_gap",
+          errorVariant: "publish_failed",
+          message: errMessage,
+        },
+        reasoning: `crawl ${job.id} publish to ${CRAWL_TOPIC} failed: ${errMessage}`,
+      },
+    });
+    return { crawlJob: failedJob, publishedMessageId: null };
   }
 
   return { crawlJob: job, publishedMessageId };
