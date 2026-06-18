@@ -716,6 +716,21 @@ function CrawlJobProgressCard({
             {job.cancelReason}
           </div>
         )}
+        {/* KAN-1219 fix-forward — Memo 57 anchor #5 + Memo 42 affordance-
+            honesty. When publish_infrastructure_gap fires (Pub/Sub publish
+            failed because the topic is unprovisioned or otherwise NOT_FOUND),
+            surface the underlying message so the operator + on-call can
+            diagnose without round-tripping to logs. Other failure variants
+            already surface counters; this one has no per-URL extract phase
+            because the worker never started. */}
+        {job.status === "failed" &&
+          job.cancelReason === "publish_infrastructure_gap" &&
+          job.errorSamples?.[0]?.message && (
+            <div className="text-xs text-red-600 break-words">
+              <span className="font-medium">Publish failed: </span>
+              {job.errorSamples[0].message}
+            </div>
+          )}
       </CardContent>
     </Card>
   );

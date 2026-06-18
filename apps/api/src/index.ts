@@ -63,6 +63,16 @@ import { accountDetectEventsSseApp } from "./internal/account-detect-events-sse.
 import { getPubSubClient } from "../../../packages/api/src/lib/pubsub-client.js";
 import { setLLMCostPublisher } from "../../../packages/api/src/services/llm-client.js";
 import { readyzApp } from "./routes/readyz.js";
+// KAN-1219 fix-forward (Memo 57 anchor #5) — Layer 1 boot-time idempotent
+// topic + push-subscription self-heal + Layer 3b retroactive stuck-pending
+// CrawlJob recovery. Defense-in-depth against the day-1 GCP-provisioning gap
+// that left vehicle.crawl_requested unprovisioned and CrawlJobs stuck pending
+// on 2026-06-17 (Memo 51 anchor #9).
+import {
+  bootstrapPubsubAtStartup,
+  recoverStuckPendingCrawlJobs,
+} from "./internal/pubsub-bootstrap.js";
+import { prisma } from "./prisma.js";
 
 const app = new Hono();
 const PORT = parseInt(process.env.PORT || "8080", 10);
@@ -234,6 +244,25 @@ app.onError((err, c) => {
 // KAN-699: wire the cost-tracking publisher so every llm-client call emits an
 // llm.call Pub/Sub event. Best-effort — publish failures are logged, never thrown.
 setLLMCostPublisher(getPubSubClient());
+
+// KAN-1219 fix-forward — Layer 1 boot-time Pub/Sub self-heal + Layer 3b
+// retroactive stuck-pending CrawlJob recovery (Memo 57 #5 + Memo 51 #9).
+// Fire-and-forget: transient bootstrap failures must never gate the API
+// surface. See apps/api/src/internal/pubsub-bootstrap.ts.
+void bootstrapPubsubAtStartup().catch((err: unknown) => {
+  console.error("[pubsub-bootstrap] unexpected error:", err);
+});
+void recoverStuckPendingCrawlJobs(prisma)
+  .then((res) => {
+    if (res.recovered > 0 || res.errors.length > 0) {
+      console.log(
+        `[pubsub-bootstrap] stuck-pending recovery: ${res.recovered} recovered, ${res.errors.length} errors`,
+      );
+    }
+  })
+  .catch((err: unknown) => {
+    console.error("[pubsub-bootstrap] stuck-pending recovery unexpected error:", err);
+  });
 
 // KAN-698: RAG knowledge fetcher auto-wires lazily inside context-assembler's
 // loadKnowledge on first call (variable-specifier dynamic import keeps

@@ -1229,6 +1229,181 @@ describe("KAN-1219 — Inventory crawler", () => {
       (prisma: PrismaClient) => cleanupTenant(prisma, tenantId),
     );
   });
+
+  // ── KAN-1219 fix-forward Memo 57 anchor #5 Layer 2 (publish-failure) ──
+  it("scenario 15 — Pub/Sub publish failure: CrawlJob.status='failed' + cancelReason='publish_infrastructure_gap' + errorSamples populated + vehicle.crawl_failed audit", async () => {
+    let tenantId = "";
+    await withCleanup(
+      async (prisma: PrismaClient) => {
+        const t = await createTenant(prisma);
+        tenantId = t.id;
+        await prisma.tenant.update({
+          where: { id: tenantId },
+          data: { marketingDomain: "drivegood.com" },
+        });
+
+        // Pub/Sub that throws NOT_FOUND on publish (canonical PROD trigger
+        // 2026-06-17 — topic vehicle.crawl_requested unprovisioned in GCP).
+        const failingPubsub = {
+          publish: async (): Promise<string> => {
+            const err = new Error(
+              "5 NOT_FOUND: Resource not found (resource=vehicle.crawl_requested)",
+            );
+            (err as { code?: number }).code = 5;
+            throw err;
+          },
+        };
+
+        const started = await crawler.startCrawl(
+          prisma as unknown as object,
+          tenantId,
+          "operator-1",
+          { listingUrl: "https://drivegood.com/inventory" },
+          failingPubsub,
+        );
+
+        // Mutation returns success-shaped (no thrown exception); but the
+        // CrawlJob row carries the honest failed state.
+        expect(started.publishedMessageId).toBeNull();
+        expect(started.crawlJob.status).toBe("failed");
+
+        const job = await (prisma as unknown as {
+          crawlJob: { findUnique: (args: unknown) => Promise<{
+            status: string;
+            cancelReason: string | null;
+            errorSamples: unknown;
+            completedAt: Date | null;
+          } | null> };
+        }).crawlJob.findUnique({ where: { id: started.crawlJob.id } });
+        expect(job?.status).toBe("failed");
+        expect(job?.cancelReason).toBe("publish_infrastructure_gap");
+        expect(job?.completedAt).not.toBeNull();
+
+        const samples = job?.errorSamples as Array<{
+          url: string;
+          errorVariant: string;
+          message: string;
+        }>;
+        expect(samples).toBeDefined();
+        expect(samples.length).toBe(1);
+        expect(samples[0]?.errorVariant).toBe("publish_failed");
+        expect(samples[0]?.url).toBe("https://drivegood.com/inventory");
+        expect(samples[0]?.message).toMatch(/NOT_FOUND/);
+
+        // Audit row written with explicit reasoning.
+        const audits = await prisma.auditLog.findMany({
+          where: { tenantId, actionType: "vehicle.crawl_failed" },
+        });
+        expect(audits.length).toBe(1);
+        const reasoning = (audits[0] as unknown as { reasoning: string })
+          .reasoning;
+        expect(reasoning).toMatch(/publish to vehicle\.crawl_requested failed/);
+      },
+      (prisma: PrismaClient) => cleanupTenant(prisma, tenantId),
+    );
+  });
+
+  // ── KAN-1219 fix-forward Memo 57 anchor #5 Layer 1 (boot self-heal) ──
+  it("scenario 16 — boot-time idempotent topic+subscription self-heal: ensurePubsubInfrastructure creates absent + no-ops on present", async () => {
+    interface StubSub {
+      exists: () => Promise<[boolean]>;
+    }
+    interface StubTopic {
+      exists: () => Promise<[boolean]>;
+      create: () => Promise<unknown>;
+      subscription: (name: string) => StubSub;
+      createSubscription: (
+        name: string,
+        opts: { pushConfig: { pushEndpoint: string; oidcToken: { serviceAccountEmail: string } } },
+      ) => Promise<unknown>;
+    }
+    function buildStubPubsub(opts: {
+      topicExists: boolean;
+      subExists: boolean;
+    }): {
+      pubsub: { topic: (name: string) => StubTopic };
+      created: { topics: string[]; subscriptions: Array<{ name: string; pushEndpoint: string }> };
+    } {
+      const created = {
+        topics: [] as string[],
+        subscriptions: [] as Array<{ name: string; pushEndpoint: string }>,
+      };
+      const pubsub = {
+        topic: (name: string): StubTopic => ({
+          exists: async () => [opts.topicExists],
+          create: async () => {
+            created.topics.push(name);
+            return {};
+          },
+          subscription: (_subName: string): StubSub => ({
+            exists: async () => [opts.subExists],
+          }),
+          createSubscription: async (subName: string, subOpts: {
+            pushConfig: { pushEndpoint: string; oidcToken: { serviceAccountEmail: string } };
+          }) => {
+            created.subscriptions.push({
+              name: subName,
+              pushEndpoint: subOpts.pushConfig.pushEndpoint,
+            });
+            return {};
+          },
+        }),
+      };
+      return { pubsub, created };
+    }
+
+    const bootstrapSpec = "../../internal/pubsub-bootstrap.js";
+    const mod = (await import(bootstrapSpec)) as {
+      ensurePubsubInfrastructure: (
+        pubsub: unknown,
+        env?: NodeJS.ProcessEnv,
+      ) => Promise<{
+        topicsEnsured: string[];
+        subscriptionsEnsured: string[];
+        errors: string[];
+      }>;
+    };
+
+    // Case A: both topic + subscription absent → both created exactly once.
+    {
+      const { pubsub, created } = buildStubPubsub({
+        topicExists: false,
+        subExists: false,
+      });
+      const env = {
+        API_PUBLIC_URL: "https://growth-api.example.com",
+        PUBSUB_INVOKER_SA: "pubsub-invoker@example.iam.gserviceaccount.com",
+      } as NodeJS.ProcessEnv;
+      const summary = await mod.ensurePubsubInfrastructure(pubsub, env);
+      expect(summary.topicsEnsured).toContain("vehicle.crawl_requested");
+      expect(summary.subscriptionsEnsured).toContain("growth-api-vehicle-crawl");
+      expect(summary.errors).toEqual([]);
+      expect(created.topics).toEqual(["vehicle.crawl_requested"]);
+      expect(created.subscriptions.length).toBe(1);
+      expect(created.subscriptions[0]?.name).toBe("growth-api-vehicle-crawl");
+      expect(created.subscriptions[0]?.pushEndpoint).toBe(
+        "https://growth-api.example.com/pubsub/vehicle-crawl",
+      );
+    }
+
+    // Case B: both present → idempotent no-op (no .create() / .createSubscription()).
+    {
+      const { pubsub, created } = buildStubPubsub({
+        topicExists: true,
+        subExists: true,
+      });
+      const env = {
+        API_PUBLIC_URL: "https://growth-api.example.com",
+        PUBSUB_INVOKER_SA: "pubsub-invoker@example.iam.gserviceaccount.com",
+      } as NodeJS.ProcessEnv;
+      const summary = await mod.ensurePubsubInfrastructure(pubsub, env);
+      expect(summary.topicsEnsured).toContain("vehicle.crawl_requested");
+      expect(summary.subscriptionsEnsured).toContain("growth-api-vehicle-crawl");
+      expect(summary.errors).toEqual([]);
+      expect(created.topics).toEqual([]);
+      expect(created.subscriptions).toEqual([]);
+    }
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────
