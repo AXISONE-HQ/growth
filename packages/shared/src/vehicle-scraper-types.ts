@@ -11,8 +11,12 @@
  *   - extracted_full — all required identity + enum fields extracted;
  *     vehicle persisted with status='active'.
  *   - extracted_partial — name fields present (year/make/model) but one or
- *     more enum / VIN slots missing; persisted with status='draft' +
- *     extractGaps[] populated for operator review.
+ *     more enum slots missing. **DOES NOT PERSIST** (Memo 51 #6 fix-forward
+ *     after KAN-1216 CI revealed schema-vs-semantics mismatch: Vehicle
+ *     model requires NON-nullable enums; persisting a partial extract
+ *     would violate the substrate). Returns extractedFields for operator
+ *     to complete via /settings/inventory Create form. Extract gaps
+ *     populated for UI hint list.
  *   - tenant_marketing_domain_not_configured — defensive variant; UI button
  *     SHOULD be disabled when this is true. Preserves operator UX precision
  *     (button-disable signal before user attempts scrape) per Q1 verdict.
@@ -76,6 +80,34 @@ export const VehicleScraperInputSchema = z.object({
 export type VehicleScraperInput = z.infer<typeof VehicleScraperInputSchema>;
 
 // ─────────────────────────────────────────────
+// ExtractedVehicleFields — shared shape for partial-extract surfacing.
+//
+// Returned in the `extracted_partial` discriminated variant so the UI can
+// pre-populate a Create-Vehicle form with what was scraped, letting the
+// operator complete the missing enum slots. Mirrors the 15 columns of the
+// Vehicle Prisma model (KAN-1212) with all fields nullable — partial
+// extraction may leave any subset empty.
+// ─────────────────────────────────────────────
+
+export interface ExtractedVehicleFields {
+  year: number | null;
+  make: string | null;
+  model: string | null;
+  trim: string | null;
+  vin: string | null;
+  mileage: number | null;
+  bodyStyle: string | null;
+  transmission: string | null;
+  fuelType: string | null;
+  drivetrain: string | null;
+  condition: string | null;
+  exteriorColor: string | null;
+  interiorColor: string | null;
+  stockNumber: string | null;
+  dealerLot: string | null;
+}
+
+// ─────────────────────────────────────────────
 // VehicleScraperResult — discriminated return shape (7 variants)
 // ─────────────────────────────────────────────
 
@@ -87,8 +119,10 @@ export type VehicleScraperResult =
     }
   | {
       kind: "extracted_partial";
-      /** Persisted vehicle id (status='draft'). */
-      vehicleId: string;
+      /** Extracted fields (NOT persisted — Option B fix-forward). Operator
+       *  UI pre-populates Create-Vehicle form with these values for
+       *  completion. */
+      extractedFields: ExtractedVehicleFields;
       /** Field names missing from the extract (e.g. ["bodyStyle", "vin"]).
        *  Operator UI renders as a hint list. Non-empty by construction. */
       extractGaps: string[];

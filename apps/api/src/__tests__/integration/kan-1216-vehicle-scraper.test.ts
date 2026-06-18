@@ -6,7 +6,7 @@
  * per Phase 1 lock + Memo 46 sub-cat 6 calibration:
  *
  *   1. schema_org_full — full JSON-LD extract → extracted_full + AuditLog
- *   2. og_title_year_make_model — partial og:* extract → extracted_partial + status='draft'
+ *   2. og_title_year_make_model — partial og:* extract → extracted_partial (NO persist; Option B fix-forward)
  *   3. hostname_mismatch — input URL hostname rejection
  *   4. fetch_timeout — AbortError surfaces as fetch_timeout
  *   5. response_too_large — 250KB body cap rejection
@@ -41,9 +41,31 @@ interface VehicleScraperServiceModule {
   ) => Promise<ScrapeResult>;
 }
 
+interface ExtractedVehicleFieldsMirror {
+  year: number | null;
+  make: string | null;
+  model: string | null;
+  trim: string | null;
+  vin: string | null;
+  mileage: number | null;
+  bodyStyle: string | null;
+  transmission: string | null;
+  fuelType: string | null;
+  drivetrain: string | null;
+  condition: string | null;
+  exteriorColor: string | null;
+  interiorColor: string | null;
+  stockNumber: string | null;
+  dealerLot: string | null;
+}
+
 type ScrapeResult =
   | { kind: "extracted_full"; vehicleId: string }
-  | { kind: "extracted_partial"; vehicleId: string; extractGaps: string[] }
+  | {
+      kind: "extracted_partial";
+      extractedFields: ExtractedVehicleFieldsMirror;
+      extractGaps: string[];
+    }
   | { kind: "tenant_marketing_domain_not_configured" }
   | { kind: "hostname_mismatch"; hostname: string; configuredDomain: string }
   | { kind: "fetch_timeout" }
@@ -274,7 +296,7 @@ describe("KAN-1216 — Vehicle scraper service", () => {
     );
   });
 
-  it("scenario 2 — og:title partial extract → extracted_partial + status='draft'", async () => {
+  it("scenario 2 — og:title partial extract → extracted_partial returns fields without persisting (Option B)", async () => {
     let tenantId = "";
     await withCleanup(
       async (prisma: PrismaClient) => {
@@ -297,24 +319,21 @@ describe("KAN-1216 — Vehicle scraper service", () => {
         expect(result.kind).toBe("extracted_partial");
         if (result.kind !== "extracted_partial") throw new Error("type narrow");
 
+        // KAN-1216 fix-forward (Option B): partial extract does NOT persist
+        // because the Vehicle Prisma model requires NON-nullable enums.
+        // Operator completes via /settings/inventory Create form.
+        const vehicles = await (prisma as unknown as {
+          vehicle: {
+            findMany: (args: unknown) => Promise<Array<{ id: string }>>;
+          };
+        }).vehicle.findMany({ where: { tenantId } });
+        expect(vehicles.length).toBe(0);
+
         // og:title stripSiteSuffix removes "- 4mk Auto"; remaining year/make/model
         // parse: "2024 Honda Civic EX-L" → year=2024 make=Honda model=Civic trim=EX-L
-        const vehicle = await (prisma as unknown as {
-          vehicle: {
-            findUnique: (args: unknown) => Promise<{
-              year: number;
-              make: string;
-              model: string;
-              trim: string | null;
-              status: string;
-            } | null>;
-          };
-        }).vehicle.findUnique({ where: { id: result.vehicleId } });
-
-        expect(vehicle?.status).toBe("draft");
-        expect(vehicle?.year).toBe(2024);
-        expect(vehicle?.make).toBe("Honda");
-        expect(vehicle?.model).toBe("Civic");
+        expect(result.extractedFields.year).toBe(2024);
+        expect(result.extractedFields.make).toBe("Honda");
+        expect(result.extractedFields.model).toBe("Civic");
 
         // All 5 enum fields + VIN should be in extractGaps (no JSON-LD,
         // no body text providing enums).

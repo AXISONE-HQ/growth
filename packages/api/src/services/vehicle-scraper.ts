@@ -453,7 +453,23 @@ export async function scrapeVehicleUrl(
     };
   }
 
-  // ── Step 8: persist + write `vehicle.scraped` audit row ────────────────
+  // ── Step 7a: partial extract → return WITHOUT persisting ───────────────
+  //
+  // KAN-1216 fix-forward (Option B): Vehicle Prisma model (KAN-1212) requires
+  // bodyStyle / transmission / fuelType / drivetrain / condition as
+  // NON-nullable enums. Persisting a partial extract with missing enums
+  // would throw PrismaClientValidationError. Instead, surface the extracted
+  // fields so the operator can complete via /settings/inventory Create form.
+  // Memo 51 #6 — test-found semantic-vs-substrate mismatch.
+  if (classified.extractGaps.length > 0) {
+    return {
+      kind: "extracted_partial",
+      extractedFields: { ...fields },
+      extractGaps: classified.extractGaps,
+    };
+  }
+
+  // ── Step 8: persist + write `vehicle.scraped` audit row (FULL only) ────
   //
   // Memo 53 — AuditLog action_type provenance distinguishability.
   // `vehicle.scraped` is the 4th sibling of the product.* family
@@ -494,21 +510,12 @@ export async function scrapeVehicleUrl(
         extractGaps: classified.extractGaps,
         scrapedAt,
       },
-      reasoning: `scraper (${actor}) scraped vehicle from ${parsed.url} (gaps: ${
-        classified.extractGaps.length === 0 ? "none" : classified.extractGaps.join(",")
-      })`,
+      reasoning: `scraper (${actor}) scraped vehicle from ${parsed.url} (gaps: none)`,
     });
     return { vehicleId: created.id };
   });
 
-  if (classified.extractGaps.length === 0) {
-    return { kind: "extracted_full", vehicleId };
-  }
-  return {
-    kind: "extracted_partial",
-    vehicleId,
-    extractGaps: classified.extractGaps,
-  };
+  return { kind: "extracted_full", vehicleId };
 }
 
 /** Test seam — exposed for unit-level helper coverage. */

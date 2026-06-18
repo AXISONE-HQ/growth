@@ -19,24 +19,11 @@
  * `.toUpperCase()` is defensive — the regex already locks case.
  */
 import type * as cheerio from "cheerio";
+// KAN-1216 fix-forward: ExtractedVehicleFields hoisted to packages/shared so
+// the discriminated union's extracted_partial variant can surface it cleanly.
+import type { ExtractedVehicleFields } from "@growth/shared";
 
-export interface ExtractedVehicleFields {
-  year: number | null;
-  make: string | null;
-  model: string | null;
-  trim: string | null;
-  vin: string | null;
-  mileage: number | null;
-  bodyStyle: string | null;
-  transmission: string | null;
-  fuelType: string | null;
-  drivetrain: string | null;
-  condition: string | null;
-  exteriorColor: string | null;
-  interiorColor: string | null;
-  stockNumber: string | null;
-  dealerLot: string | null;
-}
+export type { ExtractedVehicleFields };
 
 export interface DealerAdapter {
   hostname: string;
