@@ -213,7 +213,8 @@ export function stripSiteSuffix(raw: string, $: cheerio.CheerioAPI): string {
  * Returns null when no separator-bridged suffix matches; returns the
  * trimmed prefix otherwise.
  */
-function applySuffixStrip(input: string, candidate: string): string | null {
+// KAN-1216: re-exported for vehicle-scraper consumer (Memo 37 pre-hoist pattern)
+export function applySuffixStrip(input: string, candidate: string): string | null {
   const lower = input.toLowerCase();
   const candLower = candidate.toLowerCase();
   for (const sep of SITE_SUFFIX_SEPARATORS) {
