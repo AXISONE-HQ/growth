@@ -667,12 +667,24 @@ export async function runCrawlJob(
         fetchImpl,
       );
     } catch (err) {
-      // VinAlreadyExistsError thrown by the scraper's downstream
-      // createVehicle? In current shape, the scraper does its own persist
-      // (no createVehicle call). VIN dedup surfaces via the @@unique
-      // constraint → catch as failed.
+      // VIN-dedup classification — scrapeVehicleUrl persists via raw
+      // tx.vehicle.create (not vehicle-service.createVehicle), so a VIN
+      // collision surfaces as Prisma P2002 with `meta.target` including
+      // 'vin'. We ALSO accept the typed VinAlreadyExistsError shape in case
+      // a future refactor routes through the service-layer wrap.
       const message = (err as Error)?.message ?? String(err);
-      if (/already exists/i.test(message) || /VinAlreadyExists/i.test(message)) {
+      const errCode = (err as { code?: string })?.code;
+      const errMetaTarget = (err as { meta?: { target?: unknown } })?.meta?.target;
+      const targetIncludesVin = Array.isArray(errMetaTarget)
+        ? errMetaTarget.includes("vin")
+        : typeof errMetaTarget === "string" && errMetaTarget.includes("vin");
+      const isVinUniqueViolation = errCode === "P2002" && targetIncludesVin;
+      const isVinAlreadyExistsType = (err as Error)?.name === "VinAlreadyExistsError";
+      if (
+        isVinUniqueViolation ||
+        isVinAlreadyExistsType ||
+        /VinAlreadyExists/i.test(message)
+      ) {
         skippedVinDuplicateCount++;
         pushSample(errorSamples, {
           url,
