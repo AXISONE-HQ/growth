@@ -7268,6 +7268,44 @@ async function loadProductVariantServiceModule(): Promise<ProductVariantServiceM
 // KAN-1214 — vehicle-service loader. KAN-689 cohort variable-specifier
 // dynamic import. Mirrors product-service.ts M4 archive-only doctrine; adds
 // Memo 45 VIN-null uniqueness handling at the service layer.
+// KAN-1219 (Slice 5 of KAN-1211 epic) — inventory-crawler service loader.
+// Variable-specifier dynamic import (KAN-689 cohort). Crawler depends on
+// vehicle-scraper (KAN-1216) loaded separately below.
+interface InventoryCrawlerModule {
+  startCrawl: (
+    prisma: unknown,
+    tenantId: string,
+    createdByUserId: string,
+    input: { listingUrl: string },
+    pubsub: unknown,
+  ) => Promise<{
+    crawlJob: Record<string, unknown>;
+    publishedMessageId: string | null;
+  }>;
+  cancelCrawl: (
+    prisma: unknown,
+    tenantId: string,
+    crawlJobId: string,
+    reason: string,
+  ) => Promise<{ cancelled: boolean; crawlJob: Record<string, unknown> | null }>;
+  getCrawlStatus: (
+    prisma: unknown,
+    tenantId: string,
+    crawlJobId: string,
+  ) => Promise<Record<string, unknown>>;
+  CrawlJobAlreadyRunningError: new (existingJobId: string) => Error;
+  CrawlJobNotFoundError: new () => Error;
+  HostnameMismatchError: new (h: string, c: string) => Error;
+  MarketingDomainNotConfiguredError: new () => Error;
+}
+let _inventoryCrawlerModule: InventoryCrawlerModule | null = null;
+async function loadInventoryCrawlerModule(): Promise<InventoryCrawlerModule> {
+  if (_inventoryCrawlerModule) return _inventoryCrawlerModule;
+  const spec = "../../../packages/api/src/services/inventory-crawler.js";
+  _inventoryCrawlerModule = (await import(spec)) as InventoryCrawlerModule;
+  return _inventoryCrawlerModule;
+}
+
 interface VehicleServiceModule {
   createVehicle: (
     prisma: unknown,
@@ -8763,6 +8801,71 @@ const vehiclesRouter = router({
         }
         throw err;
       }
+    }),
+
+  // KAN-1219 (Slice 5 of KAN-1211 epic) — Full-inventory crawler procedures.
+  // Pub/Sub push pattern (Memo 39 anchor #11): startCrawl publishes
+  // vehicle.crawl_requested; vehicle-crawl-push.ts drives runCrawlJob.
+  startCrawl: protectedProcedure
+    .input(z.object({ listingUrl: z.string().url() }))
+    .mutation(async ({ ctx, input }) => {
+      const crawler = await loadInventoryCrawlerModule();
+      const { getPubSubClient } = await loadPubSubLib();
+      try {
+        return await crawler.startCrawl(
+          ctx.prisma,
+          ctx.tenantId,
+          ctx.firebaseUser?.uid ?? "system",
+          { listingUrl: input.listingUrl },
+          getPubSubClient(),
+        );
+      } catch (err) {
+        if (err instanceof crawler.CrawlJobAlreadyRunningError) {
+          throw new TRPCError({ code: "CONFLICT", message: err.message });
+        }
+        if (err instanceof crawler.MarketingDomainNotConfiguredError) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: err.message });
+        }
+        if (err instanceof crawler.HostnameMismatchError) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: err.message });
+        }
+        throw err;
+      }
+    }),
+
+  crawlStatus: protectedProcedure
+    .input(z.object({ id: z.string().uuid() }))
+    .query(async ({ ctx, input }) => {
+      const crawler = await loadInventoryCrawlerModule();
+      try {
+        return await crawler.getCrawlStatus(
+          ctx.prisma,
+          ctx.tenantId,
+          input.id,
+        );
+      } catch (err) {
+        if (err instanceof crawler.CrawlJobNotFoundError) {
+          throw new TRPCError({ code: "NOT_FOUND", message: err.message });
+        }
+        throw err;
+      }
+    }),
+
+  cancelCrawl: protectedProcedure
+    .input(
+      z.object({
+        id: z.string().uuid(),
+        reason: z.string().min(1).max(500).default("operator cancelled"),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const crawler = await loadInventoryCrawlerModule();
+      return await crawler.cancelCrawl(
+        ctx.prisma,
+        ctx.tenantId,
+        input.id,
+        input.reason,
+      );
     }),
 });
 

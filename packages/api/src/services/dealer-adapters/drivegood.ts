@@ -33,6 +33,24 @@ export interface DealerAdapter {
     $: cheerio.CheerioAPI,
     base: ExtractedVehicleFields,
   ): ExtractedVehicleFields;
+  /**
+   * KAN-1219 (Slice 5) — Parse an inventory listing page and return the list
+   * of per-vehicle URLs (VDPs) to crawl. Returns absolute URLs (resolved
+   * against the listing URL).
+   *
+   * For drivegood: VDP links match the inventory/{VIN}/{slug} pattern
+   * (`a[href*="/inventory/"]`). De-duplicated by URL.
+   *
+   * @param html  The fetched listing HTML
+   * @param $     Cheerio API loaded over `html` (caller-supplied for reuse)
+   * @param baseUrl The listing URL (used to resolve relative hrefs)
+   * @returns Absolute VDP URLs, in source-document order, de-duplicated.
+   */
+  parseInventoryListing(
+    html: string,
+    $: cheerio.CheerioAPI,
+    baseUrl: string,
+  ): string[];
 }
 
 // Drivegood VDP URL patterns: `/inventory/{VIN}/{slug}`, `/vehicle/{VIN}`,
@@ -61,5 +79,48 @@ export const drivegoodAdapter: DealerAdapter = {
       ...base,
       dealerLot: dealerLotRaw.length > 0 ? dealerLotRaw : base.dealerLot,
     };
+  },
+
+  // KAN-1219 — Drivegood inventory-listing parser. Selects anchors whose
+  // href matches the VDP shape (`/inventory/{VIN}/...`). Resolves relative
+  // hrefs against `baseUrl` and de-duplicates. We DO NOT validate that the
+  // captured segment is a VIN here — the per-URL scrape will fail-soft if
+  // the page turns out to be non-VDP. Caller is responsible for caps.
+  parseInventoryListing: (_html, $, baseUrl) => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    let listingBase: URL;
+    try {
+      listingBase = new URL(baseUrl);
+    } catch {
+      return out;
+    }
+    $('a[href*="/inventory/"]').each((_, el) => {
+      const href = $(el).attr("href");
+      if (!href) return;
+      // Skip the listing root itself ("/inventory" or "/inventory/" or
+      // "/inventory?page=…"). The VDP shape requires at least one trailing
+      // path segment after /inventory/.
+      const trimmed = href.trim();
+      if (!trimmed) return;
+      let resolved: URL;
+      try {
+        resolved = new URL(trimmed, listingBase);
+      } catch {
+        return;
+      }
+      // Per-page heuristic: VDP path must have a non-empty segment after
+      // /inventory/. Excludes /inventory and /inventory/ exactly.
+      const path = resolved.pathname;
+      const vdpRe = /\/inventory\/[^/?#]+/;
+      if (!vdpRe.test(path)) return;
+      // Normalize on absolute href with no fragment.
+      resolved.hash = "";
+      const key = resolved.toString();
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push(key);
+    });
+    return out;
   },
 };

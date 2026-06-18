@@ -28,7 +28,7 @@
 
 import { useEffect, useState, type FocusEvent } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Plus, Car, Trash2, Pencil, Globe } from "lucide-react";
+import { Plus, Car, Trash2, Pencil, Globe, X } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -48,6 +48,8 @@ import {
   type VehicleListItem,
   type VehicleStatus,
   type CursorPage,
+  type CrawlJobRecord,
+  type CrawlJobStatus,
 } from "@/lib/api";
 import {
   BODY_STYLES,
@@ -131,6 +133,12 @@ function VehiclesTab() {
   const [pages, setPages] = useState<CursorPage<VehicleListItem>[]>([]);
   const [createOpen, setCreateOpen] = useState(false);
   const [editing, setEditing] = useState<VehicleListItem | null>(null);
+  // KAN-1219 (Slice 5) — scraper-trigger modal + active crawl-job tracking.
+  // activeCrawlJobId persists across renders so the progress card stays
+  // mounted (and the TanStack Query keeps polling) even after the modal
+  // closes. Cleared on terminal status via card's onTerminal callback.
+  const [scrapeOpen, setScrapeOpen] = useState(false);
+  const [activeCrawlJobId, setActiveCrawlJobId] = useState<string | null>(null);
 
   // Reset paged accumulator when filter changes.
   useEffect(() => {
@@ -230,15 +238,23 @@ function VehiclesTab() {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          {/* Q6 — Scraper-trigger placeholder. Memo 19 feature-affordance-
-              honesty: render disabled with disclosure tooltip. The scrape
-              endpoint lands in KAN-1216 Slice 4. */}
+          {/* KAN-1219 (Slice 5 of KAN-1211 epic) — Full-inventory crawler
+              trigger. Replaces the Slice-3 affordance-honesty placeholder
+              (was disabled with "Available after KAN-1216 Slice 4 merge"
+              tooltip). Disabled while a crawl is active to honor the
+              one-at-a-time Q4 lock at server side; tooltip surfaces the
+              concurrent-prevention reason to the operator. */}
           <Button
             variant="outline"
             size="sm"
-            disabled
-            title="Available after KAN-1216 Slice 4 merge"
-            aria-label="Scrape inventory (not yet available)"
+            onClick={() => setScrapeOpen(true)}
+            disabled={activeCrawlJobId !== null}
+            title={
+              activeCrawlJobId
+                ? "A crawl is already running"
+                : "Crawl your inventory listing page"
+            }
+            aria-label="Scrape inventory"
           >
             <Globe className="h-4 w-4" />
             Scrape inventory
@@ -394,7 +410,314 @@ function VehiclesTab() {
           void refetch();
         }}
       />
+
+      {/* KAN-1219 — ScrapeInventoryModal triggers vehicles.startCrawl.
+          On success, sets activeCrawlJobId so CrawlJobProgressCard mounts
+          and polls. */}
+      <ScrapeInventoryModal
+        open={scrapeOpen}
+        onOpenChange={setScrapeOpen}
+        onStarted={(jobId) => {
+          setScrapeOpen(false);
+          setActiveCrawlJobId(jobId);
+        }}
+      />
+
+      {/* KAN-1219 — CrawlJobProgressCard polls vehicles.crawlStatus every
+          2000ms (Memo 32 — UI polling precedent imports/[id]:105-117 used
+          1500ms; 2000ms here aligns with the crawler pacing interval).
+          On terminal status, refetches the vehicle list (newly-extracted
+          rows surface) + clears activeCrawlJobId. */}
+      {activeCrawlJobId && (
+        <CrawlJobProgressCard
+          crawlJobId={activeCrawlJobId}
+          onTerminal={() => {
+            setActiveCrawlJobId(null);
+            setPages([]);
+            void refetch();
+          }}
+          onDismiss={() => setActiveCrawlJobId(null)}
+        />
+      )}
     </div>
+  );
+}
+
+/* ── ScrapeInventoryModal — KAN-1219 ─────────────────────────────────── */
+
+function ScrapeInventoryModal({
+  open,
+  onOpenChange,
+  onStarted,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onStarted: (crawlJobId: string) => void;
+}) {
+  const [listingUrl, setListingUrl] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (!open) {
+      setListingUrl("");
+      setSubmitting(false);
+    }
+  }, [open]);
+
+  async function handleSubmit(): Promise<void> {
+    const trimmed = listingUrl.trim();
+    if (!trimmed) {
+      toast.error("Listing URL is required");
+      return;
+    }
+    // Lightweight client-side URL validation; server-side authoritative
+    // via z.string().url() at vehicles.startCrawl.
+    try {
+      new URL(trimmed);
+    } catch {
+      toast.error("Invalid URL");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const result = await vehiclesApi.startCrawl(trimmed);
+      toast.success("Crawl started");
+      onStarted(result.crawlJob.id);
+    } catch (e) {
+      toast.error((e as Error)?.message ?? "Failed to start crawl");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Scrape inventory</DialogTitle>
+          <DialogDescription>
+            Paste your dealer&apos;s inventory listing URL. The crawler will
+            walk each VDP, extract vehicle details, and skip any VIN already
+            in your inventory. You can cancel at any time.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-2 py-2">
+          <Label htmlFor="scrape-listing-url">Listing URL</Label>
+          <Input
+            id="scrape-listing-url"
+            value={listingUrl}
+            onChange={(e) => setListingUrl(e.target.value)}
+            placeholder="https://dealer.example.com/inventory"
+            autoFocus
+          />
+          <p className="text-xs text-muted-foreground">
+            Must match your configured marketing domain.
+          </p>
+        </div>
+        <DialogFooter>
+          <Button
+            variant="outline"
+            onClick={() => onOpenChange(false)}
+            disabled={submitting}
+          >
+            Cancel
+          </Button>
+          <Button onClick={handleSubmit} disabled={submitting}>
+            {submitting ? "Starting..." : "Start crawl"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/* ── CrawlJobProgressCard — KAN-1219 polling progress UI ─────────────── */
+
+const TERMINAL_CRAWL_STATUSES: ReadonlySet<CrawlJobStatus> = new Set([
+  "completed",
+  "completed_with_errors",
+  "cancelled",
+  "failed",
+]);
+
+function crawlStatusLabel(s: CrawlJobStatus): string {
+  switch (s) {
+    case "pending":
+      return "Pending";
+    case "running":
+      return "Running";
+    case "completed":
+      return "Completed";
+    case "completed_with_errors":
+      return "Completed with errors";
+    case "cancelled":
+      return "Cancelled";
+    case "failed":
+      return "Failed";
+  }
+}
+
+function crawlStatusVariant(
+  s: CrawlJobStatus,
+): "muted" | "green" | "rose" | "amber" {
+  if (s === "completed") return "green";
+  if (s === "completed_with_errors") return "amber";
+  if (s === "failed" || s === "cancelled") return "rose";
+  return "muted";
+}
+
+function CrawlJobProgressCard({
+  crawlJobId,
+  onTerminal,
+  onDismiss,
+}: {
+  crawlJobId: string;
+  onTerminal: () => void;
+  onDismiss: () => void;
+}) {
+  const { data: job } = useQuery<CrawlJobRecord>({
+    queryKey: ["vehicles", "crawlStatus", crawlJobId],
+    queryFn: () => vehiclesApi.crawlStatus(crawlJobId),
+    // Memo 32 — UI polling precedent at imports/[id]:105-117. 2000ms here
+    // aligns with crawler pacing interval; stops on terminal status.
+    refetchInterval: (data) => {
+      const next = data as unknown as CrawlJobRecord | undefined;
+      if (!next) return 2000;
+      return TERMINAL_CRAWL_STATUSES.has(next.status) ? false : 2000;
+    },
+  });
+
+  // Fire onTerminal when status transitions to terminal.
+  useEffect(() => {
+    if (job && TERMINAL_CRAWL_STATUSES.has(job.status)) {
+      // Defer so the user can still see the terminal counters before the
+      // parent refetches the vehicle list.
+      const t = setTimeout(onTerminal, 1500);
+      return () => clearTimeout(t);
+    }
+  }, [job, onTerminal]);
+
+  async function handleCancel(): Promise<void> {
+    if (!confirm("Cancel this crawl? Already-extracted vehicles are kept.")) {
+      return;
+    }
+    try {
+      await vehiclesApi.cancelCrawl(crawlJobId);
+      toast.success("Crawl cancelled");
+    } catch (e) {
+      toast.error((e as Error)?.message ?? "Failed to cancel crawl");
+    }
+  }
+
+  if (!job) {
+    return (
+      <Card className="border-dashed">
+        <CardHeader>
+          <CardTitle className="text-sm">Crawl starting...</CardTitle>
+        </CardHeader>
+      </Card>
+    );
+  }
+
+  const isTerminal = TERMINAL_CRAWL_STATUSES.has(job.status);
+  const isRunning = job.status === "running" || job.status === "pending";
+  const progressPct =
+    job.discoveredCount > 0
+      ? Math.round(
+          ((job.extractedCount + job.failedCount + job.skippedVinDuplicateCount) /
+            job.discoveredCount) *
+            100,
+        )
+      : 0;
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-sm flex items-center gap-2">
+            Inventory crawl
+            <Badge
+              variant={crawlStatusVariant(job.status)}
+              className="text-xs"
+            >
+              {crawlStatusLabel(job.status)}
+            </Badge>
+          </CardTitle>
+          {isTerminal && (
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={onDismiss}
+              aria-label="Dismiss"
+            >
+              <X className="h-4 w-4" />
+            </Button>
+          )}
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="text-xs text-muted-foreground break-all">
+          {job.listingUrl}
+        </div>
+        {job.discoveredCount > 0 && (
+          <div className="space-y-1">
+            <div className="flex justify-between text-xs">
+              <span>
+                {job.extractedCount + job.failedCount + job.skippedVinDuplicateCount}
+                {" / "}
+                {job.discoveredCount} URLs
+              </span>
+              <span className="tabular-nums">{progressPct}%</span>
+            </div>
+            <div className="h-2 bg-muted rounded overflow-hidden">
+              <div
+                className="h-full bg-primary transition-all"
+                style={{ width: `${progressPct}%` }}
+              />
+            </div>
+          </div>
+        )}
+        <div className="grid grid-cols-4 gap-2 text-xs">
+          <div>
+            <div className="text-muted-foreground">Discovered</div>
+            <div className="font-medium tabular-nums">
+              {job.discoveredCount}
+            </div>
+          </div>
+          <div>
+            <div className="text-muted-foreground">Extracted</div>
+            <div className="font-medium tabular-nums text-green-600">
+              {job.extractedCount}
+            </div>
+          </div>
+          <div>
+            <div className="text-muted-foreground">VIN-skipped</div>
+            <div className="font-medium tabular-nums">
+              {job.skippedVinDuplicateCount}
+            </div>
+          </div>
+          <div>
+            <div className="text-muted-foreground">Failed</div>
+            <div className="font-medium tabular-nums text-red-600">
+              {job.failedCount}
+            </div>
+          </div>
+        </div>
+        {isRunning && (
+          <div className="flex justify-end">
+            <Button variant="outline" size="sm" onClick={handleCancel}>
+              Cancel crawl
+            </Button>
+          </div>
+        )}
+        {job.cancelReason && (
+          <div className="text-xs text-muted-foreground">
+            <span className="font-medium">Reason: </span>
+            {job.cancelReason}
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
