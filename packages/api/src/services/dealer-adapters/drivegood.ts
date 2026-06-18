@@ -27,6 +27,17 @@ export type { ExtractedVehicleFields };
 
 export interface DealerAdapter {
   hostname: string;
+  /**
+   * KAN-1219 fix-forward — Layer 2 dispatcher hook (Memo 57 anchor #4).
+   *
+   * Structural hint (meta / og signature) — NOT hostname. Handles
+   * SaaS-backed dealers serving on vanity domains. Example: 4mkauto.com
+   * (dealer vanity) served by drivegood.com SaaS backend; og:image points
+   * at cdn.drivegood.com, meta-author is potenzaglobal.
+   *
+   * Generalizes to vAuto / DealerSocket / EBlock / Trader patterns.
+   */
+  fingerprint($: cheerio.CheerioAPI): boolean;
   parseVin(url: string, $: cheerio.CheerioAPI): string | null;
   parseStockNumber($: cheerio.CheerioAPI): string | null;
   enrichFields(
@@ -59,6 +70,20 @@ const DRIVEGOOD_VIN_URL_PATTERN = /\/(?:vehicle|inventory|vdp)\/([A-HJ-NPR-Z0-9]
 
 export const drivegoodAdapter: DealerAdapter = {
   hostname: "drivegood.com",
+
+  // KAN-1219 fix-forward — Layer 2 fingerprint. Drivegood SaaS-served
+  // dealer sites embed identifying meta even when hosted on a vanity
+  // domain (e.g., 4mkauto.com). Two empirical signatures:
+  //   1. og:image points at cdn.drivegood.com
+  //   2. meta[author] = Potenza Global Solutions (the SaaS vendor)
+  // Either match is sufficient; both observed in production.
+  fingerprint: ($) => {
+    const ogImage = $('meta[property="og:image"]').attr("content") ?? "";
+    if (/drivegood/i.test(ogImage)) return true;
+    const metaAuthor = $('meta[name="author"]').attr("content") ?? "";
+    if (/potenzaglobal/i.test(metaAuthor)) return true;
+    return false;
+  },
 
   parseVin: (url: string) => {
     const match = url.match(DRIVEGOOD_VIN_URL_PATTERN);
