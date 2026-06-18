@@ -27,6 +27,10 @@ import {
   ParseRuleBodySchema,
   // KAN-1219 (Slice 5 of KAN-1212 epic) — product scraper input schema.
   ProductScraperInputSchema,
+  // KAN-1214 (Slice 2 of KAN-1211 epic) — Vehicle CRUD inputs.
+  VehicleCreateInputSchema,
+  VehicleUpdateInputSchema,
+  VehicleStatusEnum,
 } from "@growth/shared";
 // KAN-852 — Account Page publisher + flag. Cross-rootDir static imports
 // trigger TS6059 (KAN-689 cohort), so we use the variable-specifier
@@ -7261,6 +7265,56 @@ async function loadProductVariantServiceModule(): Promise<ProductVariantServiceM
   return _productVariantServiceModule;
 }
 
+// KAN-1214 — vehicle-service loader. KAN-689 cohort variable-specifier
+// dynamic import. Mirrors product-service.ts M4 archive-only doctrine; adds
+// Memo 45 VIN-null uniqueness handling at the service layer.
+interface VehicleServiceModule {
+  createVehicle: (
+    prisma: unknown,
+    tenantId: string,
+    input: unknown,
+    actor: string,
+    hooks: unknown,
+  ) => Promise<{ vehicle: unknown; auditLogId: string }>;
+  updateVehicle: (
+    prisma: unknown,
+    tenantId: string,
+    vehicleId: string,
+    input: unknown,
+    actor: string,
+    hooks: unknown,
+  ) => Promise<{ vehicle: unknown; auditLogId: string }>;
+  archiveVehicle: (
+    prisma: unknown,
+    tenantId: string,
+    vehicleId: string,
+    actor: string,
+    hooks: unknown,
+  ) => Promise<{ vehicle: unknown; auditLogId: string; alreadyArchived: boolean }>;
+  getVehicleById: (
+    prisma: unknown,
+    tenantId: string,
+    vehicleId: string,
+    opts?: { includeArchived?: boolean },
+  ) => Promise<unknown | null>;
+  listVehicles: (
+    prisma: unknown,
+    tenantId: string,
+    filters: { status?: string; includeArchived?: boolean },
+    pagination: { cursor?: string; limit?: number },
+  ) => Promise<{ items: unknown[]; nextCursor: string | null; totalCount: number }>;
+  VehicleNotFoundError: new () => Error;
+  ArchivedVehicleMutationError: new () => Error;
+  VinAlreadyExistsError: new (tenantId: string, vin: string) => Error;
+}
+let _vehicleServiceModule: VehicleServiceModule | null = null;
+async function loadVehicleServiceModule(): Promise<VehicleServiceModule> {
+  if (_vehicleServiceModule) return _vehicleServiceModule;
+  const spec = "../../../packages/api/src/services/vehicle-service.js";
+  _vehicleServiceModule = (await import(spec)) as VehicleServiceModule;
+  return _vehicleServiceModule;
+}
+
 // KAN-1216b — product-service loader. KAN-689 cohort variable-specifier
 // dynamic import. Seeds M4 (soft_delete_archive_only_crud_discipline) memo
 // at the resolving service module header.
@@ -8569,6 +8623,149 @@ const productsRouter = router({
     }),
 });
 
+// KAN-1214 — Vehicle CRUD router. Service layer at
+// packages/api/src/services/vehicle-service.ts (Slice 2 of KAN-1211 epic).
+// Mirrors productsRouter shape; Memo 45 NULL-semantic VIN uniqueness +
+// Memo 53 vehicle.* audit action_types apply at service layer.
+interface VehicleRouterAuditTx {
+  auditLog: { create: (args: unknown) => Promise<{ id: string }> };
+}
+function buildVehicleHooks() {
+  return {
+    auditLog: {
+      writeInTx: async (
+        tx: VehicleRouterAuditTx,
+        payload: {
+          tenantId: string;
+          actor: string;
+          actionType: string;
+          payload: Record<string, unknown>;
+          reasoning: string;
+        },
+      ): Promise<{ id: string }> =>
+        tx.auditLog.create({
+          data: {
+            tenantId: payload.tenantId,
+            actor: payload.actor,
+            actionType: payload.actionType,
+            payload: payload.payload,
+            reasoning: payload.reasoning,
+          },
+        }),
+    },
+  };
+}
+
+const vehiclesRouter = router({
+  list: protectedProcedure
+    .input(
+      z.object({
+        status: VehicleStatusEnum.optional(),
+        includeArchived: z.boolean().optional(),
+        limit: z.number().int().min(1).max(100).default(50),
+        cursor: z.string().optional(),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      const svc = await loadVehicleServiceModule();
+      return svc.listVehicles(
+        ctx.prisma,
+        ctx.tenantId,
+        { status: input.status, includeArchived: input.includeArchived },
+        { cursor: input.cursor, limit: input.limit },
+      );
+    }),
+
+  get: protectedProcedure
+    .input(
+      z.object({
+        id: z.string().uuid(),
+        includeArchived: z.boolean().optional(),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      const svc = await loadVehicleServiceModule();
+      const vehicle = await svc.getVehicleById(
+        ctx.prisma,
+        ctx.tenantId,
+        input.id,
+        { includeArchived: input.includeArchived },
+      );
+      if (!vehicle) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Vehicle not found" });
+      }
+      return vehicle;
+    }),
+
+  create: protectedProcedure
+    .input(VehicleCreateInputSchema)
+    .mutation(async ({ ctx, input }) => {
+      const svc = await loadVehicleServiceModule();
+      try {
+        return await svc.createVehicle(
+          ctx.prisma,
+          ctx.tenantId,
+          input,
+          ctx.firebaseUser?.uid ?? "system",
+          buildVehicleHooks(),
+        );
+      } catch (err) {
+        if (err instanceof svc.VinAlreadyExistsError) {
+          throw new TRPCError({ code: "CONFLICT", message: err.message });
+        }
+        throw err;
+      }
+    }),
+
+  update: protectedProcedure
+    .input(z.object({ id: z.string().uuid() }).and(VehicleUpdateInputSchema))
+    .mutation(async ({ ctx, input }) => {
+      const svc = await loadVehicleServiceModule();
+      const { id, ...data } = input;
+      try {
+        return await svc.updateVehicle(
+          ctx.prisma,
+          ctx.tenantId,
+          id,
+          data,
+          ctx.firebaseUser?.uid ?? "system",
+          buildVehicleHooks(),
+        );
+      } catch (err) {
+        if (err instanceof svc.VehicleNotFoundError) {
+          throw new TRPCError({ code: "NOT_FOUND", message: err.message });
+        }
+        if (err instanceof svc.ArchivedVehicleMutationError) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: err.message });
+        }
+        if (err instanceof svc.VinAlreadyExistsError) {
+          throw new TRPCError({ code: "CONFLICT", message: err.message });
+        }
+        throw err;
+      }
+    }),
+
+  archive: protectedProcedure
+    .input(z.object({ id: z.string().uuid() }))
+    .mutation(async ({ ctx, input }) => {
+      const svc = await loadVehicleServiceModule();
+      try {
+        return await svc.archiveVehicle(
+          ctx.prisma,
+          ctx.tenantId,
+          input.id,
+          ctx.firebaseUser?.uid ?? "system",
+          buildVehicleHooks(),
+        );
+      } catch (err) {
+        if (err instanceof svc.VehicleNotFoundError) {
+          throw new TRPCError({ code: "NOT_FOUND", message: err.message });
+        }
+        throw err;
+      }
+    }),
+});
+
 // KAN-1216c — ProductVariant CRUD router. Service layer at
 // packages/api/src/services/product-variant-service.ts (M1 + M2 canonical
 // anchors). Reuses buildProductHooks() — same AuditLog hook shape as
@@ -9103,6 +9300,10 @@ export const appRouter = router({
   // KAN-1213 — Product Catalog Module substrate (Slice 1 of KAN-1212 epic).
   // List-only stub this slice; KAN-1216 expands to full CRUD.
   products: productsRouter,
+  // KAN-1214 — Vehicle CRUD (Slice 2 of KAN-1211 epic). Service layer at
+  // packages/api/src/services/vehicle-service.ts mirrors product M4
+  // archive-only doctrine + Memo 45 VIN-null uniqueness.
+  vehicles: vehiclesRouter,
   // KAN-1216c — ProductVariant CRUD with content-hash dedup (M1 Path α) +
   // price-inheritance resolution (M2). Variant-level archive deferred per
   // KAN-1214 schema doctrine.
