@@ -73,6 +73,7 @@ function fixtureVehicle(
     interiorColor: "Black Leather",
     stockNumber: "STK-001",
     dealerLot: "Main",
+    price: 28500,
     status: "active",
     archivedAt: null,
     createdAt: "2026-06-01T00:00:00Z",

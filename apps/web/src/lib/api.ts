@@ -3114,12 +3114,22 @@ export const productCategoriesApi = {
 // ─────────────────────────────────────────────────────────────────────
 // KAN-1217 — Vehicle Inventory UI (Slice 3 of KAN-1211 epic).
 //
-// Consumes apps/api vehiclesRouter (KAN-1214 Slice 2). Shape mirrors
-// productsApi precedent above; Decimal-coercion not required (Vehicle
-// schema has no Decimal columns — mileage is Int, year is Int).
+// Consumes apps/api vehiclesRouter (KAN-1214 Slice 2 + KAN-1219 Slice B
+// filter+sort expansion). KAN-1219 Slice A added `price` as Decimal(10,2)
+// at the DB — Prisma coerces to JS number at JSON serialization, so the
+// client receives `number | null` (Memo 39 codebase-precedent).
 // ─────────────────────────────────────────────────────────────────────
 
 export type VehicleStatus = 'draft' | 'active' | 'archived';
+
+export type VehicleListSort =
+  | 'createdAt_desc'
+  | 'year_asc'
+  | 'year_desc'
+  | 'mileage_asc'
+  | 'mileage_desc'
+  | 'price_asc'
+  | 'price_desc';
 
 export interface VehicleListItem {
   id: string;
@@ -3139,22 +3149,39 @@ export interface VehicleListItem {
   interiorColor: string | null;
   stockNumber: string | null;
   dealerLot: string | null;
+  price: number | null;
   status: VehicleStatus;
   archivedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
 
+export interface VehicleListInput {
+  status?: VehicleStatus;
+  includeArchived?: boolean;
+  searchText?: string;
+  makeIn?: string[];
+  bodyStyleIn?: string[];
+  transmissionIn?: string[];
+  fuelTypeIn?: string[];
+  drivetrainIn?: string[];
+  conditionIn?: string[];
+  yearMin?: number;
+  yearMax?: number;
+  mileageMin?: number;
+  mileageMax?: number;
+  priceMin?: number;
+  priceMax?: number;
+  sort?: VehicleListSort;
+  limit?: number;
+  cursor?: string;
+}
+
 export const vehiclesApi = {
-  list: (input?: {
-    status?: VehicleStatus;
-    includeArchived?: boolean;
-    limit?: number;
-    cursor?: string;
-  }) =>
+  list: (input?: VehicleListInput) =>
     trpcQuery<CursorPage<VehicleListItem>>(
       'vehicles.list',
-      input ?? { limit: 50 },
+      (input ?? { limit: 50 }) as Record<string, unknown>,
     ),
 
   get: (id: string, includeArchived = false) =>

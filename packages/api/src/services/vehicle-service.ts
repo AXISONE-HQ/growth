@@ -36,6 +36,12 @@ import {
   VehicleUpdateInputSchema,
   type Vehicle,
   type VehicleStatus,
+  type VehicleListSort,
+  type BodyStyle,
+  type Transmission,
+  type FuelType,
+  type Drivetrain,
+  type VehicleCondition,
 } from "@growth/shared";
 
 // ─────────────────────────────────────────────
@@ -373,7 +379,12 @@ export async function getVehicleById(
 }
 
 // ─────────────────────────────────────────────
-// listVehicles — paginated list with status + archived filters
+// listVehicles — paginated list with KAN-1219 Slice B filter + sort
+// expansion. Existing { status, includeArchived } shape preserved; new
+// dimensions are optional. Cursor pagination still keys off `id` (the
+// sort tiebreaker), so cursors stay stable across sort changes within
+// a single sort+filter context. Sort changes invalidate cursors —
+// callers must reset on sort change.
 // ─────────────────────────────────────────────
 
 export interface ListVehiclesResult {
@@ -382,13 +393,67 @@ export interface ListVehiclesResult {
   totalCount: number;
 }
 
+export interface ListVehiclesFilters {
+  status?: VehicleStatus;
+  includeArchived?: boolean;
+  searchText?: string;
+  makeIn?: string[];
+  bodyStyleIn?: BodyStyle[];
+  transmissionIn?: Transmission[];
+  fuelTypeIn?: FuelType[];
+  drivetrainIn?: Drivetrain[];
+  conditionIn?: VehicleCondition[];
+  yearMin?: number;
+  yearMax?: number;
+  mileageMin?: number;
+  mileageMax?: number;
+  priceMin?: number;
+  priceMax?: number;
+  sort?: VehicleListSort;
+}
+
 const LIST_DEFAULT_LIMIT = 50;
 const LIST_MAX_LIMIT = 100;
+
+function buildSortOrderBy(
+  sort: VehicleListSort | undefined,
+): Array<Record<string, "asc" | "desc">> {
+  // `id` tiebreaker is mandatory for cursor pagination stability.
+  switch (sort) {
+    case "year_asc":
+      return [{ year: "asc" }, { id: "desc" }];
+    case "year_desc":
+      return [{ year: "desc" }, { id: "desc" }];
+    case "mileage_asc":
+      return [{ mileage: "asc" }, { id: "desc" }];
+    case "mileage_desc":
+      return [{ mileage: "desc" }, { id: "desc" }];
+    case "price_asc":
+      return [{ price: "asc" }, { id: "desc" }];
+    case "price_desc":
+      return [{ price: "desc" }, { id: "desc" }];
+    case "createdAt_desc":
+    case undefined:
+    default:
+      return [{ createdAt: "desc" }, { id: "desc" }];
+  }
+}
+
+function buildRange(
+  min: number | undefined,
+  max: number | undefined,
+): Record<string, number> | undefined {
+  if (min === undefined && max === undefined) return undefined;
+  const range: Record<string, number> = {};
+  if (min !== undefined) range.gte = min;
+  if (max !== undefined) range.lte = max;
+  return range;
+}
 
 export async function listVehicles(
   prisma: VehiclePrisma,
   tenantId: string,
-  filters: { status?: VehicleStatus; includeArchived?: boolean },
+  filters: ListVehiclesFilters,
   pagination: { cursor?: string; limit?: number },
 ): Promise<ListVehiclesResult> {
   const limit = Math.min(
@@ -403,12 +468,47 @@ export async function listVehicles(
   if (filters.status !== undefined) {
     where.status = filters.status;
   }
+  if (filters.searchText) {
+    const q = filters.searchText.trim();
+    if (q.length > 0) {
+      where.OR = [
+        { make: { contains: q, mode: "insensitive" } },
+        { model: { contains: q, mode: "insensitive" } },
+        { vin: { contains: q, mode: "insensitive" } },
+        { stockNumber: { contains: q, mode: "insensitive" } },
+      ];
+    }
+  }
+  if (filters.makeIn && filters.makeIn.length > 0) {
+    where.make = { in: filters.makeIn };
+  }
+  if (filters.bodyStyleIn && filters.bodyStyleIn.length > 0) {
+    where.bodyStyle = { in: filters.bodyStyleIn };
+  }
+  if (filters.transmissionIn && filters.transmissionIn.length > 0) {
+    where.transmission = { in: filters.transmissionIn };
+  }
+  if (filters.fuelTypeIn && filters.fuelTypeIn.length > 0) {
+    where.fuelType = { in: filters.fuelTypeIn };
+  }
+  if (filters.drivetrainIn && filters.drivetrainIn.length > 0) {
+    where.drivetrain = { in: filters.drivetrainIn };
+  }
+  if (filters.conditionIn && filters.conditionIn.length > 0) {
+    where.condition = { in: filters.conditionIn };
+  }
+  const yearRange = buildRange(filters.yearMin, filters.yearMax);
+  if (yearRange) where.year = yearRange;
+  const mileageRange = buildRange(filters.mileageMin, filters.mileageMax);
+  if (mileageRange) where.mileage = mileageRange;
+  const priceRange = buildRange(filters.priceMin, filters.priceMax);
+  if (priceRange) where.price = priceRange;
 
   const totalCount = await prisma.vehicle.count({ where });
 
   const items = (await prisma.vehicle.findMany({
     where,
-    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    orderBy: buildSortOrderBy(filters.sort),
     take: limit + 1,
     ...(pagination.cursor
       ? { cursor: { id: pagination.cursor }, skip: 1 }
