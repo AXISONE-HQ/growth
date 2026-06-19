@@ -27,6 +27,7 @@
  */
 
 import { useEffect, useMemo, useState, type FocusEvent } from "react";
+import Link from "next/link";
 import { useRouter, useSearchParams, usePathname } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -368,12 +369,46 @@ function VehiclesTab() {
   const [scrapeOpen, setScrapeOpen] = useState(false);
   const [activeCrawlJobId, setActiveCrawlJobId] = useState<string | null>(null);
 
-  // Sync URL on filter change (replace — no history pollution).
+  // Sync URL on filter change (replace — no history pollution). Also mirror
+  // the filter querystring into sessionStorage so the Slice E detail page can
+  // restore the operator's filter view on "Back to inventory".
   useEffect(() => {
     const sp = encodeFilters(filters);
     const qs = sp.toString();
     router.replace(qs ? `${pathname}?${qs}` : pathname);
+    if (typeof window !== "undefined") {
+      try {
+        window.sessionStorage.setItem(
+          "kan-1219-inventory-filter-querystring",
+          qs,
+        );
+      } catch {
+        // sessionStorage may be unavailable in some sandboxes; safe fallback.
+      }
+    }
   }, [filters, router, pathname]);
+
+  // KAN-1219 Slice E — consume ?edit=<vehicleId> from the URL (used by the
+  // detail page's Edit button). When present, fetch the row and open the
+  // edit modal; then strip the param from the URL so a refresh doesn't
+  // re-trigger.
+  useEffect(() => {
+    if (!searchParams) return;
+    const editId = searchParams.get("edit");
+    if (!editId || editing) return;
+    void vehiclesApi
+      .get(editId, true)
+      .then((vehicle) => {
+        setEditing(vehicle);
+        const next = new URLSearchParams(searchParams.toString());
+        next.delete("edit");
+        const qs = next.toString();
+        router.replace(qs ? `${pathname}?${qs}` : pathname);
+      })
+      .catch(() => {
+        // Quietly drop: vehicle may not exist, tenant mismatch, etc.
+      });
+  }, [searchParams, editing, router, pathname]);
 
   // Reset paged accumulator when filter shape changes.
   useEffect(() => {
@@ -778,7 +813,11 @@ function VehiclesTab() {
               className="rounded-lg border bg-card"
             >
               <div className="flex items-center justify-between p-4">
-                <div className="flex items-center gap-3 text-left flex-1">
+                <Link
+                  href={`/settings/inventory/${v.id}`}
+                  className="flex items-center gap-3 text-left flex-1 hover:text-primary transition-colors"
+                  aria-label={`Open ${label} detail`}
+                >
                   <div className="flex-1">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="font-medium">{label}{trimSuffix}</span>
@@ -808,7 +847,7 @@ function VehiclesTab() {
                       {v.dealerLot && <span>Lot: {v.dealerLot}</span>}
                     </div>
                   </div>
-                </div>
+                </Link>
                 <div className="flex items-center gap-1">
                   <Button
                     variant="ghost"
