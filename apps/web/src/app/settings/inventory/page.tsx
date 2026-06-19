@@ -26,7 +26,7 @@
  * via VehicleCreateInputSchema (defense-in-depth per J3 verdict).
  */
 
-import { useEffect, useMemo, useState, type FocusEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FocusEvent } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams, usePathname } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
@@ -372,9 +372,20 @@ function VehiclesTab() {
   // Sync URL on filter change (replace — no history pollution). Also mirror
   // the filter querystring into sessionStorage so the Slice E detail page can
   // restore the operator's filter view on "Back to inventory".
+  //
+  // KAN-1219 fix-forward — track last-emitted querystring in a ref and skip
+  // the replace when filters genuinely haven't changed. Without this guard
+  // the useEffect re-fires on pathname-only dep changes (e.g. during in-flight
+  // `<Link>` navigation), and the `router.replace(${pathname}?${qs})` races
+  // against the Link's `router.push(<new>)` — left-click silently no-ops
+  // while right-click ("Open in new tab") still works because it uses the
+  // href directly. The ref-skip eliminates the race.
+  const lastQsRef = useRef<string | null>(null);
   useEffect(() => {
     const sp = encodeFilters(filters);
     const qs = sp.toString();
+    if (lastQsRef.current === qs) return;
+    lastQsRef.current = qs;
     router.replace(qs ? `${pathname}?${qs}` : pathname);
     if (typeof window !== "undefined") {
       try {
