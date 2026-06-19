@@ -21,7 +21,7 @@
  *
  * Q4 lock — inline robots.txt + synthesized HTML fixtures only; no live network.
  */
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect, beforeAll, vi } from "vitest";
 import type { PrismaClient } from "@prisma/client";
 import { withCleanup, createTenant } from "./setup.js";
 
@@ -1790,6 +1790,192 @@ describe("KAN-1219 — Inventory crawler", () => {
     </head><body><div id="root"></div></body></html>`;
     const $ = cheerioMod.load(html);
     expect(adapters.drivegoodAdapter.fingerprint($)).toBe(true);
+  });
+
+  // ──────────────────────────────────────────────────────────────────────
+  // KAN-1219 fix-forward — Memo 39 wrong-shape-precedent-transfer refinement
+  //
+  // Trigger: 2026-06-19 PR #369 diagnostic logs revealed Cloud Run egress
+  // fetches cars_formatted.json successfully (bodyByteLength logged), but
+  // the 200KB cap (copy-pasted from vehicle-scraper's HTML cap) rejects
+  // the 1.5MB inventory JSON → discoveredCount=0.
+  //
+  // Fix: raise DRIVEGOOD_JSON_MAX_BYTES to 10MB (covers franchise dealers
+  // + powersports headroom while still rejecting pathological responses).
+  // Add explicit `drivegood_json_too_large` log on cap exceed (Memo 19/42
+  // affordance-honesty — was previously silent return-empty).
+  //
+  // Scenarios 24-25 lock the new cap behavior.
+  // ──────────────────────────────────────────────────────────────────────
+
+  it("scenario 24 — Mode B JSON body within new 10MB cap (e.g., 1.5MB realistic 4mkauto-scale): vehicles discovered", async () => {
+    let tenantId = "";
+    await withCleanup(
+      async (prisma: PrismaClient) => {
+        const t = await createTenant(prisma);
+        tenantId = t.id;
+        await prisma.tenant.update({
+          where: { id: tenantId },
+          data: { marketingDomain: "4mkauto.test" },
+        });
+        const pubsub = buildStubPubSub();
+        const started = await crawler.startCrawl(
+          prisma as unknown as object,
+          tenantId,
+          "operator-1",
+          { listingUrl: "https://4mkauto.test/en/inventory" },
+          pubsub,
+        );
+
+        const listingHtml = `<!DOCTYPE html><html><head>
+          <meta name="author" content="potenzaglobalsolutions.com" />
+          <script src="https://4mkauto.test/wp-content/themes/astra/react-cars-app/dist/assets/index.js"></script>
+        </head><body><div id="root"></div></body></html>`;
+
+        // Build a JSON payload that mimics realistic 4mkauto scale (~1MB
+        // via padded post_content). Stays well under the 10MB cap.
+        const padding = "x".repeat(8000); // ~8KB per entry × 135 = ~1MB
+        const entries = Array.from({ length: 135 }, (_, i) => {
+          const vinIdx = i % VINS.length;
+          return {
+            guid: `https://4mkauto.test/vehicle/${VINS[vinIdx]}-${i}`,
+            car_vin: VINS[vinIdx],
+            post_content: padding,
+          };
+        });
+        const jsonBody = JSON.stringify(entries);
+        expect(Buffer.byteLength(jsonBody, "utf8")).toBeGreaterThan(
+          1 * 1024 * 1024,
+        );
+
+        const finalFetch = (async (input: unknown) => {
+          const url =
+            typeof input === "string"
+              ? input
+              : (input as { url?: string }).url ?? String(input);
+          if (url.endsWith("/robots.txt")) {
+            return makeResponse("User-agent: *\nAllow: /");
+          }
+          if (url.endsWith("/inventory") || url.endsWith("/en/inventory")) {
+            return makeResponse(listingHtml);
+          }
+          if (url.includes("cars_formatted.json")) {
+            return makeResponse(jsonBody);
+          }
+          const m = /\/vehicle\/([A-HJ-NPR-Z0-9]{17})/i.exec(url);
+          if (m) return makeResponse(buildVdpHtmlFull(m[1]!));
+          throw new Error(`Unmatched URL ${url}`);
+        }) as unknown as typeof fetch;
+
+        const final = await crawler.runCrawlJob(
+          prisma as unknown as object,
+          started.crawlJob.id,
+          {
+            scrapeVehicleUrl: scraperMod.scrapeVehicleUrl,
+            scraperHooks: buildTestHooks(),
+            redis: buildStubRedis(),
+            fetchImpl: finalFetch,
+            sleep: fastSleep,
+          },
+        );
+
+        expect(final.status).toBe("completed");
+        const job = await (prisma as unknown as {
+          crawlJob: { findUnique: (args: unknown) => Promise<{
+            adapter: string;
+            discoveredCount: number;
+          } | null> };
+        }).crawlJob.findUnique({ where: { id: started.crawlJob.id } });
+        expect(job?.adapter).toBe("drivegood.com");
+        // 5 distinct VINS × 27 distinct guids per VIN = 135 unique URLs
+        // (each guid is unique due to the `-${i}` suffix), so all 135
+        // entries deduplicate to 135 distinct VDP URLs.
+        expect(job?.discoveredCount).toBe(135);
+      },
+      (prisma: PrismaClient) => cleanupTenant(prisma, tenantId),
+    );
+  });
+
+  it("scenario 25 — Mode B JSON body exceeds 10MB cap: empty discovery + drivegood_json_too_large log", async () => {
+    let tenantId = "";
+    await withCleanup(
+      async (prisma: PrismaClient) => {
+        const t = await createTenant(prisma);
+        tenantId = t.id;
+        await prisma.tenant.update({
+          where: { id: tenantId },
+          data: { marketingDomain: "4mkauto.test" },
+        });
+        const pubsub = buildStubPubSub();
+        const started = await crawler.startCrawl(
+          prisma as unknown as object,
+          tenantId,
+          "operator-1",
+          { listingUrl: "https://4mkauto.test/en/inventory" },
+          pubsub,
+        );
+
+        const listingHtml = `<!DOCTYPE html><html><head>
+          <meta name="author" content="potenzaglobalsolutions.com" />
+          <script src="https://4mkauto.test/wp-content/themes/astra/react-cars-app/dist/assets/index.js"></script>
+        </head><body><div id="root"></div></body></html>`;
+
+        // Pathologically-large JSON: 12MB > 10MB cap.
+        const oversizedBody = `[${'"x"'.padEnd(12 * 1024 * 1024, "x")}]`;
+        expect(Buffer.byteLength(oversizedBody, "utf8")).toBeGreaterThan(
+          10 * 1024 * 1024,
+        );
+
+        const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+        const finalFetch = (async (input: unknown) => {
+          const url =
+            typeof input === "string"
+              ? input
+              : (input as { url?: string }).url ?? String(input);
+          if (url.endsWith("/robots.txt")) {
+            return makeResponse("User-agent: *\nAllow: /");
+          }
+          if (url.endsWith("/inventory") || url.endsWith("/en/inventory")) {
+            return makeResponse(listingHtml);
+          }
+          if (url.includes("cars_formatted.json")) {
+            return makeResponse(oversizedBody);
+          }
+          throw new Error(`Unmatched URL ${url}`);
+        }) as unknown as typeof fetch;
+
+        const final = await crawler.runCrawlJob(
+          prisma as unknown as object,
+          started.crawlJob.id,
+          {
+            scrapeVehicleUrl: scraperMod.scrapeVehicleUrl,
+            scraperHooks: buildTestHooks(),
+            redis: buildStubRedis(),
+            fetchImpl: finalFetch,
+            sleep: fastSleep,
+          },
+        );
+
+        expect(final.status).toBe("completed");
+        const job = await (prisma as unknown as {
+          crawlJob: { findUnique: (args: unknown) => Promise<{
+            adapter: string;
+            discoveredCount: number;
+          } | null> };
+        }).crawlJob.findUnique({ where: { id: started.crawlJob.id } });
+        expect(job?.adapter).toBe("drivegood.com");
+        expect(job?.discoveredCount).toBe(0);
+
+        // Cap-exceeded surfaces explicitly (Memo 19/42 affordance-honesty).
+        const tooLargeLogged = logSpy.mock.calls.some((call) =>
+          (call[0] as string).includes("drivegood_json_too_large"),
+        );
+        expect(tooLargeLogged).toBe(true);
+        logSpy.mockRestore();
+      },
+      (prisma: PrismaClient) => cleanupTenant(prisma, tenantId),
+    );
   });
 });
 
