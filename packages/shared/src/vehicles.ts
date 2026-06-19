@@ -39,6 +39,15 @@
  *
  * Lower bound 1900 covers pre-war collector cars; upper bound `CURRENT_YEAR + 2`
  * supports MY-ahead-of-CY ordering pattern (e.g. 2027 MY orderable in 2026).
+ *
+ * # KAN-1219 Slice A — price (Memo 39 Decimal-coercion-at-boundary)
+ *
+ * `price` is `z.number().nullable().optional()` at the JSON boundary; Prisma
+ * coerces `Decimal(10,2)` ↔ JS `number` at serialization. Mirrors
+ * `Product.price` at packages/shared/src/products.ts:66 — NOT Int cents.
+ * Ceiling 9,999,999.99 matches the Prisma DB precision; positive constraint
+ * rules out negative prices (sentinel for fixture bugs). Tenant-currency for
+ * now (explicit `currency` column deferred per Memo 54 empirical-priority).
  */
 import { z } from "zod";
 
@@ -102,6 +111,8 @@ export const VehicleCreateInputSchema = z.object({
   condition: VehicleConditionEnum,
   stockNumber: z.string().nullable().optional(),
   dealerLot: z.string().nullable().optional(),
+  // KAN-1219 Slice A — Decimal(10,2) at DB; number at JSON boundary (Memo 39).
+  price: z.number().positive().max(9_999_999.99).nullable().optional(),
   status: VehicleStatusEnum.default("draft"),
 });
 

@@ -3931,6 +3931,16 @@ model ProductCategory {
 /// signal of cardinality ≥3 per tenant OR operator-session duplicate-
 /// variation signal). Per Memo 54 empirical-priority discipline — no
 /// speculative normalization without measured demand.
+///
+/// # KAN-1219 Slice A — price column
+///
+/// Decimal(10,2) supports up to 9,999,999.99 — covers luxury vehicles
+/// (Bugatti Chiron MSRP ~$3M well below ceiling) with 2dp cents precision.
+/// Tenant-currency for now; explicit `currency` column deferred per Memo 54
+/// empirical-priority (no multi-currency operator pressure yet). Nullable
+/// for legacy inventory and unpriced/auction lots. JSON wire format is
+/// `number` matching Product.price precedent at packages/shared/src/
+/// products.ts:66 (Memo 39 codebase-precedent — NOT Int cents).
 model Vehicle {
   id            String           @id @default(uuid())
   tenantId      String           @map("tenant_id")
@@ -3949,6 +3959,7 @@ model Vehicle {
   condition     VehicleCondition
   stockNumber   String?          @map("stock_number")
   dealerLot     String?          @map("dealer_lot")
+  price         Decimal?         @db.Decimal(10, 2)
   status        VehicleStatus    @default(draft)
   archivedAt    DateTime?        @map("archived_at")
   createdAt     DateTime         @default(now()) @map("created_at")

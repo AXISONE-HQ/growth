@@ -1,0 +1,37 @@
+-- KAN-1219 Slice A — Vehicle.price column add (additive, nullable).
+--
+-- # Additive-only contract
+--
+-- Adds ONE nullable column `vehicles.price NUMERIC(10, 2)`. Rollback is
+-- clean: `ALTER TABLE vehicles DROP COLUMN price;` reverses with zero data
+-- loss for the application layer (price reads `null` post-rollback).
+--
+-- # Zero-downtime profile
+--
+-- Postgres `ALTER TABLE ADD COLUMN` with no default + nullable is a
+-- metadata-only operation — no table rewrite, no exclusive lock beyond the
+-- brief catalog update, no rewrite of existing 134+1 rows. Safe on a live
+-- vehicles table.
+--
+-- # Decimal(10,2) sizing
+--
+-- 10-digit precision / 2 scale supports up to 9,999,999.99. Covers the
+-- luxury ceiling (Bugatti Chiron MSRP ~$3M well under) with cents
+-- precision. Matches the Vehicle model header doctrine + Memo 54
+-- empirical-priority — no speculative widening to (14,2) until measured.
+--
+-- # Memo 39 codebase-precedent — JS number at JSON boundary
+--
+-- price is `z.number().nullable().optional()` at the Zod boundary; Prisma
+-- coerces Decimal(10,2) ↔ JS number at serialization. Mirrors Product.price
+-- (Decimal(12,2), shared/src/products.ts:66). NOT Int cents.
+--
+-- # Migration discipline (KAN-1080 lesson + KAN-1212 substrate precedent)
+--
+-- Hand-authored SQL since local dev DB is unavailable; CI deploy-api
+-- workflow runs `npx prisma migrate deploy` on first post-merge deploy.
+-- Shape mirrors KAN-1212 vehicle substrate migration at
+-- packages/db/prisma/migrations/20260617200132_kan_1212_vehicle_substrate/migration.sql.
+
+-- AddColumn
+ALTER TABLE "vehicles" ADD COLUMN "price" DECIMAL(10,2);
