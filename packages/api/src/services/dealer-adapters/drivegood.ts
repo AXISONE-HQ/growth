@@ -45,33 +45,45 @@ export interface DealerAdapter {
     base: ExtractedVehicleFields,
   ): ExtractedVehicleFields;
   /**
-   * KAN-1219 (Slice 5) — Parse an inventory listing page and return the list
-   * of per-vehicle URLs (VDPs) to crawl. Returns absolute URLs (resolved
-   * against the listing URL).
+   * KAN-1219 (Slice 5) — Parse an inventory listing page and return the
+   * URLs of per-vehicle pages (VDPs) to crawl plus, optionally, fully
+   * extracted Vehicle fields per entry.
    *
-   * For drivegood: VDP links match the inventory/{VIN}/{slug} pattern
-   * (`a[href*="/inventory/"]`). De-duplicated by URL.
+   * KAN-1219 fix-forward (Memo 39 refinement #2 / Option H+I): when the
+   * adapter has a structured data source (drivegood's `cars_formatted.json`
+   * is the canonical example), it MAY populate `directVehicles` so the
+   * crawler can persist Vehicle rows directly without per-VDP HTML scraping.
+   * This is required when VDP pages are behind a bot-detection challenge
+   * (SiteGround CAPTCHA empirically blocks Cloud Run egress on 4mkauto.com),
+   * and is just faster otherwise (one JSON fetch vs N HTTP roundtrips).
    *
-   * KAN-1219 fix-forward (Memo 57 #5 content-rendering-mode sub-refinement):
-   * Async to support adapters that fall back to a JSON inventory endpoint
-   * when the listing is rendered client-side (React SPA shell). The
-   * existing server-rendered Cheerio path remains the primary path; the
-   * fallback fires only when (a) the primary returns zero anchors AND
-   * (b) the page advertises a known SPA marker. Optional `deps.fetchImpl`
-   * lets tests stub the JSON fetch.
+   * `directVehicles[].url` is the VDP URL (same shape as `urls`); the
+   * crawler keys by URL for audit-trail consistency. `directVehicles[].fields`
+   * is a fully-populated ExtractedVehicleFields where every required Vehicle
+   * column (year/make/model/bodyStyle/transmission/fuelType/drivetrain/
+   * condition) is non-null. Partial JSON entries that can't satisfy the
+   * full schema are dropped (not surfaced as `extracted_partial` — direct
+   * extract is best-effort completeness; missing entries fall back to the
+   * per-VDP scrape path).
+   *
+   * When `directVehicles` is undefined or empty, the crawler iterates
+   * `urls` through its per-VDP scrape pipeline (KAN-1216 vehicle-scraper).
    *
    * @param html  The fetched listing HTML
    * @param $     Cheerio API loaded over `html` (caller-supplied for reuse)
    * @param baseUrl The listing URL (used to resolve relative hrefs)
    * @param deps  Optional fetch override for the SPA-fallback JSON fetch
-   * @returns Absolute VDP URLs, in source-document order, de-duplicated.
+   * @returns URLs + optional pre-extracted Vehicle fields, in source order.
    */
   parseInventoryListing(
     html: string,
     $: cheerio.CheerioAPI,
     baseUrl: string,
     deps?: { fetchImpl?: typeof fetch },
-  ): Promise<string[]>;
+  ): Promise<{
+    urls: string[];
+    directVehicles?: Array<{ url: string; fields: ExtractedVehicleFields }>;
+  }>;
 }
 
 // Drivegood VDP URL patterns: `/inventory/{VIN}/{slug}`, `/vehicle/{VIN}`,
@@ -154,12 +166,12 @@ export const drivegoodAdapter: DealerAdapter = {
   // to be non-VDP. See task #52 for generic React-shell walker.
   parseInventoryListing: async (_html, $, baseUrl, deps) => {
     const seen = new Set<string>();
-    const out: string[] = [];
+    const urls: string[] = [];
     let listingBase: URL;
     try {
       listingBase = new URL(baseUrl);
     } catch {
-      return out;
+      return { urls };
     }
 
     // ── Mode A: server-rendered HTML ──────────────────────────────────
@@ -181,14 +193,21 @@ export const drivegoodAdapter: DealerAdapter = {
       const key = resolved.toString();
       if (seen.has(key)) return;
       seen.add(key);
-      out.push(key);
+      urls.push(key);
     });
-    if (out.length > 0) return out;
+    if (urls.length > 0) return { urls };
 
-    // ── Mode B: React SPA fallback (cars_formatted.json) ──────────────
-    // SPA marker: drivegood ships a WordPress theme bundling react-cars-app.
+    // ── Mode B: React SPA / CAPTCHA-blocked fallback (JSON inventory) ─
+    // The cars_formatted.json endpoint is a static file in the WordPress
+    // theme. SiteGround anti-bot CAPTCHA (Memo 51 #11 confirmed) does not
+    // apply to static asset paths, so this fetch succeeds from Cloud Run
+    // egress even when /en/inventory returns a CAPTCHA challenge.
     const reactAppScript = $('script[src*="/react-cars-app/"]').length;
-    if (reactAppScript === 0) return out;
+    // KAN-1219 Option H+I: also fall through to JSON when listing body is
+    // empty/tiny — CAPTCHA challenge pages strip all markers, so we can't
+    // rely on the React app script being present.
+    const htmlLength = $.html()?.length ?? 0;
+    if (reactAppScript === 0 && htmlLength > 2000) return { urls };
 
     const fetchImpl = deps?.fetchImpl ?? fetch;
     const jsonUrl =
@@ -204,13 +223,10 @@ export const drivegoodAdapter: DealerAdapter = {
         redirect: "follow",
         headers: { accept: "application/json" },
       });
-      if (!resp.ok) return out;
+      if (!resp.ok) return { urls };
       const text = await resp.text();
       const bodyBytes = Buffer.byteLength(text, "utf8");
       if (bodyBytes > DRIVEGOOD_JSON_MAX_BYTES) {
-        // KAN-1219 fix-forward (Memo 19/42 affordance-honesty): cap-exceeded
-        // was previously a silent return-empty. Surface the explicit signal
-        // so operator diagnosis matches Layer A diagnostic logging shape.
         console.log(
           JSON.stringify({
             type: "drivegood_json_too_large",
@@ -219,20 +235,21 @@ export const drivegoodAdapter: DealerAdapter = {
             cap: DRIVEGOOD_JSON_MAX_BYTES,
           }),
         );
-        return out;
+        return { urls };
       }
       try {
         entries = JSON.parse(text);
       } catch {
-        return out;
+        return { urls };
       }
     } catch {
-      return out;
+      return { urls };
     } finally {
       clearTimeout(timer);
     }
-    if (!Array.isArray(entries)) return out;
+    if (!Array.isArray(entries)) return { urls };
 
+    const directVehicles: Array<{ url: string; fields: ExtractedVehicleFields }> = [];
     for (const entry of entries) {
       if (!entry || typeof entry !== "object") continue;
       const e = entry as Record<string, unknown>;
@@ -246,20 +263,135 @@ export const drivegoodAdapter: DealerAdapter = {
         candidate = `${listingBase.origin}/vehicle/${e.car_vin.toUpperCase()}`;
       }
       if (!candidate) continue;
+      let key: string;
       try {
         const resolved = new URL(candidate);
         resolved.hash = "";
-        const key = resolved.toString();
-        if (seen.has(key)) continue;
-        seen.add(key);
-        out.push(key);
+        key = resolved.toString();
       } catch {
         continue;
       }
+      if (seen.has(key)) continue;
+      seen.add(key);
+      urls.push(key);
+
+      // Direct-extract: map JSON fields → ExtractedVehicleFields. Entries
+      // missing any required Vehicle enum (bodyStyle/transmission/fuelType/
+      // drivetrain/condition) are skipped from the direct path; their URL
+      // remains in `urls` so the per-VDP scraper can still attempt them
+      // (or fail visibly under CAPTCHA, surfaced via errorSamples).
+      const direct = mapDrivegoodEntryToFields(e);
+      if (direct) directVehicles.push({ url: key, fields: direct });
     }
-    return out;
+    return directVehicles.length > 0
+      ? { urls, directVehicles }
+      : { urls };
   },
 };
+
+// Drivegood JSON entry → ExtractedVehicleFields. Returns null when any
+// required Vehicle enum can't be resolved (caller falls back to per-VDP
+// scrape for those entries).
+function mapDrivegoodEntryToFields(
+  e: Record<string, unknown>,
+): ExtractedVehicleFields | null {
+  const year = parseIntOrNull(e.car_year);
+  const make = titleCaseOrNull(e.maker);
+  const model = stringOrNull(e.model);
+  if (year === null || !make || !model) return null;
+  const bodyStyle = mapBodyStyle(stringOrNull(e.car_body));
+  const transmission = mapTransmission(stringOrNull(e.car_transmission));
+  const fuelType = mapFuelType(stringOrNull(e.car_fuel_type));
+  const drivetrain = mapDrivetrain(stringOrNull(e.car_drivetrain));
+  const condition = mapCondition(stringOrNull(e.condition));
+  if (!bodyStyle || !transmission || !fuelType || !drivetrain || !condition) {
+    return null;
+  }
+  const vinRaw = stringOrNull(e.car_vin);
+  const vin = vinRaw && /^[A-HJ-NPR-Z0-9]{17}$/i.test(vinRaw)
+    ? vinRaw.toUpperCase()
+    : null;
+  return {
+    year,
+    make,
+    model,
+    trim: stringOrNull(e.car_sub_model) ?? stringOrNull(e.car_trim),
+    vin,
+    mileage: parseIntOrNull(e.car_mileage),
+    bodyStyle,
+    transmission,
+    fuelType,
+    drivetrain,
+    condition,
+    exteriorColor: titleCaseOrNull(e.car_exterior_color),
+    interiorColor: titleCaseOrNull(e.car_interrior_color),
+    stockNumber: stringOrNull(e.stock),
+    dealerLot: null,
+  };
+}
+
+function stringOrNull(v: unknown): string | null {
+  return typeof v === "string" && v.trim().length > 0 ? v.trim() : null;
+}
+function parseIntOrNull(v: unknown): number | null {
+  if (typeof v === "number" && Number.isFinite(v)) return Math.trunc(v);
+  if (typeof v === "string") {
+    const n = parseInt(v.replace(/[^0-9]/g, ""), 10);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }
+  return null;
+}
+function titleCaseOrNull(v: unknown): string | null {
+  const s = stringOrNull(v);
+  if (!s) return null;
+  return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+}
+function mapBodyStyle(s: string | null): string | null {
+  if (!s) return null;
+  const k = s.toLowerCase();
+  const table: Record<string, string> = {
+    suv: "suv", sedan: "sedan", truck: "truck", hatchback: "hatchback",
+    coupe: "coupe", convertible: "convertible", minivan: "minivan",
+    van: "van", wagon: "wagon", crossover: "suv",
+  };
+  return table[k] ?? null;
+}
+function mapTransmission(s: string | null): string | null {
+  if (!s) return null;
+  const k = s.toLowerCase();
+  if (k === "automatic" || k === "auto") return "automatic";
+  if (k === "manual") return "manual";
+  if (k === "cvt") return "cvt";
+  if (k === "dct") return "dct";
+  return null;
+}
+function mapFuelType(s: string | null): string | null {
+  if (!s) return null;
+  const k = s.toLowerCase();
+  if (k === "gasoline" || k === "gas") return "gas";
+  if (k === "diesel") return "diesel";
+  if (k === "hybrid") return "hybrid";
+  if (k === "electric" || k === "ev") return "electric";
+  if (k === "plugin_hybrid" || k === "phev") return "plugin_hybrid";
+  return null;
+}
+function mapDrivetrain(s: string | null): string | null {
+  if (!s) return null;
+  const k = s.toLowerCase();
+  if (k === "fwd") return "fwd";
+  if (k === "rwd") return "rwd";
+  if (k === "awd") return "awd";
+  if (k === "4wd" || k === "four_wd" || k === "4x4") return "four_wd";
+  return null;
+}
+function mapCondition(s: string | null): string | null {
+  if (!s) return null;
+  const k = s.toLowerCase();
+  if (k === "new") return "new";
+  if (k === "used") return "used";
+  if (k === "cpo" || k === "certified") return "cpo";
+  return null;
+}
 
 // Drivegood JSON-fallback fetch caps.
 //

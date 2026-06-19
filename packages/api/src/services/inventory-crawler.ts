@@ -111,6 +111,7 @@ import {
   type DealerAdapter,
 } from "./dealer-adapters/drivegood.js";
 import { genericHostnameRestrictedAdapter } from "./dealer-adapters/generic.js";
+import type { ExtractedVehicleFields } from "@growth/shared";
 
 // Layer 1 + Layer 2 adapters (hostname/fingerprint-precise). Layer 3
 // generic adapter is NOT in this list — it's the unconditional fallback.
@@ -372,6 +373,10 @@ export interface InventoryCrawlerPrisma {
     }) => Promise<{ count: number }>;
   };
   auditLog: {
+    create: (args: { data: Record<string, unknown> }) => Promise<{ id: string }>;
+  };
+  // KAN-1219 Option H+I — direct-extract persistence path uses vehicle.create.
+  vehicle: {
     create: (args: { data: Record<string, unknown> }) => Promise<{ id: string }>;
   };
 }
@@ -669,10 +674,31 @@ export async function runCrawlJob(
     listingFetchError = err as Error;
   }
 
-  // Triple-fallback dispatch — never returns null. Hard-fail removed
-  // (KAN-1219 fix-forward Memo 57 anchor #4). Layer 2 reuses the already-
-  // fetched listingHtml via a closure; Layer 3 generic is the sentinel.
-  const adapter = await pickCrawlerAdapter(listingHost, async () => listingHtml);
+  // KAN-1219 fix-forward (Memo 51 #11 CONFIRMED — Option H+I): detect
+  // bot-detection challenge pages BEFORE dispatcher Layer 2 fingerprint.
+  // SiteGround anti-bot (empirically observed on 4mkauto.com 2026-06-19)
+  // serves a tiny meta-refresh redirect page that strips every fingerprint
+  // marker, so Layer 2 would mis-route to generic. If the body looks like
+  // a CAPTCHA challenge, force drivegoodAdapter so its Mode B JSON-path
+  // can fire — the static cars_formatted.json endpoint is NOT challenged.
+  const captchaDetected = isCaptchaChallenge(listingHtml);
+  let adapter: DealerAdapter;
+  if (captchaDetected) {
+    adapter = drivegoodAdapter;
+    console.log(
+      JSON.stringify({
+        type: "inventory_crawler_captcha_detected",
+        crawlJobId,
+        listingUrl,
+        bodyByteLength: listingHtml ? Buffer.byteLength(listingHtml, "utf8") : 0,
+      }),
+    );
+  } else {
+    // Triple-fallback dispatch — never returns null. Hard-fail removed
+    // (KAN-1219 fix-forward Memo 57 anchor #4). Layer 2 reuses the already-
+    // fetched listingHtml via a closure; Layer 3 generic is the sentinel.
+    adapter = await pickCrawlerAdapter(listingHost, async () => listingHtml);
+  }
 
   // ── Status → running + vehicle.crawl_started audit ───────────────────
   await prisma.crawlJob.update({
@@ -691,6 +717,7 @@ export async function runCrawlJob(
 
   // ── Parse listing page ───────────────────────────────────────────────
   let discoveredUrls: string[] = [];
+  let directVehicles: Array<{ url: string; fields: ExtractedVehicleFields }> = [];
   if (listingFetchError || listingHtml === null) {
     return await finalizeJob(prisma, crawlJobId, tenantId, {
       status: "failed",
@@ -703,12 +730,14 @@ export async function runCrawlJob(
     // Lazy cheerio import (matches vehicle-scraper pattern).
     const cheerioMod = (await import("cheerio")) as typeof cheerio;
     const $ = cheerioMod.load(listingHtml);
-    discoveredUrls = await adapter.parseInventoryListing(
+    const parsed = await adapter.parseInventoryListing(
       listingHtml,
       $,
       listingUrl,
       { fetchImpl },
     );
+    discoveredUrls = parsed.urls;
+    directVehicles = parsed.directVehicles ?? [];
     console.log(
       JSON.stringify({
         type: "inventory_crawler_dispatcher_result",
@@ -716,6 +745,8 @@ export async function runCrawlJob(
         listingUrl,
         adapter: adapter.hostname,
         discoveredCount: discoveredUrls.length,
+        directVehiclesCount: directVehicles.length,
+        captchaDetected,
         ogImage: $('meta[property="og:image"]').attr("content") ?? null,
         metaAuthor: $('meta[name="author"]').attr("content") ?? null,
         reactCarsAppScripts: $('script[src*="/react-cars-app/"]').length,
@@ -735,6 +766,80 @@ export async function runCrawlJob(
     where: { id: crawlJobId },
     data: { discoveredCount: discoveredUrls.length },
   });
+
+  // KAN-1219 Option H+I — Direct-extract from JSON path. When the adapter
+  // populated `directVehicles`, persist Vehicle rows directly without the
+  // per-VDP HTML scrape (which would be CAPTCHA-blocked anyway). VIN
+  // dedup honored via @@unique [tenantId, vin] catching P2002.
+  if (directVehicles.length > 0) {
+    let extracted = 0;
+    let skipped = 0;
+    let failed = 0;
+    for (const dv of directVehicles) {
+      try {
+        const created = await prisma.vehicle.create({
+          data: {
+            tenantId,
+            year: dv.fields.year!,
+            make: dv.fields.make!,
+            model: dv.fields.model!,
+            trim: dv.fields.trim,
+            vin: dv.fields.vin,
+            mileage: dv.fields.mileage,
+            bodyStyle: dv.fields.bodyStyle!,
+            transmission: dv.fields.transmission!,
+            fuelType: dv.fields.fuelType!,
+            drivetrain: dv.fields.drivetrain!,
+            condition: dv.fields.condition!,
+            exteriorColor: dv.fields.exteriorColor,
+            interiorColor: dv.fields.interiorColor,
+            stockNumber: dv.fields.stockNumber,
+            dealerLot: dv.fields.dealerLot,
+            status: "draft",
+          },
+        });
+        await prisma.auditLog.create({
+          data: {
+            tenantId,
+            actor: initialJob.createdByUserId,
+            actionType: "vehicle.scraped",
+            payload: {
+              vehicleId: created.id,
+              externalUrl: dv.url,
+              crawlJobId,
+              extractionSource: "direct_json",
+              extractedFields: dv.fields,
+            },
+            reasoning: `inventory-crawler direct-extract from JSON for ${dv.url}`,
+          },
+        });
+        extracted++;
+      } catch (err) {
+        const msg = (err as Error)?.message ?? String(err);
+        if (msg.includes("Unique constraint") || msg.includes("P2002")) {
+          skipped++;
+        } else {
+          pushSample(errorSamples, {
+            url: dv.url,
+            errorVariant: "direct_persist_failed",
+            message: msg.slice(0, 200),
+          });
+          failed++;
+        }
+      }
+    }
+    return await finalizeJob(prisma, crawlJobId, tenantId, {
+      status: failed > 0 ? "completed_with_errors" : "completed",
+      cancelReason: null,
+      errorSamples,
+      counts: {
+        discovered: discoveredUrls.length,
+        extracted,
+        skipped,
+        failed,
+      },
+    });
+  }
 
   // ── Robots.txt (inline, Q4 lock) ─────────────────────────────────────
   const robots = await fetchRobotsTxt(listingUrl, fetchImpl);
@@ -945,6 +1050,18 @@ export async function runCrawlJob(
 
 function pushSample(samples: ErrorSample[], s: ErrorSample): void {
   if (samples.length < ERROR_SAMPLES_CAP) samples.push(s);
+}
+
+// KAN-1219 fix-forward (Memo 51 #11 — Option H+I): detect anti-bot CAPTCHA
+// challenge pages. Empirically observed: SiteGround returns a tiny (<1KB)
+// HTML body whose only content is a meta-refresh to /.well-known/sgcaptcha/.
+// Same shape catches Cloudflare's cdn-cgi/challenge fallback. When detected,
+// the listing dispatcher forces drivegoodAdapter so its Mode B JSON-path
+// can sidestep the challenge via the static cars_formatted.json endpoint.
+function isCaptchaChallenge(html: string | null): boolean {
+  if (html === null) return false;
+  if (html.length > 2000) return false;
+  return /sgcaptcha|cdn-cgi\/challenge|cf-mitigated/i.test(html);
 }
 
 async function fetchListingHtml(
