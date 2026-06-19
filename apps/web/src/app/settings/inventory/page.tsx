@@ -26,9 +26,19 @@
  * via VehicleCreateInputSchema (defense-in-depth per J3 verdict).
  */
 
-import { useEffect, useState, type FocusEvent } from "react";
+import { useEffect, useMemo, useState, type FocusEvent } from "react";
+import { useRouter, useSearchParams, usePathname } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
-import { Plus, Car, Trash2, Pencil, Globe, X } from "lucide-react";
+import {
+  Plus,
+  Car,
+  Trash2,
+  Pencil,
+  Globe,
+  X,
+  Search,
+  SlidersHorizontal,
+} from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -47,6 +57,8 @@ import {
   vehiclesApi,
   type VehicleListItem,
   type VehicleStatus,
+  type VehicleListInput,
+  type VehicleListSort,
   type CursorPage,
   type CrawlJobRecord,
   type CrawlJobStatus,
@@ -125,48 +137,309 @@ export default function InventorySettingsPage() {
 
 /* ── Vehicles Tab — list + filters + CTA + modals ────────────────────── */
 
+// KAN-1219 Slice C — Filter state + URL sync helpers.
+//
+// Filter dimensions are stored in a single object; URL state sync via
+// next/navigation reflects active filters as querystring (shareable links).
+// Memo 19/42 affordance-honesty — URL is the source of truth for "what the
+// operator is currently looking at," so bookmarks + back/forward work.
+
+interface UiFilters {
+  searchText: string;
+  sort: VehicleListSort;
+  statusFilter: VehicleStatus[];
+  bodyStyleIn: string[];
+  makeIn: string[];
+  transmissionIn: string[];
+  fuelTypeIn: string[];
+  drivetrainIn: string[];
+  conditionIn: string[];
+  yearMin: string;
+  yearMax: string;
+  mileageMin: string;
+  mileageMax: string;
+  priceMin: string;
+  priceMax: string;
+}
+
+const EMPTY_FILTERS: UiFilters = {
+  searchText: "",
+  sort: "createdAt_desc",
+  statusFilter: DEFAULT_STATUS_FILTER,
+  bodyStyleIn: [],
+  makeIn: [],
+  transmissionIn: [],
+  fuelTypeIn: [],
+  drivetrainIn: [],
+  conditionIn: [],
+  yearMin: "",
+  yearMax: "",
+  mileageMin: "",
+  mileageMax: "",
+  priceMin: "",
+  priceMax: "",
+};
+
+const SORT_OPTIONS: Array<{ value: VehicleListSort; label: string }> = [
+  { value: "createdAt_desc", label: "Newest first" },
+  { value: "year_desc", label: "Year (newest)" },
+  { value: "year_asc", label: "Year (oldest)" },
+  { value: "mileage_asc", label: "Mileage (lowest)" },
+  { value: "mileage_desc", label: "Mileage (highest)" },
+  { value: "price_asc", label: "Price (lowest)" },
+  { value: "price_desc", label: "Price (highest)" },
+];
+
+function parseCsv(v: string | null): string[] {
+  return v ? v.split(",").filter(Boolean) : [];
+}
+
+function decodeFilters(sp: URLSearchParams): UiFilters {
+  const status = parseCsv(sp.get("status")) as VehicleStatus[];
+  const sort = (sp.get("sort") as VehicleListSort | null) ?? "createdAt_desc";
+  return {
+    searchText: sp.get("q") ?? "",
+    sort,
+    statusFilter: status.length > 0 ? status : DEFAULT_STATUS_FILTER,
+    bodyStyleIn: parseCsv(sp.get("bodyStyle")),
+    makeIn: parseCsv(sp.get("make")),
+    transmissionIn: parseCsv(sp.get("transmission")),
+    fuelTypeIn: parseCsv(sp.get("fuelType")),
+    drivetrainIn: parseCsv(sp.get("drivetrain")),
+    conditionIn: parseCsv(sp.get("condition")),
+    yearMin: sp.get("yearMin") ?? "",
+    yearMax: sp.get("yearMax") ?? "",
+    mileageMin: sp.get("mileageMin") ?? "",
+    mileageMax: sp.get("mileageMax") ?? "",
+    priceMin: sp.get("priceMin") ?? "",
+    priceMax: sp.get("priceMax") ?? "",
+  };
+}
+
+function encodeFilters(f: UiFilters): URLSearchParams {
+  const sp = new URLSearchParams();
+  if (f.searchText) sp.set("q", f.searchText);
+  if (f.sort !== "createdAt_desc") sp.set("sort", f.sort);
+  // statusFilter only emitted if it diverges from DEFAULT.
+  const isDefaultStatus =
+    f.statusFilter.length === DEFAULT_STATUS_FILTER.length &&
+    DEFAULT_STATUS_FILTER.every((s) => f.statusFilter.includes(s));
+  if (!isDefaultStatus) sp.set("status", f.statusFilter.join(","));
+  if (f.bodyStyleIn.length > 0) sp.set("bodyStyle", f.bodyStyleIn.join(","));
+  if (f.makeIn.length > 0) sp.set("make", f.makeIn.join(","));
+  if (f.transmissionIn.length > 0) sp.set("transmission", f.transmissionIn.join(","));
+  if (f.fuelTypeIn.length > 0) sp.set("fuelType", f.fuelTypeIn.join(","));
+  if (f.drivetrainIn.length > 0) sp.set("drivetrain", f.drivetrainIn.join(","));
+  if (f.conditionIn.length > 0) sp.set("condition", f.conditionIn.join(","));
+  if (f.yearMin) sp.set("yearMin", f.yearMin);
+  if (f.yearMax) sp.set("yearMax", f.yearMax);
+  if (f.mileageMin) sp.set("mileageMin", f.mileageMin);
+  if (f.mileageMax) sp.set("mileageMax", f.mileageMax);
+  if (f.priceMin) sp.set("priceMin", f.priceMin);
+  if (f.priceMax) sp.set("priceMax", f.priceMax);
+  return sp;
+}
+
+// "Active filter count" — number of filter DIMENSIONS that are currently
+// constraining results (excludes default-status + sort, which are baseline).
+function countActiveFilters(f: UiFilters): number {
+  let n = 0;
+  if (f.searchText) n++;
+  if (f.bodyStyleIn.length > 0) n++;
+  if (f.makeIn.length > 0) n++;
+  if (f.transmissionIn.length > 0) n++;
+  if (f.fuelTypeIn.length > 0) n++;
+  if (f.drivetrainIn.length > 0) n++;
+  if (f.conditionIn.length > 0) n++;
+  if (f.yearMin || f.yearMax) n++;
+  if (f.mileageMin || f.mileageMax) n++;
+  if (f.priceMin || f.priceMax) n++;
+  return n;
+}
+
+function parseNumOrUndefined(s: string): number | undefined {
+  if (!s) return undefined;
+  const n = Number(s);
+  return Number.isFinite(n) && n >= 0 ? n : undefined;
+}
+
+function FilterChipRow({
+  label,
+  options,
+  selected,
+  onToggle,
+  emptyHint,
+}: {
+  label: string;
+  options: string[];
+  selected: string[];
+  onToggle: (v: string) => void;
+  emptyHint?: string;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <span className="text-xs font-medium text-muted-foreground w-24 shrink-0">
+        {label}:
+      </span>
+      {options.length === 0 && emptyHint ? (
+        <span className="text-xs text-muted-foreground italic">{emptyHint}</span>
+      ) : (
+        options.map((o) => (
+          <button
+            key={o}
+            type="button"
+            onClick={() => onToggle(o)}
+            className={`px-2.5 py-1 text-xs rounded-md border transition-colors ${
+              selected.includes(o)
+                ? "bg-primary text-primary-foreground border-primary"
+                : "bg-background text-muted-foreground border-border hover:bg-muted"
+            }`}
+            aria-pressed={selected.includes(o)}
+          >
+            {humanize(o)}
+          </button>
+        ))
+      )}
+    </div>
+  );
+}
+
+function RangeFilter({
+  label,
+  min,
+  max,
+  onMinChange,
+  onMaxChange,
+  placeholder,
+}: {
+  label: string;
+  min: string;
+  max: string;
+  onMinChange: (v: string) => void;
+  onMaxChange: (v: string) => void;
+  placeholder: [string, string];
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <span className="text-xs font-medium text-muted-foreground w-24 shrink-0">
+        {label}:
+      </span>
+      <Input
+        type="number"
+        inputMode="numeric"
+        placeholder={`Min (${placeholder[0]})`}
+        value={min}
+        onChange={(e) => onMinChange(e.target.value)}
+        className="w-36 h-8 text-xs"
+        aria-label={`${label} minimum`}
+      />
+      <span className="text-xs text-muted-foreground">to</span>
+      <Input
+        type="number"
+        inputMode="numeric"
+        placeholder={`Max (${placeholder[1]})`}
+        value={max}
+        onChange={(e) => onMaxChange(e.target.value)}
+        className="w-36 h-8 text-xs"
+        aria-label={`${label} maximum`}
+      />
+    </div>
+  );
+}
+
 function VehiclesTab() {
-  // Multi-chip status filter. Default active+draft visible (Q3 verdict).
-  const [statusFilter, setStatusFilter] = useState<VehicleStatus[]>(
-    DEFAULT_STATUS_FILTER,
+  // KAN-1219 Slice C — Hydrate filter state from URL on mount.
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+
+  // Read URL once; state is the source of truth thereafter (URL is mirrored
+  // back via router.replace on every change). Avoids re-reading on every
+  // searchParams identity change (which Next would force).
+  const [filters, setFilters] = useState<UiFilters>(() =>
+    decodeFilters(
+      new URLSearchParams(searchParams ? searchParams.toString() : ""),
+    ),
   );
   const [pages, setPages] = useState<CursorPage<VehicleListItem>[]>([]);
+  const [moreFiltersOpen, setMoreFiltersOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [editing, setEditing] = useState<VehicleListItem | null>(null);
-  // KAN-1219 (Slice 5) — scraper-trigger modal + active crawl-job tracking.
-  // activeCrawlJobId persists across renders so the progress card stays
-  // mounted (and the TanStack Query keeps polling) even after the modal
-  // closes. Cleared on terminal status via card's onTerminal callback.
   const [scrapeOpen, setScrapeOpen] = useState(false);
   const [activeCrawlJobId, setActiveCrawlJobId] = useState<string | null>(null);
 
-  // Reset paged accumulator when filter changes.
+  // Sync URL on filter change (replace — no history pollution).
+  useEffect(() => {
+    const sp = encodeFilters(filters);
+    const qs = sp.toString();
+    router.replace(qs ? `${pathname}?${qs}` : pathname);
+  }, [filters, router, pathname]);
+
+  // Reset paged accumulator when filter shape changes.
   useEffect(() => {
     setPages([]);
-  }, [statusFilter]);
+  }, [
+    filters.searchText,
+    filters.sort,
+    filters.statusFilter,
+    filters.bodyStyleIn,
+    filters.makeIn,
+    filters.transmissionIn,
+    filters.fuelTypeIn,
+    filters.drivetrainIn,
+    filters.conditionIn,
+    filters.yearMin,
+    filters.yearMax,
+    filters.mileageMin,
+    filters.mileageMax,
+    filters.priceMin,
+    filters.priceMax,
+  ]);
 
   const currentCursor =
     pages.length > 0 ? pages[pages.length - 1]?.nextCursor : null;
 
-  // Translate chip selection to vehiclesApi.list input:
-  //   - includeArchived: true iff 'archived' chip is selected
-  //   - status: single-value when exactly ONE non-archived chip selected
-  //   - else omitted; client-side filter handles multi-non-archived shapes
-  const includeArchived = statusFilter.includes("archived");
+  const includeArchived = filters.statusFilter.includes("archived");
   const onlyOneStatusSelected =
-    statusFilter.length === 1 ? statusFilter[0] : undefined;
+    filters.statusFilter.length === 1 ? filters.statusFilter[0] : undefined;
 
-  const queryInput = {
+  const queryInput: VehicleListInput = {
     limit: 50,
     includeArchived,
     ...(onlyOneStatusSelected ? { status: onlyOneStatusSelected } : {}),
     ...(currentCursor ? { cursor: currentCursor } : {}),
+    sort: filters.sort,
+    ...(filters.searchText ? { searchText: filters.searchText } : {}),
+    ...(filters.bodyStyleIn.length > 0 ? { bodyStyleIn: filters.bodyStyleIn } : {}),
+    ...(filters.makeIn.length > 0 ? { makeIn: filters.makeIn } : {}),
+    ...(filters.transmissionIn.length > 0 ? { transmissionIn: filters.transmissionIn } : {}),
+    ...(filters.fuelTypeIn.length > 0 ? { fuelTypeIn: filters.fuelTypeIn } : {}),
+    ...(filters.drivetrainIn.length > 0 ? { drivetrainIn: filters.drivetrainIn } : {}),
+    ...(filters.conditionIn.length > 0 ? { conditionIn: filters.conditionIn } : {}),
+    ...(parseNumOrUndefined(filters.yearMin) !== undefined
+      ? { yearMin: parseNumOrUndefined(filters.yearMin) }
+      : {}),
+    ...(parseNumOrUndefined(filters.yearMax) !== undefined
+      ? { yearMax: parseNumOrUndefined(filters.yearMax) }
+      : {}),
+    ...(parseNumOrUndefined(filters.mileageMin) !== undefined
+      ? { mileageMin: parseNumOrUndefined(filters.mileageMin) }
+      : {}),
+    ...(parseNumOrUndefined(filters.mileageMax) !== undefined
+      ? { mileageMax: parseNumOrUndefined(filters.mileageMax) }
+      : {}),
+    ...(parseNumOrUndefined(filters.priceMin) !== undefined
+      ? { priceMin: parseNumOrUndefined(filters.priceMin) }
+      : {}),
+    ...(parseNumOrUndefined(filters.priceMax) !== undefined
+      ? { priceMax: parseNumOrUndefined(filters.priceMax) }
+      : {}),
   };
 
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery<
     CursorPage<VehicleListItem>
   >({
-    queryKey: ["vehicles", "list", queryInput, statusFilter],
+    queryKey: ["vehicles", "list", queryInput],
     queryFn: () => vehiclesApi.list(queryInput),
   });
 
@@ -180,22 +453,45 @@ function VehiclesTab() {
     });
   }, [data]);
 
-  // Client-side filter for multi-chip combinations the server can't express
-  // with a single-status filter. Server still applies includeArchived gate.
+  // Client-side filter: server applies single-status filter; if multiple
+  // non-archived statuses selected, narrow client-side.
   const allItems = pages.flatMap((p) => p.items);
-  const items = allItems.filter((v) => statusFilter.includes(v.status));
+  const items = allItems.filter((v) => filters.statusFilter.includes(v.status));
   const hasMore =
     (pages[pages.length - 1]?.nextCursor ?? data?.nextCursor) != null;
 
+  // Distinct makes derived from current page set (no extra API surface).
+  const distinctMakes = useMemo(() => {
+    const set = new Set<string>();
+    for (const v of allItems) set.add(v.make);
+    return [...set].sort();
+  }, [allItems]);
+
+  const activeFilterCount = countActiveFilters(filters);
+
   function toggleStatusChip(s: VehicleStatus): void {
-    setStatusFilter((prev) => {
-      if (prev.includes(s)) {
-        // Don't allow empty selection — leave at least one chip on.
-        if (prev.length === 1) return prev;
-        return prev.filter((x) => x !== s);
+    setFilters((prev) => {
+      if (prev.statusFilter.includes(s)) {
+        if (prev.statusFilter.length === 1) return prev;
+        return {
+          ...prev,
+          statusFilter: prev.statusFilter.filter((x) => x !== s),
+        };
       }
-      return [...prev, s];
+      return { ...prev, statusFilter: [...prev.statusFilter, s] };
     });
+  }
+
+  function toggleArrayFilter(key: keyof UiFilters, v: string): void {
+    setFilters((prev) => {
+      const arr = prev[key] as string[];
+      const next = arr.includes(v) ? arr.filter((x) => x !== v) : [...arr, v];
+      return { ...prev, [key]: next };
+    });
+  }
+
+  function clearAllFilters(): void {
+    setFilters({ ...EMPTY_FILTERS, statusFilter: filters.statusFilter });
   }
 
   async function handleArchive(v: VehicleListItem): Promise<void> {
@@ -217,25 +513,67 @@ function VehiclesTab() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2 flex-1">
-          <div className="flex gap-1">
-            {STATUS_FILTER_OPTIONS.map((opt) => (
-              <button
-                key={opt.value}
-                type="button"
-                onClick={() => toggleStatusChip(opt.value)}
-                className={`px-3 py-1.5 text-xs font-medium rounded-md border transition-colors ${
-                  statusFilter.includes(opt.value)
-                    ? "bg-primary text-primary-foreground border-primary"
-                    : "bg-background text-muted-foreground border-border hover:bg-muted"
-                }`}
-                aria-pressed={statusFilter.includes(opt.value)}
-              >
-                {opt.label}
-              </button>
-            ))}
+      {/* KAN-1219 Slice C — Top bar: search + sort + more-filters + actions. */}
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="flex items-center gap-2 flex-1 min-w-[260px]">
+          <div className="relative flex-1 max-w-md">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Input
+              type="search"
+              placeholder="Search make, model, VIN, stock #"
+              value={filters.searchText}
+              onChange={(e) =>
+                setFilters((f) => ({ ...f, searchText: e.target.value }))
+              }
+              className="pl-8"
+              aria-label="Search inventory"
+            />
           </div>
+          <select
+            value={filters.sort}
+            onChange={(e) =>
+              setFilters((f) => ({
+                ...f,
+                sort: e.target.value as VehicleListSort,
+              }))
+            }
+            className="px-3 py-1.5 text-xs border rounded-md bg-background"
+            aria-label="Sort vehicles"
+          >
+            {SORT_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setMoreFiltersOpen((x) => !x)}
+            aria-expanded={moreFiltersOpen}
+            aria-controls="vehicle-more-filters"
+          >
+            <SlidersHorizontal className="h-4 w-4" />
+            More filters
+            {activeFilterCount > 0 && (
+              <Badge variant="default" className="ml-1 text-xs px-1.5">
+                {activeFilterCount}
+              </Badge>
+            )}
+          </Button>
+          {activeFilterCount > 0 && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={clearAllFilters}
+              aria-label="Clear all filters"
+            >
+              <X className="h-4 w-4" />
+              Clear
+            </Button>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {/* KAN-1219 (Slice 5 of KAN-1211 epic) — Full-inventory crawler
@@ -266,6 +604,107 @@ function VehiclesTab() {
         </div>
       </div>
 
+      {/* Status + body style chip rows — always visible. */}
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs text-muted-foreground">Status:</span>
+        {STATUS_FILTER_OPTIONS.map((opt) => (
+          <button
+            key={opt.value}
+            type="button"
+            onClick={() => toggleStatusChip(opt.value)}
+            className={`px-3 py-1.5 text-xs font-medium rounded-md border transition-colors ${
+              filters.statusFilter.includes(opt.value)
+                ? "bg-primary text-primary-foreground border-primary"
+                : "bg-background text-muted-foreground border-border hover:bg-muted"
+            }`}
+            aria-pressed={filters.statusFilter.includes(opt.value)}
+          >
+            {opt.label}
+          </button>
+        ))}
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs text-muted-foreground">Body:</span>
+        {BODY_STYLES.map((b) => (
+          <button
+            key={b}
+            type="button"
+            onClick={() => toggleArrayFilter("bodyStyleIn", b)}
+            className={`px-3 py-1.5 text-xs font-medium rounded-md border transition-colors ${
+              filters.bodyStyleIn.includes(b)
+                ? "bg-primary text-primary-foreground border-primary"
+                : "bg-background text-muted-foreground border-border hover:bg-muted"
+            }`}
+            aria-pressed={filters.bodyStyleIn.includes(b)}
+          >
+            {humanize(b)}
+          </button>
+        ))}
+      </div>
+
+      {/* Collapsible "More filters" panel. */}
+      {moreFiltersOpen && (
+        <Card id="vehicle-more-filters" className="border-dashed">
+          <CardContent className="space-y-4 pt-6">
+            <FilterChipRow
+              label="Make"
+              options={distinctMakes}
+              selected={filters.makeIn}
+              onToggle={(v) => toggleArrayFilter("makeIn", v)}
+              emptyHint="No makes in current inventory yet"
+            />
+            <FilterChipRow
+              label="Transmission"
+              options={[...TRANSMISSIONS]}
+              selected={filters.transmissionIn}
+              onToggle={(v) => toggleArrayFilter("transmissionIn", v)}
+            />
+            <FilterChipRow
+              label="Fuel type"
+              options={[...FUEL_TYPES]}
+              selected={filters.fuelTypeIn}
+              onToggle={(v) => toggleArrayFilter("fuelTypeIn", v)}
+            />
+            <FilterChipRow
+              label="Drivetrain"
+              options={[...DRIVETRAINS]}
+              selected={filters.drivetrainIn}
+              onToggle={(v) => toggleArrayFilter("drivetrainIn", v)}
+            />
+            <FilterChipRow
+              label="Condition"
+              options={[...VEHICLE_CONDITIONS]}
+              selected={filters.conditionIn}
+              onToggle={(v) => toggleArrayFilter("conditionIn", v)}
+            />
+            <RangeFilter
+              label="Year"
+              min={filters.yearMin}
+              max={filters.yearMax}
+              onMinChange={(v) => setFilters((f) => ({ ...f, yearMin: v }))}
+              onMaxChange={(v) => setFilters((f) => ({ ...f, yearMax: v }))}
+              placeholder={["1900", "2028"]}
+            />
+            <RangeFilter
+              label="Mileage"
+              min={filters.mileageMin}
+              max={filters.mileageMax}
+              onMinChange={(v) => setFilters((f) => ({ ...f, mileageMin: v }))}
+              onMaxChange={(v) => setFilters((f) => ({ ...f, mileageMax: v }))}
+              placeholder={["0", "999,999"]}
+            />
+            <RangeFilter
+              label="Price ($)"
+              min={filters.priceMin}
+              max={filters.priceMax}
+              onMinChange={(v) => setFilters((f) => ({ ...f, priceMin: v }))}
+              onMaxChange={(v) => setFilters((f) => ({ ...f, priceMax: v }))}
+              placeholder={["0", "9,999,999"]}
+            />
+          </CardContent>
+        </Card>
+      )}
+
       {isError && (
         <Card className="border-destructive/50 bg-destructive/5">
           <CardHeader>
@@ -292,19 +731,39 @@ function VehiclesTab() {
       )}
 
       {!isLoading && items.length === 0 && (
-        // Q5 — inline <Card border-dashed> empty state. REFUTE shared
-        // <EmptyState> import. Mirrors products precedent at :403-412.
+        // Q5 — inline <Card border-dashed> empty state. KAN-1219 Slice C
+        // branches copy based on whether filters are active.
         <Card className="border-dashed">
           <CardContent className="flex flex-col items-center justify-center gap-3 py-16 text-center">
             <Car className="h-10 w-10 text-muted-foreground/50" />
-            <div>
-              <p className="text-sm font-medium">
-                No vehicles in inventory yet
-              </p>
-              <p className="text-xs text-muted-foreground mt-1">
-                Click Create vehicle to add your first vehicle
-              </p>
-            </div>
+            {activeFilterCount > 0 ? (
+              <div>
+                <p className="text-sm font-medium">
+                  No vehicles match current filters
+                </p>
+                <p className="text-xs text-muted-foreground mt-1">
+                  Adjust or clear filters to see more results
+                </p>
+                <Button
+                  type="button"
+                  variant="link"
+                  size="sm"
+                  onClick={clearAllFilters}
+                  className="mt-2"
+                >
+                  Clear all filters
+                </Button>
+              </div>
+            ) : (
+              <div>
+                <p className="text-sm font-medium">
+                  No vehicles in inventory yet
+                </p>
+                <p className="text-xs text-muted-foreground mt-1">
+                  Click Create vehicle to add your first vehicle
+                </p>
+              </div>
+            )}
           </CardContent>
         </Card>
       )}
@@ -335,6 +794,11 @@ function VehiclesTab() {
                       {v.mileage != null && (
                         <span className="text-xs text-muted-foreground tabular-nums">
                           {v.mileage.toLocaleString()} mi
+                        </span>
+                      )}
+                      {v.price != null && (
+                        <span className="text-xs font-medium tabular-nums">
+                          ${v.price.toLocaleString()}
                         </span>
                       )}
                     </div>
@@ -392,7 +856,7 @@ function VehiclesTab() {
           // Memo 52 operator-visibility — newly-created drafts must
           // surface. active+draft is the default filter; reset to it
           // (not 'all') because Memo 39 vehicle-UX excludes archived.
-          setStatusFilter(DEFAULT_STATUS_FILTER);
+          setFilters((f) => ({ ...f, statusFilter: DEFAULT_STATUS_FILTER }));
           setPages([]);
           void refetch();
         }}
@@ -405,7 +869,7 @@ function VehiclesTab() {
         }}
         onSaved={() => {
           setEditing(null);
-          setStatusFilter(DEFAULT_STATUS_FILTER);
+          setFilters((f) => ({ ...f, statusFilter: DEFAULT_STATUS_FILTER }));
           setPages([]);
           void refetch();
         }}

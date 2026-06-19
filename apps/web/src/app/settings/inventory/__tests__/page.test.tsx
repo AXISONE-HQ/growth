@@ -41,6 +41,14 @@ vi.mock("@/lib/api", async () => {
   };
 });
 
+// KAN-1219 Slice C — Mock next/navigation for URL state sync in filter bar.
+const replaceMock = vi.fn();
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ replace: replaceMock, push: vi.fn(), refresh: vi.fn() }),
+  useSearchParams: () => new URLSearchParams(),
+  usePathname: () => "/settings/inventory",
+}));
+
 // Mock sonner toast to avoid jsdom side effects.
 vi.mock("sonner", () => ({
   toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() },
