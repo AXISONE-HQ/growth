@@ -643,6 +643,8 @@ export async function runCrawlJob(
   const tenantId = initialJob.tenantId;
   const listingUrl = initialJob.listingUrl;
 
+  // KAN-1219 fix-forward (Memo 51 #11) — log adapter selection after dispatch.
+  // Helper closure so the log fires regardless of which Layer (1/2/3) matched.
   // ── Adapter dispatch (Memo 57 anchor #4 — triple-fallback) ───────────
   let listingHost: string;
   try {
@@ -706,6 +708,19 @@ export async function runCrawlJob(
       $,
       listingUrl,
       { fetchImpl },
+    );
+    console.log(
+      JSON.stringify({
+        type: "inventory_crawler_dispatcher_result",
+        crawlJobId,
+        listingUrl,
+        adapter: adapter.hostname,
+        discoveredCount: discoveredUrls.length,
+        ogImage: $('meta[property="og:image"]').attr("content") ?? null,
+        metaAuthor: $('meta[name="author"]').attr("content") ?? null,
+        reactCarsAppScripts: $('script[src*="/react-cars-app/"]').length,
+        inventoryAnchors: $('a[href*="/inventory/"]').length,
+      }),
     );
   } catch (err) {
     return await finalizeJob(prisma, crawlJobId, tenantId, {
@@ -947,10 +962,37 @@ async function fetchListingHtml(
         accept: "text/html,application/xhtml+xml",
       },
     });
+    // KAN-1219 fix-forward (Memo 51 #11 PROD-vs-local-divergence diagnostic).
+    // Log HTTP response metadata before the cheerio parse + dispatcher
+    // fingerprint walk so we can empirically see what 4mkauto.com (or any
+    // other listing host) returns to Cloud Run egress vs a local dev fetch.
     if (!resp.ok) {
+      console.log(
+        JSON.stringify({
+          type: "inventory_crawler_listing_fetch",
+          listingUrl,
+          status: resp.status,
+          contentType: resp.headers.get("content-type"),
+          contentLength: resp.headers.get("content-length"),
+          server: resp.headers.get("server"),
+        }),
+      );
       throw new Error(`HTTP ${resp.status} fetching listing`);
     }
-    return await resp.text();
+    const body = await resp.text();
+    console.log(
+      JSON.stringify({
+        type: "inventory_crawler_listing_fetch",
+        listingUrl,
+        status: resp.status,
+        contentType: resp.headers.get("content-type"),
+        contentLength: resp.headers.get("content-length"),
+        server: resp.headers.get("server"),
+        bodyByteLength: Buffer.byteLength(body, "utf8"),
+        bodyHead: body.slice(0, 500),
+      }),
+    );
+    return body;
   } finally {
     clearTimeout(timer);
   }

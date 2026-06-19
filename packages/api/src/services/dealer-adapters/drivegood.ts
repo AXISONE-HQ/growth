@@ -81,17 +81,26 @@ const DRIVEGOOD_VIN_URL_PATTERN = /\/(?:vehicle|inventory|vdp)\/([A-HJ-NPR-Z0-9]
 export const drivegoodAdapter: DealerAdapter = {
   hostname: "drivegood.com",
 
-  // KAN-1219 fix-forward — Layer 2 fingerprint. Drivegood SaaS-served
-  // dealer sites embed identifying meta even when hosted on a vanity
-  // domain (e.g., 4mkauto.com). Two empirical signatures:
+  // KAN-1219 fix-forward (Memo 57 #5 sub-refinement — multi-marker
+  // defense-in-depth at fingerprint level). Drivegood SaaS-served dealer
+  // sites embed identifying meta even when hosted on a vanity domain
+  // (e.g., 4mkauto.com). Multiple empirical signatures observed; ANY
+  // match dispatches drivegood. Single-marker fingerprint is a single
+  // point of failure if PROD egress receives different HTML than local
+  // (CDN/geo variation), so we widen across orthogonal markers:
   //   1. og:image points at cdn.drivegood.com
-  //   2. meta[author] = Potenza Global Solutions (the SaaS vendor)
-  // Either match is sufficient; both observed in production.
+  //   2. meta[author] = potenzaglobalsolutions (the SaaS vendor)
+  //   3. body / script text references cdn.drivegood.com or drivegood.com
+  //   4. script[src] references /react-cars-app/ (drivegood's React app
+  //      bundled inside the WordPress theme)
   fingerprint: ($) => {
     const ogImage = $('meta[property="og:image"]').attr("content") ?? "";
     if (/drivegood/i.test(ogImage)) return true;
     const metaAuthor = $('meta[name="author"]').attr("content") ?? "";
     if (/potenzaglobal/i.test(metaAuthor)) return true;
+    if ($('script[src*="/react-cars-app/"]').length > 0) return true;
+    const html = $.html();
+    if (/cdn\.drivegood\.com|\bdrivegood\.com/i.test(html)) return true;
     return false;
   },
 
