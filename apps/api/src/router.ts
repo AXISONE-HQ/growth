@@ -31,6 +31,13 @@ import {
   VehicleCreateInputSchema,
   VehicleUpdateInputSchema,
   VehicleStatusEnum,
+  // KAN-1219 Slice B — Vehicle list filter + sort dimensions.
+  BodyStyleEnum,
+  TransmissionEnum,
+  FuelTypeEnum,
+  DrivetrainEnum,
+  VehicleConditionEnum,
+  VehicleListSortEnum,
 } from "@growth/shared";
 // KAN-852 — Account Page publisher + flag. Cross-rootDir static imports
 // trigger TS6059 (KAN-689 cohort), so we use the variable-specifier
@@ -7338,7 +7345,24 @@ interface VehicleServiceModule {
   listVehicles: (
     prisma: unknown,
     tenantId: string,
-    filters: { status?: string; includeArchived?: boolean },
+    filters: {
+      status?: string;
+      includeArchived?: boolean;
+      searchText?: string;
+      makeIn?: string[];
+      bodyStyleIn?: string[];
+      transmissionIn?: string[];
+      fuelTypeIn?: string[];
+      drivetrainIn?: string[];
+      conditionIn?: string[];
+      yearMin?: number;
+      yearMax?: number;
+      mileageMin?: number;
+      mileageMax?: number;
+      priceMin?: number;
+      priceMax?: number;
+      sort?: string;
+    },
     pagination: { cursor?: string; limit?: number },
   ) => Promise<{ items: unknown[]; nextCursor: string | null; totalCount: number }>;
   VehicleNotFoundError: new () => Error;
@@ -8698,8 +8722,25 @@ const vehiclesRouter = router({
   list: protectedProcedure
     .input(
       z.object({
+        // KAN-1214 — original filters.
         status: VehicleStatusEnum.optional(),
         includeArchived: z.boolean().optional(),
+        // KAN-1219 Slice B — filter dimension expansion.
+        searchText: z.string().min(1).max(120).optional(),
+        makeIn: z.array(z.string().min(1)).max(50).optional(),
+        bodyStyleIn: z.array(BodyStyleEnum).optional(),
+        transmissionIn: z.array(TransmissionEnum).optional(),
+        fuelTypeIn: z.array(FuelTypeEnum).optional(),
+        drivetrainIn: z.array(DrivetrainEnum).optional(),
+        conditionIn: z.array(VehicleConditionEnum).optional(),
+        yearMin: z.number().int().min(1900).max(2028).optional(),
+        yearMax: z.number().int().min(1900).max(2028).optional(),
+        mileageMin: z.number().int().min(0).max(999_999).optional(),
+        mileageMax: z.number().int().min(0).max(999_999).optional(),
+        priceMin: z.number().nonnegative().max(9_999_999.99).optional(),
+        priceMax: z.number().nonnegative().max(9_999_999.99).optional(),
+        sort: VehicleListSortEnum.optional(),
+        // Pagination.
         limit: z.number().int().min(1).max(100).default(50),
         cursor: z.string().optional(),
       }),
@@ -8709,7 +8750,24 @@ const vehiclesRouter = router({
       return svc.listVehicles(
         ctx.prisma,
         ctx.tenantId,
-        { status: input.status, includeArchived: input.includeArchived },
+        {
+          status: input.status,
+          includeArchived: input.includeArchived,
+          searchText: input.searchText,
+          makeIn: input.makeIn,
+          bodyStyleIn: input.bodyStyleIn,
+          transmissionIn: input.transmissionIn,
+          fuelTypeIn: input.fuelTypeIn,
+          drivetrainIn: input.drivetrainIn,
+          conditionIn: input.conditionIn,
+          yearMin: input.yearMin,
+          yearMax: input.yearMax,
+          mileageMin: input.mileageMin,
+          mileageMax: input.mileageMax,
+          priceMin: input.priceMin,
+          priceMax: input.priceMax,
+          sort: input.sort,
+        },
         { cursor: input.cursor, limit: input.limit },
       );
     }),

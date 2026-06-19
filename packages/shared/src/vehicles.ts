@@ -129,3 +129,48 @@ export const VehicleSchema = VehicleCreateInputSchema.extend({
   updatedAt: z.date(),
 });
 export type Vehicle = z.infer<typeof VehicleSchema>;
+
+// ─────────────────────────────────────────────────────────────────────────
+// KAN-1219 Slice B — list-view filter + sort
+//
+// `searchText` is case-insensitive `contains` across {make, model, vin,
+// stockNumber}. The `In` filters narrow by enum value sets. Numeric range
+// filters use `gte`/`lte` semantics; both ends are optional and independent.
+// `price` ranges are JS numbers at the JSON boundary per Memo 39 (Prisma
+// coerces to Decimal(10,2) at query construction).
+// ─────────────────────────────────────────────────────────────────────────
+
+export const VEHICLE_LIST_SORTS = [
+  "createdAt_desc",
+  "year_asc",
+  "year_desc",
+  "mileage_asc",
+  "mileage_desc",
+  "price_asc",
+  "price_desc",
+] as const;
+export const VehicleListSortEnum = z.enum(VEHICLE_LIST_SORTS);
+export type VehicleListSort = z.infer<typeof VehicleListSortEnum>;
+
+export const VehicleListFiltersSchema = z.object({
+  status: VehicleStatusEnum.optional(),
+  includeArchived: z.boolean().optional(),
+  searchText: z.string().min(1).max(120).optional(),
+  makeIn: z.array(z.string().min(1)).max(50).optional(),
+  bodyStyleIn: z.array(BodyStyleEnum).max(BODY_STYLES.length).optional(),
+  transmissionIn: z.array(TransmissionEnum).max(TRANSMISSIONS.length).optional(),
+  fuelTypeIn: z.array(FuelTypeEnum).max(FUEL_TYPES.length).optional(),
+  drivetrainIn: z.array(DrivetrainEnum).max(DRIVETRAINS.length).optional(),
+  conditionIn: z
+    .array(VehicleConditionEnum)
+    .max(VEHICLE_CONDITIONS.length)
+    .optional(),
+  yearMin: z.number().int().min(1900).max(CURRENT_YEAR + 2).optional(),
+  yearMax: z.number().int().min(1900).max(CURRENT_YEAR + 2).optional(),
+  mileageMin: z.number().int().min(0).max(999_999).optional(),
+  mileageMax: z.number().int().min(0).max(999_999).optional(),
+  priceMin: z.number().nonnegative().max(9_999_999.99).optional(),
+  priceMax: z.number().nonnegative().max(9_999_999.99).optional(),
+  sort: VehicleListSortEnum.optional(),
+});
+export type VehicleListFilters = z.infer<typeof VehicleListFiltersSchema>;
