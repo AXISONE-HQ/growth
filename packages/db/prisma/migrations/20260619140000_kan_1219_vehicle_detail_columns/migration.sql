@@ -1,0 +1,52 @@
+-- KAN-1219 Slice D — Vehicle detail columns (photo_urls + description + features).
+--
+-- # Additive-only contract
+--
+-- Adds THREE columns to vehicles:
+--   - photo_urls TEXT[] DEFAULT '{}' NOT NULL   (URL list; URL-reference-only)
+--   - description TEXT NULL                     (operator-facing markdown-ish copy)
+--   - features TEXT[] DEFAULT '{}' NOT NULL     (semantic-tagged feature list)
+--
+-- Rollback is clean: 3 × `ALTER TABLE vehicles DROP COLUMN …` reverses
+-- with zero application-layer data loss (post-rollback reads see empty
+-- arrays / null description; same defaults the application reads today
+-- pre-migration).
+--
+-- # Zero-downtime profile
+--
+-- All 3 columns have an explicit default at column-creation time. Postgres
+-- 11+ treats `ALTER TABLE … ADD COLUMN … DEFAULT … NOT NULL` for non-
+-- volatile defaults as metadata-only — no full table rewrite. Safe on the
+-- live vehicles table (~135 rows for AxisOne; trivially safe at scale too).
+--
+-- # photo_urls URL-reference-only (Memo 54 empirical-priority)
+--
+-- Source CDN is the dealer's existing host (cdn.drivegood.com). No self-
+-- hosting / CDN-rehost decision is made here. Defer until measured outage
+-- signal or operator-flagged cross-origin failure. URLs stored as-is;
+-- application validates `z.string().url()` at the Zod boundary.
+--
+-- # features semantic-tagged tokens (Memo 39 codebase-precedent)
+--
+-- features is String[] of canonical camelCase tokens (e.g. "remote_start",
+-- "rear_camera", "leather_seats"). UI humanizes at render time. NOT a
+-- normalized join table — keeps Slice D scope tight per Memo 54; future
+-- normalization tracked separately if cardinality demands.
+--
+-- # description multi-language tolerance
+--
+-- TEXT column; UTF-8 native at Postgres default; no language metadata
+-- column shipped (Memo 39 affordance-honesty — operator writes in their
+-- language and reader UI renders verbatim). Markdown-rendering UX decision
+-- deferred to Slice E.
+--
+-- # Migration discipline (KAN-1080 + KAN-1212 + KAN-1219 Slice A precedent)
+--
+-- Hand-authored SQL since local dev DB is unavailable; CI deploy-api runs
+-- `prisma migrate deploy` on first post-merge deploy. Shape mirrors
+-- KAN-1212 vehicle substrate migration at 20260617200132_kan_1212_…/migration.sql.
+
+-- AddColumn
+ALTER TABLE "vehicles" ADD COLUMN "photo_urls" TEXT[] NOT NULL DEFAULT '{}';
+ALTER TABLE "vehicles" ADD COLUMN "description" TEXT;
+ALTER TABLE "vehicles" ADD COLUMN "features" TEXT[] NOT NULL DEFAULT '{}';

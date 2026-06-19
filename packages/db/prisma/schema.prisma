@@ -3941,6 +3941,17 @@ model ProductCategory {
 /// for legacy inventory and unpriced/auction lots. JSON wire format is
 /// `number` matching Product.price precedent at packages/shared/src/
 /// products.ts:66 (Memo 39 codebase-precedent — NOT Int cents).
+///
+/// # KAN-1219 Slice D — detail columns
+///
+/// `photoUrls`, `description`, `features` ship the operator-facing vehicle
+/// detail surface. URL-reference-only for photoUrls (no self-hosting; cdn
+/// host is the source's CDN per Memo 54 empirical-priority — defer the
+/// hosting decision until measured outage signal). features is a
+/// semantic-tagged String[] (camelCase tokens like "remote_start" /
+/// "rear_camera" — UI humanizes at render time). description is free-form
+/// markdown-ish text with multi-language tolerance (UTF-8 native, Memo 39
+/// affordance-honesty — operator writes in their language).
 model Vehicle {
   id            String           @id @default(uuid())
   tenantId      String           @map("tenant_id")
@@ -3960,6 +3971,9 @@ model Vehicle {
   stockNumber   String?          @map("stock_number")
   dealerLot     String?          @map("dealer_lot")
   price         Decimal?         @db.Decimal(10, 2)
+  photoUrls     String[]         @default([]) @map("photo_urls")
+  description   String?
+  features      String[]         @default([])
   status        VehicleStatus    @default(draft)
   archivedAt    DateTime?        @map("archived_at")
   createdAt     DateTime         @default(now()) @map("created_at")
