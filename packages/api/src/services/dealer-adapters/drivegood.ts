@@ -206,7 +206,21 @@ export const drivegoodAdapter: DealerAdapter = {
       });
       if (!resp.ok) return out;
       const text = await resp.text();
-      if (Buffer.byteLength(text, "utf8") > DRIVEGOOD_JSON_MAX_BYTES) return out;
+      const bodyBytes = Buffer.byteLength(text, "utf8");
+      if (bodyBytes > DRIVEGOOD_JSON_MAX_BYTES) {
+        // KAN-1219 fix-forward (Memo 19/42 affordance-honesty): cap-exceeded
+        // was previously a silent return-empty. Surface the explicit signal
+        // so operator diagnosis matches Layer A diagnostic logging shape.
+        console.log(
+          JSON.stringify({
+            type: "drivegood_json_too_large",
+            hostname: listingBase.hostname,
+            bodyByteLength: bodyBytes,
+            cap: DRIVEGOOD_JSON_MAX_BYTES,
+          }),
+        );
+        return out;
+      }
       try {
         entries = JSON.parse(text);
       } catch {
@@ -247,7 +261,18 @@ export const drivegoodAdapter: DealerAdapter = {
   },
 };
 
-// Drivegood JSON-fallback fetch caps. Mirrors vehicle-scraper precedent
-// (SCRAPER_TIMEOUT_MS = 5s, SCRAPER_MAX_RESPONSE_BYTES = 200KB).
+// Drivegood JSON-fallback fetch caps.
+//
+// Timeout mirrors vehicle-scraper precedent (5s — fast-fail on slow CDNs).
+//
+// KAN-1219 fix-forward (Memo 39 refinement — wrong-shape-precedent transfer):
+// Body cap was initially 200KB, copied verbatim from vehicle-scraper's
+// SCRAPER_MAX_RESPONSE_BYTES. That cap is sized for ONE HTML VDP page; the
+// drivegood JSON inventory endpoint legitimately carries N vehicles × M
+// fields. Empirical 4mkauto (135 vehicles) = 1.5MB. Franchise dealers
+// (500+ vehicles) project to 5-6MB; powersports+auto combined plausibly
+// 7-8MB. 10MB cap covers growth headroom while still rejecting pathological
+// responses (>10MB JSON inventory is a misconfiguration signal). 5MB initial
+// proposal raised to 10MB at SPO Option E refinement.
 const DRIVEGOOD_JSON_TIMEOUT_MS = 5000;
-const DRIVEGOOD_JSON_MAX_BYTES = 200 * 1024;
+const DRIVEGOOD_JSON_MAX_BYTES = 10 * 1024 * 1024;
