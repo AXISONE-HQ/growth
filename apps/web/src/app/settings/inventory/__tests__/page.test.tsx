@@ -462,7 +462,7 @@ describe("KAN-1219 fix-forward — router.replace race guard", () => {
       fixturePage([fixtureVehicle({ id: "v-card", make: "Acme", model: "Sedan" })]),
     );
     renderPage();
-    const cardLink = await screen.findByRole("link", { name: /Open .* Acme Sedan .* detail/i });
+    const cardLink = await screen.findByRole("link", { name: /Open 2024 Acme Sedan.* detail/i });
     expect(cardLink).toHaveAttribute("href", "/settings/inventory/v-card");
     // Both Edit and Archive buttons must be DESCENDANTS of the Link so the
     // card's entire bounded surface is clickable when not interacting with
