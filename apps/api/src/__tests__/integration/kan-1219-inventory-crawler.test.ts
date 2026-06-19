@@ -1977,6 +1977,264 @@ describe("KAN-1219 — Inventory crawler", () => {
       (prisma: PrismaClient) => cleanupTenant(prisma, tenantId),
     );
   });
+
+  // ──────────────────────────────────────────────────────────────────────
+  // KAN-1219 fix-forward — Option H+I: CAPTCHA detection + direct-extract
+  //
+  // Trigger: 2026-06-19 PR #369 diagnostic logs revealed SiteGround anti-bot
+  // CAPTCHA serves a 185-244 byte meta-refresh page to Cloud Run egress IPs
+  // for /en/inventory, dropping every fingerprint marker. The static JSON
+  // endpoint at /wp-content/themes/astra/car_single_page_data/cars_formatted.json
+  // is NOT challenged. Option H: detect CAPTCHA body → force drivegoodAdapter.
+  // Option I: direct-extract Vehicle rows from JSON entries → skip per-VDP
+  // scrape (which is also CAPTCHA-blocked for dynamic /vehicle/{vin} pages).
+  // Scenarios 26-28 lock the dual-path contract.
+  // ──────────────────────────────────────────────────────────────────────
+
+  it("scenario 26 — CAPTCHA listing → forced drivegood → Mode B JSON → vehicles persisted directly", async () => {
+    let tenantId = "";
+    await withCleanup(
+      async (prisma: PrismaClient) => {
+        const t = await createTenant(prisma);
+        tenantId = t.id;
+        await prisma.tenant.update({
+          where: { id: tenantId },
+          data: { marketingDomain: "4mkauto.test" },
+        });
+        const pubsub = buildStubPubSub();
+        const started = await crawler.startCrawl(
+          prisma as unknown as object,
+          tenantId,
+          "operator-1",
+          { listingUrl: "https://4mkauto.test/en/inventory" },
+          pubsub,
+        );
+
+        // Empirical SiteGround CAPTCHA challenge body (185 bytes, sgcaptcha marker).
+        const captchaHtml = `<html><head><link rel="icon" href="data:;"><meta http-equiv="refresh" content="0;/.well-known/sgcaptcha/?r=%2Fen%2Finventory%2F&y=ipr:136.124.35.59:1781879010.120"></meta></head></html>`;
+
+        const jsonBody = JSON.stringify([
+          {
+            guid: `https://4mkauto.test/vehicle/${VINS[0]}`,
+            car_vin: VINS[0],
+            car_year: "2020", maker: "NISSAN", model: "Rogue",
+            car_sub_model: "SV", car_mileage: "75613",
+            car_body: "SUV", car_transmission: "AUTOMATIC",
+            car_fuel_type: "GASOLINE", car_drivetrain: "AWD",
+            condition: "USED",
+            car_exterior_color: "BLACK", car_interrior_color: "BLACK",
+            stock: "790807",
+          },
+          {
+            guid: `https://4mkauto.test/vehicle/${VINS[1]}`,
+            car_vin: VINS[1],
+            car_year: "2022", maker: "HONDA", model: "Civic",
+            car_trim: "EX-L", car_mileage: "12000",
+            car_body: "SEDAN", car_transmission: "CVT",
+            car_fuel_type: "GASOLINE", car_drivetrain: "FWD",
+            condition: "USED",
+            car_exterior_color: "SILVER", car_interrior_color: "BLACK",
+            stock: "C42",
+          },
+        ]);
+
+        const finalFetch = (async (input: unknown) => {
+          const url =
+            typeof input === "string"
+              ? input
+              : (input as { url?: string }).url ?? String(input);
+          if (url.endsWith("/robots.txt")) {
+            return makeResponse("User-agent: *\nAllow: /");
+          }
+          if (url.endsWith("/inventory") || url.endsWith("/en/inventory")) {
+            return makeResponse(captchaHtml);
+          }
+          if (url.includes("cars_formatted.json")) {
+            return makeResponse(jsonBody);
+          }
+          throw new Error(`Unmatched URL ${url}`);
+        }) as unknown as typeof fetch;
+
+        const final = await crawler.runCrawlJob(
+          prisma as unknown as object,
+          started.crawlJob.id,
+          {
+            scrapeVehicleUrl: scraperMod.scrapeVehicleUrl,
+            scraperHooks: buildTestHooks(),
+            redis: buildStubRedis(),
+            fetchImpl: finalFetch,
+            sleep: fastSleep,
+          },
+        );
+
+        // Direct-extract path: vehicles persisted from JSON; per-VDP scrape skipped.
+        expect(final.status).toBe("completed");
+        const job = await (prisma as unknown as {
+          crawlJob: { findUnique: (args: unknown) => Promise<{
+            adapter: string;
+            discoveredCount: number;
+            extractedCount: number;
+          } | null> };
+        }).crawlJob.findUnique({ where: { id: started.crawlJob.id } });
+        expect(job?.adapter).toBe("drivegood.com");
+        expect(job?.extractedCount).toBe(2);
+        const vehicles = await prisma.vehicle.findMany({
+          where: { tenantId },
+          orderBy: { vin: "asc" },
+        });
+        expect(vehicles.length).toBe(2);
+        expect(vehicles[0]!.make).toBe("Nissan");
+        expect(vehicles[0]!.bodyStyle).toBe("suv");
+        expect(vehicles[0]!.transmission).toBe("automatic");
+        expect(vehicles[0]!.fuelType).toBe("gas");
+        expect(vehicles[0]!.drivetrain).toBe("awd");
+      },
+      (prisma: PrismaClient) => cleanupTenant(prisma, tenantId),
+    );
+  });
+
+  it("scenario 27 — Non-CAPTCHA listing → existing per-VDP scrape path preserved (regression)", async () => {
+    let tenantId = "";
+    await withCleanup(
+      async (prisma: PrismaClient) => {
+        const t = await createTenant(prisma);
+        tenantId = t.id;
+        await prisma.tenant.update({
+          where: { id: tenantId },
+          data: { marketingDomain: "drivegood.com" },
+        });
+        const pubsub = buildStubPubSub();
+        const started = await crawler.startCrawl(
+          prisma as unknown as object,
+          tenantId,
+          "operator-1",
+          { listingUrl: "https://drivegood.com/inventory" },
+          pubsub,
+        );
+        const listingHtml = buildListingHtml([VINS[0]!]);
+        const finalFetch = (async (input: unknown) => {
+          const url =
+            typeof input === "string"
+              ? input
+              : (input as { url?: string }).url ?? String(input);
+          if (url.endsWith("/robots.txt")) {
+            return makeResponse("User-agent: *\nAllow: /");
+          }
+          if (url.endsWith("/inventory")) {
+            return makeResponse(listingHtml);
+          }
+          const m = /\/inventory\/([A-HJ-NPR-Z0-9]{17})/i.exec(url);
+          if (m) return makeResponse(buildVdpHtmlFull(m[1]!));
+          throw new Error(`Unmatched URL ${url}`);
+        }) as unknown as typeof fetch;
+        const final = await crawler.runCrawlJob(
+          prisma as unknown as object,
+          started.crawlJob.id,
+          {
+            scrapeVehicleUrl: scraperMod.scrapeVehicleUrl,
+            scraperHooks: buildTestHooks(),
+            redis: buildStubRedis(),
+            fetchImpl: finalFetch,
+            sleep: fastSleep,
+          },
+        );
+        // Mode A returns URLs (no directVehicles) → per-VDP scrape used → extracted=1.
+        expect(final.status).toBe("completed");
+        const job = await (prisma as unknown as {
+          crawlJob: { findUnique: (args: unknown) => Promise<{
+            extractedCount: number;
+          } | null> };
+        }).crawlJob.findUnique({ where: { id: started.crawlJob.id } });
+        expect(job?.extractedCount).toBe(1);
+      },
+      (prisma: PrismaClient) => cleanupTenant(prisma, tenantId),
+    );
+  });
+
+  it("scenario 28 — Direct-extract with malformed entry: graceful skip (others succeed)", async () => {
+    let tenantId = "";
+    await withCleanup(
+      async (prisma: PrismaClient) => {
+        const t = await createTenant(prisma);
+        tenantId = t.id;
+        await prisma.tenant.update({
+          where: { id: tenantId },
+          data: { marketingDomain: "4mkauto.test" },
+        });
+        const pubsub = buildStubPubSub();
+        const started = await crawler.startCrawl(
+          prisma as unknown as object,
+          tenantId,
+          "operator-1",
+          { listingUrl: "https://4mkauto.test/en/inventory" },
+          pubsub,
+        );
+        const captchaHtml = `<html><head><meta http-equiv="refresh" content="0;/.well-known/sgcaptcha/?r=x"></meta></head></html>`;
+        const jsonBody = JSON.stringify([
+          // Valid entry — full enums.
+          {
+            guid: `https://4mkauto.test/vehicle/${VINS[0]}`,
+            car_vin: VINS[0],
+            car_year: "2020", maker: "TOYOTA", model: "RAV4",
+            car_mileage: "30000",
+            car_body: "SUV", car_transmission: "AUTOMATIC",
+            car_fuel_type: "GASOLINE", car_drivetrain: "AWD",
+            condition: "USED", stock: "RAV1",
+          },
+          // Malformed entry — missing transmission (required enum) → dropped from directVehicles.
+          {
+            guid: `https://4mkauto.test/vehicle/${VINS[1]}`,
+            car_vin: VINS[1],
+            car_year: "2021", maker: "MAZDA", model: "CX-5",
+            car_body: "SUV",
+            car_fuel_type: "GASOLINE", car_drivetrain: "AWD",
+            condition: "USED",
+          },
+        ]);
+        const finalFetch = (async (input: unknown) => {
+          const url =
+            typeof input === "string"
+              ? input
+              : (input as { url?: string }).url ?? String(input);
+          if (url.endsWith("/robots.txt")) {
+            return makeResponse("User-agent: *\nAllow: /");
+          }
+          if (url.endsWith("/inventory") || url.endsWith("/en/inventory")) {
+            return makeResponse(captchaHtml);
+          }
+          if (url.includes("cars_formatted.json")) {
+            return makeResponse(jsonBody);
+          }
+          throw new Error(`Unmatched URL ${url}`);
+        }) as unknown as typeof fetch;
+        const final = await crawler.runCrawlJob(
+          prisma as unknown as object,
+          started.crawlJob.id,
+          {
+            scrapeVehicleUrl: scraperMod.scrapeVehicleUrl,
+            scraperHooks: buildTestHooks(),
+            redis: buildStubRedis(),
+            fetchImpl: finalFetch,
+            sleep: fastSleep,
+          },
+        );
+        // Only the valid entry persists; malformed one is silently dropped.
+        expect(final.status).toBe("completed");
+        const job = await (prisma as unknown as {
+          crawlJob: { findUnique: (args: unknown) => Promise<{
+            extractedCount: number;
+          } | null> };
+        }).crawlJob.findUnique({ where: { id: started.crawlJob.id } });
+        expect(job?.extractedCount).toBe(1);
+        const vehicles = await prisma.vehicle.findMany({
+          where: { tenantId },
+        });
+        expect(vehicles.length).toBe(1);
+        expect(vehicles[0]!.make).toBe("Toyota");
+      },
+      (prisma: PrismaClient) => cleanupTenant(prisma, tenantId),
+    );
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────
