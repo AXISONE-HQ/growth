@@ -1722,6 +1722,75 @@ describe("KAN-1219 — Inventory crawler", () => {
       (prisma: PrismaClient) => cleanupTenant(prisma, tenantId),
     );
   });
+
+  // ──────────────────────────────────────────────────────────────────────
+  // KAN-1219 fix-forward — Memo 57 #5 multi-marker fingerprint sub-refinement
+  //
+  // Trigger: 2026-06-19 operator-mediated test on www.4mkauto.com — crawl
+  // completed in 22-91ms with adapter='*' (Layer 3 generic) persisted.
+  // Empirical PROD-vs-local divergence: local fingerprint matches
+  // /potenzaglobal/i on meta[author]; PROD persists generic. Hypothesis:
+  // Cloud Run egress receives different/empty HTML at the listing host.
+  //
+  // Mitigation: widen drivegood fingerprint across orthogonal markers so
+  // a single content variation can't drop us to generic. ANY match wins:
+  //   - meta[og:image] /drivegood/i (existing)
+  //   - meta[author]  /potenzaglobal/i (existing)
+  //   - script[src]  /react-cars-app/ (new)
+  //   - $.html()     /cdn\.drivegood\.com|\bdrivegood\.com/i (new)
+  //
+  // Scenarios 21-23 exercise each path independently.
+  // ──────────────────────────────────────────────────────────────────────
+
+  it("scenario 21 — Layer 2 fingerprint via meta[author] only (regression preserved)", async () => {
+    const adapterSpec =
+      "../../../../../packages/api/src/services/dealer-adapters/drivegood.js";
+    const adapters = (await import(adapterSpec)) as {
+      drivegoodAdapter: { fingerprint: (cheerio: unknown) => boolean };
+    };
+    const cheerioMod = await import("cheerio");
+    const html = `<!DOCTYPE html><html><head>
+      <meta name="author" content="potenzaglobalsolutions.com" />
+    </head><body></body></html>`;
+    const $ = cheerioMod.load(html);
+    expect(adapters.drivegoodAdapter.fingerprint($)).toBe(true);
+  });
+
+  it("scenario 22 — Layer 2 fingerprint via body-text drivegood reference (new Layer B path)", async () => {
+    const adapterSpec =
+      "../../../../../packages/api/src/services/dealer-adapters/drivegood.js";
+    const adapters = (await import(adapterSpec)) as {
+      drivegoodAdapter: { fingerprint: (cheerio: unknown) => boolean };
+    };
+    const cheerioMod = await import("cheerio");
+    // No meta[author] match, no og:image match, no react-cars-app script —
+    // only an embedded body-text reference to cdn.drivegood.com survives.
+    const html = `<!DOCTYPE html><html><head>
+      <meta property="og:image" content="https://example.com/static.png" />
+    </head><body>
+      <img src="https://cdn.drivegood.com/dealer_42_photo.jpg" />
+    </body></html>`;
+    const $ = cheerioMod.load(html);
+    expect(adapters.drivegoodAdapter.fingerprint($)).toBe(true);
+  });
+
+  it("scenario 23 — Layer 2 fingerprint via react-cars-app script marker (new Layer B path)", async () => {
+    const adapterSpec =
+      "../../../../../packages/api/src/services/dealer-adapters/drivegood.js";
+    const adapters = (await import(adapterSpec)) as {
+      drivegoodAdapter: { fingerprint: (cheerio: unknown) => boolean };
+    };
+    const cheerioMod = await import("cheerio");
+    // Even when ALL meta tags are missing/wrong, the React app script
+    // marker alone dispatches drivegood. Body-text scan also catches it
+    // via the script src, but this scenario locks the script-selector
+    // path explicitly.
+    const html = `<!DOCTYPE html><html><head>
+      <script src="https://example.com/wp-content/themes/astra/react-cars-app/dist/assets/index.js"></script>
+    </head><body><div id="root"></div></body></html>`;
+    const $ = cheerioMod.load(html);
+    expect(adapters.drivegoodAdapter.fingerprint($)).toBe(true);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────
