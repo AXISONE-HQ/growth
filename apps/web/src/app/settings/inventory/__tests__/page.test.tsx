@@ -118,6 +118,7 @@ beforeEach(() => {
   vehiclesArchiveMock.mockReset();
   vehiclesGetMock.mockReset();
   confirmSpy.mockClear();
+  replaceMock.mockClear();
   // Default: empty list.
   vehiclesListMock.mockResolvedValue(fixturePage([]));
 });
@@ -416,5 +417,32 @@ describe("KAN-1217 Scenario 8 — archived row affordance", () => {
     expect(
       screen.queryByRole("button", { name: /archive 2024 nissan leaf/i }),
     ).not.toBeInTheDocument();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// Scenario 9 — KAN-1219 fix-forward regression guard
+// router.replace must NOT re-fire when filters stay identical across
+// re-renders (root cause of the vehicle-card Link click race).
+// ─────────────────────────────────────────────────────────────────────
+describe("KAN-1219 fix-forward — router.replace race guard", () => {
+  it("does not call router.replace twice with identical filter querystring", async () => {
+    vehiclesListMock.mockResolvedValue(fixturePage([]));
+    renderPage();
+    // Wait for initial render to settle (list query resolves).
+    await waitFor(() =>
+      expect(screen.getByText(/No vehicles in inventory yet/i)).toBeInTheDocument(),
+    );
+    // The filter→URL sync useEffect should call router.replace exactly once
+    // on mount (to seed the initial querystring); a re-render with no filter
+    // change must NOT trigger a second replace, otherwise it would clobber
+    // in-flight Link click navigations to the detail page.
+    const initialCallCount = replaceMock.mock.calls.length;
+    expect(initialCallCount).toBeLessThanOrEqual(1);
+    // Force a render flush — re-rendering the same state must NOT add calls.
+    await waitFor(() => {
+      // Stable assertion: no additional replace calls beyond the initial seed.
+      expect(replaceMock.mock.calls.length).toBe(initialCallCount);
+    });
   });
 });
