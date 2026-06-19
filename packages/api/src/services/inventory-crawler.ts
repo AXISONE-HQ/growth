@@ -701,7 +701,12 @@ export async function runCrawlJob(
     // Lazy cheerio import (matches vehicle-scraper pattern).
     const cheerioMod = (await import("cheerio")) as typeof cheerio;
     const $ = cheerioMod.load(listingHtml);
-    discoveredUrls = adapter.parseInventoryListing(listingHtml, $, listingUrl);
+    discoveredUrls = await adapter.parseInventoryListing(
+      listingHtml,
+      $,
+      listingUrl,
+      { fetchImpl },
+    );
   } catch (err) {
     return await finalizeJob(prisma, crawlJobId, tenantId, {
       status: "failed",

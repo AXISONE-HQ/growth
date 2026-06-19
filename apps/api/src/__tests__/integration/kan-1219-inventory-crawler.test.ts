@@ -1404,6 +1404,324 @@ describe("KAN-1219 — Inventory crawler", () => {
       expect(created.subscriptions).toEqual([]);
     }
   });
+
+  // ──────────────────────────────────────────────────────────────────────
+  // KAN-1219 fix-forward — Memo 57 #5 content-rendering-mode sub-refinement
+  //
+  // Trigger: 2026-06-18 operator-mediated test on www.4mkauto.com — crawl
+  // completed in 39ms with 0/0/0/0 counts. Diagnosis: 4mkauto serves a
+  // React SPA shell; Cheerio sees zero vehicle anchors; adapter's
+  // server-rendered HTML path returns empty list immediately.
+  //
+  // Fix: drivegood adapter parseInventoryListing dual-mode. Primary path
+  // is the existing server-rendered HTML walk (regression preserved).
+  // When primary returns zero anchors AND the page advertises a known
+  // React SPA marker (`<script src="…/react-cars-app/…">`), fall back to
+  // fetching `cars_formatted.json` (the JSON the React app itself
+  // consumes) and discover VDP URLs from each entry's `guid` field.
+  //
+  // Scenarios 17-20 lock the dual-mode contract.
+  // ──────────────────────────────────────────────────────────────────────
+
+  it("scenario 17 — SPA marker present BUT HTML also has anchors: Mode A (HTML) wins; JSON endpoint NOT fetched", async () => {
+    let tenantId = "";
+    await withCleanup(
+      async (prisma: PrismaClient) => {
+        const t = await createTenant(prisma);
+        tenantId = t.id;
+        await prisma.tenant.update({
+          where: { id: tenantId },
+          data: { marketingDomain: "drivegood.com" },
+        });
+        const pubsub = buildStubPubSub();
+        const started = await crawler.startCrawl(
+          prisma as unknown as object,
+          tenantId,
+          "operator-1",
+          { listingUrl: "https://drivegood.com/inventory" },
+          pubsub,
+        );
+
+        const listingHtml = `<!DOCTYPE html><html><head>
+          <script src="https://drivegood.com/wp-content/themes/astra/react-cars-app/dist/assets/index.js"></script>
+        </head><body>
+          <h1>Inventory</h1>
+          <a href="/inventory/${VINS[0]}/sedan-detail">Car 1</a>
+        </body></html>`;
+
+        let jsonFetched = false;
+        const finalFetch = (async (input: unknown) => {
+          const url =
+            typeof input === "string"
+              ? input
+              : (input as { url?: string }).url ?? String(input);
+          if (url.endsWith("/robots.txt")) {
+            return makeResponse("User-agent: *\nAllow: /");
+          }
+          if (url.endsWith("/inventory")) {
+            return makeResponse(listingHtml);
+          }
+          if (url.includes("cars_formatted.json")) {
+            jsonFetched = true;
+            return makeResponse("[]");
+          }
+          const m = /\/inventory\/([A-HJ-NPR-Z0-9]{17})/i.exec(url);
+          if (m) return makeResponse(buildVdpHtmlFull(m[1]!));
+          throw new Error(`Unmatched URL ${url}`);
+        }) as unknown as typeof fetch;
+
+        const final = await crawler.runCrawlJob(
+          prisma as unknown as object,
+          started.crawlJob.id,
+          {
+            scrapeVehicleUrl: scraperMod.scrapeVehicleUrl,
+            scraperHooks: buildTestHooks(),
+            redis: buildStubRedis(),
+            fetchImpl: finalFetch,
+            sleep: fastSleep,
+          },
+        );
+
+        // Primary (HTML) path returned 1 anchor → Mode A wins, JSON skipped.
+        expect(final.status).toBe("completed");
+        expect(jsonFetched).toBe(false);
+        const job = await (prisma as unknown as {
+          crawlJob: { findUnique: (args: unknown) => Promise<{
+            discoveredCount: number;
+            extractedCount: number;
+          } | null> };
+        }).crawlJob.findUnique({ where: { id: started.crawlJob.id } });
+        expect(job?.discoveredCount).toBe(1);
+        expect(job?.extractedCount).toBe(1);
+      },
+      (prisma: PrismaClient) => cleanupTenant(prisma, tenantId),
+    );
+  });
+
+  it("scenario 18 — SPA marker + 0 HTML anchors + JSON has vehicles: Mode B discovers VDP URLs from guid + extracts", async () => {
+    let tenantId = "";
+    await withCleanup(
+      async (prisma: PrismaClient) => {
+        const t = await createTenant(prisma);
+        tenantId = t.id;
+        await prisma.tenant.update({
+          where: { id: tenantId },
+          data: { marketingDomain: "4mkauto.test" },
+        });
+        const pubsub = buildStubPubSub();
+        const started = await crawler.startCrawl(
+          prisma as unknown as object,
+          tenantId,
+          "operator-1",
+          { listingUrl: "https://4mkauto.test/en/inventory" },
+          pubsub,
+        );
+
+        // SPA shell — drivegood fingerprint via og:image, React app marker,
+        // ZERO vehicle anchors (matches empirical 4mkauto signature).
+        const listingHtml = `<!DOCTYPE html><html><head>
+          <meta property="og:image" content="https://cdn.drivegood.com/og.png" />
+          <script src="https://4mkauto.test/wp-content/themes/astra/react-cars-app/dist/assets/index.js"></script>
+        </head><body>
+          <div id="root"></div>
+          <a href="/en/inventory/?max_price=10000">Filter</a>
+        </body></html>`;
+
+        const jsonBody = JSON.stringify([
+          { guid: `https://4mkauto.test/vehicle/${VINS[0]}`, car_vin: VINS[0] },
+          { guid: `https://4mkauto.test/vehicle/${VINS[1]}`, car_vin: VINS[1] },
+        ]);
+
+        const finalFetch = (async (input: unknown) => {
+          const url =
+            typeof input === "string"
+              ? input
+              : (input as { url?: string }).url ?? String(input);
+          if (url.endsWith("/robots.txt")) {
+            return makeResponse("User-agent: *\nAllow: /");
+          }
+          if (url.endsWith("/inventory") || url.endsWith("/en/inventory")) {
+            return makeResponse(listingHtml);
+          }
+          if (url.includes("cars_formatted.json")) {
+            return makeResponse(jsonBody);
+          }
+          const m = /\/vehicle\/([A-HJ-NPR-Z0-9]{17})/i.exec(url);
+          if (m) return makeResponse(buildVdpHtmlFull(m[1]!));
+          throw new Error(`Unmatched URL ${url}`);
+        }) as unknown as typeof fetch;
+
+        const final = await crawler.runCrawlJob(
+          prisma as unknown as object,
+          started.crawlJob.id,
+          {
+            scrapeVehicleUrl: scraperMod.scrapeVehicleUrl,
+            scraperHooks: buildTestHooks(),
+            redis: buildStubRedis(),
+            fetchImpl: finalFetch,
+            sleep: fastSleep,
+          },
+        );
+
+        // Mode B (JSON) discovered 2 vehicles via guid field; per-VDP
+        // scrape extracted both. Adapter resolved to drivegood via Layer 2
+        // fingerprint (og:image cdn.drivegood.com).
+        expect(final.status).toBe("completed");
+        const job = await (prisma as unknown as {
+          crawlJob: { findUnique: (args: unknown) => Promise<{
+            adapter: string;
+            discoveredCount: number;
+            extractedCount: number;
+          } | null> };
+        }).crawlJob.findUnique({ where: { id: started.crawlJob.id } });
+        expect(job?.adapter).toBe("drivegood.com");
+        expect(job?.discoveredCount).toBe(2);
+        expect(job?.extractedCount).toBe(2);
+      },
+      (prisma: PrismaClient) => cleanupTenant(prisma, tenantId),
+    );
+  });
+
+  it("scenario 19 — SPA + cars_formatted.json returns 404: graceful fall-through; completed with 0", async () => {
+    let tenantId = "";
+    await withCleanup(
+      async (prisma: PrismaClient) => {
+        const t = await createTenant(prisma);
+        tenantId = t.id;
+        await prisma.tenant.update({
+          where: { id: tenantId },
+          data: { marketingDomain: "4mkauto.test" },
+        });
+        const pubsub = buildStubPubSub();
+        const started = await crawler.startCrawl(
+          prisma as unknown as object,
+          tenantId,
+          "operator-1",
+          { listingUrl: "https://4mkauto.test/en/inventory" },
+          pubsub,
+        );
+
+        const listingHtml = `<!DOCTYPE html><html><head>
+          <meta property="og:image" content="https://cdn.drivegood.com/og.png" />
+          <script src="https://4mkauto.test/wp-content/themes/astra/react-cars-app/dist/assets/index.js"></script>
+        </head><body><div id="root"></div></body></html>`;
+
+        const finalFetch = (async (input: unknown) => {
+          const url =
+            typeof input === "string"
+              ? input
+              : (input as { url?: string }).url ?? String(input);
+          if (url.endsWith("/robots.txt")) {
+            return makeResponse("User-agent: *\nAllow: /");
+          }
+          if (url.endsWith("/inventory") || url.endsWith("/en/inventory")) {
+            return makeResponse(listingHtml);
+          }
+          if (url.includes("cars_formatted.json")) {
+            return { ok: false, status: 404 } as unknown as Response;
+          }
+          throw new Error(`Unmatched URL ${url}`);
+        }) as unknown as typeof fetch;
+
+        const final = await crawler.runCrawlJob(
+          prisma as unknown as object,
+          started.crawlJob.id,
+          {
+            scrapeVehicleUrl: scraperMod.scrapeVehicleUrl,
+            scraperHooks: buildTestHooks(),
+            redis: buildStubRedis(),
+            fetchImpl: finalFetch,
+            sleep: fastSleep,
+          },
+        );
+
+        // JSON 404 → graceful empty list; crawl finishes cleanly.
+        expect(final.status).toBe("completed");
+        const job = await (prisma as unknown as {
+          crawlJob: { findUnique: (args: unknown) => Promise<{
+            discoveredCount: number;
+            extractedCount: number;
+            cancelReason: string | null;
+          } | null> };
+        }).crawlJob.findUnique({ where: { id: started.crawlJob.id } });
+        expect(job?.discoveredCount).toBe(0);
+        expect(job?.extractedCount).toBe(0);
+        expect(job?.cancelReason).toBeNull();
+      },
+      (prisma: PrismaClient) => cleanupTenant(prisma, tenantId),
+    );
+  });
+
+  it("scenario 20 — SPA + cars_formatted.json malformed body: graceful fall-through; no crash; completed with 0", async () => {
+    let tenantId = "";
+    await withCleanup(
+      async (prisma: PrismaClient) => {
+        const t = await createTenant(prisma);
+        tenantId = t.id;
+        await prisma.tenant.update({
+          where: { id: tenantId },
+          data: { marketingDomain: "4mkauto.test" },
+        });
+        const pubsub = buildStubPubSub();
+        const started = await crawler.startCrawl(
+          prisma as unknown as object,
+          tenantId,
+          "operator-1",
+          { listingUrl: "https://4mkauto.test/en/inventory" },
+          pubsub,
+        );
+
+        const listingHtml = `<!DOCTYPE html><html><head>
+          <meta property="og:image" content="https://cdn.drivegood.com/og.png" />
+          <script src="https://4mkauto.test/wp-content/themes/astra/react-cars-app/dist/assets/index.js"></script>
+        </head><body><div id="root"></div></body></html>`;
+
+        const finalFetch = (async (input: unknown) => {
+          const url =
+            typeof input === "string"
+              ? input
+              : (input as { url?: string }).url ?? String(input);
+          if (url.endsWith("/robots.txt")) {
+            return makeResponse("User-agent: *\nAllow: /");
+          }
+          if (url.endsWith("/inventory") || url.endsWith("/en/inventory")) {
+            return makeResponse(listingHtml);
+          }
+          if (url.includes("cars_formatted.json")) {
+            // 200 OK but body is malformed JSON.
+            return makeResponse("<html>not-json</html>");
+          }
+          throw new Error(`Unmatched URL ${url}`);
+        }) as unknown as typeof fetch;
+
+        const final = await crawler.runCrawlJob(
+          prisma as unknown as object,
+          started.crawlJob.id,
+          {
+            scrapeVehicleUrl: scraperMod.scrapeVehicleUrl,
+            scraperHooks: buildTestHooks(),
+            redis: buildStubRedis(),
+            fetchImpl: finalFetch,
+            sleep: fastSleep,
+          },
+        );
+
+        // JSON.parse failed → graceful empty list; crawl never throws.
+        expect(final.status).toBe("completed");
+        const job = await (prisma as unknown as {
+          crawlJob: { findUnique: (args: unknown) => Promise<{
+            discoveredCount: number;
+            extractedCount: number;
+            cancelReason: string | null;
+          } | null> };
+        }).crawlJob.findUnique({ where: { id: started.crawlJob.id } });
+        expect(job?.discoveredCount).toBe(0);
+        expect(job?.extractedCount).toBe(0);
+        expect(job?.cancelReason).toBeNull();
+      },
+      (prisma: PrismaClient) => cleanupTenant(prisma, tenantId),
+    );
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────
