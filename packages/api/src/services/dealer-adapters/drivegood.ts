@@ -52,16 +52,26 @@ export interface DealerAdapter {
    * For drivegood: VDP links match the inventory/{VIN}/{slug} pattern
    * (`a[href*="/inventory/"]`). De-duplicated by URL.
    *
+   * KAN-1219 fix-forward (Memo 57 #5 content-rendering-mode sub-refinement):
+   * Async to support adapters that fall back to a JSON inventory endpoint
+   * when the listing is rendered client-side (React SPA shell). The
+   * existing server-rendered Cheerio path remains the primary path; the
+   * fallback fires only when (a) the primary returns zero anchors AND
+   * (b) the page advertises a known SPA marker. Optional `deps.fetchImpl`
+   * lets tests stub the JSON fetch.
+   *
    * @param html  The fetched listing HTML
    * @param $     Cheerio API loaded over `html` (caller-supplied for reuse)
    * @param baseUrl The listing URL (used to resolve relative hrefs)
+   * @param deps  Optional fetch override for the SPA-fallback JSON fetch
    * @returns Absolute VDP URLs, in source-document order, de-duplicated.
    */
   parseInventoryListing(
     html: string,
     $: cheerio.CheerioAPI,
     baseUrl: string,
-  ): string[];
+    deps?: { fetchImpl?: typeof fetch },
+  ): Promise<string[]>;
 }
 
 // Drivegood VDP URL patterns: `/inventory/{VIN}/{slug}`, `/vehicle/{VIN}`,
@@ -106,12 +116,34 @@ export const drivegoodAdapter: DealerAdapter = {
     };
   },
 
-  // KAN-1219 — Drivegood inventory-listing parser. Selects anchors whose
-  // href matches the VDP shape (`/inventory/{VIN}/...`). Resolves relative
-  // hrefs against `baseUrl` and de-duplicates. We DO NOT validate that the
-  // captured segment is a VIN here — the per-URL scrape will fail-soft if
-  // the page turns out to be non-VDP. Caller is responsible for caps.
-  parseInventoryListing: (_html, $, baseUrl) => {
+  // KAN-1219 — Drivegood inventory-listing parser. Dual-mode (Memo 57 #5
+  // content-rendering-mode sub-refinement):
+  //   Mode A (primary) — server-rendered HTML. Selects anchors whose href
+  //     matches the VDP shape (`/inventory/{VIN}/...`). Resolves relative
+  //     hrefs against `baseUrl` and de-duplicates.
+  //   Mode B (fallback) — React SPA shell. When the primary returns zero
+  //     anchors AND the page advertises the drivegood React app
+  //     (`<script src="…/react-cars-app/…">`), fetch the WordPress theme's
+  //     `cars_formatted.json` (the JSON the React app itself loads). Pull
+  //     VDP URLs from each entry's `guid` field; fall back to
+  //     `${origin}/vehicle/${car_vin}` when `guid` is missing.
+  //
+  // Why URL-discovery (not direct-extract from JSON):
+  //   - VDP pages on drivegood-backed vanity domains ARE server-rendered
+  //     (empirically verified at https://www.4mkauto.com/vehicle/{VIN} →
+  //     260KB HTML with VIN/title/price). The per-VDP scraper (KAN-1216)
+  //     already handles them.
+  //   - Preserves the existing per-vehicle pipeline (rate limit, dedup,
+  //     error counters, partial-extract semantics). Direct-extract would
+  //     fork the persistence path.
+  //   - When VDPs ALSO turn out to be SPA-rendered for some future tenant,
+  //     the per-VDP scraper can grow its own dual-mode independently.
+  //
+  // Caller is responsible for response-size caps + timeouts via the
+  // injected fetchImpl. We DO NOT validate that the captured segment is
+  // a VIN here — the per-URL scrape will fail-soft if the page turns out
+  // to be non-VDP. See task #52 for generic React-shell walker.
+  parseInventoryListing: async (_html, $, baseUrl, deps) => {
     const seen = new Set<string>();
     const out: string[] = [];
     let listingBase: URL;
@@ -120,12 +152,11 @@ export const drivegoodAdapter: DealerAdapter = {
     } catch {
       return out;
     }
+
+    // ── Mode A: server-rendered HTML ──────────────────────────────────
     $('a[href*="/inventory/"]').each((_, el) => {
       const href = $(el).attr("href");
       if (!href) return;
-      // Skip the listing root itself ("/inventory" or "/inventory/" or
-      // "/inventory?page=…"). The VDP shape requires at least one trailing
-      // path segment after /inventory/.
       const trimmed = href.trim();
       if (!trimmed) return;
       let resolved: URL;
@@ -134,18 +165,80 @@ export const drivegoodAdapter: DealerAdapter = {
       } catch {
         return;
       }
-      // Per-page heuristic: VDP path must have a non-empty segment after
-      // /inventory/. Excludes /inventory and /inventory/ exactly.
       const path = resolved.pathname;
       const vdpRe = /\/inventory\/[^/?#]+/;
       if (!vdpRe.test(path)) return;
-      // Normalize on absolute href with no fragment.
       resolved.hash = "";
       const key = resolved.toString();
       if (seen.has(key)) return;
       seen.add(key);
       out.push(key);
     });
+    if (out.length > 0) return out;
+
+    // ── Mode B: React SPA fallback (cars_formatted.json) ──────────────
+    // SPA marker: drivegood ships a WordPress theme bundling react-cars-app.
+    const reactAppScript = $('script[src*="/react-cars-app/"]').length;
+    if (reactAppScript === 0) return out;
+
+    const fetchImpl = deps?.fetchImpl ?? fetch;
+    const jsonUrl =
+      listingBase.origin +
+      "/wp-content/themes/astra/car_single_page_data/cars_formatted.json";
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), DRIVEGOOD_JSON_TIMEOUT_MS);
+    let entries: unknown;
+    try {
+      const resp = await fetchImpl(jsonUrl, {
+        signal: controller.signal,
+        redirect: "follow",
+        headers: { accept: "application/json" },
+      });
+      if (!resp.ok) return out;
+      const text = await resp.text();
+      if (Buffer.byteLength(text, "utf8") > DRIVEGOOD_JSON_MAX_BYTES) return out;
+      try {
+        entries = JSON.parse(text);
+      } catch {
+        return out;
+      }
+    } catch {
+      return out;
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!Array.isArray(entries)) return out;
+
+    for (const entry of entries) {
+      if (!entry || typeof entry !== "object") continue;
+      const e = entry as Record<string, unknown>;
+      let candidate: string | null = null;
+      if (typeof e.guid === "string" && /^https?:\/\//.test(e.guid)) {
+        candidate = e.guid;
+      } else if (
+        typeof e.car_vin === "string" &&
+        /^[A-HJ-NPR-Z0-9]{17}$/i.test(e.car_vin)
+      ) {
+        candidate = `${listingBase.origin}/vehicle/${e.car_vin.toUpperCase()}`;
+      }
+      if (!candidate) continue;
+      try {
+        const resolved = new URL(candidate);
+        resolved.hash = "";
+        const key = resolved.toString();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(key);
+      } catch {
+        continue;
+      }
+    }
     return out;
   },
 };
+
+// Drivegood JSON-fallback fetch caps. Mirrors vehicle-scraper precedent
+// (SCRAPER_TIMEOUT_MS = 5s, SCRAPER_MAX_RESPONSE_BYTES = 200KB).
+const DRIVEGOOD_JSON_TIMEOUT_MS = 5000;
+const DRIVEGOOD_JSON_MAX_BYTES = 200 * 1024;

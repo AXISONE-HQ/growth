@@ -59,7 +59,10 @@ export const genericHostnameRestrictedAdapter: DealerAdapter = {
 
   enrichFields: (_$, base) => base,
 
-  parseInventoryListing: (_html, $, baseUrl) => {
+  // KAN-1219 fix-forward (Memo 57 #5) — async interface, sync body. The
+  // generic walker has no JSON fallback; it just satisfies the Promise
+  // return contract.
+  parseInventoryListing: async (_html, $, baseUrl) => {
     const seen = new Set<string>();
     const out: string[] = [];
     let listingBase: URL;
