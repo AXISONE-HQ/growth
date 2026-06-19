@@ -43,8 +43,9 @@ vi.mock("@/lib/api", async () => {
 
 // KAN-1219 Slice C — Mock next/navigation for URL state sync in filter bar.
 const replaceMock = vi.fn();
+const pushMock = vi.fn();
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ replace: replaceMock, push: vi.fn(), refresh: vi.fn() }),
+  useRouter: () => ({ replace: replaceMock, push: pushMock, refresh: vi.fn() }),
   useSearchParams: () => new URLSearchParams(),
   usePathname: () => "/settings/inventory",
 }));
@@ -119,6 +120,7 @@ beforeEach(() => {
   vehiclesGetMock.mockReset();
   confirmSpy.mockClear();
   replaceMock.mockClear();
+  pushMock.mockClear();
   // Default: empty list.
   vehiclesListMock.mockResolvedValue(fixturePage([]));
 });
@@ -444,5 +446,52 @@ describe("KAN-1219 fix-forward — router.replace race guard", () => {
       // Stable assertion: no additional replace calls beyond the initial seed.
       expect(replaceMock.mock.calls.length).toBe(initialCallCount);
     });
+  });
+
+  // ───────────────────────────────────────────────────────────────────
+  // Scenario 10 — visual ↔ clickable parity guard (Option F fix)
+  //
+  // The vehicle row card must render as a single <a> wrapping the
+  // entire card so click anywhere (including padding) navigates. Edit
+  // and Archive button clicks must NOT bubble to the Link (use
+  // preventDefault + stopPropagation). Memo 19/42 affordance-honesty
+  // extension — visual interactive area matches clickable area.
+  // ───────────────────────────────────────────────────────────────────
+  it("vehicle card row is a Link wrapping the entire card", async () => {
+    vehiclesListMock.mockResolvedValue(
+      fixturePage([fixtureVehicle({ id: "v-card", make: "Acme", model: "Sedan" })]),
+    );
+    renderPage();
+    const cardLink = await screen.findByRole("link", { name: /Open .* Acme Sedan .* detail/i });
+    expect(cardLink).toHaveAttribute("href", "/settings/inventory/v-card");
+    // Both Edit and Archive buttons must be DESCENDANTS of the Link so the
+    // card's entire bounded surface is clickable when not interacting with
+    // the buttons.
+    expect(
+      cardLink.querySelector("button[aria-label^='Edit ']"),
+    ).not.toBeNull();
+    expect(
+      cardLink.querySelector("button[aria-label^='Archive ']"),
+    ).not.toBeNull();
+  });
+
+  it("Edit button click does NOT bubble to the card Link", async () => {
+    vehiclesListMock.mockResolvedValue(
+      fixturePage([fixtureVehicle({ id: "v-edit", make: "Honda", model: "Civic" })]),
+    );
+    renderPage();
+    const editBtn = await screen.findByRole("button", { name: /Edit .* Honda Civic/i });
+    await userEvent.click(editBtn);
+    // Edit modal opens (heading appears) and router.push is NOT called
+    // for the card Link target — preventDefault + stopPropagation in the
+    // button's onClick prevent the Link from firing.
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: /edit vehicle/i }),
+      ).toBeInTheDocument(),
+    );
+    expect(pushMock).not.toHaveBeenCalledWith(
+      expect.stringContaining("/settings/inventory/v-edit"),
+    );
   });
 });

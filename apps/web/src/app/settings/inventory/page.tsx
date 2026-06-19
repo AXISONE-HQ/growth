@@ -818,17 +818,29 @@ function VehiclesTab() {
         {items.map((v) => {
           const label = `${v.year} ${v.make} ${v.model}`;
           const trimSuffix = v.trim ? ` ${v.trim}` : "";
+          // KAN-1219 fix-forward v2 — the <Link> wraps the ENTIRE card so the
+          // padding / border area is part of the clickable surface. The prior
+          // shape (Link around inner content only) left the visible card edges
+          // unclickable — operators naturally click anywhere on the styled
+          // bordered card and got no response, while right-click "Open in new
+          // tab" worked when targeted at the inner text. Memo 19/42
+          // affordance-honesty extension — visual interactive area must match
+          // the actual clickable interactive area.
+          //
+          // The Edit / Archive buttons inside use e.preventDefault() +
+          // e.stopPropagation() to prevent the Link's left-click navigation
+          // when their own onClick fires. button-inside-a is non-standard per
+          // HTML spec but handled consistently by all major browsers when the
+          // descendant button stops the click event.
           return (
-            <div
+            <Link
               key={v.id}
-              className="rounded-lg border bg-card"
+              href={`/settings/inventory/${v.id}`}
+              aria-label={`Open ${label} detail`}
+              className="block rounded-lg border bg-card hover:border-primary transition-colors"
             >
               <div className="flex items-center justify-between p-4">
-                <Link
-                  href={`/settings/inventory/${v.id}`}
-                  className="flex items-center gap-3 text-left flex-1 hover:text-primary transition-colors"
-                  aria-label={`Open ${label} detail`}
-                >
+                <div className="flex items-center gap-3 text-left flex-1">
                   <div className="flex-1">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="font-medium">{label}{trimSuffix}</span>
@@ -858,21 +870,31 @@ function VehiclesTab() {
                       {v.dealerLot && <span>Lot: {v.dealerLot}</span>}
                     </div>
                   </div>
-                </Link>
+                </div>
                 <div className="flex items-center gap-1">
                   <Button
+                    type="button"
                     variant="ghost"
                     size="icon"
-                    onClick={() => setEditing(v)}
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setEditing(v);
+                    }}
                     aria-label={`Edit ${label}`}
                   >
                     <Pencil className="h-4 w-4" />
                   </Button>
                   {v.status !== "archived" && (
                     <Button
+                      type="button"
                       variant="ghost"
                       size="icon"
-                      onClick={() => handleArchive(v)}
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        void handleArchive(v);
+                      }}
                       aria-label={`Archive ${label}`}
                     >
                       <Trash2 className="h-4 w-4" />
@@ -880,7 +902,7 @@ function VehiclesTab() {
                   )}
                 </div>
               </div>
-            </div>
+            </Link>
           );
         })}
       </div>
