@@ -161,6 +161,7 @@ export async function createVehicle(
           condition: parsed.condition,
           stockNumber: parsed.stockNumber ?? null,
           dealerLot: parsed.dealerLot ?? null,
+          price: parsed.price ?? null,
           status: parsed.status,
         },
       })) as Vehicle;
@@ -267,6 +268,7 @@ export async function updateVehicle(
             stockNumber: parsed.stockNumber,
           }),
           ...(parsed.dealerLot !== undefined && { dealerLot: parsed.dealerLot }),
+          ...(parsed.price !== undefined && { price: parsed.price }),
           ...(parsed.status !== undefined && { status: parsed.status }),
         },
       })) as Vehicle;
