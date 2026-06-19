@@ -113,6 +113,12 @@ export const VehicleCreateInputSchema = z.object({
   dealerLot: z.string().nullable().optional(),
   // KAN-1219 Slice A — Decimal(10,2) at DB; number at JSON boundary (Memo 39).
   price: z.number().positive().max(9_999_999.99).nullable().optional(),
+  // KAN-1219 Slice D — vehicle detail surface (photo gallery + description + features).
+  // photoUrls is URL-reference-only (no self-hosting); description is free-form
+  // multi-language text; features are semantic-tagged tokens (UI humanizes).
+  photoUrls: z.array(z.string().url()).max(40).default([]),
+  description: z.string().max(20_000).nullable().optional(),
+  features: z.array(z.string().min(1).max(120)).max(200).default([]),
   status: VehicleStatusEnum.default("draft"),
 });
 

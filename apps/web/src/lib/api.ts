@@ -3150,6 +3150,10 @@ export interface VehicleListItem {
   stockNumber: string | null;
   dealerLot: string | null;
   price: number | null;
+  // KAN-1219 Slice D — vehicle detail substrate.
+  photoUrls: string[];
+  description: string | null;
+  features: string[];
   status: VehicleStatus;
   archivedAt: string | null;
   createdAt: string;
