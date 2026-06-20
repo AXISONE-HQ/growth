@@ -494,4 +494,45 @@ describe("KAN-1219 fix-forward — router.replace race guard", () => {
       expect.stringContaining("/settings/inventory/v-edit"),
     );
   });
+
+  // ───────────────────────────────────────────────────────────────────
+  // Scenario 11 — Refetch cascade regression guard (Option L fix)
+  //
+  // The pre-fix shape coupled `cursor = pages[pages.length - 1]?.nextCursor`
+  // into the query input. Every successful page-1 fetch fired setPages →
+  // cursor advanced → query re-ran for next page → setPages → repeat until
+  // nextCursor=null. With 134 vehicles + 50/page = 3 auto-fetches that
+  // looked like a refetch loop in DevTools and clobbered in-flight Link
+  // click navigation.
+  //
+  // Fix: explicit `cursor` state. Cursor only advances on Load More click.
+  // This test guards against re-introducing the auto-cursor-advance pattern.
+  // ───────────────────────────────────────────────────────────────────
+  it("does NOT auto-cascade-refetch after page 1 returns (Option L)", async () => {
+    // Page 1 has more results available (nextCursor non-null).
+    const page1 = fixturePage(
+      [
+        fixtureVehicle({ id: "v1", make: "Honda", model: "Civic" }),
+        fixtureVehicle({ id: "v2", make: "Ford", model: "F-150" }),
+      ],
+      "cursor-page-2",
+    );
+    vehiclesListMock.mockResolvedValue(page1);
+
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByText(/Honda Civic/i)).toBeInTheDocument(),
+    );
+    // After page 1 settles, vehiclesApi.list MUST NOT be auto-called for
+    // page 2. Operator must explicitly click Load More to advance.
+    const initialFetchCount = vehiclesListMock.mock.calls.length;
+    // Wait long enough for any auto-cascade to fire (it would happen
+    // immediately after the data setState; a 50ms wait is generous).
+    await new Promise((r) => setTimeout(r, 50));
+    expect(vehiclesListMock.mock.calls.length).toBe(initialFetchCount);
+    // The cursor on the input for the initial fetch was undefined/absent
+    // (operator-explicit cursor advances only via Load More).
+    const firstCall = vehiclesListMock.mock.calls[0]?.[0];
+    expect((firstCall as { cursor?: unknown } | undefined)?.cursor).toBeUndefined();
+  });
 });

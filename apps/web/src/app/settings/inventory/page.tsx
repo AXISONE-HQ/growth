@@ -363,6 +363,10 @@ function VehiclesTab() {
     ),
   );
   const [pages, setPages] = useState<CursorPage<VehicleListItem>[]>([]);
+  // KAN-1219 fix-forward v3 — explicit cursor state decouples pagination
+  // from the query-input feedback loop. Cursor advances ONLY via the Load
+  // More button click (operator intent), not silently via setPages updates.
+  const [cursor, setCursor] = useState<string | null>(null);
   const [moreFiltersOpen, setMoreFiltersOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [editing, setEditing] = useState<VehicleListItem | null>(null);
@@ -421,9 +425,24 @@ function VehiclesTab() {
       });
   }, [searchParams, editing, router, pathname]);
 
-  // Reset paged accumulator when filter shape changes.
+  // KAN-1219 fix-forward v3 — Option L cascade fix.
+  //
+  // Prior shape coupled `currentCursor = pages[pages.length - 1]?.nextCursor`
+  // into the query input. Every successful fetch fired setPages → cursor
+  // advanced → query re-ran for next page → setPages → repeat until
+  // nextCursor=null. With 134 vehicles + 50/page = 3 auto-fetches that look
+  // like a refetch loop in DevTools Network. The cascading re-renders
+  // interrupted in-flight <Link> click navigation — operator left-click
+  // never landed despite the visual-clickable parity fix from PR #378.
+  //
+  // Fix: explicit `cursor` state. Cursor only advances when the operator
+  // clicks Load More (or the filter resets to null). Query refires only
+  // on operator-triggered state change.
+  //
+  // Reset cursor + paged accumulator when filter shape changes.
   useEffect(() => {
     setPages([]);
+    setCursor(null);
   }, [
     filters.searchText,
     filters.sort,
@@ -442,18 +461,18 @@ function VehiclesTab() {
     filters.priceMax,
   ]);
 
-  const currentCursor =
-    pages.length > 0 ? pages[pages.length - 1]?.nextCursor : null;
-
   const includeArchived = filters.statusFilter.includes("archived");
   const onlyOneStatusSelected =
     filters.statusFilter.length === 1 ? filters.statusFilter[0] : undefined;
 
-  const queryInput: VehicleListInput = {
+  // useMemo so the queryInput object identity is stable across re-renders
+  // when filter values are unchanged — prevents the queryKey from churning
+  // and triggering unrelated refetches.
+  const queryInput = useMemo<VehicleListInput>(() => ({
     limit: 50,
     includeArchived,
     ...(onlyOneStatusSelected ? { status: onlyOneStatusSelected } : {}),
-    ...(currentCursor ? { cursor: currentCursor } : {}),
+    ...(cursor ? { cursor } : {}),
     sort: filters.sort,
     ...(filters.searchText ? { searchText: filters.searchText } : {}),
     ...(filters.bodyStyleIn.length > 0 ? { bodyStyleIn: filters.bodyStyleIn } : {}),
@@ -480,13 +499,32 @@ function VehiclesTab() {
     ...(parseNumOrUndefined(filters.priceMax) !== undefined
       ? { priceMax: parseNumOrUndefined(filters.priceMax) }
       : {}),
-  };
+  }), [
+    includeArchived,
+    onlyOneStatusSelected,
+    cursor,
+    filters.sort,
+    filters.searchText,
+    filters.bodyStyleIn,
+    filters.makeIn,
+    filters.transmissionIn,
+    filters.fuelTypeIn,
+    filters.drivetrainIn,
+    filters.conditionIn,
+    filters.yearMin,
+    filters.yearMax,
+    filters.mileageMin,
+    filters.mileageMax,
+    filters.priceMin,
+    filters.priceMax,
+  ]);
 
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery<
     CursorPage<VehicleListItem>
   >({
     queryKey: ["vehicles", "list", queryInput],
     queryFn: () => vehiclesApi.list(queryInput),
+    staleTime: 30_000,
   });
 
   useEffect(() => {
@@ -551,6 +589,7 @@ function VehiclesTab() {
       await vehiclesApi.archive(v.id);
       toast.success("Vehicle archived");
       setPages([]);
+      setCursor(null);
       void refetch();
     } catch (e) {
       toast.error((e as Error)?.message ?? "Failed to archive vehicle");
@@ -912,7 +951,13 @@ function VehiclesTab() {
           <Button
             variant="outline"
             size="sm"
-            onClick={() => void refetch()}
+            onClick={() => {
+              // KAN-1219 fix-forward v3 — operator-explicit cursor advance.
+              // Setting cursor changes the memoized queryInput identity →
+              // useQuery re-fires for the next page. No silent cascade.
+              const nextCursor = pages[pages.length - 1]?.nextCursor ?? data?.nextCursor ?? null;
+              if (nextCursor) setCursor(nextCursor);
+            }}
             disabled={isFetching}
           >
             {isFetching ? "Loading..." : "Load more"}
@@ -930,6 +975,7 @@ function VehiclesTab() {
           // (not 'all') because Memo 39 vehicle-UX excludes archived.
           setFilters((f) => ({ ...f, statusFilter: DEFAULT_STATUS_FILTER }));
           setPages([]);
+          setCursor(null);
           void refetch();
         }}
       />
@@ -943,6 +989,7 @@ function VehiclesTab() {
           setEditing(null);
           setFilters((f) => ({ ...f, statusFilter: DEFAULT_STATUS_FILTER }));
           setPages([]);
+          setCursor(null);
           void refetch();
         }}
       />
@@ -970,6 +1017,7 @@ function VehiclesTab() {
           onTerminal={() => {
             setActiveCrawlJobId(null);
             setPages([]);
+            setCursor(null);
             void refetch();
           }}
           onDismiss={() => setActiveCrawlJobId(null)}
