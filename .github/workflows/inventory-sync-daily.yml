@@ -14,7 +14,10 @@
 #
 # WIRE SHAPE
 #
-#   1. curl GET https://4mkauto.com/wp-json/cars/v1/all  → JSON array
+#   1. curl GET https://www.4mkauto.com/wp-content/themes/astra/car_single_page_data/cars_formatted.json
+#      → JSON array (empirically-validated; the wp-json REST API URL we first
+#      guessed returns 301 → HTML, not JSON. Fix-forward post-empirical signal
+#      from first workflow_dispatch run.)
 #   2. curl POST https://growth-api-…/api/v1/inventory/reconcile
 #      with X-AxisOne-API-Key header + { entries: [...], source: "..." } body
 #   3. Surface response counts in workflow log + Slack notification
@@ -57,10 +60,13 @@ jobs:
           set -euo pipefail
           # -f → fail on HTTP errors; --max-time → bound on hanging fetches;
           # User-Agent header → some CAPTCHAs allow named bots through.
+          # Empirically-validated URL (workflow_dispatch run #2 of #381). The
+          # earlier wp-json/cars/v1/all guess returns 301 → HTML; this path
+          # serves the live 131-entry JSON array used for backfill.
           curl -fSs \
             --max-time 60 \
             -H "User-Agent: AxisOne-Inventory-Sync/1.0 (+https://axisone.io)" \
-            "https://4mkauto.com/wp-json/cars/v1/all" \
+            "https://www.4mkauto.com/wp-content/themes/astra/car_single_page_data/cars_formatted.json" \
             -o /tmp/dealer-feed.json
           echo "Fetched $(jq 'length' /tmp/dealer-feed.json) entries"
 
