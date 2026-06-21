@@ -44,12 +44,19 @@ import {
   ChevronLeft,
   ChevronRight,
   ImageOff,
+  Activity,
+  CalendarClock,
+  CircleX,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { vehiclesApi, type VehicleListItem } from "@/lib/api";
+import {
+  vehiclesApi,
+  type VehicleActivityEvent,
+  type VehicleListItem,
+} from "@/lib/api";
 
 const INVENTORY_FILTER_STATE_KEY = "kan-1219-inventory-filter-querystring";
 
@@ -242,8 +249,265 @@ export default function VehicleDetailPage() {
           </p>
         </Section>
       )}
+
+      {/* KAN-1219 Slice F3 — Lifecycle dates + activity timeline. */}
+      <LifecycleSection vehicle={v} />
+      <ActivityTimeline vehicleId={v.id} />
     </div>
   );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// KAN-1219 Slice F3 — Lifecycle dates section
+//
+// Renders firstSeenAt / lastSeenAt as plain rows; renders removedAt as a
+// warning row ONLY when set. firstSeenAt/lastSeenAt diverge after the
+// first daily sync confirms each VIN; removedAt is set when the VIN
+// disappears from the dealer feed (sold / delisted).
+// ─────────────────────────────────────────────────────────────────────
+
+function LifecycleSection({ vehicle }: { vehicle: VehicleListItem }) {
+  return (
+    <Section title="Lifecycle">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
+        <LifecycleDateCell
+          icon={<CalendarClock className="h-4 w-4" />}
+          label="First seen"
+          iso={vehicle.firstSeenAt}
+        />
+        <LifecycleDateCell
+          icon={<Activity className="h-4 w-4" />}
+          label="Last seen"
+          iso={vehicle.lastSeenAt}
+        />
+        {vehicle.removedAt && (
+          <LifecycleDateCell
+            icon={<CircleX className="h-4 w-4 text-amber-600" />}
+            label="Removed"
+            iso={vehicle.removedAt}
+            tone="warning"
+          />
+        )}
+      </div>
+      {vehicle.removedAt && (
+        <p className="mt-3 text-xs text-amber-700">
+          This VIN is no longer in the dealer&apos;s published feed. It may have
+          been sold or delisted.
+        </p>
+      )}
+    </Section>
+  );
+}
+
+function LifecycleDateCell({
+  icon,
+  label,
+  iso,
+  tone,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  iso: string;
+  tone?: "warning";
+}) {
+  return (
+    <div
+      className={`rounded-md border p-3 ${
+        tone === "warning" ? "border-amber-300 bg-amber-50" : ""
+      }`}
+    >
+      <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+        {icon}
+        {label}
+      </div>
+      <div className="mt-1 font-medium tabular-nums">{formatAbsolute(iso)}</div>
+      <div className="text-xs text-muted-foreground">{formatRelative(iso)}</div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// KAN-1219 Slice F3 — Activity timeline
+//
+// Surfaces the per-vehicle audit_log feed (operator mutations + daily
+// sync events). Action-type + extraction-source humanization mappings
+// keep raw enum strings out of operator UX (Memo 19/42 affordance-
+// honesty). Events grouped by calendar date for readability.
+// ─────────────────────────────────────────────────────────────────────
+
+const ACTION_TYPE_LABELS: Record<string, string> = {
+  "vehicle.created": "Vehicle added to inventory",
+  "vehicle.updated": "Vehicle updated",
+  "vehicle.scraped": "Vehicle scraped from dealer site",
+  "vehicle.archived": "Vehicle archived",
+  "vehicle.sync_seen": "Confirmed in inventory sync",
+  "vehicle.sync_created": "Added via inventory sync",
+  "vehicle.sync_removed": "Marked removed (no longer in dealer feed)",
+};
+
+const EXTRACTION_SOURCE_LABELS: Record<string, string> = {
+  manual_import_4mkauto_kan_1219: "Initial bulk import",
+  manual_import_4mkauto_kan_1219_detail_backfill: "Photo / description backfill",
+  manual_import_4mkauto_kan_1219_lifecycle_backfill: "Lifecycle backfill",
+  manual_import_4mkauto_kan_1219_price_backfill: "Price backfill",
+  "github-actions-daily-cron": "Daily auto-sync (GitHub Actions)",
+  "operator-sync-now": "Manual sync (operator-triggered)",
+  "inventory-sync-api": "Inventory sync API",
+};
+
+function labelForActionType(type: string): string {
+  return ACTION_TYPE_LABELS[type] ?? humanize(type.replace(/^vehicle\./, ""));
+}
+
+function labelForExtractionSource(source: string | null): string | null {
+  if (!source) return null;
+  return EXTRACTION_SOURCE_LABELS[source] ?? source;
+}
+
+function ActivityTimeline({ vehicleId }: { vehicleId: string }) {
+  const { data, isLoading, isError } = useQuery<VehicleActivityEvent[]>({
+    queryKey: ["vehicles", "getActivityLog", vehicleId],
+    queryFn: () => vehiclesApi.getActivityLog(vehicleId),
+    enabled: vehicleId.length > 0,
+  });
+
+  if (isLoading) {
+    return (
+      <Section title="Activity">
+        <div className="text-sm text-muted-foreground">Loading activity…</div>
+      </Section>
+    );
+  }
+  if (isError) {
+    return (
+      <Section title="Activity">
+        <div className="text-sm text-destructive">Couldn&apos;t load activity log.</div>
+      </Section>
+    );
+  }
+  if (!data || data.length === 0) {
+    return (
+      <Section title="Activity">
+        <div className="text-sm text-muted-foreground">
+          No activity recorded yet.
+        </div>
+      </Section>
+    );
+  }
+
+  const grouped = groupByDate(data);
+  return (
+    <Section title="Activity">
+      <div className="space-y-5">
+        {grouped.map(({ dateLabel, events }) => (
+          <div key={dateLabel} className="space-y-2">
+            <div className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+              {dateLabel}
+            </div>
+            <ul className="space-y-2">
+              {events.map((e) => (
+                <li
+                  key={e.id}
+                  className="flex items-start gap-3 text-sm border rounded-md p-3"
+                >
+                  <div className="mt-0.5 shrink-0 text-muted-foreground">
+                    <Activity className="h-4 w-4" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="font-medium">
+                      {labelForActionType(e.actionType)}
+                    </div>
+                    <div className="text-xs text-muted-foreground tabular-nums">
+                      {formatAbsoluteWithTime(e.createdAt)}
+                    </div>
+                    {labelForExtractionSource(e.extractionSource) && (
+                      <div className="text-xs text-muted-foreground mt-0.5">
+                        Source: {labelForExtractionSource(e.extractionSource)}
+                      </div>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
+      </div>
+    </Section>
+  );
+}
+
+function groupByDate(
+  events: VehicleActivityEvent[],
+): Array<{ dateLabel: string; events: VehicleActivityEvent[] }> {
+  const buckets = new Map<string, VehicleActivityEvent[]>();
+  for (const e of events) {
+    const key = new Date(e.createdAt).toISOString().slice(0, 10);
+    const list = buckets.get(key) ?? [];
+    list.push(e);
+    buckets.set(key, list);
+  }
+  return Array.from(buckets.entries()).map(([key, evs]) => ({
+    dateLabel: formatDateGroupLabel(key),
+    events: evs,
+  }));
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Date formatters (kept inline — used only by Slice F3 surfaces)
+// ─────────────────────────────────────────────────────────────────────
+
+function formatAbsolute(iso: string): string {
+  return new Date(iso).toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+}
+
+function formatAbsoluteWithTime(iso: string): string {
+  return new Date(iso).toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function formatDateGroupLabel(isoDate: string): string {
+  const date = new Date(`${isoDate}T00:00:00`);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const dateAtMidnight = new Date(date);
+  dateAtMidnight.setHours(0, 0, 0, 0);
+  const diffDays = Math.round(
+    (today.getTime() - dateAtMidnight.getTime()) / 86_400_000,
+  );
+  if (diffDays === 0) return "Today";
+  if (diffDays === 1) return "Yesterday";
+  return date.toLocaleDateString(undefined, {
+    weekday: "long",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
+function formatRelative(iso: string): string {
+  const then = new Date(iso).getTime();
+  const now = Date.now();
+  const diffMs = now - then;
+  const diffMin = Math.round(diffMs / 60_000);
+  if (diffMin < 1) return "just now";
+  if (diffMin < 60) return `${diffMin} min ago`;
+  const diffHr = Math.round(diffMin / 60);
+  if (diffHr < 24) return `${diffHr} hour${diffHr === 1 ? "" : "s"} ago`;
+  const diffDay = Math.round(diffHr / 24);
+  if (diffDay < 30) return `${diffDay} day${diffDay === 1 ? "" : "s"} ago`;
+  const diffMo = Math.round(diffDay / 30);
+  if (diffMo < 12) return `${diffMo} month${diffMo === 1 ? "" : "s"} ago`;
+  const diffYr = Math.round(diffMo / 12);
+  return `${diffYr} year${diffYr === 1 ? "" : "s"} ago`;
 }
 
 // ─────────────────────────────────────────────────────────────────────

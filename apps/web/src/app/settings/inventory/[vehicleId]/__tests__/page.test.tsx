@@ -17,6 +17,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 const vehiclesGetMock = vi.fn();
 const vehiclesArchiveMock = vi.fn();
+const vehiclesGetActivityLogMock = vi.fn();
 
 vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
@@ -28,6 +29,9 @@ vi.mock("@/lib/api", async () => {
       create: vi.fn(),
       update: vi.fn(),
       archive: (id: string) => vehiclesArchiveMock(id),
+      // KAN-1219 Slice F3 — Activity timeline data source on detail page.
+      getActivityLog: (vehicleId: string) =>
+        vehiclesGetActivityLogMock(vehicleId),
     },
   };
 });
@@ -101,6 +105,8 @@ function renderPage() {
 beforeEach(() => {
   vehiclesGetMock.mockReset();
   vehiclesArchiveMock.mockReset();
+  vehiclesGetActivityLogMock.mockReset();
+  vehiclesGetActivityLogMock.mockResolvedValue([]);
   confirmSpy.mockClear();
   pushMock.mockClear();
 });
@@ -171,5 +177,124 @@ describe("KAN-1219 Slice E — Vehicle detail page", () => {
     expect(confirmSpy).toHaveBeenCalled();
     await waitFor(() => expect(vehiclesArchiveMock).toHaveBeenCalledWith("veh-1"));
     await waitFor(() => expect(pushMock).toHaveBeenCalled());
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// KAN-1219 Slice F3 — Lifecycle dates + activity timeline
+// ─────────────────────────────────────────────────────────────────────
+
+describe("KAN-1219 Slice F3 — Lifecycle dates + activity timeline", () => {
+  it("Scenario F3-1 — Lifecycle section renders First seen + Last seen, hides Removed when null", async () => {
+    vehiclesGetMock.mockResolvedValue(fixtureVehicle());
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: /Lifecycle/i })).toBeInTheDocument(),
+    );
+    expect(screen.getByText(/First seen/i)).toBeInTheDocument();
+    expect(screen.getByText(/Last seen/i)).toBeInTheDocument();
+    expect(screen.queryByText(/^Removed$/i)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/no longer in the dealer/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("Scenario F3-2 — Removed vehicle shows Removed date + warning copy", async () => {
+    vehiclesGetMock.mockResolvedValue(
+      fixtureVehicle({ removedAt: "2026-06-21T13:00:00Z" }),
+    );
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByText(/^Removed$/i)).toBeInTheDocument(),
+    );
+    expect(
+      screen.getByText(/no longer in the dealer/i),
+    ).toBeInTheDocument();
+  });
+
+  it("Scenario F3-3 — Activity timeline renders events with humanized labels", async () => {
+    vehiclesGetMock.mockResolvedValue(fixtureVehicle());
+    vehiclesGetActivityLogMock.mockResolvedValue([
+      {
+        id: "audit-1",
+        actionType: "vehicle.sync_seen",
+        payload: { vehicleId: "veh-1", vin: "5N1AT2MVXLC790807" },
+        actor: "system",
+        createdAt: "2026-06-21T13:09:38Z",
+        extractionSource: "github-actions-daily-cron",
+      },
+      {
+        id: "audit-2",
+        actionType: "vehicle.created",
+        payload: { vehicleId: "veh-1" },
+        actor: "user-1",
+        createdAt: "2026-06-19T09:00:00Z",
+        extractionSource: "manual_import_4mkauto_kan_1219",
+      },
+    ]);
+    renderPage();
+    await waitFor(() =>
+      expect(
+        screen.getByText(/Confirmed in inventory sync/i),
+      ).toBeInTheDocument(),
+    );
+    expect(
+      screen.getByText(/Vehicle added to inventory/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Daily auto-sync \(GitHub Actions\)/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Initial bulk import/i),
+    ).toBeInTheDocument();
+  });
+
+  it("Scenario F3-4 — Activity timeline groups events by date", async () => {
+    vehiclesGetMock.mockResolvedValue(fixtureVehicle());
+    vehiclesGetActivityLogMock.mockResolvedValue([
+      {
+        id: "a",
+        actionType: "vehicle.sync_seen",
+        payload: { vehicleId: "veh-1" },
+        actor: "system",
+        createdAt: "2026-06-21T13:00:00Z",
+        extractionSource: "github-actions-daily-cron",
+      },
+      {
+        id: "b",
+        actionType: "vehicle.sync_seen",
+        payload: { vehicleId: "veh-1" },
+        actor: "system",
+        createdAt: "2026-06-20T13:00:00Z",
+        extractionSource: "github-actions-daily-cron",
+      },
+      {
+        id: "c",
+        actionType: "vehicle.created",
+        payload: { vehicleId: "veh-1" },
+        actor: "user-1",
+        createdAt: "2026-06-19T09:00:00Z",
+        extractionSource: "manual_import_4mkauto_kan_1219",
+      },
+    ]);
+    renderPage();
+    await waitFor(() => {
+      // 3 events → 3 group headers (one per day).
+      expect(
+        screen.getAllByText(/Confirmed in inventory sync|Vehicle added/i)
+          .length,
+      ).toBeGreaterThanOrEqual(3);
+    });
+  });
+
+  it("Scenario F3-5 — Activity timeline shows empty state when no events", async () => {
+    vehiclesGetMock.mockResolvedValue(fixtureVehicle());
+    vehiclesGetActivityLogMock.mockResolvedValue([]);
+    renderPage();
+    await waitFor(() =>
+      expect(
+        screen.getByText(/No activity recorded yet/i),
+      ).toBeInTheDocument(),
+    );
   });
 });

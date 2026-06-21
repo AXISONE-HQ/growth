@@ -9023,6 +9023,64 @@ const vehiclesRouter = router({
         errorSamples: result.errors.slice(0, 10),
       };
     }),
+
+  // KAN-1219 Slice F3 — Activity timeline for the vehicle detail page.
+  // Reads `audit_log` rows tagged with `payload.vehicleId = <id>`, scoped
+  // to the caller's tenant. Action types include operator-initiated
+  // (vehicle.created/updated/archived/scraped) AND sync-driven
+  // (vehicle.sync_seen/sync_created/sync_removed) families — humanized
+  // at the UI layer (apps/web/.../[vehicleId]/page.tsx). The composite
+  // index (tenant_id, created_at) already covers this query; the
+  // `payload->>'vehicleId'` filter runs at the row level after the
+  // index narrows by tenant.
+  getActivityLog: protectedProcedure
+    .input(
+      z.object({
+        vehicleId: z.string().uuid(),
+        limit: z.number().int().min(1).max(200).default(100),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      const rows = (await (ctx.prisma as unknown as {
+        $queryRaw: (
+          query: TemplateStringsArray | { sql: string },
+          ...values: unknown[]
+        ) => Promise<
+          Array<{
+            id: string;
+            action_type: string;
+            payload: Record<string, unknown>;
+            actor: string;
+            created_at: Date;
+          }>
+        >;
+      }).$queryRaw`
+        SELECT id, action_type, payload, actor, created_at
+          FROM audit_log
+         WHERE tenant_id = ${ctx.tenantId}
+           AND payload->>'vehicleId' = ${input.vehicleId}
+         ORDER BY created_at DESC
+         LIMIT ${input.limit}
+      `) as Array<{
+        id: string;
+        action_type: string;
+        payload: Record<string, unknown>;
+        actor: string;
+        created_at: Date;
+      }>;
+
+      return rows.map((r) => ({
+        id: r.id,
+        actionType: r.action_type,
+        payload: r.payload,
+        actor: r.actor,
+        createdAt: r.created_at,
+        extractionSource:
+          typeof r.payload?.extractionSource === "string"
+            ? r.payload.extractionSource
+            : null,
+      }));
+    }),
 });
 
 // KAN-1216c — ProductVariant CRUD router. Service layer at
