@@ -3156,6 +3156,10 @@ export interface VehicleListItem {
   features: string[];
   status: VehicleStatus;
   archivedAt: string | null;
+  // KAN-1219 Slice F1 — lifecycle tracking (feed-derived; read-only at UI).
+  firstSeenAt: string;
+  lastSeenAt: string;
+  removedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }

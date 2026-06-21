@@ -1,0 +1,57 @@
+-- KAN-1219 Slice F1 — Vehicle lifecycle columns (first_seen_at + last_seen_at + removed_at).
+--
+-- # Additive-only contract
+--
+-- Adds THREE columns to vehicles:
+--   - first_seen_at TIMESTAMP NOT NULL DEFAULT NOW()  (first sync observation)
+--   - last_seen_at  TIMESTAMP NOT NULL DEFAULT NOW()  (most recent sync observation)
+--   - removed_at    TIMESTAMP NULL                    (when VIN dropped from feed)
+--
+-- Rollback is clean: 3 × `ALTER TABLE vehicles DROP COLUMN …` reverses
+-- with zero application-layer data loss (post-rollback reads see no
+-- lifecycle data; reconcileInventory() falls back to existing created_at
+-- as a coarse approximation if needed).
+--
+-- # Zero-downtime profile
+--
+-- Postgres treats `ALTER TABLE … ADD COLUMN … DEFAULT NOW() NOT NULL`
+-- as a table-rewrite operation in PG < 12 (because NOW() is volatile per
+-- session). For PG 11+ with a stable default this would be metadata-only.
+-- On the 135-row vehicles table this rewrite is trivially fast (<1s);
+-- holds an AccessExclusiveLock briefly but the SELECT/UPDATE traffic on
+-- the table is operator-driven (low rate) so impact is negligible.
+--
+-- The HALT-2 backfill script then re-sets first_seen_at / last_seen_at to
+-- created_at for rows that pre-date the migration, so the "first seen"
+-- truth aligns with when the vehicle actually entered the inventory.
+--
+-- # Lifecycle semantics (Memo 53 audit-log namespace)
+--
+-- reconcileInventory() emits distinct audit_log action_types:
+--   - vehicle.sync_seen     — VIN observed in current sync; last_seen_at updated
+--   - vehicle.sync_created  — new VIN; row created with first_seen_at=last_seen_at=NOW()
+--   - vehicle.sync_removed  — previously-seen VIN absent from current sync; removed_at set
+-- Distinct from operator-initiated vehicle.created / vehicle.updated /
+-- vehicle.archived. Forensic queries can distinguish feed-driven from
+-- operator-driven state changes.
+--
+-- # Distinct from archivedAt
+--
+-- archived_at is operator-initiated soft-delete (Memo 19/42 affordance-
+-- honesty — operator chose to archive). removed_at is feed-derived (the
+-- vehicle disappeared from the dealer's published JSON; could be sold,
+-- delisted, or feed glitch). Both can coexist; queries SHOULD use
+-- removedAt IS NULL AND archivedAt IS NULL for "currently-listed
+-- inventory" semantics.
+--
+-- # Migration discipline (KAN-1080 + KAN-1212 + KAN-1219 Slice A/D precedent)
+--
+-- Hand-authored SQL since local dev DB is unavailable; CI deploy-api
+-- workflow runs `npx prisma migrate deploy` on first post-merge deploy.
+-- Shape mirrors KAN-1219 Slice D detail-columns migration at
+-- packages/db/prisma/migrations/20260619140000_kan_1219_vehicle_detail_columns/migration.sql.
+
+-- AddColumn
+ALTER TABLE "vehicles" ADD COLUMN "first_seen_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP;
+ALTER TABLE "vehicles" ADD COLUMN "last_seen_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP;
+ALTER TABLE "vehicles" ADD COLUMN "removed_at" TIMESTAMP(3);

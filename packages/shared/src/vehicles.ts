@@ -131,6 +131,11 @@ export const VehicleSchema = VehicleCreateInputSchema.extend({
   id: z.string().uuid(),
   tenantId: z.string(),
   archivedAt: z.date().nullable(),
+  // KAN-1219 Slice F1 — lifecycle tracking. Set by reconcileInventory().
+  // Read-only at the API boundary (no operator mutation; feed-derived).
+  firstSeenAt: z.date(),
+  lastSeenAt: z.date(),
+  removedAt: z.date().nullable(),
   createdAt: z.date(),
   updatedAt: z.date(),
 });
