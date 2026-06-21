@@ -527,3 +527,297 @@ export async function listVehicles(
 
   return { items: slice, nextCursor, totalCount };
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// KAN-1219 Slice F1 — reconcileInventory
+// ─────────────────────────────────────────────────────────────────────
+//
+// Reconciles a tenant's inventory against a fresh dealer-feed snapshot.
+// Called by the GitHub Actions daily cron (KAN-1219 Slice F2) and the
+// manual Sync Now button. Pure service function — Prisma + audit hooks
+// only; no Pub/Sub, no HTTP.
+//
+// Semantics:
+//   - For each entry in the snapshot keyed by VIN (entries without VIN
+//     are skipped at this stage — Memo 45 NULL semantics; manual import
+//     path handles VIN-null cases separately):
+//       * VIN exists, archived=false, removedAt IS NULL → UPDATE
+//         lastSeenAt = NOW(); refresh feed-derived fields; audit
+//         vehicle.sync_seen.
+//       * VIN does not exist → INSERT with firstSeenAt = lastSeenAt =
+//         NOW(); audit vehicle.sync_created.
+//       * VIN exists but archived=true → SKIP (operator chose to archive;
+//         do not resurrect via feed).
+//       * VIN exists with removedAt non-null → SKIP (vehicle was
+//         previously removed; do not bring back automatically — operator
+//         decides via UI in Slice F3).
+//   - For each pre-existing vehicle (archived=false, removedAt IS NULL)
+//     whose VIN is NOT in the snapshot → SET removedAt = NOW(); audit
+//     vehicle.sync_removed.
+//
+// Idempotent: calling reconcileInventory twice with the same snapshot
+// produces 0 creates, 0 removes; lastSeenAt advances on each call.
+//
+// Per-row tx so a single bad row doesn't roll back the whole sync.
+// Returns counts + error samples.
+
+export interface ReconcileVehicleEntry {
+  vin: string;
+  year: number;
+  make: string;
+  model: string;
+  trim?: string | null;
+  mileage?: number | null;
+  bodyStyle: BodyStyle;
+  transmission: Transmission;
+  fuelType: FuelType;
+  drivetrain: Drivetrain;
+  condition: VehicleCondition;
+  exteriorColor?: string | null;
+  interiorColor?: string | null;
+  stockNumber?: string | null;
+  dealerLot?: string | null;
+  price?: number | null;
+  photoUrls?: string[];
+  description?: string | null;
+  features?: string[];
+}
+
+export interface ReconcileError {
+  vin: string;
+  phase: "seen" | "created" | "removed";
+  message: string;
+}
+
+export interface ReconcileResult {
+  seenCount: number;
+  createdCount: number;
+  updatedCount: number;
+  removedCount: number;
+  unchangedCount: number;
+  errors: ReconcileError[];
+}
+
+interface ReconcileExistingRow {
+  id: string;
+  vin: string;
+  archivedAt: Date | null;
+  removedAt: Date | null;
+  year: number;
+  make: string;
+  model: string;
+  trim: string | null;
+  mileage: number | null;
+  bodyStyle: BodyStyle;
+  transmission: Transmission;
+  fuelType: FuelType;
+  drivetrain: Drivetrain;
+  condition: VehicleCondition;
+  exteriorColor: string | null;
+  interiorColor: string | null;
+  stockNumber: string | null;
+  dealerLot: string | null;
+  price: { toNumber: () => number } | null;
+  photoUrls: string[];
+  description: string | null;
+  features: string[];
+}
+
+interface ReconcileVehiclePrisma extends VehiclePrisma {
+  vehicle: VehiclePrisma["vehicle"] & {
+    findMany: (args: unknown) => Promise<unknown>;
+  };
+}
+
+function hasFieldChanged<T>(a: T, b: T): boolean {
+  if (Array.isArray(a) && Array.isArray(b)) {
+    if (a.length !== b.length) return true;
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return true;
+    return false;
+  }
+  return a !== b;
+}
+
+export async function reconcileInventory(
+  prisma: ReconcileVehiclePrisma,
+  tenantId: string,
+  entries: ReconcileVehicleEntry[],
+  source: string,
+  hooks: VehicleServiceHooks,
+): Promise<ReconcileResult> {
+  const result: ReconcileResult = {
+    seenCount: 0,
+    createdCount: 0,
+    updatedCount: 0,
+    removedCount: 0,
+    unchangedCount: 0,
+    errors: [],
+  };
+
+  const byVin = new Map<string, ReconcileVehicleEntry>();
+  for (const e of entries) {
+    if (typeof e.vin !== "string" || e.vin.length !== 17) continue;
+    byVin.set(e.vin.toUpperCase(), e);
+  }
+  const feedVins = [...byVin.keys()];
+
+  // Load all matching + all candidate-for-removal rows in one round-trip.
+  const existing = (await prisma.vehicle.findMany({
+    where: { tenantId },
+    select: {
+      id: true, vin: true, archivedAt: true, removedAt: true,
+      year: true, make: true, model: true, trim: true, mileage: true,
+      bodyStyle: true, transmission: true, fuelType: true, drivetrain: true,
+      condition: true, exteriorColor: true, interiorColor: true,
+      stockNumber: true, dealerLot: true, price: true,
+      photoUrls: true, description: true, features: true,
+    },
+  })) as ReconcileExistingRow[];
+
+  const existingByVin = new Map<string, ReconcileExistingRow>();
+  for (const row of existing) {
+    if (row.vin) existingByVin.set(row.vin.toUpperCase(), row);
+  }
+
+  // Pass 1 — seen / created.
+  for (const vin of feedVins) {
+    const entry = byVin.get(vin)!;
+    const row = existingByVin.get(vin);
+    try {
+      if (row) {
+        // Archived / removed VINs are skipped (don't resurrect).
+        if (row.archivedAt != null || row.removedAt != null) {
+          continue;
+        }
+        // UPDATE — refresh lastSeenAt + any changed field.
+        await prisma.$transaction(async (tx) => {
+          const update: Record<string, unknown> = { lastSeenAt: new Date() };
+          if (hasFieldChanged(row.year, entry.year)) update.year = entry.year;
+          if (hasFieldChanged(row.make, entry.make)) update.make = entry.make;
+          if (hasFieldChanged(row.model, entry.model)) update.model = entry.model;
+          if (entry.trim !== undefined && hasFieldChanged(row.trim, entry.trim ?? null)) update.trim = entry.trim ?? null;
+          if (entry.mileage !== undefined && hasFieldChanged(row.mileage, entry.mileage ?? null)) update.mileage = entry.mileage ?? null;
+          if (hasFieldChanged(row.bodyStyle, entry.bodyStyle)) update.bodyStyle = entry.bodyStyle;
+          if (hasFieldChanged(row.transmission, entry.transmission)) update.transmission = entry.transmission;
+          if (hasFieldChanged(row.fuelType, entry.fuelType)) update.fuelType = entry.fuelType;
+          if (hasFieldChanged(row.drivetrain, entry.drivetrain)) update.drivetrain = entry.drivetrain;
+          if (hasFieldChanged(row.condition, entry.condition)) update.condition = entry.condition;
+          if (entry.exteriorColor !== undefined && hasFieldChanged(row.exteriorColor, entry.exteriorColor ?? null)) update.exteriorColor = entry.exteriorColor ?? null;
+          if (entry.interiorColor !== undefined && hasFieldChanged(row.interiorColor, entry.interiorColor ?? null)) update.interiorColor = entry.interiorColor ?? null;
+          if (entry.stockNumber !== undefined && hasFieldChanged(row.stockNumber, entry.stockNumber ?? null)) update.stockNumber = entry.stockNumber ?? null;
+          if (entry.dealerLot !== undefined && hasFieldChanged(row.dealerLot, entry.dealerLot ?? null)) update.dealerLot = entry.dealerLot ?? null;
+          if (entry.price !== undefined) {
+            const rowPrice = row.price ? row.price.toNumber() : null;
+            if (hasFieldChanged(rowPrice, entry.price ?? null)) update.price = entry.price ?? null;
+          }
+          if (entry.photoUrls !== undefined && hasFieldChanged(row.photoUrls, entry.photoUrls)) update.photoUrls = entry.photoUrls;
+          if (entry.description !== undefined && hasFieldChanged(row.description, entry.description ?? null)) update.description = entry.description ?? null;
+          if (entry.features !== undefined && hasFieldChanged(row.features, entry.features)) update.features = entry.features;
+
+          const changedKeys = Object.keys(update).filter((k) => k !== "lastSeenAt");
+          await tx.vehicle.update({ where: { id: row.id }, data: update });
+          await hooks.auditLog.writeInTx(tx, {
+            tenantId,
+            actor: source,
+            actionType: "vehicle.sync_seen",
+            payload: {
+              vehicleId: row.id,
+              vin,
+              fieldsChanged: changedKeys,
+              extractionSource: source,
+            },
+            reasoning: `reconcileInventory sync_seen — ${vin} (${changedKeys.length} field(s) updated; source=${source})`,
+          });
+          result.seenCount++;
+          if (changedKeys.length > 0) result.updatedCount++;
+          else result.unchangedCount++;
+        });
+      } else {
+        // CREATE — new VIN; insert with firstSeenAt = lastSeenAt = NOW().
+        await prisma.$transaction(async (tx) => {
+          const created = (await tx.vehicle.create({
+            data: {
+              tenantId,
+              year: entry.year,
+              make: entry.make,
+              model: entry.model,
+              trim: entry.trim ?? null,
+              vin,
+              mileage: entry.mileage ?? null,
+              bodyStyle: entry.bodyStyle,
+              transmission: entry.transmission,
+              fuelType: entry.fuelType,
+              drivetrain: entry.drivetrain,
+              condition: entry.condition,
+              exteriorColor: entry.exteriorColor ?? null,
+              interiorColor: entry.interiorColor ?? null,
+              stockNumber: entry.stockNumber ?? null,
+              dealerLot: entry.dealerLot ?? null,
+              price: entry.price ?? null,
+              photoUrls: entry.photoUrls ?? [],
+              description: entry.description ?? null,
+              features: entry.features ?? [],
+              status: "active",
+            },
+          })) as { id: string };
+          await hooks.auditLog.writeInTx(tx, {
+            tenantId,
+            actor: source,
+            actionType: "vehicle.sync_created",
+            payload: {
+              vehicleId: created.id,
+              vin,
+              extractionSource: source,
+            },
+            reasoning: `reconcileInventory sync_created — new VIN ${vin} (${entry.year} ${entry.make} ${entry.model}; source=${source})`,
+          });
+          result.createdCount++;
+        });
+      }
+    } catch (err) {
+      result.errors.push({
+        vin,
+        phase: row ? "seen" : "created",
+        message: (err instanceof Error ? err.message : String(err)).slice(0, 240),
+      });
+    }
+  }
+
+  // Pass 2 — removed. Vehicles previously visible (archived=false,
+  // removedAt=null) whose VIN is NOT in the current feed.
+  const feedVinSet = new Set(feedVins);
+  for (const row of existing) {
+    if (!row.vin) continue;
+    if (row.archivedAt != null) continue;
+    if (row.removedAt != null) continue;
+    if (feedVinSet.has(row.vin.toUpperCase())) continue;
+    try {
+      await prisma.$transaction(async (tx) => {
+        await tx.vehicle.update({
+          where: { id: row.id },
+          data: { removedAt: new Date() },
+        });
+        await hooks.auditLog.writeInTx(tx, {
+          tenantId,
+          actor: source,
+          actionType: "vehicle.sync_removed",
+          payload: {
+            vehicleId: row.id,
+            vin: row.vin,
+            extractionSource: source,
+          },
+          reasoning: `reconcileInventory sync_removed — VIN ${row.vin} absent from current feed (source=${source})`,
+        });
+        result.removedCount++;
+      });
+    } catch (err) {
+      result.errors.push({
+        vin: row.vin,
+        phase: "removed",
+        message: (err instanceof Error ? err.message : String(err)).slice(0, 240),
+      });
+    }
+  }
+
+  return result;
+}

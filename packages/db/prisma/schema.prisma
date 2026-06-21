@@ -3952,6 +3952,31 @@ model ProductCategory {
 /// "rear_camera" — UI humanizes at render time). description is free-form
 /// markdown-ish text with multi-language tolerance (UTF-8 native, Memo 39
 /// affordance-honesty — operator writes in their language).
+///
+/// # KAN-1219 Slice F1 — lifecycle tracking
+///
+/// `firstSeenAt`, `lastSeenAt`, `removedAt` capture the dealer-feed
+/// observation history per VIN. Set by `reconcileInventory()` whenever a
+/// JSON sync runs (GitHub Actions daily cron, manual Sync Now, or the
+/// CC-bridged import path). Semantics:
+///   - `firstSeenAt` — first sync that observed this VIN. NEVER updated
+///     after first sighting; preserves the "we first saw it on this date"
+///     truth across re-runs.
+///   - `lastSeenAt` — most recent sync that observed this VIN. Updated
+///     every reconcile run while the VIN is present in the feed.
+///   - `removedAt` — set when a previously-seen VIN drops out of the
+///     feed (vehicle disappeared without operator-initiated archive).
+///     Once set, NOT re-set on subsequent reconcile runs (a vehicle that
+///     reappears later does not transition back to "active" automatically;
+///     operator decides via UI).
+///
+/// Distinct from `archivedAt` — that's operator-initiated soft-delete;
+/// lifecycle dates are feed-derived. Both can coexist (an archived vehicle
+/// may also be removed from the feed; both timestamps remain queryable).
+///
+/// Audit log namespace (Memo 53): vehicle.sync_seen / vehicle.sync_created
+/// / vehicle.sync_removed action_types — distinct family from operator-
+/// initiated vehicle.created / vehicle.updated / vehicle.archived.
 model Vehicle {
   id            String           @id @default(uuid())
   tenantId      String           @map("tenant_id")
@@ -3976,6 +4001,16 @@ model Vehicle {
   features      String[]         @default([])
   status        VehicleStatus    @default(draft)
   archivedAt    DateTime?        @map("archived_at")
+  // KAN-1219 Slice F1 — lifecycle tracking. Updated by reconcileInventory()
+  // each time the dealer JSON sync runs. firstSeenAt is the first sync that
+  // observed this VIN; lastSeenAt is the most recent sync; removedAt is
+  // set when a VIN drops out of the dealer feed (vehicle disappeared without
+  // operator-initiated archive). Distinct from `archivedAt` — operator-
+  // initiated soft-delete; lifecycle is feed-derived. See model header
+  // doctrine block for reconcile semantics.
+  firstSeenAt   DateTime         @default(now()) @map("first_seen_at")
+  lastSeenAt    DateTime         @default(now()) @map("last_seen_at")
+  removedAt     DateTime?        @map("removed_at")
   createdAt     DateTime         @default(now()) @map("created_at")
   updatedAt     DateTime         @updatedAt @map("updated_at")
 
