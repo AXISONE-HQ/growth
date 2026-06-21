@@ -36,6 +36,7 @@ import {
   Trash2,
   Pencil,
   Globe,
+  RefreshCw,
   X,
   Search,
   SlidersHorizontal,
@@ -661,6 +662,16 @@ function VehiclesTab() {
           )}
         </div>
         <div className="flex items-center gap-2">
+          {/* KAN-1219 Slice F2 — Manual dealer-feed sync. Operator fallback
+              for when the daily GH Actions cron is broken OR for empirical
+              probing of whether Cloud Run egress can reach the dealer feed
+              (4mkauto CAPTCHA-blocks the Cloud Run IP range; the daily
+              cron uses a GH-hosted runner IP). Failure surfaces a
+              "wait-for-the-cron" message to keep operator-affordance
+              honesty (Memo 19/42). Distinct from "Scrape inventory" which
+              crawls the HTML listing — this one consumes the dealer JSON
+              feed and writes lifecycle columns. */}
+          <SyncNowButton />
           {/* KAN-1219 (Slice 5 of KAN-1211 epic) — Full-inventory crawler
               trigger. Replaces the Slice-3 affordance-honesty placeholder
               (was disabled with "Available after KAN-1216 Slice 4 merge"
@@ -1024,6 +1035,55 @@ function VehiclesTab() {
         />
       )}
     </div>
+  );
+}
+
+/* ── SyncNowButton — KAN-1219 Slice F2 ───────────────────────────────── */
+
+function SyncNowButton() {
+  const [busy, setBusy] = useState(false);
+  const onClick = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const result = await vehiclesApi.triggerManualSync();
+      const moved =
+        result.createdCount + result.updatedCount + result.removedCount;
+      if (moved === 0 && result.parsedEntries > 0) {
+        toast.success(
+          `Inventory in sync (${result.unchangedCount} unchanged, ${result.skippedEntries} skipped)`,
+        );
+      } else {
+        toast.success(
+          `Synced: ${result.createdCount} new · ${result.updatedCount} updated · ${result.removedCount} removed`,
+        );
+      }
+      // Refetch list — query keys are cache-managed elsewhere; manual
+      // refresh via location.reload is intentional KISS until the slice
+      // closes (operator-empirical signal: did the new rows appear?).
+      window.setTimeout(() => window.location.reload(), 800);
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Manual sync failed";
+      toast.error(message, { duration: 8000 });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Button
+      variant="outline"
+      size="sm"
+      onClick={onClick}
+      disabled={busy}
+      title="Re-fetch the dealer JSON feed and reconcile inventory now"
+      aria-label="Sync now"
+    >
+      <RefreshCw
+        className={`h-4 w-4 ${busy ? "animate-spin" : ""}`}
+      />
+      {busy ? "Syncing…" : "Sync now"}
+    </Button>
   );
 }
 

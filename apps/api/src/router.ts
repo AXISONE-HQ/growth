@@ -366,6 +366,7 @@ import {
   buildPlaybookStepContext,
 } from "../../../packages/api/src/services/wedge-playbooks.js";
 import { runDecisionForContact } from "../../../packages/api/src/services/run-decision-for-contact.js";
+import { mapDrivegoodEntry } from "./lib/drivegood-mapper.js";
 
 // ============================================================================
 // CONTACTS ROUTER
@@ -7365,6 +7366,23 @@ interface VehicleServiceModule {
     },
     pagination: { cursor?: string; limit?: number },
   ) => Promise<{ items: unknown[]; nextCursor: string | null; totalCount: number }>;
+  // KAN-1219 Slice F2 — manual sync invokes the same reconcileInventory
+  // service the GH Actions cron / HTTP route does. In-process call from
+  // tRPC (operator already authenticated via Firebase JWT — no API key).
+  reconcileInventory: (
+    prisma: unknown,
+    tenantId: string,
+    entries: Array<Record<string, unknown>>,
+    source: string,
+    hooks: unknown,
+  ) => Promise<{
+    seenCount: number;
+    createdCount: number;
+    updatedCount: number;
+    removedCount: number;
+    unchangedCount: number;
+    errors: Array<{ vin: string; phase: string; message: string }>;
+  }>;
   VehicleNotFoundError: new () => Error;
   ArchivedVehicleMutationError: new () => Error;
   VinAlreadyExistsError: new (tenantId: string, vin: string) => Error;
@@ -8924,6 +8942,86 @@ const vehiclesRouter = router({
         input.id,
         input.reason,
       );
+    }),
+
+  // KAN-1219 Slice F2 — Sync Now button on /settings/inventory. In-process
+  // call to the same reconcileInventory() service the GH Actions cron / HTTP
+  // route invoke. Operator is already Firebase-authenticated, so no API key
+  // is required at this entry point. Fetches the dealer feed directly from
+  // the Cloud Run egress IP — this WILL fail with 403/CAPTCHA against
+  // 4mkauto, which is the empirical signal that surfaces to the operator
+  // ("wait for the daily cron at 9am UTC" — GitHub Actions egress is the
+  // current proxy of last resort). When a 2nd dealer feed lands without
+  // CAPTCHA, Sync Now becomes the primary path; for now it is the fallback
+  // affordance the spec calls for. Memo 54 empirical-priority — keep
+  // dealer-URL hardcoded until generalization is forced.
+  triggerManualSync: protectedProcedure
+    .input(z.object({}).optional())
+    .mutation(async ({ ctx }) => {
+      const FEED_URL = "https://4mkauto.com/wp-json/cars/v1/all";
+      let rawEntries: Record<string, unknown>[];
+      try {
+        const res = await fetch(FEED_URL, {
+          headers: {
+            "User-Agent":
+              "AxisOne-Inventory-Sync/1.0 (+https://axisone.io)",
+          },
+          signal: AbortSignal.timeout(60_000),
+        });
+        if (!res.ok) {
+          throw new TRPCError({
+            code: "BAD_GATEWAY",
+            message: `Dealer feed returned ${res.status} ${res.statusText}. The 4mkauto host CAPTCHA-blocks our Cloud Run egress; wait for the daily 9 AM UTC GitHub Actions cron, which uses a different IP range.`,
+          });
+        }
+        const payload = (await res.json()) as unknown;
+        if (!Array.isArray(payload)) {
+          throw new TRPCError({
+            code: "BAD_GATEWAY",
+            message: "Dealer feed returned non-array payload",
+          });
+        }
+        rawEntries = payload as Record<string, unknown>[];
+      } catch (err) {
+        if (err instanceof TRPCError) throw err;
+        throw new TRPCError({
+          code: "BAD_GATEWAY",
+          message: `Failed to fetch dealer feed (likely CAPTCHA-blocked from Cloud Run): ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        });
+      }
+
+      // Map raw JSON → ReconcileVehicleEntry[]. Entries with missing VIN
+      // or required enum slots are silently dropped.
+      const entries: Record<string, unknown>[] = [];
+      let skippedCount = 0;
+      for (const raw of rawEntries) {
+        const e = mapDrivegoodEntry(raw);
+        if (e) entries.push(e as unknown as Record<string, unknown>);
+        else skippedCount++;
+      }
+
+      const svc = await loadVehicleServiceModule();
+      const result = await svc.reconcileInventory(
+        ctx.prisma,
+        ctx.tenantId,
+        entries,
+        "operator-sync-now",
+        buildVehicleHooks(),
+      );
+
+      return {
+        sourceEntries: rawEntries.length,
+        parsedEntries: entries.length,
+        skippedEntries: skippedCount,
+        seenCount: result.seenCount,
+        createdCount: result.createdCount,
+        updatedCount: result.updatedCount,
+        removedCount: result.removedCount,
+        unchangedCount: result.unchangedCount,
+        errorSamples: result.errors.slice(0, 10),
+      };
     }),
 });
 

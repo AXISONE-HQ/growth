@@ -1,0 +1,112 @@
+# KAN-1219 Slice F2 — Daily dealer-feed sync via GitHub-hosted runner.
+#
+# WHY GITHUB ACTIONS (not Cloud Scheduler → Cloud Run)
+#
+# The dealer feed at 4mkauto is CAPTCHA-gated against our Cloud Run egress
+# IP range. GitHub-hosted runners use a different IP range (Microsoft Azure
+# DC); empirically untested but worth the first cron firing as an
+# empirical signal of whether GitHub IPs are also CAPTCHA-blocked.
+#
+# If GitHub-Actions IPs ALSO get CAPTCHA-blocked: fall back to a 3rd-party
+# residential proxy (Bright Data, etc.) or operator-initiated manual
+# fetch (Sync Now button, copy-paste paste-fallback). Memo 54 — empirical
+# before architectural; first failure mode tells us the next move.
+#
+# WIRE SHAPE
+#
+#   1. curl GET https://4mkauto.com/wp-json/cars/v1/all  → JSON array
+#   2. curl POST https://growth-api-…/api/v1/inventory/reconcile
+#      with X-AxisOne-API-Key header + { entries: [...], source: "..." } body
+#   3. Surface response counts in workflow log + Slack notification
+#      (Slack TODO — Memo 54 keep it minimal until first failure)
+#
+# SECRETS REQUIRED
+#
+#   INVENTORY_SYNC_KEY_4MKAUTO  — TenantApiKey rawKey for the 4mkauto tenant
+#   INVENTORY_SYNC_API_BASE     — https://growth-api-… (Cloud Run URL)
+#
+# OPERATOR FALLBACK
+#
+# A "Sync Now" button on /settings/inventory (Slice F2) triggers the same
+# reconcile path in-process via tRPC — useful for when GH cron is broken
+# AND the operator has the dealer JSON in hand (paste-fallback path).
+name: Inventory Sync (Daily Dealer Feed)
+
+on:
+  schedule:
+    # 09:00 UTC = 05:00 ET (dealer-side feed regenerated overnight; pick a
+    # time after they finish + before North-American business hours start).
+    - cron: '0 9 * * *'
+  workflow_dispatch:
+    # Allow operator-initiated runs from the GH Actions UI as a fallback
+    # for the in-app Sync Now button when the API is down.
+
+concurrency:
+  group: inventory-sync-4mkauto
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Reconcile 4mkauto dealer feed
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Fetch dealer JSON
+        id: fetch
+        run: |
+          set -euo pipefail
+          # -f → fail on HTTP errors; --max-time → bound on hanging fetches;
+          # User-Agent header → some CAPTCHAs allow named bots through.
+          curl -fSs \
+            --max-time 60 \
+            -H "User-Agent: AxisOne-Inventory-Sync/1.0 (+https://axisone.io)" \
+            "https://4mkauto.com/wp-json/cars/v1/all" \
+            -o /tmp/dealer-feed.json
+          echo "Fetched $(jq 'length' /tmp/dealer-feed.json) entries"
+
+      - name: Build reconcile payload
+        id: payload
+        run: |
+          set -euo pipefail
+          jq -n \
+            --slurpfile entries /tmp/dealer-feed.json \
+            '{ entries: $entries[0], source: "github-actions-daily-cron" }' \
+            > /tmp/reconcile-payload.json
+
+      - name: POST /api/v1/inventory/reconcile
+        id: reconcile
+        env:
+          API_BASE: ${{ secrets.INVENTORY_SYNC_API_BASE }}
+          API_KEY: ${{ secrets.INVENTORY_SYNC_KEY_4MKAUTO }}
+        run: |
+          set -euo pipefail
+          # POST with the X-AxisOne-API-Key header; capture body for log.
+          HTTP_CODE=$(curl -sS \
+            -o /tmp/reconcile-response.json \
+            -w "%{http_code}" \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -H "X-AxisOne-API-Key: ${API_KEY}" \
+            --data-binary @/tmp/reconcile-payload.json \
+            "${API_BASE}/api/v1/inventory/reconcile")
+
+          echo "HTTP ${HTTP_CODE}"
+          cat /tmp/reconcile-response.json
+          echo ""
+
+          if [ "${HTTP_CODE}" != "200" ]; then
+            echo "::error::reconcile returned non-200: ${HTTP_CODE}"
+            exit 1
+          fi
+
+          # Surface the counts for operator-facing log scan.
+          jq -r '
+            "sourceEntries=\(.sourceEntries)",
+            "parsedEntries=\(.parsedEntries)",
+            "skippedEntries=\(.skippedEntries)",
+            "seenCount=\(.seenCount)",
+            "createdCount=\(.createdCount)",
+            "updatedCount=\(.updatedCount)",
+            "removedCount=\(.removedCount)",
+            "unchangedCount=\(.unchangedCount)"
+          ' /tmp/reconcile-response.json
