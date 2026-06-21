@@ -3219,6 +3219,23 @@ export const vehiclesApi = {
       'vehicles.cancelCrawl',
       { id, reason },
     ),
+
+  // KAN-1219 Slice F2 — Sync Now button on /settings/inventory.
+  // In-process reconcile against the dealer JSON feed. Likely to fail
+  // from Cloud Run egress (CAPTCHA) — error message tells the operator
+  // to wait for the daily GH Actions cron.
+  triggerManualSync: () =>
+    trpcMutation<{
+      sourceEntries: number;
+      parsedEntries: number;
+      skippedEntries: number;
+      seenCount: number;
+      createdCount: number;
+      updatedCount: number;
+      removedCount: number;
+      unchangedCount: number;
+      errorSamples: Array<{ vin: string; phase: string; message: string }>;
+    }>('vehicles.triggerManualSync', {}),
 };
 
 // KAN-1219 — CrawlJob record shape mirrored from packages/api

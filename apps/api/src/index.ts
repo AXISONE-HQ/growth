@@ -53,6 +53,7 @@ import { decisionRunDlqApp } from "./subscribers/decision-run-dlq.js";
 // inventory-crawler worker loop (runCrawlJob).
 import { vehicleCrawlPushApp } from "./subscribers/vehicle-crawl-push.js";
 import { leadApiApp } from "./routes/lead-api.js";
+import { inventorySyncApp } from "./routes/inventory-sync.js";
 import { knowledgeSourcesApp } from "./routes/knowledge-sources.js";
 import { faqEntriesApp } from "./routes/faq-entries.js";
 import { servicesApp } from "./routes/services.js";
@@ -189,6 +190,17 @@ app.route("/api", accountDetectEventsSseApp);
 // ============================================================================
 
 app.route("/api/v1/leads", leadApiApp);
+
+// ============================================================================
+// INVENTORY RECONCILE API (KAN-1219 Slice F2) — API-key authenticated daily sync
+// ============================================================================
+// GitHub Actions cron (`.github/workflows/inventory-sync-daily.yml`) fetches
+// the dealer JSON from a GH-hosted runner IP (4mkauto CAPTCHA-blocks Cloud Run
+// egress; GH IPs may pass) and POSTs to /api/v1/inventory/reconcile. Inline
+// drivegood-JSON mapper + reconcileInventory() from Slice F1. Operator UI
+// also calls this via the "Sync Now" button on /settings/inventory.
+
+app.route("/api/v1/inventory", inventorySyncApp);
 
 // ============================================================================
 // KNOWLEDGE INGESTION INTAKE (KAN-827) — Firebase JWT + tenant scope
