@@ -3236,7 +3236,26 @@ export const vehiclesApi = {
       unchangedCount: number;
       errorSamples: Array<{ vin: string; phase: string; message: string }>;
     }>('vehicles.triggerManualSync', {}),
+
+  // KAN-1219 Slice F3 — Activity timeline feed for vehicle detail page.
+  // Returns audit_log rows tagged with this vehicleId in reverse chronological
+  // order. Humanization (action_type → English label, extractionSource →
+  // provenance label) lives at the UI layer.
+  getActivityLog: (vehicleId: string, limit = 100) =>
+    trpcQuery<VehicleActivityEvent[]>('vehicles.getActivityLog', {
+      vehicleId,
+      limit,
+    }),
 };
+
+export interface VehicleActivityEvent {
+  id: string;
+  actionType: string;
+  payload: Record<string, unknown>;
+  actor: string;
+  createdAt: string;
+  extractionSource: string | null;
+}
 
 // KAN-1219 — CrawlJob record shape mirrored from packages/api
 // inventory-crawler.ts (CrawlJobRecord interface).
