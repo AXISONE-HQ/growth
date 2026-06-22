@@ -8701,6 +8701,50 @@ const productsRouter = router({
         buildProductHooks(),
       );
     }),
+
+  // KAN-1219 Slice G2 — campaign target search. Mirror of
+  // vehicles.searchForCampaignTarget for the Product entity branch.
+  // Tenant-scoped; archived products excluded. Returns the same
+  // { entities, totalCount, filterSpec } shape so TargetEntityPanel
+  // can render uniformly regardless of entityType.
+  searchForCampaignTarget: protectedProcedure
+    .input(
+      z.object({
+        searchText: z.string().min(1).max(120).optional(),
+        priceMin: z.number().nonnegative().optional(),
+        priceMax: z.number().nonnegative().optional(),
+        limit: z.number().int().min(1).max(200).default(50),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      const where: Record<string, unknown> = {
+        tenantId: ctx.tenantId,
+        archivedAt: null,
+      };
+      if (input.searchText) {
+        where.OR = [
+          { name: { contains: input.searchText, mode: "insensitive" } },
+          { sku: { contains: input.searchText, mode: "insensitive" } },
+        ];
+      }
+      if (input.priceMin !== undefined || input.priceMax !== undefined) {
+        const priceWhere: Record<string, unknown> = {};
+        if (input.priceMin !== undefined) priceWhere.gte = input.priceMin;
+        if (input.priceMax !== undefined) priceWhere.lte = input.priceMax;
+        where.price = priceWhere;
+      }
+      const products = (await (ctx.prisma as any).product.findMany({
+        where,
+        orderBy: { createdAt: "desc" },
+        take: input.limit,
+      })) as Array<Record<string, unknown>>;
+      const totalCount = (await (ctx.prisma as any).product.count({ where })) as number;
+      return {
+        entities: products,
+        totalCount,
+        filterSpec: input,
+      };
+    }),
 });
 
 // KAN-1214 — Vehicle CRUD router. Service layer at
@@ -9080,6 +9124,61 @@ const vehiclesRouter = router({
             ? r.payload.extractionSource
             : null,
       }));
+    }),
+
+  // KAN-1219 Slice G2 — campaign target search. Used by the operator's
+  // confirmation panel (TargetEntityPanel) when a Campaign targets
+  // Vehicles. Tenant-scoped; same filter shape as listVehicles (Slice B)
+  // but returns a leaner Vehicle shape + totalCount so the panel can
+  // render "Selected: N / matching: M" affordances.
+  //
+  // Memo 39 codebase-precedent — mirrors the listVehicles filter surface
+  // exactly so the LLM-proposed VehicleDimensionValue (Slice G1 extract
+  // service) maps 1:1 into this call shape.
+  searchForCampaignTarget: protectedProcedure
+    .input(
+      z.object({
+        bodyStyleIn: z.array(BodyStyleEnum).optional(),
+        makeIn: z.array(z.string().min(1)).max(50).optional(),
+        transmissionIn: z.array(TransmissionEnum).optional(),
+        fuelTypeIn: z.array(FuelTypeEnum).optional(),
+        drivetrainIn: z.array(DrivetrainEnum).optional(),
+        conditionIn: z.array(VehicleConditionEnum).optional(),
+        yearMin: z.number().int().min(1900).max(2028).optional(),
+        yearMax: z.number().int().min(1900).max(2028).optional(),
+        priceMin: z.number().nonnegative().max(9_999_999.99).optional(),
+        priceMax: z.number().nonnegative().max(9_999_999.99).optional(),
+        searchText: z.string().min(1).max(120).optional(),
+        limit: z.number().int().min(1).max(200).default(50),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      const svc = await loadVehicleServiceModule();
+      const result = await svc.listVehicles(
+        ctx.prisma,
+        ctx.tenantId,
+        {
+          status: "active",
+          includeArchived: false,
+          searchText: input.searchText,
+          makeIn: input.makeIn,
+          bodyStyleIn: input.bodyStyleIn,
+          transmissionIn: input.transmissionIn,
+          fuelTypeIn: input.fuelTypeIn,
+          drivetrainIn: input.drivetrainIn,
+          conditionIn: input.conditionIn,
+          yearMin: input.yearMin,
+          yearMax: input.yearMax,
+          priceMin: input.priceMin,
+          priceMax: input.priceMax,
+        },
+        { cursor: undefined, limit: input.limit },
+      );
+      return {
+        entities: result.items,
+        totalCount: result.totalCount,
+        filterSpec: input,
+      };
     }),
 });
 

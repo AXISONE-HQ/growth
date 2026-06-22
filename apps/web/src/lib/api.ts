@@ -3054,7 +3054,26 @@ export const productsApi = {
   // union (6 variants); UI consumer MUST branch on `kind`.
   scrape: (url: string) =>
     trpcMutation<ProductScraperResult>('products.scrape', { url }),
+
+  // KAN-1219 Slice G2 — campaign target search.
+  searchForCampaignTarget: (input: {
+    searchText?: string;
+    priceMin?: number;
+    priceMax?: number;
+    limit?: number;
+  }) =>
+    trpcQuery<CampaignTargetSearchResult<ProductListItem>>(
+      'products.searchForCampaignTarget',
+      input,
+    ),
 };
+
+// KAN-1219 Slice G2 — uniform search result for TargetEntityPanel.
+export interface CampaignTargetSearchResult<TEntity> {
+  entities: TEntity[];
+  totalCount: number;
+  filterSpec: Record<string, unknown>;
+}
 
 // KAN-1219 — Product scraper result discriminated union mirror.
 // Source of truth: packages/shared/src/product-scraper-types.ts.
@@ -3246,6 +3265,28 @@ export const vehiclesApi = {
       vehicleId,
       limit,
     }),
+
+  // KAN-1219 Slice G2 — campaign target search. Returns active vehicles
+  // matching the filter spec for the operator's TargetEntityPanel
+  // selection. Mirrors listVehicles filter dimensions (Slice B).
+  searchForCampaignTarget: (input: {
+    bodyStyleIn?: string[];
+    makeIn?: string[];
+    transmissionIn?: string[];
+    fuelTypeIn?: string[];
+    drivetrainIn?: string[];
+    conditionIn?: string[];
+    yearMin?: number;
+    yearMax?: number;
+    priceMin?: number;
+    priceMax?: number;
+    searchText?: string;
+    limit?: number;
+  }) =>
+    trpcQuery<CampaignTargetSearchResult<VehicleListItem>>(
+      'vehicles.searchForCampaignTarget',
+      input,
+    ),
 };
 
 export interface VehicleActivityEvent {
