@@ -42,11 +42,15 @@ vi.mock("@/lib/api", async () => {
 });
 
 // KAN-1219 Slice C — Mock next/navigation for URL state sync in filter bar.
+// KAN-1290 Slice 6 — `currentSearchParamsString` is mutable per-test so URL
+// state hydration scenarios can simulate deep-link entry into pre-filtered
+// /settings/inventory routes.
 const replaceMock = vi.fn();
 const pushMock = vi.fn();
+let currentSearchParamsString = "";
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ replace: replaceMock, push: pushMock, refresh: vi.fn() }),
-  useSearchParams: () => new URLSearchParams(),
+  useSearchParams: () => new URLSearchParams(currentSearchParamsString),
   usePathname: () => "/settings/inventory",
 }));
 
@@ -124,8 +128,15 @@ beforeEach(() => {
   confirmSpy.mockClear();
   replaceMock.mockClear();
   pushMock.mockClear();
-  // Default: empty list.
+  // Default: empty URL, empty list.
+  currentSearchParamsString = "";
   vehiclesListMock.mockResolvedValue(fixturePage([]));
+  // Default: clear sessionStorage to avoid cross-test contamination.
+  try {
+    window.sessionStorage.clear();
+  } catch {
+    // sessionStorage may be unavailable in some sandboxes.
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────
@@ -537,5 +548,146 @@ describe("KAN-1219 fix-forward — router.replace race guard", () => {
     // (operator-explicit cursor advances only via Load More).
     const firstCall = vehiclesListMock.mock.calls[0]?.[0];
     expect((firstCall as { cursor?: unknown } | undefined)?.cursor).toBeUndefined();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// KAN-1290 Slice 6 Item 1 — URL state + back/forward
+//
+// Deep-link entry, sessionStorage round-trip, page reload preserves filters.
+// Codifies the Slice C URL state machinery + Slice E sessionStorage
+// integration that makes "Back to inventory" preserve operator context.
+// ─────────────────────────────────────────────────────────────────────
+
+describe("KAN-1290 Slice 6 — URL state + back/forward", () => {
+  it("Scenario 9 — deep-link initialises filters from the URL querystring", async () => {
+    // URL parameter names mirror encodeFilters() in page.tsx — short keys
+    // (`bodyStyle`, `make`, etc.) rather than the long backend filter names
+    // (`bodyStyleIn`, `makeIn`).
+    currentSearchParamsString = "bodyStyle=suv&priceMax=20000";
+    vehiclesListMock.mockResolvedValue(fixturePage([]));
+    renderPage();
+    // First list call MUST carry the URL-derived filters; without the URL
+    // hydration the test would see bodyStyleIn=undefined / priceMax=undefined.
+    await waitFor(() => {
+      expect(vehiclesListMock).toHaveBeenCalled();
+    });
+    const firstInput = vehiclesListMock.mock.calls[0]?.[0] as {
+      bodyStyleIn?: string[];
+      priceMax?: number;
+    };
+    expect(firstInput?.bodyStyleIn).toEqual(["suv"]);
+    expect(firstInput?.priceMax).toBe(20_000);
+  });
+
+  it("Scenario 10 — sessionStorage filter-querystring is written on mount sync", async () => {
+    currentSearchParamsString = "make=Honda&yearMin=2020";
+    vehiclesListMock.mockResolvedValue(fixturePage([]));
+    renderPage();
+    await waitFor(() => {
+      const stored = window.sessionStorage.getItem(
+        "kan-1219-inventory-filter-querystring",
+      );
+      expect(stored).not.toBeNull();
+      expect(stored).toContain("make=Honda");
+      expect(stored).toContain("yearMin=2020");
+    });
+  });
+
+  it("Scenario 11 — empty URL hydrates to defaults; no sessionStorage querystring noise", async () => {
+    currentSearchParamsString = "";
+    vehiclesListMock.mockResolvedValue(fixturePage([]));
+    renderPage();
+    await waitFor(() => expect(vehiclesListMock).toHaveBeenCalled());
+    const firstInput = vehiclesListMock.mock.calls[0]?.[0] as {
+      bodyStyleIn?: string[];
+      makeIn?: string[];
+      priceMax?: number;
+      yearMin?: number;
+    };
+    // No filters applied → all dimension arrays absent (or empty).
+    expect(firstInput?.bodyStyleIn ?? []).toEqual([]);
+    expect(firstInput?.makeIn ?? []).toEqual([]);
+    expect(firstInput?.priceMax).toBeUndefined();
+    expect(firstInput?.yearMin).toBeUndefined();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// KAN-1290 Slice 6 Item 2 — Error toast + retry affordance
+//
+// Memo 19/42 affordance-honesty at the mutation error boundary: failed
+// mutations surface an actionable retry that re-fires the same operation
+// without re-prompting (operator already consented).
+// ─────────────────────────────────────────────────────────────────────
+
+describe("KAN-1290 Slice 6 — Error toast + retry", () => {
+  it("Scenario 12 — archive failure surfaces toast.error with a Retry action", async () => {
+    const sonner = (await import("sonner")) as unknown as {
+      toast: { error: ReturnType<typeof vi.fn> };
+    };
+    const veh = fixtureVehicle({ id: "veh-err" });
+    vehiclesListMock.mockResolvedValue(fixturePage([veh]));
+    vehiclesArchiveMock.mockRejectedValueOnce(new Error("Network failed"));
+
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByText(/Toyota Camry/i)).toBeInTheDocument(),
+    );
+    const archiveBtn = await screen.findByRole("button", {
+      name: /archive 2024 toyota camry/i,
+    });
+    await userEvent.click(archiveBtn);
+
+    await waitFor(() => {
+      expect(sonner.toast.error).toHaveBeenCalled();
+    });
+    const errorCall = sonner.toast.error.mock.calls[0] as [
+      string,
+      { action?: { label: string; onClick: () => void } } | undefined,
+    ];
+    expect(errorCall[0]).toMatch(/Network failed/);
+    expect(errorCall[1]?.action?.label).toBe("Retry");
+    expect(typeof errorCall[1]?.action?.onClick).toBe("function");
+  });
+
+  it("Scenario 13 — Retry action re-fires the archive mutation", async () => {
+    const sonner = (await import("sonner")) as unknown as {
+      toast: {
+        error: ReturnType<typeof vi.fn>;
+        success: ReturnType<typeof vi.fn>;
+      };
+    };
+    const veh = fixtureVehicle({ id: "veh-retry" });
+    vehiclesListMock.mockResolvedValue(fixturePage([veh]));
+    // First archive fails; retry succeeds.
+    vehiclesArchiveMock
+      .mockRejectedValueOnce(new Error("Transient infra error"))
+      .mockResolvedValueOnce(fixtureVehicle({ status: "archived" }));
+
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByText(/Toyota Camry/i)).toBeInTheDocument(),
+    );
+    const archiveBtn = await screen.findByRole("button", {
+      name: /archive 2024 toyota camry/i,
+    });
+    await userEvent.click(archiveBtn);
+    await waitFor(() => expect(sonner.toast.error).toHaveBeenCalled());
+
+    // Invoke the Retry action directly (toast UI is not rendered in vitest;
+    // exercise the operator-action path via the captured callback).
+    const errorCall = sonner.toast.error.mock.calls[0] as [
+      string,
+      { action: { label: string; onClick: () => void } },
+    ];
+    errorCall[1].action.onClick();
+
+    await waitFor(() => {
+      expect(vehiclesArchiveMock).toHaveBeenCalledTimes(2);
+    });
+    await waitFor(() => {
+      expect(sonner.toast.success).toHaveBeenCalledWith("Vehicle archived");
+    });
   });
 });

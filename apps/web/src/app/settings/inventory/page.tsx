@@ -593,7 +593,30 @@ function VehiclesTab() {
       setCursor(null);
       void refetch();
     } catch (e) {
-      toast.error((e as Error)?.message ?? "Failed to archive vehicle");
+      // KAN-1290 Slice 6 — Memo 19/42 affordance-honesty at the mutation
+      // error boundary. Surface an actionable retry that re-fires the same
+      // mutation; the second confirm is intentionally skipped (operator
+      // already consented; this is a transient infra retry).
+      toast.error((e as Error)?.message ?? "Failed to archive vehicle", {
+        action: {
+          label: "Retry",
+          onClick: () => {
+            void (async () => {
+              try {
+                await vehiclesApi.archive(v.id);
+                toast.success("Vehicle archived");
+                setPages([]);
+                setCursor(null);
+                void refetch();
+              } catch (retryErr) {
+                toast.error(
+                  (retryErr as Error)?.message ?? "Retry failed",
+                );
+              }
+            })();
+          },
+        },
+      });
     }
   }
 
