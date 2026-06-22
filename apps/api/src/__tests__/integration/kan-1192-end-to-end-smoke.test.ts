@@ -191,7 +191,14 @@ describe('KAN-1192 — end-to-end smoke (live Haiku or fixture replay)', () => {
         const generatorAudienceCount = stubAudienceCountForGenerator();
 
         // ─── 4-turn chat — operator confirms each dimension ───
-        let state = emptyConversationState();
+        // KAN-1219 G3 — seed entityType='product' as confirmed so this
+        // smoke stays focused on the product/objectives/timeline/audience
+        // chain (the 5-dim polymorphic flow is exercised in the dedicated
+        // entityType integration test added in G3).
+        let state: ConversationState = {
+          ...emptyConversationState(),
+          entityType: { kind: 'confirmed', value: 'product' },
+        };
         let campaignId: string | undefined;
 
         const turns = [

@@ -21,8 +21,8 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
   DIMENSION_ORDER,
-  type ActiveDimensionKey,
   type ConversationState,
+  type DimensionKey,
   type DimensionState,
 } from "@growth/shared";
 
@@ -34,10 +34,12 @@ export interface DimensionSidebarProps {
   className?: string;
 }
 
-// KAN-1219 Slice G1 — Record scoped to ActiveDimensionKey (4 dims) rather
-// than DimensionKey (5 dims, includes the dark 'entityType'). G2 will add
-// the entityType label here when promoting it into DIMENSION_ORDER.
-const DIMENSION_LABELS: Record<ActiveDimensionKey, string> = {
+// KAN-1219 Slice G3 — Record now scoped to full DimensionKey (5 dims) with
+// entityType promoted to DIMENSION_ORDER position 0 per Q1 lock. Sidebar
+// shows the operator's polymorphic discriminator decision as the first
+// chip — Memo 19/42 affordance-honesty (explicit branch, never implicit).
+const DIMENSION_LABELS: Record<DimensionKey, string> = {
+  entityType: "Target type",
   product: "Product",
   objectives: "Objectives",
   timeline: "Timeline",

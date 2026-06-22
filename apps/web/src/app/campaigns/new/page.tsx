@@ -21,9 +21,10 @@
  *   X1 — empty-state copy lives in shared constants module
  *   X3 — reset turn renders inline delimiter; sidebar chips clear
  */
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { AlertTriangle } from "lucide-react";
+import { useMutation } from "@tanstack/react-query";
 import { useAuth } from "@/lib/AuthContext";
 import { useCampaignBuilder } from "@/lib/hooks/useCampaignBuilder";
 import { Button } from "@/components/ui/button";
@@ -31,6 +32,9 @@ import { LoadingState } from "../_components/LoadingState";
 import { BuilderChatThread } from "./_components/BuilderChatThread";
 import { DimensionSidebar } from "./_components/DimensionSidebar";
 import { ActionPlanCard } from "./_components/ActionPlanCard";
+import { TargetEntityPanel } from "../_components/TargetEntityPanel";
+import { campaignsApi } from "@/lib/api";
+import type { CampaignTargetEntityType } from "@growth/shared";
 
 export default function CampaignBuilderPage() {
   const router = useRouter();
@@ -58,6 +62,35 @@ export default function CampaignBuilderPage() {
   useEffect(() => {
     document.title = "New Campaign · Campaigns";
   }, []);
+
+  // KAN-1219 Slice G3 — TargetEntityPanel mount state.
+  //
+  // The panel surfaces once the operator has confirmed an entityType + the
+  // LLM has proposed a descriptive target via the 'product' dimension. The
+  // operator narrows the proposal to concrete IDs and commits via
+  // campaigns.commitTarget. After commit, panel hides and ActionPlanCard's
+  // target badge surfaces the persisted ID count.
+  const [committedTargetIds, setCommittedTargetIds] = useState<string[] | null>(null);
+  const confirmedEntityType: CampaignTargetEntityType | null =
+    state.entityType.kind === "confirmed"
+      ? (state.entityType.value as CampaignTargetEntityType)
+      : null;
+  const targetProposalFilter =
+    state.product.kind !== "empty" && typeof state.product.value === "object" && state.product.value
+      ? (state.product.value as Record<string, unknown>)
+      : undefined;
+
+  const commitTargetMutation = useMutation({
+    mutationFn: (input: { entityType: CampaignTargetEntityType; entityIds: string[] }) =>
+      campaignsApi.commitTarget({
+        campaignId: campaignId!,
+        entityType: input.entityType,
+        entityIds: input.entityIds,
+      }),
+    onSuccess: (data) => {
+      setCommittedTargetIds(data.entityIds);
+    },
+  });
 
   // Mirror existing route protection — list view + [id] pages assume
   // useAuth resolves to a user before consuming protected routes.
@@ -106,16 +139,44 @@ export default function CampaignBuilderPage() {
       )}
 
       <div className="flex flex-col gap-4 md:flex-row md:gap-6">
-        <BuilderChatThread
-          className="flex-1 md:basis-3/4"
-          turns={turns}
-          isSending={isSending}
-          sendError={sendError}
-          onSend={send}
-          allDimensionsConfirmed={allDimensionsConfirmed}
-          onGeneratePlan={generatePlan}
-          isGenerating={isGenerating}
-        />
+        <div className="flex-1 md:basis-3/4 flex flex-col gap-4">
+          <BuilderChatThread
+            turns={turns}
+            isSending={isSending}
+            sendError={sendError}
+            onSend={send}
+            allDimensionsConfirmed={allDimensionsConfirmed}
+            onGeneratePlan={generatePlan}
+            isGenerating={isGenerating}
+          />
+          {/* KAN-1219 Slice G3 — TargetEntityPanel mount. Surfaces below the
+           *   chat once entityType is confirmed so the operator can narrow
+           *   the LLM's descriptive proposal to concrete IDs. */}
+          {confirmedEntityType && campaignId && committedTargetIds === null && (
+            <TargetEntityPanel
+              entityType={confirmedEntityType}
+              initialFilterSpec={targetProposalFilter}
+              onConfirm={(ids) =>
+                commitTargetMutation.mutate({
+                  entityType: confirmedEntityType,
+                  entityIds: ids,
+                })
+              }
+            />
+          )}
+          {committedTargetIds && (
+            <div className="rounded-lg border border-border bg-card p-4 text-sm text-muted-foreground">
+              ✓ {committedTargetIds.length} {confirmedEntityType}
+              {committedTargetIds.length === 1 ? "" : "s"} committed as
+              Campaign target.
+            </div>
+          )}
+          {commitTargetMutation.error && (
+            <p role="alert" className="text-sm text-destructive">
+              Couldn&apos;t commit target selection. Try again.
+            </p>
+          )}
+        </div>
         <DimensionSidebar
           className="md:basis-1/4 md:sticky md:top-6 md:self-start"
           state={state}
@@ -131,6 +192,8 @@ export default function CampaignBuilderPage() {
         <ActionPlanCard
           campaignId={campaignId}
           initialPlan={generatePlanResult.plan}
+          targetEntityType={confirmedEntityType}
+          targetEntityCount={committedTargetIds?.length}
         />
       )}
       {generatePlanResult?.kind === "analyzer_unavailable" && (

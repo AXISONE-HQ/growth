@@ -2680,6 +2680,26 @@ export const campaignsApi = {
   }) => trpcMutation<ChatTurnResult>('campaigns.chat', input),
 
   /**
+   * KAN-1219 Slice G3 — Commit target entity selection.
+   *
+   * Persists Campaign.targetEntityType + targetEntityIds and writes a
+   * campaign.target_committed audit log entry (Memo 53). Called from the
+   * TargetEntityPanel inside BuilderChatThread once the operator has
+   * narrowed the LLM's descriptive proposal down to concrete IDs.
+   */
+  commitTarget: (input: {
+    campaignId: string;
+    entityType: 'product' | 'vehicle';
+    entityIds: string[];
+  }) =>
+    trpcMutation<{
+      kind: 'committed';
+      campaignId: string;
+      entityType: 'product' | 'vehicle' | null;
+      entityIds: string[];
+    }>('campaigns.commitTarget', input),
+
+  /**
    * KAN-1185 — Action Plan generator.
    *
    * Operator-initiated (Q-ADD-NEW-2 lock): UI surfaces this affordance

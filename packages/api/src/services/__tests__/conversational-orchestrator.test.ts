@@ -80,31 +80,42 @@ function makeAudienceCount(count = 1247): AudienceCountFn {
 // Pure function tests — no LLM, no prisma
 // ─────────────────────────────────────────────
 
-describe('KAN-1184 — nextDimensionToExtract', () => {
-  it('empty state → product (first dimension)', () => {
-    expect(nextDimensionToExtract(emptyConversationState())).toBe('product');
+describe('KAN-1184 / KAN-1219 G3 — nextDimensionToExtract', () => {
+  it('empty state → entityType (first dimension per Q1 lock)', () => {
+    expect(nextDimensionToExtract(emptyConversationState())).toBe('entityType');
   });
 
-  it('product confirmed → objectives', () => {
+  it('entityType confirmed (product) → product', () => {
     const state: ConversationState = {
       ...emptyConversationState(),
+      entityType: { kind: 'confirmed', value: 'product' },
+    };
+    expect(nextDimensionToExtract(state)).toBe('product');
+  });
+
+  it('entityType + product confirmed → objectives', () => {
+    const state: ConversationState = {
+      ...emptyConversationState(),
+      entityType: { kind: 'confirmed', value: 'product' },
       product: { kind: 'confirmed', value: 'ABC' },
     };
     expect(nextDimensionToExtract(state)).toBe('objectives');
   });
 
-  it('product + objectives confirmed → timeline', () => {
+  it('entityType + product + objectives confirmed → timeline', () => {
     const state: ConversationState = {
       ...emptyConversationState(),
+      entityType: { kind: 'confirmed', value: 'product' },
       product: { kind: 'confirmed', value: 'ABC' },
       objectives: { kind: 'confirmed', value: { goalType: 'deals', goalTarget: 50 } },
     };
     expect(nextDimensionToExtract(state)).toBe('timeline');
   });
 
-  it('product + objectives + timeline confirmed → audience', () => {
+  it('entityType + product + objectives + timeline confirmed → audience (product campaign)', () => {
     const state: ConversationState = {
       ...emptyConversationState(),
+      entityType: { kind: 'confirmed', value: 'product' },
       product: { kind: 'confirmed', value: 'ABC' },
       objectives: { kind: 'confirmed', value: { goalType: 'deals', goalTarget: 50 } },
       timeline: { kind: 'confirmed', value: { windowStart: '2026-07-01', windowEnd: '2026-09-30' } },
@@ -112,8 +123,20 @@ describe('KAN-1184 — nextDimensionToExtract', () => {
     expect(nextDimensionToExtract(state)).toBe('audience');
   });
 
-  it('all 4 confirmed → null (hand off to Action Plan generator)', () => {
+  it('vehicle campaign skips audience per Q3 lock — timeline confirmed → null', () => {
     const state: ConversationState = {
+      ...emptyConversationState(),
+      entityType: { kind: 'confirmed', value: 'vehicle' },
+      product: { kind: 'confirmed', value: { year: 2023, bodyStyle: 'suv' } },
+      objectives: { kind: 'confirmed', value: { goalType: 'units', goalTarget: 4 } },
+      timeline: { kind: 'confirmed', value: { windowStart: '2026-07-01', windowEnd: '2026-09-30' } },
+    };
+    expect(nextDimensionToExtract(state)).toBeNull();
+  });
+
+  it('all 5 confirmed (product campaign) → null (hand off to Action Plan generator)', () => {
+    const state: ConversationState = {
+      entityType: { kind: 'confirmed', value: 'product' },
       product: { kind: 'confirmed', value: 'ABC' },
       objectives: { kind: 'confirmed', value: {} },
       timeline: { kind: 'confirmed', value: {} },
@@ -125,10 +148,10 @@ describe('KAN-1184 — nextDimensionToExtract', () => {
   it('proposed state does NOT count as confirmed — first-Empty-wins includes Proposed', () => {
     const state: ConversationState = {
       ...emptyConversationState(),
-      product: { kind: 'proposed', value: 'ABC', confidence: 'high' },
+      entityType: { kind: 'proposed', value: 'product', confidence: 'high' },
     };
-    // First non-confirmed wins; product is proposed-not-confirmed → still product
-    expect(nextDimensionToExtract(state)).toBe('product');
+    // First non-confirmed wins; entityType is proposed-not-confirmed → still entityType
+    expect(nextDimensionToExtract(state)).toBe('entityType');
   });
 });
 
@@ -284,6 +307,7 @@ describe('KAN-1184 — buildExtractionPrompt (Step 3 locks)', () => {
   it('includes current state JSON', () => {
     const prompt = buildExtractionPrompt('objectives', emptyConversationState(), new Date('2026-06-15T00:00:00Z'));
     expect(prompt).toMatch(/Current 4-dimension capture state/);
+    expect(prompt).toMatch(/"entityType"/);
     expect(prompt).toMatch(/"product"/);
   });
 
@@ -305,6 +329,46 @@ describe('KAN-1184 — buildExtractionPrompt (Step 3 locks)', () => {
     const prompt = buildExtractionPrompt('timeline', emptyConversationState(), today);
     expect(prompt).toMatch(/2026-06-15/);
   });
+
+  it('KAN-1219 G3 — entityType dim emits operator-honest classifier prompt', () => {
+    const prompt = buildExtractionPrompt(
+      'entityType',
+      emptyConversationState(),
+      new Date('2026-06-15T00:00:00Z'),
+    );
+    expect(prompt).toMatch(/Target dimension to extract: entityType/);
+    expect(prompt).toMatch(/"product" or "vehicle"/);
+    expect(prompt).toMatch(/dealer inventory/i);
+  });
+
+  it('KAN-1219 G3 — product dim renders vehicle prompt example when entityType=vehicle', () => {
+    const vehicleState: ConversationState = {
+      ...emptyConversationState(),
+      entityType: { kind: 'confirmed', value: 'vehicle' },
+    };
+    const prompt = buildExtractionPrompt(
+      'product',
+      vehicleState,
+      new Date('2026-06-15T00:00:00Z'),
+    );
+    expect(prompt).toMatch(/bodyStyle/);
+    expect(prompt).toMatch(/vinHints/);
+    expect(prompt).toMatch(/year.*make.*model/i);
+  });
+
+  it('KAN-1219 G3 — product dim renders catalog product example when entityType=product', () => {
+    const productState: ConversationState = {
+      ...emptyConversationState(),
+      entityType: { kind: 'confirmed', value: 'product' },
+    };
+    const prompt = buildExtractionPrompt(
+      'product',
+      productState,
+      new Date('2026-06-15T00:00:00Z'),
+    );
+    expect(prompt).toMatch(/product\/offering name/);
+    expect(prompt).not.toMatch(/bodyStyle/);
+  });
 });
 
 // ─────────────────────────────────────────────
@@ -324,10 +388,17 @@ describe('KAN-1184 — handleChatTurn (full state-machine integration)', () => {
     );
     const audience = makeAudienceCount();
 
+    // KAN-1219 Slice G3 — entityType is the first dimension extracted per Q1
+    // lock; this scenario tests the 'product' extraction step so the
+    // operator-confirmed entityType='product' precondition is wired in.
+    const entityTypeConfirmed: ConversationState = {
+      ...emptyConversationState(),
+      entityType: { kind: 'confirmed', value: 'product' },
+    };
     const result = await handleChatTurn(prisma, llm, audience, {
       tenantId: 'tenant-1',
       message: 'I want to sell Product ABC',
-      state: emptyConversationState(),
+      state: entityTypeConfirmed,
     });
 
     expect(spies.campaignCreate).toHaveBeenCalledTimes(1);
@@ -360,7 +431,8 @@ describe('KAN-1184 — handleChatTurn (full state-machine integration)', () => {
 
     expect(result.kind).toBe('reset');
     if (result.kind === 'reset') {
-      // All 4 dimensions reset to empty
+      // All 5 dimensions reset to empty (KAN-1219 G3 — entityType included)
+      expect(result.state.entityType.kind).toBe('empty');
       expect(result.state.product.kind).toBe('empty');
       expect(result.state.objectives.kind).toBe('empty');
       expect(result.state.timeline.kind).toBe('empty');
@@ -375,11 +447,12 @@ describe('KAN-1184 — handleChatTurn (full state-machine integration)', () => {
     expect(systemTurnCall).toBeDefined();
   });
 
-  it('all 4 dimensions already confirmed → kind=all_dimensions_confirmed (no LLM call)', async () => {
+  it('all 5 dimensions already confirmed → kind=all_dimensions_confirmed (no LLM call)', async () => {
     const { prisma } = makePrismaMock();
     const llm = makeLlm('should not be called');
     const audience = makeAudienceCount();
     const allConfirmed: ConversationState = {
+      entityType: { kind: 'confirmed', value: 'product' },
       product: { kind: 'confirmed', value: 'ABC' },
       objectives: { kind: 'confirmed', value: { goalType: 'deals', goalTarget: 50 } },
       timeline: { kind: 'confirmed', value: { windowStart: '2026-07-01', windowEnd: '2026-09-30' } },
@@ -410,6 +483,7 @@ describe('KAN-1184 — handleChatTurn (full state-machine integration)', () => {
     );
     const audience = makeAudienceCount(1247);
     const tilAudience: ConversationState = {
+      entityType: { kind: 'confirmed', value: 'product' },
       product: { kind: 'confirmed', value: 'ABC' },
       objectives: { kind: 'confirmed', value: {} },
       timeline: { kind: 'confirmed', value: {} },

@@ -45,6 +45,14 @@ export interface ActionPlanCardProps {
   initialPlan: ActionPlan;
   campaignName?: string;
   goalType?: string;
+  /**
+   * KAN-1219 Slice G3 — operator-committed target entities. When set,
+   * surfaces a "Target: N {entityType}s" affordance above the header so
+   * the operator sees exactly what the Action Plan is targeting. Memo
+   * 19/42 affordance-honesty.
+   */
+  targetEntityType?: "product" | "vehicle" | null;
+  targetEntityCount?: number;
 }
 
 export function ActionPlanCard({
@@ -52,6 +60,8 @@ export function ActionPlanCard({
   initialPlan,
   campaignName,
   goalType,
+  targetEntityType,
+  targetEntityCount,
 }: ActionPlanCardProps) {
   const router = useRouter();
   const {
@@ -142,6 +152,16 @@ export function ActionPlanCard({
             >
               Open Campaign
             </Button>
+          </div>
+        )}
+
+        {/* KAN-1219 Slice G3 — target entity badge above the header.
+         *   Renders only when commitTarget has fired (parent passes count). */}
+        {targetEntityType && targetEntityCount != null && targetEntityCount > 0 && (
+          <div className="inline-flex items-center gap-2 self-start rounded-full border border-emerald-300 bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-900">
+            <CheckCircle2 className="h-3.5 w-3.5" />
+            Target: {targetEntityCount} {targetEntityType}
+            {targetEntityCount === 1 ? "" : "s"}
           </div>
         )}
 

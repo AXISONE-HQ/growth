@@ -96,10 +96,14 @@ const STUB_AUDIENCE_COUNT = async () => ({
 
 const TODAY = new Date('2026-06-16T00:00:00.000Z');
 
-/** State with product/objectives/timeline confirmed so the LLM's next
- *  extraction targets 'audience' (the dimension under test here). */
+/** State with entityType + product + objectives + timeline confirmed so
+ *  the LLM's next extraction targets 'audience' (the dimension under test
+ *  here). KAN-1219 G3 — entityType='product' seeded as confirmed per Q1
+ *  lock activation; this is a product-campaign audience scenario.
+ *  Activation-slice-fixture-update pattern (1st banked anchor). */
 const STATE_AUDIENCE_NEXT: ConversationState = {
   ...emptyConversationState(),
+  entityType: { kind: 'confirmed', value: 'product' },
   product: { kind: 'confirmed', value: 'Growth Platform' },
   objectives: { kind: 'confirmed', value: { goalType: 'custom', goalTarget: 50, goalDescription: 'x' } },
   timeline: { kind: 'confirmed', value: { windowStart: '2026-07-01T00:00:00.000Z', windowEnd: '2026-07-31T23:59:59.999Z' } },

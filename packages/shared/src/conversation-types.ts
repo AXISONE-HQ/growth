@@ -25,14 +25,11 @@ import { z } from 'zod';
 // ─────────────────────────────────────────────
 
 export const DimensionKeyEnum = z.enum([
-  // KAN-1219 Slice G1 (Q1 lock) — entityType is the new polymorphic
-  // discriminator dimension. The substrate ships the enum value here; the
-  // orchestrator state-machine activation (DIMENSION_ORDER reshuffle +
-  // 5-dimension extraction wiring) lands in Slice G3. Keeping the value in
-  // the enum but absent from DIMENSION_ORDER (below) preserves the existing
-  // 4-dimension extraction flow until G3 explicitly opts in. Memo 19/42
-  // affordance-honesty — operator will see the entity decision as the
-  // first explicit step once G3 promotes entityType to position 0.
+  // KAN-1219 Slice G3 (Q1 lock activated) — entityType is the polymorphic
+  // discriminator and the FIRST extracted dimension. Operator answers
+  // "campaign for a product or a vehicle?" before any product/vehicle
+  // resolution branches off. Memo 19/42 affordance-honesty — the entity
+  // decision is the first explicit step.
   'entityType',
   'product',
   'objectives',
@@ -42,28 +39,31 @@ export const DimensionKeyEnum = z.enum([
 export type DimensionKey = z.infer<typeof DimensionKeyEnum>;
 
 /**
- * KAN-1219 Slice G1 — Narrower type for currently-active extraction dims.
+ * KAN-1219 Slice G3 — Type alias for currently-active extraction dims.
  *
- * `DimensionKey` includes 'entityType' (substrate ships it) but the
- * extraction order array + iteration sites only currently cover the 4
- * legacy dimensions. G3 will promote 'entityType' to a member of this
- * subset once the state machine + tests are wired in lockstep.
+ * Retained for downstream callers that emerged during the G1 dark-substrate
+ * phase (e.g. `apps/web/src/app/campaigns/new/_components/DimensionSidebar.tsx`
+ * Record<ActiveDimensionKey, string> label map). G3 promotes entityType to
+ * full DimensionKey membership; this alias remains a safe escape hatch for
+ * future dimensions that need staged activation.
  */
 export type ActiveDimensionKey = Exclude<DimensionKey, 'entityType'>;
 
 /**
  * Canonical extraction order. First-Empty-wins in `nextDimensionToExtract`.
  *
- * # KAN-1219 Slice G1 — entityType intentionally OMITTED here
+ * # KAN-1219 Slice G3 — entityType promoted to position 0 (Q1 lock)
  *
- * The substrate ships entityType in the enum + state schema (optional)
- * without inserting it into DIMENSION_ORDER yet. G3 will replace this array
- * with `['entityType', 'product', 'objectives', 'timeline', 'audience']`
- * once the orchestrator state machine + tests have been updated in
- * lockstep. Pattern mirrors KAN-1184 Q-ADD C2 "deterministic state
- * transitions" — order changes are a state-machine concern, not substrate.
+ * G1 staged entityType in the enum + optional state slot. G2 shipped the
+ * UI confirmation surface DARK. G3 activates: entityType is now position 0
+ * in extraction order, required in ConversationStateSchema, and gating
+ * downstream extraction branching (product vs vehicle resolution; audience
+ * gated per Q3 — vehicles skip audience). All in-tree consumers updated in
+ * lockstep — Memo 56 anchor #13 substrate-staging-for-future-activation
+ * 3rd anchor (composes-across-slices refinement formalizes).
  */
-export const DIMENSION_ORDER: ActiveDimensionKey[] = [
+export const DIMENSION_ORDER: DimensionKey[] = [
+  'entityType',
   'product',
   'objectives',
   'timeline',
@@ -93,14 +93,11 @@ export type DimensionState = z.infer<typeof DimensionStateSchema>;
 // ─────────────────────────────────────────────
 
 export const ConversationStateSchema = z.object({
-  // KAN-1219 Slice G1 — `entityType` carries CampaignTargetEntityType
-  // ('product' | 'vehicle') once confirmed. Drives the downstream product
-  // vs vehicle resolution flow. OPTIONAL in this substrate ship so the
-  // existing 4-dimension orchestrator flow remains intact; G3 will mark it
-  // required + insert into DIMENSION_ORDER position 0 (Memo 19/42
-  // affordance-honesty — operator sees the entity branch as the first
-  // explicit step once G3 lands).
-  entityType: DimensionStateSchema.optional(),
+  // KAN-1219 Slice G3 — `entityType` carries CampaignTargetEntityType
+  // ('product' | 'vehicle') once confirmed. REQUIRED + first in
+  // DIMENSION_ORDER per Q1 lock. Gates downstream product/vehicle
+  // resolution + (Q3) audience skip for vehicles.
+  entityType: DimensionStateSchema,
   product: DimensionStateSchema,
   objectives: DimensionStateSchema,
   timeline: DimensionStateSchema,
@@ -108,9 +105,10 @@ export const ConversationStateSchema = z.object({
 });
 export type ConversationState = z.infer<typeof ConversationStateSchema>;
 
-/** Empty initial state — 4 dimensions unconfirmed (G1 backward-compat). */
+/** Empty initial state — 5 dimensions unconfirmed (Slice G3 activation). */
 export function emptyConversationState(): ConversationState {
   return {
+    entityType: { kind: 'empty' },
     product: { kind: 'empty' },
     objectives: { kind: 'empty' },
     timeline: { kind: 'empty' },

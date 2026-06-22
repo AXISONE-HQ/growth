@@ -20,15 +20,21 @@
 import type {
   ConversationState,
   DimensionKey,
-  ActiveDimensionKey,
   DimensionState,
   ChatTurnResult,
+  CampaignTargetEntityType,
 } from '@growth/shared';
 import {
   AudienceConditionsSchema,
+  CampaignTargetEntityTypeEnum,
   DIMENSION_ORDER,
   emptyConversationState,
 } from '@growth/shared';
+import { normalizeEntityTypeExtraction } from './orchestrator/extractEntityType.js';
+import {
+  VEHICLE_DIMENSION_PROMPT_EXAMPLE,
+  normalizeVehicleExtraction,
+} from './orchestrator/extractVehicle.js';
 
 // ─────────────────────────────────────────────
 // Public API
@@ -130,7 +136,7 @@ export async function handleChatTurn(
         tenantId: params.tenantId,
         campaignId,
         turnType: 'system',
-        content: 'Conversation reset — all 4 dimensions cleared.',
+        content: 'Conversation reset — all dimensions cleared.',
       },
     });
     const aiMessage =
@@ -150,10 +156,11 @@ export async function handleChatTurn(
   const targetDim = nextDimensionToExtract(params.state);
 
   if (targetDim === null) {
-    // All 4 dimensions confirmed; orchestrator hands off to Action Plan
-    // generator (KAN-1185).
+    // All required dimensions confirmed; orchestrator hands off to Action
+    // Plan generator (KAN-1185). KAN-1219 Slice G3 — "required" varies by
+    // entityType per Q3 lock (vehicle campaigns skip audience).
     const aiMessage =
-      'All 4 dimensions confirmed. Ready to generate your Action Plan.';
+      'All required dimensions confirmed. Ready to generate your Action Plan.';
     await prisma.campaignConversationTurn.create({
       data: {
         tenantId: params.tenantId,
@@ -188,12 +195,10 @@ export async function handleChatTurn(
       ...params.state,
       [targetDim]: { kind: 'confirmed', value: priorValue } as DimensionState,
     };
-    const allConfirmed = DIMENSION_ORDER.every(
-      (d) => confirmedState[d].kind === 'confirmed',
-    );
+    const allConfirmed = allRequiredConfirmed(confirmedState);
     const ackMessage = allConfirmed
-      ? 'All 4 dimensions confirmed. Ready to generate your Action Plan.'
-      : buildConfirmationAck(targetDim);
+      ? 'All required dimensions confirmed. Ready to generate your Action Plan.'
+      : buildConfirmationAck(targetDim, confirmedState);
     await prisma.campaignConversationTurn.create({
       data: {
         tenantId: params.tenantId,
@@ -260,7 +265,20 @@ export async function handleChatTurn(
     return { kind: 'analyzer_unavailable', aiMessage, campaignId };
   }
 
-  const extraction = parseDimensionExtraction(llmResponse.text, targetDim);
+  const rawExtraction = parseDimensionExtraction(llmResponse.text, targetDim);
+
+  // KAN-1219 Slice G3 — Per-dimension normalizer routing. entityType uses the
+  // CampaignTargetEntityTypeEnum classifier; the 'product' dimension branches
+  // on confirmed entityType (vehicle → VehicleDimensionValueSchema; product →
+  // raw passthrough). Other dimensions pass through unchanged. Each
+  // normalizer returns either an extracted shape with confidence + canonical
+  // value OR a clarification fallback when the LLM emitted an unmappable
+  // shape (Memo 19/42 affordance-honesty — ask rather than invent).
+  const extraction = normalizeForDimension(
+    rawExtraction,
+    targetDim,
+    params.state,
+  );
 
   // C5 — 3-confidence routing
   if (extraction.kind === 'clarification') {
@@ -324,13 +342,23 @@ export async function handleChatTurn(
         } as DimensionState),
   };
 
-  // Persist updated state to Campaign row for chat-history resume
+  // Persist updated state to Campaign row for chat-history resume.
+  // KAN-1219 Slice G3 — pass the post-update entityType so the persistence
+  // layer can branch the polymorphic 'product' dimension (vehicle mode
+  // captures the descriptive intent in proposedPlan, NOT in goalProductId;
+  // actual targetEntityIds population happens at the TargetEntityPanel
+  // confirm step in BuilderChatThread per Q5 lock).
+  const postUpdateEntityType: CampaignTargetEntityType | null =
+    updatedState.entityType.kind === 'confirmed'
+      ? (updatedState.entityType.value as CampaignTargetEntityType)
+      : null;
   await persistDimensionToCampaign(
     prisma,
     campaignId,
     params.tenantId,
     targetDim,
     extraction.value,
+    postUpdateEntityType,
   );
 
   const aiMessage = `${extraction.aiMessage}${audienceCountAnnotation}`;
@@ -348,14 +376,12 @@ export async function handleChatTurn(
     },
   });
 
-  // KAN-1201 L5 — If this confirmation closed the 4-dimension set, return
-  // all_dimensions_confirmed directly (without waiting for the operator to
-  // send another turn). Mirrors the entry-time check at line ~147 but fires
-  // on the exit path.
-  if (
-    shouldConfirm &&
-    DIMENSION_ORDER.every((d) => updatedState[d].kind === 'confirmed')
-  ) {
+  // KAN-1201 L5 — If this confirmation closed the required-dimension set,
+  // return all_dimensions_confirmed directly (without waiting for the
+  // operator to send another turn). Mirrors the entry-time check at line
+  // ~147 but fires on the exit path. KAN-1219 Slice G3 — "required" varies
+  // by entityType per Q3 lock (vehicle campaigns skip audience).
+  if (shouldConfirm && allRequiredConfirmed(updatedState)) {
     return {
       kind: 'all_dimensions_confirmed',
       aiMessage,
@@ -386,16 +412,105 @@ export async function handleChatTurn(
 // ─────────────────────────────────────────────
 
 /**
- * First-Empty-wins per canonical order. Returns null when all 4 dimensions
- * are confirmed (orchestrator hands off to Action Plan generator).
+ * First-Empty-wins per canonical order. Returns null when all required
+ * dimensions are confirmed (orchestrator hands off to Action Plan generator).
+ *
+ * # KAN-1219 Slice G3 — Q3 lock: vehicle campaigns skip 'audience'
+ *
+ * When entityType has confirmed to 'vehicle', the 'audience' dimension is
+ * gated out of the iteration. Q3 doctrine: vehicle campaigns target a fixed
+ * VIN set + dealer-distance / lifecycle-stage filtering happens at send time
+ * via Q5 skip-removed-at-send semantics, NOT via an audience tree. Product
+ * campaigns continue to require an explicit audience.
  */
 export function nextDimensionToExtract(
   state: ConversationState,
-): ActiveDimensionKey | null {
+): DimensionKey | null {
+  const isVehicleCampaign =
+    state.entityType.kind === 'confirmed' &&
+    state.entityType.value === 'vehicle';
   for (const dim of DIMENSION_ORDER) {
+    if (dim === 'audience' && isVehicleCampaign) continue;
     if (state[dim].kind !== 'confirmed') return dim;
   }
   return null;
+}
+
+/**
+ * KAN-1219 Slice G3 — Q3 lock: which dimensions are REQUIRED for this state
+ * to be considered fully-confirmed. Vehicle campaigns are complete with
+ * entityType + product + objectives + timeline; product campaigns require
+ * audience too. Mirrors the same gating logic as `nextDimensionToExtract`
+ * so the all-confirmed check stays consistent.
+ */
+function requiredDimensionsForState(state: ConversationState): DimensionKey[] {
+  const isVehicleCampaign =
+    state.entityType.kind === 'confirmed' &&
+    state.entityType.value === 'vehicle';
+  return DIMENSION_ORDER.filter(
+    (d) => !(d === 'audience' && isVehicleCampaign),
+  );
+}
+
+function allRequiredConfirmed(state: ConversationState): boolean {
+  return requiredDimensionsForState(state).every(
+    (d) => state[d].kind === 'confirmed',
+  );
+}
+
+/**
+ * KAN-1219 Slice G3 — Per-dimension normalization router.
+ *
+ * Routes the canonical LLM extraction envelope into the matching
+ * per-dimension normalizer. entityType uses the polymorphic discriminator
+ * classifier; product dimension branches on the operator's confirmed
+ * entityType (vehicle → VehicleDimensionValueSchema). Other dimensions
+ * pass through unchanged (the persist-side normalizers handle field-name
+ * drift for those — see persistDimensionToCampaign).
+ *
+ * Returns a clarification fallback when the normalizer rejects the LLM's
+ * shape so the operator sees an honest question rather than a silently-
+ * dropped value (Memo 19/42 affordance-honesty).
+ */
+function normalizeForDimension(
+  rawExtraction:
+    | { kind: 'extracted'; value: unknown; confidence: 'high' | 'medium' | 'low'; aiMessage: string }
+    | { kind: 'clarification'; aiMessage: string },
+  targetDim: DimensionKey,
+  state: ConversationState,
+):
+  | { kind: 'extracted'; value: unknown; confidence: 'high' | 'medium' | 'low'; aiMessage: string }
+  | { kind: 'clarification'; aiMessage: string } {
+  if (rawExtraction.kind === 'clarification') return rawExtraction;
+
+  if (targetDim === 'entityType') {
+    const normalized = normalizeEntityTypeExtraction(rawExtraction);
+    if (normalized.kind === 'clarification') return normalized;
+    return {
+      kind: 'extracted',
+      value: normalized.entityType,
+      confidence: normalized.confidence,
+      aiMessage: rawExtraction.aiMessage,
+    };
+  }
+
+  if (targetDim === 'product') {
+    const isVehicleCampaign =
+      state.entityType.kind === 'confirmed' &&
+      state.entityType.value === 'vehicle';
+    if (isVehicleCampaign) {
+      const normalized = normalizeVehicleExtraction(rawExtraction);
+      if (normalized.kind === 'clarification') return normalized;
+      return {
+        kind: 'extracted',
+        value: normalized.value,
+        confidence: normalized.confidence,
+        aiMessage: rawExtraction.aiMessage,
+      };
+    }
+  }
+
+  return rawExtraction;
 }
 
 /**
@@ -467,16 +582,31 @@ export function isOperatorConfirmation(message: string): boolean {
  * fix — pre-KAN-1201 the LLM's prose said "next, let's nail down your
  * objective" but state never advanced, violating the doctrine preamble).
  */
-function buildConfirmationAck(dim: ActiveDimensionKey): string {
+function buildConfirmationAck(
+  dim: DimensionKey,
+  state: ConversationState,
+): string {
+  const isVehicleCampaign =
+    state.entityType.kind === 'confirmed' &&
+    state.entityType.value === 'vehicle';
   switch (dim) {
+    case 'entityType':
+      return isVehicleCampaign
+        ? "Got it — vehicle campaign. Next: which vehicles (year/make/model, body style, specific VINs)?"
+        : "Got it — product campaign. Next: which product or offering is this Campaign about?";
     case 'product':
-      return "Got it — Product confirmed. Next, let's nail down your objective: what specific outcome (revenue / units / deals / meetings) and target number do you want to hit?";
+      return isVehicleCampaign
+        ? "Vehicle target confirmed. Next, let's nail down your objective: revenue / units / deals / meetings and a target number."
+        : "Got it — Product confirmed. Next, let's nail down your objective: what specific outcome (revenue / units / deals / meetings) and target number do you want to hit?";
     case 'objectives':
       return "Objective confirmed. Next: what's the timeline — when does this Campaign start and end?";
     case 'timeline':
-      return 'Timeline confirmed. Last dimension: the audience — who are we sending this to?';
+      // Q3 lock — vehicle campaigns complete after timeline (no audience step).
+      return isVehicleCampaign
+        ? 'Timeline confirmed. All required dimensions in place — ready to generate your Action Plan.'
+        : 'Timeline confirmed. Last dimension: the audience — who are we sending this to?';
     case 'audience':
-      return 'Audience confirmed. All 4 dimensions are in place — ready to generate your Action Plan.';
+      return 'Audience confirmed. All required dimensions in place — ready to generate your Action Plan.';
   }
 }
 
@@ -504,12 +634,19 @@ export function buildExtractionPrompt(
   const today = todayUtc.toISOString();
   const stateJson = JSON.stringify(state, null, 2);
 
-  const dimensionDescriptor = describeDimension(dim);
+  const isVehicleCampaign =
+    state.entityType.kind === 'confirmed' &&
+    state.entityType.value === 'vehicle';
+
+  const dimensionDescriptor = describeDimension(dim, isVehicleCampaign);
   const vocabulary = dim === 'audience' ? `\n\n${AUDIENCE_VOCABULARY}` : '';
   // KAN-1203 — concrete JSON examples are the primary defense against
   // LLM-output / persist-schema field-name drift. Replaces the prior vague
   // "<dimension-specific shape>" placeholder.
-  const valueShapeContract = dimensionValueExample(dim);
+  // KAN-1219 Slice G3 — the 'product' dimension is polymorphic; when the
+  // operator has confirmed entityType='vehicle' the shape contract switches
+  // to VEHICLE_DIMENSION_PROMPT_EXAMPLE.
+  const valueShapeContract = dimensionValueExample(dim, isVehicleCampaign);
 
   return `${DOCTRINE_PREAMBLE}
 
@@ -542,7 +679,7 @@ ${valueShapeContract}
 Be honest. When the operator's message doesn't clearly answer the dimension, return clarification.`;
 }
 
-function describeDimension(dim: DimensionKey): string {
+function describeDimension(dim: DimensionKey, isVehicleCampaign: boolean): string {
   switch (dim) {
     case 'entityType':
       // KAN-1219 Slice G1 — operator clarification: are we campaigning to
@@ -551,7 +688,12 @@ function describeDimension(dim: DimensionKey): string {
       // the operator should see this explicit branch, not have it inferred.
       return 'Whether this campaign targets a Product (catalog item) or a Vehicle (dealer inventory).';
     case 'product':
-      return 'Which product / offering this Campaign is about (free text or product ID).';
+      // KAN-1219 Slice G3 — polymorphic 'product' dimension. Vehicle-mode
+      // captures the operator's descriptive vehicle intent (year/make/model/
+      // bodyStyle + optional VIN hints).
+      return isVehicleCampaign
+        ? "Which vehicles this Campaign targets (year/make/model/bodyStyle/condition/price/VIN hints). Capture the operator's descriptive intent — actual VIN resolution against live inventory happens at confirm time."
+        : 'Which product / offering this Campaign is about (free text or product ID).';
     case 'objectives':
       return 'Numeric outcome target + outcome type (revenue / units / deals / meetings / custom) + goal description.';
     case 'timeline':
@@ -576,7 +718,14 @@ function describeDimension(dim: DimensionKey): string {
  * is defense-in-depth. Both layers together close the dual-state-drift
  * anti-pattern (in-memory state vs persisted state).
  */
-function dimensionValueExample(dim: DimensionKey): string {
+function dimensionValueExample(dim: DimensionKey, isVehicleCampaign: boolean): string {
+  // KAN-1219 Slice G3 — when the operator confirmed entityType='vehicle',
+  // the 'product' dimension prompt uses the vehicle shape contract instead
+  // of the catalog-product one. Routes to the shared
+  // VEHICLE_DIMENSION_PROMPT_EXAMPLE constant in extractVehicle.ts.
+  if (dim === 'product' && isVehicleCampaign) {
+    return VEHICLE_DIMENSION_PROMPT_EXAMPLE;
+  }
   switch (dim) {
     case 'entityType':
       // KAN-1219 Slice G1 — classify operator utterance as 'product' or
@@ -1154,10 +1303,43 @@ async function persistDimensionToCampaign(
   _tenantId: string,
   dim: DimensionKey,
   value: unknown,
+  entityType: CampaignTargetEntityType | null,
 ): Promise<void> {
   const data: Record<string, unknown> = {};
   switch (dim) {
+    case 'entityType': {
+      // KAN-1219 Slice G3 — write the polymorphic discriminator to the
+      // canonical `target_entity_type` column the moment the operator
+      // confirms it. targetEntityIds is populated later at the
+      // TargetEntityPanel confirm step (per Q5 lock — specific VINs
+      // selected from live inventory, lazy-loaded at confirm time).
+      const parsed = CampaignTargetEntityTypeEnum.safeParse(value);
+      if (parsed.success) {
+        data.targetEntityType = parsed.data;
+      } else {
+        console.warn(
+          `[orchestrator] entityType-persist-drift campaignId=${campaignId} valueShape=${describeValueShape(value)}`,
+        );
+      }
+      break;
+    }
     case 'product': {
+      // KAN-1219 Slice G3 — polymorphic branch. Vehicle campaigns capture
+      // the operator's descriptive intent (year/make/model/VIN hints) in
+      // proposedPlan.vehicleTargetDescriptor; actual targetEntityIds get
+      // populated at the TargetEntityPanel confirm step. Product campaigns
+      // keep the existing goalProductId behavior for the 1-sprint
+      // deprecation window per Q4 lock.
+      if (entityType === 'vehicle') {
+        if (value && typeof value === 'object') {
+          data.proposedPlan = { vehicleTargetDescriptor: value };
+        } else {
+          console.warn(
+            `[orchestrator] vehicle-persist-drift campaignId=${campaignId} valueShape=${describeValueShape(value)}`,
+          );
+        }
+        break;
+      }
       const normalized = normalizeProduct(value);
       if (normalized) {
         data.goalProductId = normalized.goalProductId;
