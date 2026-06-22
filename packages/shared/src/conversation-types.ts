@@ -25,6 +25,15 @@ import { z } from 'zod';
 // ─────────────────────────────────────────────
 
 export const DimensionKeyEnum = z.enum([
+  // KAN-1219 Slice G1 (Q1 lock) — entityType is the new polymorphic
+  // discriminator dimension. The substrate ships the enum value here; the
+  // orchestrator state-machine activation (DIMENSION_ORDER reshuffle +
+  // 5-dimension extraction wiring) lands in Slice G3. Keeping the value in
+  // the enum but absent from DIMENSION_ORDER (below) preserves the existing
+  // 4-dimension extraction flow until G3 explicitly opts in. Memo 19/42
+  // affordance-honesty — operator will see the entity decision as the
+  // first explicit step once G3 promotes entityType to position 0.
+  'entityType',
   'product',
   'objectives',
   'timeline',
@@ -32,8 +41,29 @@ export const DimensionKeyEnum = z.enum([
 ]);
 export type DimensionKey = z.infer<typeof DimensionKeyEnum>;
 
-/** Canonical extraction order. First-Empty-wins in `nextDimensionToExtract`. */
-export const DIMENSION_ORDER: DimensionKey[] = [
+/**
+ * KAN-1219 Slice G1 — Narrower type for currently-active extraction dims.
+ *
+ * `DimensionKey` includes 'entityType' (substrate ships it) but the
+ * extraction order array + iteration sites only currently cover the 4
+ * legacy dimensions. G3 will promote 'entityType' to a member of this
+ * subset once the state machine + tests are wired in lockstep.
+ */
+export type ActiveDimensionKey = Exclude<DimensionKey, 'entityType'>;
+
+/**
+ * Canonical extraction order. First-Empty-wins in `nextDimensionToExtract`.
+ *
+ * # KAN-1219 Slice G1 — entityType intentionally OMITTED here
+ *
+ * The substrate ships entityType in the enum + state schema (optional)
+ * without inserting it into DIMENSION_ORDER yet. G3 will replace this array
+ * with `['entityType', 'product', 'objectives', 'timeline', 'audience']`
+ * once the orchestrator state machine + tests have been updated in
+ * lockstep. Pattern mirrors KAN-1184 Q-ADD C2 "deterministic state
+ * transitions" — order changes are a state-machine concern, not substrate.
+ */
+export const DIMENSION_ORDER: ActiveDimensionKey[] = [
   'product',
   'objectives',
   'timeline',
@@ -63,6 +93,14 @@ export type DimensionState = z.infer<typeof DimensionStateSchema>;
 // ─────────────────────────────────────────────
 
 export const ConversationStateSchema = z.object({
+  // KAN-1219 Slice G1 — `entityType` carries CampaignTargetEntityType
+  // ('product' | 'vehicle') once confirmed. Drives the downstream product
+  // vs vehicle resolution flow. OPTIONAL in this substrate ship so the
+  // existing 4-dimension orchestrator flow remains intact; G3 will mark it
+  // required + insert into DIMENSION_ORDER position 0 (Memo 19/42
+  // affordance-honesty — operator sees the entity branch as the first
+  // explicit step once G3 lands).
+  entityType: DimensionStateSchema.optional(),
   product: DimensionStateSchema,
   objectives: DimensionStateSchema,
   timeline: DimensionStateSchema,
@@ -70,7 +108,7 @@ export const ConversationStateSchema = z.object({
 });
 export type ConversationState = z.infer<typeof ConversationStateSchema>;
 
-/** Empty initial state — all 4 dimensions unconfirmed. */
+/** Empty initial state — 4 dimensions unconfirmed (G1 backward-compat). */
 export function emptyConversationState(): ConversationState {
   return {
     product: { kind: 'empty' },

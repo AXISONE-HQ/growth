@@ -21,8 +21,8 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
   DIMENSION_ORDER,
+  type ActiveDimensionKey,
   type ConversationState,
-  type DimensionKey,
   type DimensionState,
 } from "@growth/shared";
 
@@ -34,7 +34,10 @@ export interface DimensionSidebarProps {
   className?: string;
 }
 
-const DIMENSION_LABELS: Record<DimensionKey, string> = {
+// KAN-1219 Slice G1 — Record scoped to ActiveDimensionKey (4 dims) rather
+// than DimensionKey (5 dims, includes the dark 'entityType'). G2 will add
+// the entityType label here when promoting it into DIMENSION_ORDER.
+const DIMENSION_LABELS: Record<ActiveDimensionKey, string> = {
   product: "Product",
   objectives: "Objectives",
   timeline: "Timeline",

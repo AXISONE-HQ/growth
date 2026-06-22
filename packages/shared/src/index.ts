@@ -82,6 +82,10 @@ export * from "./relative-dates.js";
 // objective + strategy + stages + first-actions). Read-only — no
 // Campaign DB model corresponds. Slice 3 wires persistence.
 export * from "./campaign-proposal.js";
+// KAN-1219 Slice G1 — Polymorphic Campaign target (product | vehicle) Zod
+// schema + row-shape adapters. Consumed by orchestrator + commit-action-plan
+// in G3 and by the operator confirmation panel in G2.
+export * from "./campaign-target.js";
 // KAN-1005 M2-5 — human-review sampling markers + DecisionSource
 // discriminator. Shared between apps/api (sampling fork at
 // action-decided-push.ts) and packages/api (recommendations.ts guard

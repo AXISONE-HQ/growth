@@ -20,6 +20,7 @@
 import type {
   ConversationState,
   DimensionKey,
+  ActiveDimensionKey,
   DimensionState,
   ChatTurnResult,
 } from '@growth/shared';
@@ -390,7 +391,7 @@ export async function handleChatTurn(
  */
 export function nextDimensionToExtract(
   state: ConversationState,
-): DimensionKey | null {
+): ActiveDimensionKey | null {
   for (const dim of DIMENSION_ORDER) {
     if (state[dim].kind !== 'confirmed') return dim;
   }
@@ -466,7 +467,7 @@ export function isOperatorConfirmation(message: string): boolean {
  * fix — pre-KAN-1201 the LLM's prose said "next, let's nail down your
  * objective" but state never advanced, violating the doctrine preamble).
  */
-function buildConfirmationAck(dim: DimensionKey): string {
+function buildConfirmationAck(dim: ActiveDimensionKey): string {
   switch (dim) {
     case 'product':
       return "Got it — Product confirmed. Next, let's nail down your objective: what specific outcome (revenue / units / deals / meetings) and target number do you want to hit?";
@@ -543,6 +544,12 @@ Be honest. When the operator's message doesn't clearly answer the dimension, ret
 
 function describeDimension(dim: DimensionKey): string {
   switch (dim) {
+    case 'entityType':
+      // KAN-1219 Slice G1 — operator clarification: are we campaigning to
+      // sell a Product (Stripe/inventory) OR to move a Vehicle from the
+      // dealer lot (KAN-1211 inventory)? Memo 19/42 affordance-honesty —
+      // the operator should see this explicit branch, not have it inferred.
+      return 'Whether this campaign targets a Product (catalog item) or a Vehicle (dealer inventory).';
     case 'product':
       return 'Which product / offering this Campaign is about (free text or product ID).';
     case 'objectives':
@@ -571,6 +578,19 @@ function describeDimension(dim: DimensionKey): string {
  */
 function dimensionValueExample(dim: DimensionKey): string {
   switch (dim) {
+    case 'entityType':
+      // KAN-1219 Slice G1 — classify operator utterance as 'product' or
+      // 'vehicle'. Strong "vehicle" signals: VIN, year/make/model phrasing,
+      // "SUV"/"truck"/etc. body styles, dealer-lot phrasing. Strong
+      // "product" signals: SKU, price-list reference, catalog item name.
+      // Ambiguous → low confidence + clarification per the routing rules.
+      return `Return value as a STRING — either "product" or "vehicle". Examples:
+  "value": "vehicle"   // operator said "campaign for the 4 SUVs we just took on trade"
+  "value": "product"   // operator said "promote Growth Platform Pro to existing customers"
+
+If the operator's intent is unclear (no entity-shape signal), return
+kind=clarification and ask explicitly: "Is this campaign about a product
+in your catalog, or a vehicle from your dealer inventory?"`;
     case 'product':
       return `Return value as a STRING containing the product/offering name. Example:
   "value": "Growth Platform Pro"

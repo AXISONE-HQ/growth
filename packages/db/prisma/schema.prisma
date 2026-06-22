@@ -634,8 +634,27 @@ model Campaign {
   // feasibility analyzer; PR 3 surfaces in chat UI).
   goalType        String? @map("goal_type") // 'revenue' | 'units' | 'deals' | 'meetings' | 'custom'
   goalTarget      Int?    @map("goal_target") // numeric target value
+  // KAN-1219 Slice G1 — DEPRECATED. Replaced by `targetEntityType` +
+  // `targetEntityIds` polymorphic discriminator below. Backfilled in the
+  // 20260622120000 migration; kept for 1-sprint deprecation window before
+  // drop in the G2 follow-up.
   goalProductId   String? @map("goal_product_id") // soft pointer to Product (no relation declared this PR)
   goalDescription String? @map("goal_description") // free-text operator statement
+
+  // ─── KAN-1219 Slice G1 — Polymorphic target substrate ───
+  // Replaces the single-product `goalProductId` soft pointer with an
+  // (entityType, ids[]) pair so campaigns can target Vehicles (KAN-1211)
+  // OR Products (KAN-1212). NULL during draft phase before the operator
+  // confirms an entity type. CHECK constraint enforces the domain at the
+  // DB layer; Zod CampaignTargetSchema in @growth/shared owns the
+  // application-level shape.
+  //
+  // Memo 39 codebase-precedent — soft-pointer scalar/array pattern mirrors
+  // `goalProductId` (no FK; future KAN-1225 may upgrade). Q4 lock: one-shot
+  // backfill happens inside the migration; goalProductId stays for 1-sprint
+  // deprecation window then drops.
+  targetEntityType String?  @map("target_entity_type") // 'product' | 'vehicle' | NULL
+  targetEntityIds  String[] @default([]) @map("target_entity_ids")
 
   // AI counsel snapshots — populated by feasibility analyzer in PR 2+.
   feasibilityAnalysis Json? @map("feasibility_analysis")
