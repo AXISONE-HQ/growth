@@ -312,7 +312,7 @@ describe("accountRouter.updateIdentity", () => {
     const caller = buildCaller({ uid: "user-abc" });
     await caller.updateIdentity({ legalName: "New Name" });
     expect(publishMock).toHaveBeenCalledTimes(1);
-    const event = publishMock.mock.calls[0][0] as Record<string, unknown>;
+    const event = (publishMock.mock.calls[0] as unknown[])[0] as Record<string, unknown>;
     expect(event).toMatchObject({
       eventType: "account.field_updated",
       version: "1.0",
@@ -342,7 +342,9 @@ describe("accountRouter.updateIdentity", () => {
       displayName: "Acme",
       websiteUrl: "https://acme.com",
     });
-    const paths = publishMock.mock.calls.map((c) => (c[0] as { fieldPath: string }).fieldPath);
+    const paths = publishMock.mock.calls.map(
+      (c) => ((c as unknown[])[0] as { fieldPath: string }).fieldPath,
+    );
     expect(paths.sort()).toEqual(["displayName", "legalName", "websiteUrl"]);
   });
 

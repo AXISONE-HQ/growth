@@ -130,7 +130,11 @@ export async function getMessengerProfile(
     console.warn(`Messenger profile fetch warning: ${JSON.stringify(err)}`);
     return {};
   }
-  const data = await res.json();
+  const data = (await res.json()) as {
+    first_name?: string;
+    last_name?: string;
+    profile_pic?: string;
+  };
   return {
     firstName: data.first_name,
     lastName: data.last_name,

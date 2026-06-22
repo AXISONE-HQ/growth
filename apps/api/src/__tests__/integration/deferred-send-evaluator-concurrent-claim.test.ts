@@ -31,7 +31,6 @@
  * 11. Publish failure reverts processing → pending (cascade discipline)
  */
 import { describe, expect, it, vi } from 'vitest';
-import { processPendingDeferredSends } from '../../../../../packages/api/src/services/deferred-send-evaluator.js';
 import {
   buildDeferredSend,
   createContact,
@@ -40,12 +39,38 @@ import {
   withCleanup,
 } from './setup.js';
 
+// KAN-1221 — KAN-689 cohort: deferred-send-evaluator lives in packages/api/
+// outside apps/api rootDir. Variable-specifier dynamic import sidesteps
+// TS6059 — see memo `cc_prompt_cross_rootdir_imports_must_be_pattern_conformant`.
+const deferredSendEvaluatorSpec =
+  '../../../../../packages/api/src/services/deferred-send-evaluator.js';
+
+/** Local mirror of `processPendingDeferredSends`'s evaluator options shape.
+ *  Inline rather than imported because a static type import would re-introduce
+ *  the TS6059 cross-rootDir constraint. Update in lockstep with the canonical
+ *  shape in `packages/api/src/services/deferred-send-evaluator.ts`. */
+interface EvaluatorOpts {
+  evaluateSendPolicy: (input: unknown) => Promise<{ type: string; reason?: string; ruleViolated?: string; deferUntil?: Date }>;
+  publishActionSend: (...args: unknown[]) => Promise<string>;
+  publishActionDecided: (...args: unknown[]) => Promise<{ published: boolean; messageId: string }>;
+  resolveEmailConnectionId: (...args: unknown[]) => Promise<string>;
+  resolveReplyToForTenant: (...args: unknown[]) => Promise<string | null>;
+  getPubSubClient: () => unknown;
+  publicWebhookBaseUrl: string;
+}
+interface DeferredSendEvaluatorModule {
+  processPendingDeferredSends: (prisma: unknown, opts: EvaluatorOpts) => Promise<unknown>;
+}
+async function loadDeferredSendEvaluator(): Promise<DeferredSendEvaluatorModule> {
+  return (await import(deferredSendEvaluatorSpec)) as DeferredSendEvaluatorModule;
+}
+
 /** Stub evaluator options returning the requested policy verdict. Used in
  * tests that need processPendingDeferredSends to drive through processOneRow. */
 function makeEvaluatorOpts(overrides: {
   policy?: 'allow' | 'deny' | 'defer';
   publishActionSendImpl?: (...args: unknown[]) => Promise<string>;
-} = {}): Parameters<typeof processPendingDeferredSends>[1] {
+} = {}): EvaluatorOpts {
   return {
     evaluateSendPolicy: async () => {
       switch (overrides.policy ?? 'allow') {
@@ -441,7 +466,8 @@ describe('KAN-1119 — deferred-send-evaluator atomic CTE claim', () => {
           },
         });
 
-        const result = await processPendingDeferredSends(prisma, opts);
+        const { processPendingDeferredSends } = await loadDeferredSendEvaluator();
+        const result = (await processPendingDeferredSends(prisma, opts)) as { errors: number };
 
         // The catch path in processPendingDeferredSends should revert the
         // row back to 'pending' so it's eligible for next-tick re-claim.
