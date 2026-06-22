@@ -91,6 +91,19 @@ const STUB_AUDIENCE_COUNT = async () => ({
 
 const TODAY = new Date('2026-06-16T00:00:00.000Z');
 
+/**
+ * KAN-1219 Slice G3 activation cost — entityType promoted to FIRST per Q1
+ * lock. KAN-1203 scenarios target product/objectives/timeline/audience
+ * persistence, so each fixture seeds entityType='product' as confirmed.
+ * Activation-slice-fixture-update pattern (1st banked anchor).
+ */
+function productCampaignSeed(): ConversationState {
+  return {
+    ...emptyConversationState(),
+    entityType: { kind: 'confirmed', value: 'product' },
+  };
+}
+
 // ─────────────────────────────────────────────
 // PRODUCT dimension — accepts string OR object with natural-language names
 // ─────────────────────────────────────────────
@@ -112,7 +125,7 @@ describe('KAN-1203 product persistence — canonical string + LLM-natural object
         prisma,
         llm,
         STUB_AUDIENCE_COUNT,
-        { tenantId: tenant.id, message: 'Growth Platform Pro', state: emptyConversationState() },
+        { tenantId: tenant.id, message: 'Growth Platform Pro', state: productCampaignSeed() },
         TODAY,
       );
       const campaignId = (result as { campaignId: string }).campaignId;
@@ -141,7 +154,7 @@ describe('KAN-1203 product persistence — canonical string + LLM-natural object
         prisma,
         llm,
         STUB_AUDIENCE_COUNT,
-        { tenantId: tenant.id, message: 'Growth Platform Essential', state: emptyConversationState() },
+        { tenantId: tenant.id, message: 'Growth Platform Essential', state: productCampaignSeed() },
         TODAY,
       );
       const campaignId = (result as { campaignId: string }).campaignId;
@@ -173,7 +186,7 @@ describe('KAN-1203 objectives persistence — canonical + Fred-confirmed LLM-nat
       ]);
       // Reach objectives by injecting product already confirmed
       const stateWithProduct: ConversationState = {
-        ...emptyConversationState(),
+        ...productCampaignSeed(),
         product: { kind: 'confirmed', value: 'Growth Platform' },
       };
       const result = await handleChatTurn(
@@ -214,7 +227,7 @@ describe('KAN-1203 objectives persistence — canonical + Fred-confirmed LLM-nat
         },
       ]);
       const stateWithProduct: ConversationState = {
-        ...emptyConversationState(),
+        ...productCampaignSeed(),
         product: { kind: 'confirmed', value: 'Growth Platform' },
       };
       const result = await handleChatTurn(
@@ -252,7 +265,7 @@ describe('KAN-1203 objectives persistence — canonical + Fred-confirmed LLM-nat
         },
       ]);
       const stateWithProduct: ConversationState = {
-        ...emptyConversationState(),
+        ...productCampaignSeed(),
         product: { kind: 'confirmed', value: 'Growth Platform' },
       };
       const result = await handleChatTurn(
@@ -294,7 +307,7 @@ describe('KAN-1203 timeline persistence — ISO strings + bad-date guards', () =
         },
       ]);
       const stateWithObj: ConversationState = {
-        ...emptyConversationState(),
+        ...productCampaignSeed(),
         product: { kind: 'confirmed', value: 'Growth Platform' },
         objectives: { kind: 'confirmed', value: { goalType: 'units', goalTarget: 50, goalDescription: 'x' } },
       };
@@ -332,7 +345,7 @@ describe('KAN-1203 timeline persistence — ISO strings + bad-date guards', () =
         },
       ]);
       const stateWithObj: ConversationState = {
-        ...emptyConversationState(),
+        ...productCampaignSeed(),
         product: { kind: 'confirmed', value: 'Growth Platform' },
         objectives: { kind: 'confirmed', value: { goalType: 'units', goalTarget: 50, goalDescription: 'x' } },
       };
@@ -400,7 +413,10 @@ describe('KAN-1203 full-chain reproduction — Fred-confirmed PROD shapes', () =
         },
       ]);
 
-      let state: ConversationState = emptyConversationState();
+      // KAN-1219 G3 — chain test stays focused on the existing 4-dim
+      // persistence; seed entityType='product' so the orchestrator targets
+      // 'product' on the first turn rather than the new entityType dim.
+      let state: ConversationState = productCampaignSeed();
       let campaignId: string | undefined;
       const messages = [
         'Growth Platform',

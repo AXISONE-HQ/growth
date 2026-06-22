@@ -71,7 +71,7 @@ describe("BuilderChatThread (KAN-1191)", () => {
           kind: "clarification",
           aiMessage: "What product are you selling?",
           state: {
-            product: { kind: "empty" },
+            entityType: { kind: "empty" }, product: { kind: "empty" },
             objectives: { kind: "empty" },
             timeline: { kind: "empty" },
             audience: { kind: "empty" },
@@ -103,7 +103,7 @@ describe("BuilderChatThread (KAN-1191)", () => {
           kind: "dimension_confirmed",
           aiMessage: "Got it: Widget Pro",
           state: {
-            product: { kind: "confirmed", value: "Widget Pro" },
+            entityType: { kind: "confirmed", value: "product" }, product: { kind: "confirmed", value: "Widget Pro" },
             objectives: { kind: "empty" },
             timeline: { kind: "empty" },
             audience: { kind: "empty" },
@@ -135,7 +135,7 @@ describe("BuilderChatThread (KAN-1191)", () => {
           kind: "all_dimensions_confirmed",
           aiMessage: "All 4 dimensions confirmed. Ready to generate.",
           state: {
-            product: { kind: "confirmed", value: "Widget" },
+            entityType: { kind: "confirmed", value: "product" }, product: { kind: "confirmed", value: "Widget" },
             objectives: { kind: "confirmed", value: "Sales" },
             timeline: { kind: "confirmed", value: "Q3" },
             audience: { kind: "confirmed", value: "Existing" },

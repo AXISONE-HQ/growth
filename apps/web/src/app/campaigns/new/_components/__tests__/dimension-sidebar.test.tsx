@@ -19,8 +19,8 @@ import userEvent from "@testing-library/user-event";
 import { DimensionSidebar } from "../DimensionSidebar";
 import { emptyConversationState, type ConversationState } from "@growth/shared";
 
-describe("DimensionSidebar (KAN-1191)", () => {
-  it("renders 4 dimension chips", () => {
+describe("DimensionSidebar (KAN-1191 / KAN-1219 G3)", () => {
+  it("renders 5 dimension chips (KAN-1219 G3 — entityType promoted to FIRST)", () => {
     render(
       <DimensionSidebar
         state={emptyConversationState()}
@@ -29,13 +29,14 @@ describe("DimensionSidebar (KAN-1191)", () => {
         isGenerating={false}
       />,
     );
+    expect(screen.getByText("Target type")).toBeInTheDocument();
     expect(screen.getByText("Product")).toBeInTheDocument();
     expect(screen.getByText("Objectives")).toBeInTheDocument();
     expect(screen.getByText("Timeline")).toBeInTheDocument();
     expect(screen.getByText("Audience")).toBeInTheDocument();
   });
 
-  it("empty state: all chips show 'Pending'", () => {
+  it("empty state: all 5 chips show 'Pending'", () => {
     render(
       <DimensionSidebar
         state={emptyConversationState()}
@@ -45,7 +46,7 @@ describe("DimensionSidebar (KAN-1191)", () => {
       />,
     );
     const pendingBadges = screen.getAllByText("Pending");
-    expect(pendingBadges).toHaveLength(4);
+    expect(pendingBadges).toHaveLength(5);
   });
 
   it("proposed dimension: shows 'Proposed' badge", () => {

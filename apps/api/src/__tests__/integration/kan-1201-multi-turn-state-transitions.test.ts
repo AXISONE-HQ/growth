@@ -107,6 +107,24 @@ const STUB_AUDIENCE_COUNT = async () => ({
 
 const TODAY = new Date('2026-06-16T00:00:00.000Z');
 
+/**
+ * KAN-1219 Slice G3 activation cost — entityType promoted to FIRST position
+ * in DIMENSION_ORDER per Q1 lock. KAN-1201 scenarios target product /
+ * objectives / timeline / audience transitions, so each fixture seeds
+ * entityType='product' as confirmed up-front (the orchestrator would
+ * otherwise route to entityType extraction before reaching product).
+ *
+ * This is the activation-slice-fixture-update pattern: cost deferred from
+ * G1/G2 DARK substrate now folded into G3 activation slice. See banked
+ * memo (1st anchor of pattern).
+ */
+function productCampaignSeed(): ConversationState {
+  return {
+    ...emptyConversationState(),
+    entityType: { kind: 'confirmed', value: 'product' },
+  };
+}
+
 // ─────────────────────────────────────────────
 // Scenario 1 — Defect 1 fix: bare confirmation upgrades proposed → confirmed.
 //
@@ -122,9 +140,11 @@ describe('KAN-1201 L1 — bare confirmation upgrades proposed → confirmed (ski
     )) as OrchestratorModule;
     await withRollback(async (prisma) => {
       const tenant = await createTenant(prisma);
-      // Prior turn left product in 'proposed' state
+      // Prior turn left product in 'proposed' state (KAN-1219 G3 — entityType
+      // seeded as confirmed=product so the orchestrator targets the product
+      // dimension on this turn).
       const stateWithProposed: ConversationState = {
-        ...emptyConversationState(),
+        ...productCampaignSeed(),
         product: { kind: 'proposed', value: 'Growth Platform', confidence: 'medium' },
       };
       // LLM queue is EMPTY — scenario asserts the LLM is NOT called when the
@@ -161,11 +181,13 @@ describe('KAN-1201 L1 — bare confirmation upgrades proposed → confirmed (ski
     )) as OrchestratorModule;
     await withRollback(async (prisma) => {
       const tenant = await createTenant(prisma);
-      // Empty state — operator typing "yes" is meaningless
+      // Empty state — operator typing "yes" is meaningless. KAN-1219 G3:
+      // first dimension is now entityType, so the clarification asks about
+      // entity type rather than product.
       const llm = llmQueue([
         {
           kind: 'clarification',
-          aiMessage: 'I need a bit more to go on — what product is this Campaign for?',
+          aiMessage: 'Is this campaign about a product in your catalog, or a vehicle from your dealer inventory?',
         },
       ]);
 
@@ -213,7 +235,7 @@ describe('KAN-1201 L2 — HIGH confidence on empty dim → auto-confirm', () => 
         {
           tenantId: tenant.id,
           message: 'we sell Growth Platform Essential tier',
-          state: emptyConversationState(),
+          state: productCampaignSeed(),
         },
         TODAY,
       );
@@ -245,7 +267,7 @@ describe('KAN-1201 L3 — HIGH confidence on proposed dim → implicit confirmat
     await withRollback(async (prisma) => {
       const tenant = await createTenant(prisma);
       const stateWithProposed: ConversationState = {
-        ...emptyConversationState(),
+        ...productCampaignSeed(),
         product: { kind: 'proposed', value: 'Growth Platform', confidence: 'medium' },
       };
       const llm = llmQueue([
@@ -308,7 +330,7 @@ describe('KAN-1201 L4 — MEDIUM confidence → propose (no auto-confirm)', () =
         {
           tenantId: tenant.id,
           message: 'the main thing we sell',
-          state: emptyConversationState(),
+          state: productCampaignSeed(),
         },
         TODAY,
       );
@@ -374,7 +396,13 @@ describe('KAN-1201 L5 — full 4-dimension confirmation chain', () => {
         },
       ]);
 
-      let state: ConversationState = emptyConversationState();
+      // KAN-1219 G3 — scenario chains 4 dimensions on top of entityType
+      // already confirmed (product campaign). G3 added entityType as the
+      // FIRST dimension per Q1 lock; this scenario stays focused on the
+      // existing product→objectives→timeline→audience chain because the
+      // dedicated 5-dim end-to-end coverage lives in the polymorphic
+      // integration test added below.
+      let state: ConversationState = productCampaignSeed();
       let campaignId: string | undefined;
 
       const dimensions: DimensionKey[] = [
@@ -468,7 +496,7 @@ describe('KAN-1201 — reset mid-conversation preserves history', () => {
     await withRollback(async (prisma) => {
       const tenant = await createTenant(prisma);
       const stateWithProposed: ConversationState = {
-        ...emptyConversationState(),
+        ...productCampaignSeed(),
         product: { kind: 'proposed', value: 'Stale Product', confidence: 'medium' },
       };
       const llm = llmQueue([]); // LLM not called on reset
@@ -487,6 +515,8 @@ describe('KAN-1201 — reset mid-conversation preserves history', () => {
 
       expect(result.kind).toBe('reset');
       if (result.kind === 'reset') {
+        // KAN-1219 G3 — entityType is also reset to empty (5-dim shape).
+        expect(result.state.entityType.kind).toBe('empty');
         expect(result.state.product.kind).toBe('empty');
       }
 

@@ -7812,6 +7812,81 @@ const campaignsRouter = router({
       );
     }),
 
+  // KAN-1219 Slice G3 — commitTarget mutation.
+  //
+  // Operator-initiated commit of selected target entities (specific Product
+  // ids OR specific Vehicle VINs) once they've used the TargetEntityPanel
+  // in BuilderChatThread to narrow the LLM's descriptive proposal down to
+  // concrete IDs. Writes Campaign.targetEntityIds + ensures
+  // Campaign.targetEntityType matches, then writes a
+  // campaign.target_committed audit log entry per Memo 53.
+  //
+  // The actual VIN-against-live-inventory resolution + skip-removed-at-send
+  // semantics (Q5 lock) happen at downstream send-time consumers — this
+  // mutation just persists the operator's selection.
+  commitTarget: protectedProcedure
+    .input(
+      z.object({
+        campaignId: z.string().uuid(),
+        entityType: z.enum(["product", "vehicle"]),
+        entityIds: z.array(z.string().min(1)).min(1).max(500),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const updated = await ctx.prisma.$transaction(async (tx) => {
+        const row = await tx.campaign.findFirst({
+          where: { id: input.campaignId, tenantId: ctx.tenantId },
+          select: { id: true, targetEntityType: true },
+        });
+        if (!row) {
+          throw new Error("CAMPAIGN_NOT_FOUND");
+        }
+        // If targetEntityType already set, the operator must be confirming
+        // the SAME entityType the orchestrator extracted. The state machine
+        // owns that decision; commitTarget is purely the operator's "yes,
+        // these are the specific entities" follow-through.
+        if (
+          row.targetEntityType &&
+          row.targetEntityType !== input.entityType
+        ) {
+          throw new Error("TARGET_ENTITY_TYPE_MISMATCH");
+        }
+        const next = await tx.campaign.update({
+          where: { id: input.campaignId },
+          data: {
+            targetEntityType: input.entityType,
+            targetEntityIds: input.entityIds,
+          },
+          select: {
+            id: true,
+            targetEntityType: true,
+            targetEntityIds: true,
+          },
+        });
+        await tx.auditLog.create({
+          data: {
+            tenantId: ctx.tenantId,
+            actor: ctx.firebaseUser?.uid ?? "system",
+            actionType: "campaign.target_committed",
+            payload: {
+              campaignId: input.campaignId,
+              entityType: input.entityType,
+              entityIds: input.entityIds,
+              count: input.entityIds.length,
+            },
+            reasoning: `Operator confirmed ${input.entityIds.length} ${input.entityType} target(s) via TargetEntityPanel`,
+          },
+        });
+        return next;
+      });
+      return {
+        kind: "committed" as const,
+        campaignId: updated.id,
+        entityType: updated.targetEntityType,
+        entityIds: updated.targetEntityIds,
+      };
+    }),
+
   // KAN-1185 — Action Plan generator (Campaign Module Reset PR 4).
   //
   // Operator-initiated (Q-ADD-NEW-2 lock — NOT auto-chained from chat
