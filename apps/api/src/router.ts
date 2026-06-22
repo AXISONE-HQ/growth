@@ -359,14 +359,79 @@ export function canDeleteStage(input: {
 }
 import { generateObjectionResponses, regenerateSingleField } from "./llm.js";
 import { validatePageToken } from "./integrations/messenger/graph-api.js";
-import { detectSignals } from "../../../packages/api/src/services/wedge-signals.js";
-import { matchOpportunities } from "../../../packages/api/src/services/wedge-opportunities.js";
-import {
-  WEDGE_PLAYBOOKS,
-  buildPlaybookStepContext,
-} from "../../../packages/api/src/services/wedge-playbooks.js";
-import { runDecisionForContact } from "../../../packages/api/src/services/run-decision-for-contact.js";
 import { mapDrivegoodEntry } from "./lib/drivegood-mapper.js";
+
+// KAN-1221 — KAN-689 cohort: wedge backend services live in packages/api/src/
+// outside apps/api rootDir. Variable-specifier dynamic imports keep them out
+// of the apps/api static graph (TS6059 cohort). Pre-KAN-1221 these were
+// static imports that surfaced cold-cache (Turborepo) under KAN-1219 G3.
+interface WedgeSignalsModule {
+  detectSignals: (contacts: unknown[]) => Array<{
+    type: string;
+    contactId: string;
+    score: number;
+  }>;
+}
+interface WedgeOpportunitiesModule {
+  matchOpportunities: (signals: unknown[]) => Array<{
+    type: string;
+    playbookSlug: string;
+    entityIds: string[];
+    score: number;
+  }>;
+}
+interface WedgePlaybooksModule {
+  WEDGE_PLAYBOOKS: Record<string, {
+    slug: string;
+    name: string;
+    description: string;
+    steps: Array<{ day: number; channel: string; intent: string }>;
+  }>;
+  buildPlaybookStepContext: (playbookSlug: string, stepIndex: number) => {
+    additionalContext: Record<string, unknown>;
+    [k: string]: unknown;
+  };
+}
+interface RunDecisionForContactModule {
+  runDecisionForContact: (
+    prisma: unknown,
+    input: {
+      tenantId: string;
+      contactId: string;
+      actor: { type: string; id: string };
+      playbookStepContext?: Record<string, unknown>;
+    },
+  ) => Promise<{ outcome: string; decisionId: string }>;
+}
+
+let _wedgeSignalsModule: WedgeSignalsModule | null = null;
+async function loadWedgeSignals(): Promise<WedgeSignalsModule> {
+  if (_wedgeSignalsModule) return _wedgeSignalsModule;
+  const spec = "../../../packages/api/src/services/wedge-signals.js";
+  _wedgeSignalsModule = (await import(spec)) as WedgeSignalsModule;
+  return _wedgeSignalsModule;
+}
+let _wedgeOpportunitiesModule: WedgeOpportunitiesModule | null = null;
+async function loadWedgeOpportunities(): Promise<WedgeOpportunitiesModule> {
+  if (_wedgeOpportunitiesModule) return _wedgeOpportunitiesModule;
+  const spec = "../../../packages/api/src/services/wedge-opportunities.js";
+  _wedgeOpportunitiesModule = (await import(spec)) as WedgeOpportunitiesModule;
+  return _wedgeOpportunitiesModule;
+}
+let _wedgePlaybooksModule: WedgePlaybooksModule | null = null;
+async function loadWedgePlaybooks(): Promise<WedgePlaybooksModule> {
+  if (_wedgePlaybooksModule) return _wedgePlaybooksModule;
+  const spec = "../../../packages/api/src/services/wedge-playbooks.js";
+  _wedgePlaybooksModule = (await import(spec)) as WedgePlaybooksModule;
+  return _wedgePlaybooksModule;
+}
+let _runDecisionForContactModule: RunDecisionForContactModule | null = null;
+async function loadRunDecisionForContact(): Promise<RunDecisionForContactModule> {
+  if (_runDecisionForContactModule) return _runDecisionForContactModule;
+  const spec = "../../../packages/api/src/services/run-decision-for-contact.js";
+  _runDecisionForContactModule = (await import(spec)) as RunDecisionForContactModule;
+  return _runDecisionForContactModule;
+}
 
 // ============================================================================
 // CONTACTS ROUTER
@@ -4754,6 +4819,12 @@ const wedgeRouter = router({
       where: { tenantId: ctx.tenantId },
     });
 
+    const [{ detectSignals }, { matchOpportunities }, { WEDGE_PLAYBOOKS }] =
+      await Promise.all([
+        loadWedgeSignals(),
+        loadWedgeOpportunities(),
+        loadWedgePlaybooks(),
+      ]);
     const signals = detectSignals(contacts as any);
     const opportunities = matchOpportunities(signals);
 
@@ -4821,6 +4892,17 @@ const wedgeRouter = router({
       const contacts = await ctx.prisma.contact.findMany({
         where: { tenantId: ctx.tenantId },
       });
+      const [
+        { detectSignals },
+        { matchOpportunities },
+        { buildPlaybookStepContext },
+        { runDecisionForContact },
+      ] = await Promise.all([
+        loadWedgeSignals(),
+        loadWedgeOpportunities(),
+        loadWedgePlaybooks(),
+        loadRunDecisionForContact(),
+      ]);
       const signals = detectSignals(contacts as any);
       const opportunities = matchOpportunities(signals);
       const opp = opportunities.find((o) => o.type === input.opportunityType);

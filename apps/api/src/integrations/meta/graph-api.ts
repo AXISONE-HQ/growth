@@ -48,7 +48,7 @@ export async function exchangeCodeForToken(
     const err = await res.json().catch(() => ({}));
     throw new Error(`Meta token exchange failed: ${JSON.stringify(err)}`);
   }
-  const data = await res.json();
+  const data = (await res.json()) as { access_token: string };
   return data.access_token;
 }
 
@@ -71,7 +71,7 @@ export async function getLongLivedToken(
     const err = await res.json().catch(() => ({}));
     throw new Error(`Meta long-lived token exchange failed: ${JSON.stringify(err)}`);
   }
-  const data = await res.json();
+  const data = (await res.json()) as { access_token: string };
   return data.access_token;
 }
 
@@ -88,7 +88,9 @@ export async function getUserPages(
     const err = await res.json().catch(() => ({}));
     throw new Error(`Meta get pages failed: ${JSON.stringify(err)}`);
   }
-  const data = await res.json();
+  const data = (await res.json()) as {
+    data: Array<{ id: string; name: string; access_token: string }>;
+  };
   return data.data || [];
 }
 
@@ -143,7 +145,7 @@ export async function fetchLeadData(
     const err = await res.json().catch(() => ({}));
     throw new Error(`Meta lead fetch failed: ${JSON.stringify(err)}`);
   }
-  return res.json();
+  return (await res.json()) as MetaLeadData;
 }
 
 /**
