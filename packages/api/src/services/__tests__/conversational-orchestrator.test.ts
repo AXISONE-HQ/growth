@@ -21,6 +21,7 @@ import {
   isResetIntent,
   parseDimensionExtraction,
   buildExtractionPrompt,
+  reconcileCommittedTargetState,
   type OrchestratorPrisma,
   type LLMCompleteFn,
   type AudienceCountFn,
@@ -567,5 +568,130 @@ describe('KAN-1184 — handleChatTurn (full state-machine integration)', () => {
     });
 
     expect(result.kind).toBe('clarification');
+  });
+});
+
+// ─────────────────────────────────────────────
+// KAN-1224 Phase A — panel-commit dimension state propagation
+//
+// Operator pain (KAN-1230): after committing a vehicle via TargetEntityPanel
+// (a separate commitTarget mutation), the client-held ConversationState still
+// shows product=Pending, so the LLM re-asks "How many CR-Vs?". The orchestrator
+// now reconciles against Campaign DB truth so the panel-answered dimensions are
+// skipped.
+// ─────────────────────────────────────────────
+
+describe('KAN-1224 Phase A — reconcileCommittedTargetState (pure)', () => {
+  const committedVehicle = {
+    targetEntityType: 'vehicle',
+    targetEntityIds: ['veh-1'],
+    proposedPlan: {
+      vehicleTargetDescriptor: {
+        maxCount: 1,
+        year: 2007,
+        make: 'Honda',
+        model: 'CR-V',
+        condition: 'used',
+      },
+    },
+  };
+
+  it('no committed target → state returned unchanged', () => {
+    const state = emptyConversationState();
+    expect(reconcileCommittedTargetState(state, null)).toEqual(state);
+    expect(
+      reconcileCommittedTargetState(state, {
+        targetEntityType: null,
+        targetEntityIds: [],
+      }),
+    ).toEqual(state);
+  });
+
+  it('committed vehicle → entityType + product marked confirmed', () => {
+    const out = reconcileCommittedTargetState(
+      emptyConversationState(),
+      committedVehicle,
+    );
+    expect(out.entityType).toEqual({ kind: 'confirmed', value: 'vehicle' });
+    expect(out.product.kind).toBe('confirmed');
+    // product value carries the descriptor computed at commit time
+    expect(out.product).toMatchObject({
+      kind: 'confirmed',
+      value: { make: 'Honda', model: 'CR-V', condition: 'used', maxCount: 1 },
+    });
+    // does NOT touch downstream dimensions
+    expect(out.objectives.kind).toBe('empty');
+    expect(out.timeline.kind).toBe('empty');
+  });
+
+  it('never downgrades a dimension the client already confirmed', () => {
+    const state: ConversationState = {
+      ...emptyConversationState(),
+      product: { kind: 'confirmed', value: { make: 'Toyota' } },
+    };
+    const out = reconcileCommittedTargetState(state, committedVehicle);
+    // client's confirmed product preserved (not overwritten by descriptor)
+    expect(out.product).toEqual({ kind: 'confirmed', value: { make: 'Toyota' } });
+  });
+
+  it('product mode → product confirmed carries committed entity IDs', () => {
+    const out = reconcileCommittedTargetState(emptyConversationState(), {
+      targetEntityType: 'product',
+      targetEntityIds: ['prod-1', 'prod-2'],
+      proposedPlan: null,
+    });
+    expect(out.entityType).toEqual({ kind: 'confirmed', value: 'product' });
+    expect(out.product).toEqual({
+      kind: 'confirmed',
+      value: { committedEntityIds: ['prod-1', 'prod-2'] },
+    });
+  });
+});
+
+describe('KAN-1224 Phase A — handleChatTurn skips panel-committed product', () => {
+  it('committed vehicle target → next extraction is objectives, NOT product', async () => {
+    const { prisma } = makePrismaMock();
+    // DB truth: operator committed a vehicle via TargetEntityPanel.
+    (prisma.campaign.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue({
+      targetEntityType: 'vehicle',
+      targetEntityIds: ['veh-1'],
+      proposedPlan: {
+        vehicleTargetDescriptor: { maxCount: 1, make: 'Honda', model: 'CR-V' },
+      },
+    });
+    const llm = makeLlm(
+      JSON.stringify({
+        kind: 'extracted',
+        value: { goalType: 'sales', goalTarget: 1, goalDescription: 'Sell the CR-V' },
+        confidence: 'high',
+        aiMessage: 'Got it — sell 1.',
+      }),
+    );
+    const audience = makeAudienceCount();
+
+    // Client state is STALE: entityType confirmed (chat) but product still
+    // Pending because the panel commit never touched this in-memory state.
+    const staleState: ConversationState = {
+      ...emptyConversationState(),
+      entityType: { kind: 'confirmed', value: 'vehicle' },
+    };
+
+    const result = await handleChatTurn(prisma, llm, audience, {
+      campaignId: 'camp-1',
+      tenantId: 'tenant-1',
+      message: 'I want to move this car',
+      state: staleState,
+    });
+
+    // The LLM was asked about OBJECTIVES — product was skipped via reconciliation.
+    const callerTag = (llm as ReturnType<typeof vi.fn>).mock.calls[0][0]
+      .callerTag as string;
+    expect(callerTag).toBe('orchestrator:objectives');
+    expect(callerTag).not.toBe('orchestrator:product');
+    // Returned state confirms product (self-heals the client on setState).
+    expect(result.kind === 'dimension_confirmed' || result.kind === 'dimension_proposed').toBe(true);
+    if ('state' in result && result.state) {
+      expect(result.state.product.kind).toBe('confirmed');
+    }
   });
 });

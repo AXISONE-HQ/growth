@@ -102,6 +102,74 @@ export interface OrchestratorParams {
 }
 
 /**
+ * KAN-1224 Phase A — reconcile client-held ConversationState against a
+ * polymorphic target the operator committed via TargetEntityPanel.
+ *
+ * `commitTarget` is a SEPARATE tRPC mutation that writes Campaign.targetEntity*
+ * but does NOT touch the client's in-memory ConversationState. So a
+ * panel-committed target leaves `entityType`/`product` showing Pending in the
+ * state the client passes back, and the LLM re-asks "how many?" (the operator
+ * pain KAN-1230 targets). This marks those two dimensions confirmed from DB
+ * truth before the orchestrator decides the next dimension; the reconciled
+ * state is returned, so the client self-heals via `setState(result.state)`.
+ *
+ * Pure + minimal: only touches entityType/product, only upgrades (never
+ * downgrades a client-confirmed dimension), no-op until a target is committed.
+ */
+export function reconcileCommittedTargetState(
+  state: ConversationState,
+  campaign: {
+    targetEntityType?: unknown;
+    targetEntityIds?: unknown;
+    proposedPlan?: unknown;
+  } | null,
+): ConversationState {
+  const entityType =
+    typeof campaign?.targetEntityType === 'string'
+      ? campaign.targetEntityType
+      : null;
+  const entityIds = Array.isArray(campaign?.targetEntityIds)
+    ? (campaign?.targetEntityIds as unknown[])
+    : [];
+  // No committed target yet → leave the chat-driven state untouched.
+  if (!entityType || entityIds.length === 0) return state;
+
+  const next: ConversationState = { ...state };
+  if (state.entityType.kind !== 'confirmed') {
+    next.entityType = {
+      kind: 'confirmed',
+      value: entityType,
+    } as DimensionState;
+  }
+  if (state.product.kind !== 'confirmed') {
+    // Vehicle: the descriptor computed at commit time lives in
+    // proposedPlan.vehicleTargetDescriptor. Product: the committed IDs are the
+    // operator's confirmed selection. Either way the dimension is answered.
+    const descriptor =
+      entityType === 'vehicle'
+        ? extractVehicleTargetDescriptor(campaign?.proposedPlan)
+        : null;
+    next.product = {
+      kind: 'confirmed',
+      value: descriptor ?? { committedEntityIds: entityIds },
+    } as DimensionState;
+  }
+  return next;
+}
+
+function extractVehicleTargetDescriptor(proposedPlan: unknown): unknown | null {
+  if (
+    proposedPlan &&
+    typeof proposedPlan === 'object' &&
+    'vehicleTargetDescriptor' in proposedPlan
+  ) {
+    return (proposedPlan as { vehicleTargetDescriptor: unknown })
+      .vehicleTargetDescriptor;
+  }
+  return null;
+}
+
+/**
  * Handle one chat turn. Detects reset intent first; otherwise extracts the
  * next-needed dimension; updates state + persists turns + returns the next
  * AI message + result discriminator.
@@ -151,6 +219,20 @@ export async function handleChatTurn(
     });
     return { kind: 'reset', aiMessage, state: resetState, campaignId };
   }
+
+  // KAN-1224 Phase A — reconcile the client-held state against a polymorphic
+  // target the operator committed via TargetEntityPanel (a separate mutation
+  // that never touched this in-memory state). DB truth marks entityType +
+  // product confirmed BEFORE we pick the next dimension, so the LLM stops
+  // re-asking "how many?". We reassign params.state once here so the whole
+  // downstream turn (extraction + all returns) threads the reconciled value
+  // and the client self-heals via setState(result.state). No-op until a target
+  // is committed; only upgrades, never downgrades a client-confirmed dimension.
+  const committedTarget = await prisma.campaign.findFirst({
+    where: { id: campaignId, tenantId: params.tenantId },
+    select: { targetEntityType: true, targetEntityIds: true, proposedPlan: true },
+  });
+  params.state = reconcileCommittedTargetState(params.state, committedTarget);
 
   // C2 — Deterministic transition: which dimension to extract next
   const targetDim = nextDimensionToExtract(params.state);

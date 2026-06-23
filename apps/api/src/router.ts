@@ -7945,6 +7945,54 @@ const campaignsRouter = router({
             targetEntityIds: true,
           },
         });
+
+        // KAN-1224 Phase A — derive a vehicleTargetDescriptor from the
+        // committed vehicles so the conversational orchestrator can mark the
+        // 'product' dimension confirmed (reconcileCommittedTargetState reads
+        // proposedPlan.vehicleTargetDescriptor). Lowest-common-denominator
+        // across the selection: a field is included only when ALL selected
+        // vehicles share it; maxCount = selection size. Merge (don't clobber)
+        // any existing proposedPlan keys.
+        if (input.entityType === "vehicle") {
+          const vehicles = await tx.vehicle.findMany({
+            where: { id: { in: input.entityIds }, tenantId: ctx.tenantId },
+            select: { year: true, make: true, model: true, condition: true },
+          });
+          if (vehicles.length > 0) {
+            const shared = <T,>(vals: T[]): T | undefined => {
+              const uniq = Array.from(new Set(vals));
+              return uniq.length === 1 ? uniq[0] : undefined;
+            };
+            const descriptor: Record<string, unknown> = {
+              maxCount: vehicles.length,
+            };
+            const year = shared(vehicles.map((v) => v.year));
+            if (year !== undefined) descriptor.year = year;
+            const make = shared(vehicles.map((v) => v.make));
+            if (make !== undefined) descriptor.make = make;
+            const model = shared(vehicles.map((v) => v.model));
+            if (model !== undefined) descriptor.model = model;
+            const condition = shared(vehicles.map((v) => v.condition));
+            if (condition !== undefined) descriptor.condition = condition;
+
+            const existing = await tx.campaign.findFirst({
+              where: { id: input.campaignId },
+              select: { proposedPlan: true },
+            });
+            const mergedPlan = {
+              ...(existing?.proposedPlan &&
+              typeof existing.proposedPlan === "object"
+                ? (existing.proposedPlan as Record<string, unknown>)
+                : {}),
+              vehicleTargetDescriptor: descriptor,
+            };
+            await tx.campaign.update({
+              where: { id: input.campaignId },
+              data: { proposedPlan: mergedPlan as Prisma.InputJsonValue },
+            });
+          }
+        }
+
         await tx.auditLog.create({
           data: {
             tenantId: ctx.tenantId,
@@ -7959,6 +8007,26 @@ const campaignsRouter = router({
             reasoning: `Operator confirmed ${input.entityIds.length} ${input.entityType} target(s) via TargetEntityPanel`,
           },
         });
+
+        // KAN-1224 Phase A / Memo 53 — emit a distinct dimension-advance audit
+        // signal so the avg_turns_to_commit metric (KAN-1230) can attribute
+        // product-dimension confirmation to a panel commit vs a chat turn.
+        await tx.auditLog.create({
+          data: {
+            tenantId: ctx.tenantId,
+            actor: ctx.firebaseUser?.uid ?? "system",
+            actionType: "campaign.dimension_advanced",
+            payload: {
+              campaignId: input.campaignId,
+              dimension: "product",
+              via: "panel_commit",
+              entityType: input.entityType,
+              count: input.entityIds.length,
+            },
+            reasoning: `Product dimension auto-confirmed via TargetEntityPanel commit (${input.entityIds.length} ${input.entityType})`,
+          },
+        });
+
         return next;
       });
       return {
