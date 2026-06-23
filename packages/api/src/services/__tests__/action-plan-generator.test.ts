@@ -33,6 +33,7 @@ import {
   generateActionPlan,
   persistActionPlan,
   splitAudienceIntoPipelines,
+  VEHICLE_FULL_AUDIENCE,
   type ActionPlanGeneratorPrisma,
   type CountAudienceFn,
   type LLMCompleteFn,
@@ -666,6 +667,115 @@ describe("Dimensions input parsing (insufficient_dimensions on gaps)", () => {
       { campaignId: "campaign-1", tenantId: "t1", todayUtc: new Date("2026-06-15T12:00:00Z") },
     );
     expect(result.kind).toBe("insufficient_dimensions");
+  });
+});
+
+// ─────────────────────────────────────────────
+// (h.5) KAN-1227 — vehicle-mode audience optionality
+//
+// PROD P0: a vehicle campaign (Honda CR-V) reached "Generate Action Plan"
+// with all required dimensions confirmed but audienceConditions still the
+// createDraftCampaign `{}` placeholder (vehicles skip the audience step per
+// KAN-1219 Q3 lock). The generator's hard audience-validation gate rejected
+// it with "Campaign audienceConditions failed schema validation."
+//
+// This block is the cross-layer integration seal (doctrine: operator-
+// validation-surfaces-test-coverage-gap): each layer's isolated tests passed,
+// but no test exercised the FULL vehicle path through THIS validation surface.
+// ─────────────────────────────────────────────
+
+describe("KAN-1227 — vehicle-mode Action Plan generation", () => {
+  const VEHICLE_DIMS = {
+    targetEntityType: "vehicle",
+    // vehicle campaigns NEVER populate audience — stays the createDraftCampaign
+    // placeholder. goalProductId stays null (vehicle target lives in
+    // targetEntityIds, not goalProductId).
+    audienceConditions: {},
+  };
+
+  it("succeeds with the createDraftCampaign `{}` audience placeholder (PROD P0 repro)", async () => {
+    const prisma = makePrisma(makeCampaign(VEHICLE_DIMS));
+    const result = await generateActionPlan(
+      prisma,
+      null,
+      makeLlm(),
+      makeCount(250),
+      { campaignId: "campaign-1", tenantId: "t1", todayUtc: new Date("2026-06-15T12:00:00Z") },
+    );
+    expect(result.kind).toBe("action_plan");
+  });
+
+  it("collapses to a single full_audience pipeline carrying the default tree", async () => {
+    const prisma = makePrisma(makeCampaign(VEHICLE_DIMS));
+    const count = makeCount(250);
+    const result = await generateActionPlan(
+      prisma,
+      null,
+      makeLlm(),
+      count,
+      { campaignId: "campaign-1", tenantId: "t1", todayUtc: new Date("2026-06-15T12:00:00Z") },
+    );
+    if (result.kind !== "action_plan") throw new Error(`expected action_plan, got ${result.kind}`);
+    expect(result.plan.pipelines).toHaveLength(1);
+    expect(result.plan.pipelines[0].segment).toBe("other");
+    // countAudience IS invoked with the canonical full-audience tree so the
+    // gap-analysis projection stays meaningful (true tenant contact count).
+    expect(count).toHaveBeenCalledWith(prisma, "t1", {
+      conditions: VEHICLE_FULL_AUDIENCE,
+    });
+    expect(result.plan.pipelines[0].audienceConditions).toEqual(
+      VEHICLE_FULL_AUDIENCE,
+    );
+    expect(result.plan.pipelines[0].audienceCount).toBe(250);
+  });
+
+  it("also succeeds when audienceConditions is null (defensive)", async () => {
+    const prisma = makePrisma(
+      makeCampaign({ targetEntityType: "vehicle", audienceConditions: null }),
+    );
+    const result = await generateActionPlan(
+      prisma,
+      null,
+      makeLlm(),
+      makeCount(250),
+      { campaignId: "campaign-1", tenantId: "t1", todayUtc: new Date("2026-06-15T12:00:00Z") },
+    );
+    expect(result.kind).toBe("action_plan");
+  });
+
+  it("REGRESSION: product campaign with empty audience STILL fails validation", async () => {
+    // Same `{}` placeholder, but product mode (targetEntityType !== 'vehicle').
+    // The hard audience-validation gate MUST remain for product campaigns.
+    const prisma = makePrisma(
+      makeCampaign({ targetEntityType: "product", audienceConditions: {} }),
+    );
+    const result = await generateActionPlan(
+      prisma,
+      null,
+      makeLlm(),
+      makeCount(100),
+      { campaignId: "campaign-1", tenantId: "t1", todayUtc: new Date("2026-06-15T12:00:00Z") },
+    );
+    expect(result.kind).toBe("insufficient_dimensions");
+  });
+
+  it("vehicle-mode audience skip does NOT skip the other required dimensions", async () => {
+    // Audience optionality is vehicle-scoped; objectives/timeline still gate.
+    const prisma = makePrisma(
+      makeCampaign({ ...VEHICLE_DIMS, goalDescription: null }),
+    );
+    const result = await generateActionPlan(
+      prisma,
+      null,
+      makeLlm(),
+      makeCount(250),
+      { campaignId: "campaign-1", tenantId: "t1", todayUtc: new Date("2026-06-15T12:00:00Z") },
+    );
+    expect(result.kind).toBe("insufficient_dimensions");
+    if (result.kind !== "insufficient_dimensions") return;
+    expect(result.missing).toContain("objectives.description");
+    // and crucially NOT audience
+    expect(result.missing).not.toContain("audience");
   });
 });
 

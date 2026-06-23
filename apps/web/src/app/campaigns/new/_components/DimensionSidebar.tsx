@@ -87,6 +87,11 @@ export function DimensionSidebar({
   isGenerating,
   className,
 }: DimensionSidebarProps) {
+  // KAN-1225 — polymorphic discriminator; vehicle campaigns intentionally
+  // never populate the audience dimension.
+  const isVehicleMode =
+    state.entityType.kind === "confirmed" &&
+    state.entityType.value === "vehicle";
   return (
     <aside
       className={`flex flex-col gap-4 rounded-lg border border-border bg-card p-4 ${className ?? ""}`}
@@ -98,9 +103,16 @@ export function DimensionSidebar({
       <ul className="flex flex-col gap-3">
         {DIMENSION_ORDER.map((key) => {
           const dim = state[key];
-          const variant = chipVariant(dim);
-          const label = chipLabel(dim);
-          const value = formatValue(dim);
+          // KAN-1225 — vehicle campaigns skip the audience dimension
+          // (KAN-1219 Q3 lock). Disclose the skip honestly rather than
+          // showing a perpetual "Pending" the operator can never resolve
+          // (Memo 19/42 feature-affordance-honesty: disclose, don't dangle).
+          const isSkippedAudience = key === "audience" && isVehicleMode;
+          const variant = isSkippedAudience ? "muted" : chipVariant(dim);
+          const label = isSkippedAudience
+            ? "Skipped (vehicle mode)"
+            : chipLabel(dim);
+          const value = isSkippedAudience ? null : formatValue(dim);
           return (
             <li key={key} className="flex flex-col gap-1">
               <div className="flex items-center justify-between gap-2">
