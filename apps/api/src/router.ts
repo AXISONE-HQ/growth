@@ -4539,15 +4539,21 @@ const settingsRouter = router({
       }),
   }),
 
+  // KAN-1222b — Settings/RBAC stub. The TeamMember + Invitation Prisma models
+  // were wired into these procedures by cd31504 (KAN-458) but the schema models
+  // were never added (KAN-1222 Cohort 3 triage), so every call 500'd
+  // settings/page.tsx (Prisma 42P01 — relation does not exist). Until the
+  // KAN-458 team-features epic ships the schema, read paths return empty (the
+  // page renders its "No team members yet" empty state) and write paths fail
+  // honestly with NOT_IMPLEMENTED rather than fake-succeeding (Memo 19/42
+  // feature-affordance-honesty). Input schemas are preserved so the tRPC
+  // contract + frontend types stay stable for the eventual un-stub.
   team: router({
     list: protectedProcedure
       .input(z.object({ tenantId: z.string().uuid() }))
-      .query(async ({ ctx, input }) => {
-        const [members, invitations] = await Promise.all([
-          ctx.prisma.teamMember.findMany({ where: { tenantId: input.tenantId }, orderBy: { createdAt: "asc" } }),
-          ctx.prisma.invitation.findMany({ where: { tenantId: input.tenantId, status: "pending" }, orderBy: { createdAt: "desc" } }),
-        ]);
-        return { members, invitations };
+      .query(async () => {
+        // STUBBED pending KAN-458 team features epic — returns empty by design.
+        return { members: [], invitations: [] };
       }),
     invite: protectedProcedure
       .input(
@@ -4558,35 +4564,34 @@ const settingsRouter = router({
           invitedBy: z.string(),
         })
       )
-      .mutation(async ({ ctx, input }) => {
-        const { tenantId, email, role, invitedBy } = input;
-        const existing = await ctx.prisma.teamMember.findUnique({ where: { tenantId_email: { tenantId, email } } });
-        if (existing) { throw new TRPCError({ code: "CONFLICT", message: "User is already a team member" }); }
-        const existingInvite = await ctx.prisma.invitation.findFirst({ where: { tenantId, email, status: "pending" } });
-        if (existingInvite) { throw new TRPCError({ code: "CONFLICT", message: "An invitation is already pending for this email" }); }
-        return ctx.prisma.invitation.create({
-          data: { tenantId, email, role, invitedBy, expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) },
-        });
+      .mutation(async () => {
+        // STUBBED pending KAN-458 team features epic — no-op (no schema to
+        // write to). Returns a bare ack; the page refetches the empty list.
+        return { ok: true };
       }),
     updateRole: protectedProcedure
       .input(z.object({ tenantId: z.string().uuid(), memberId: z.string().uuid(), role: z.enum(["owner", "admin", "agent", "viewer"]) }))
-      .mutation(async ({ ctx, input }) => {
-        return ctx.prisma.teamMember.update({ where: { id: input.memberId }, data: { role: input.role } });
+      .mutation(async () => {
+        // STUBBED pending KAN-458 team features epic — no-op (no schema to
+        // persist to). The settings page awaits success then refetches the
+        // (empty) list, so nothing appears. Returns a bare ack.
+        return { ok: true };
       }),
     remove: protectedProcedure
       .input(z.object({ tenantId: z.string().uuid(), memberId: z.string().uuid() }))
-      .mutation(async ({ ctx, input }) => {
-        const member = await ctx.prisma.teamMember.findUnique({ where: { id: input.memberId } });
-        if (member?.role === "owner") {
-          const ownerCount = await ctx.prisma.teamMember.count({ where: { tenantId: input.tenantId, role: "owner" } });
-          if (ownerCount <= 1) { throw new TRPCError({ code: "FORBIDDEN", message: "Cannot remove the last owner" }); }
-        }
-        return ctx.prisma.teamMember.delete({ where: { id: input.memberId } });
+      .mutation(async () => {
+        // STUBBED pending KAN-458 team features epic — no-op (no schema to
+        // persist to). The settings page awaits success then refetches the
+        // (empty) list, so nothing appears. Returns a bare ack.
+        return { ok: true };
       }),
     cancelInvite: protectedProcedure
       .input(z.object({ tenantId: z.string().uuid(), invitationId: z.string().uuid() }))
-      .mutation(async ({ ctx, input }) => {
-        return ctx.prisma.invitation.update({ where: { id: input.invitationId }, data: { status: "cancelled" } });
+      .mutation(async () => {
+        // STUBBED pending KAN-458 team features epic — no-op (no schema to
+        // persist to). The settings page awaits success then refetches the
+        // (empty) list, so nothing appears. Returns a bare ack.
+        return { ok: true };
       }),
   }),
 
@@ -4651,12 +4656,24 @@ const settingsRouter = router({
   security: router({
     get: protectedProcedure
       .input(z.object({ tenantId: z.string().uuid() }))
-      .query(async ({ ctx, input }) => {
-        return ctx.prisma.securitySetting.upsert({
-          where: { tenantId: input.tenantId },
-          update: {},
-          create: { tenantId: input.tenantId },
-        });
+      .query(async ({ input }) => {
+        // STUBBED pending KAN-458 — SecuritySetting model never landed (KAN-1222
+        // Cohort 3); the real upsert 500'd settings/page.tsx on load. Return
+        // safe defaults (all protections off, 1-year audit retention) so the
+        // Security tab renders its read-only default state cleanly.
+        const now = new Date().toISOString();
+        return {
+          id: "stub",
+          tenantId: input.tenantId,
+          twoFactorEnabled: false,
+          ssoEnabled: false,
+          ssoProvider: null as string | null,
+          ssoConfig: {} as Record<string, unknown>,
+          auditRetentionDays: 365,
+          gdprCompliant: false,
+          createdAt: now,
+          updatedAt: now,
+        };
       }),
     update: protectedProcedure
       .input(
@@ -4670,13 +4687,26 @@ const settingsRouter = router({
           gdprCompliant: z.boolean().optional(),
         })
       )
-      .mutation(async ({ ctx, input }) => {
+      .mutation(async ({ input }) => {
+        // STUBBED pending KAN-458 — no SecuritySetting schema to persist to.
+        // No-op: echo the requested settings back so the optimistic UI shows
+        // the toggle, but nothing persists (security.get returns defaults on
+        // reload). Un-stub lands the real upsert with KAN-458.
+        const now = new Date().toISOString();
         const { tenantId, ...data } = input;
-        return ctx.prisma.securitySetting.upsert({
-          where: { tenantId },
-          update: data,
-          create: { tenantId, ...data },
-        });
+        return {
+          id: "stub",
+          tenantId,
+          twoFactorEnabled: false,
+          ssoEnabled: false,
+          ssoProvider: null as string | null,
+          ssoConfig: {} as Record<string, unknown>,
+          auditRetentionDays: 365,
+          gdprCompliant: false,
+          ...data,
+          createdAt: now,
+          updatedAt: now,
+        };
       }),
     getAuditLog: protectedProcedure
       .input(
