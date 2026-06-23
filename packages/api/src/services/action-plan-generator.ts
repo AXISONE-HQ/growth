@@ -176,6 +176,33 @@ function scopeConditionsToCohort(
   } as AudienceConditions;
 }
 
+/**
+ * KAN-1227 — Vehicle-mode default audience.
+ *
+ * Vehicle campaigns skip the operator audience step (KAN-1219 Q3 lock:
+ * vehicles target a fixed inventory set selected at TargetEntityPanel
+ * confirm time, NOT a lead-filter tree). The Action Plan generator still
+ * needs a parseable AudienceConditions to drive the deterministic split +
+ * per-pipeline count, so vehicle mode substitutes this canonical "all
+ * leads" tree at READ time rather than persisting fabricated operator
+ * intent into Campaign.audienceConditions (the column stays the honest
+ * createDraftCampaign `{}` placeholder).
+ *
+ * `orders.exists ∈ {true, false}` is provably universal (every contact
+ * either has orders or doesn't) and cardinality-stable — it does NOT
+ * couple to the LifecycleStage enum size (see memo vocab_extension_
+ * fixture_sweep — absolute-count assumptions break on enum growth).
+ * splitAudienceIntoPipelines collapses it to a single `full_audience`
+ * pipeline; countAudience returns the true tenant contact count, so the
+ * gap-analysis projections stay meaningful for the vehicle plan.
+ */
+export const VEHICLE_FULL_AUDIENCE: AudienceConditions = {
+  anyOf: [
+    { field: "orders.exists", op: "eq", value: true },
+    { field: "orders.exists", op: "eq", value: false },
+  ],
+};
+
 export function splitAudienceIntoPipelines(
   conditions: AudienceConditions,
 ): PipelineSplit[] {
@@ -448,6 +475,9 @@ export async function generateActionPlan(
         goalProductId: true,
         goalDescription: true,
         audienceConditions: true,
+        // KAN-1227 — polymorphic target discriminator drives the vehicle-mode
+        // audience branch below.
+        targetEntityType: true,
         windowStart: true,
         windowEnd: true,
       },
@@ -473,12 +503,18 @@ export async function generateActionPlan(
     };
   }
 
-  // Validate the 4 dimensions are populated.
+  // KAN-1227 — vehicle campaigns skip the operator audience dimension
+  // (KAN-1219 Q3 lock). Audience is NOT a required dimension in that mode
+  // and defaults to VEHICLE_FULL_AUDIENCE at the parse step below. Product
+  // campaigns continue to require a populated, schema-valid audience tree.
+  const isVehicleMode = campaign.targetEntityType === "vehicle";
+
+  // Validate the dimensions are populated.
   const missing: string[] = [];
   if (!campaign.goalType) missing.push("product/objectives");
   if (campaign.goalTarget == null) missing.push("objectives.target");
   if (!campaign.goalDescription) missing.push("objectives.description");
-  if (!campaign.audienceConditions) missing.push("audience");
+  if (!isVehicleMode && !campaign.audienceConditions) missing.push("audience");
   if (missing.length > 0) {
     return {
       kind: "insufficient_dimensions",
@@ -516,17 +552,26 @@ export async function generateActionPlan(
       campaign.audienceConditions,
     );
   } catch (err) {
-    const message =
-      err instanceof Error ? err.message : String(err);
-    console.warn(
-      `[action-plan-generator] audience-parse-failed campaignId=${params.campaignId}: ${message.slice(0, 200)}`,
-    );
-    return {
-      kind: "insufficient_dimensions",
-      message: "Campaign audienceConditions failed schema validation.",
-      campaignId: params.campaignId,
-      missing: ["audience"],
-    };
+    // KAN-1227 — vehicle campaigns reach here with the createDraftCampaign
+    // `{}` placeholder (the audience step is skipped, so the column is never
+    // populated). Substitute the canonical full-audience tree instead of
+    // failing the operator at the Generate Action Plan gate. Product
+    // campaigns keep the hard schema-validation gate (regression-protected).
+    if (isVehicleMode) {
+      parsedConditions = VEHICLE_FULL_AUDIENCE;
+    } else {
+      const message =
+        err instanceof Error ? err.message : String(err);
+      console.warn(
+        `[action-plan-generator] audience-parse-failed campaignId=${params.campaignId}: ${message.slice(0, 200)}`,
+      );
+      return {
+        kind: "insufficient_dimensions",
+        message: "Campaign audienceConditions failed schema validation.",
+        campaignId: params.campaignId,
+        missing: ["audience"],
+      };
+    }
   }
 
   // Pull tenant historical context — fail-safe per FCS contract.

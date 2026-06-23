@@ -128,6 +128,48 @@ describe("DimensionSidebar (KAN-1191 / KAN-1219 G3)", () => {
     expect(onGeneratePlan).toHaveBeenCalledTimes(1);
   });
 
+  // ─── KAN-1225 — vehicle-mode audience skip disclosure ───
+  // Memo 19/42 feature-affordance-honesty: a vehicle campaign never fills the
+  // audience dimension (KAN-1219 Q3 lock), so showing a perpetual "Pending"
+  // the operator can't resolve is dishonest. Disclose the skip instead.
+
+  it("vehicle mode: audience chip discloses 'Skipped (vehicle mode)' not 'Pending'", () => {
+    const state: ConversationState = {
+      ...emptyConversationState(),
+      entityType: { kind: "confirmed", value: "vehicle" },
+    };
+    render(
+      <DimensionSidebar
+        state={state}
+        allDimensionsConfirmed={false}
+        onGeneratePlan={vi.fn()}
+        isGenerating={false}
+      />,
+    );
+    expect(screen.getByText("Skipped (vehicle mode)")).toBeInTheDocument();
+    // The audience row no longer dangles a resolvable-looking "Pending".
+    // (entityType is confirmed, so only 3 remaining dims show "Pending".)
+    expect(screen.getAllByText("Pending")).toHaveLength(3);
+  });
+
+  it("product mode: audience chip still shows 'Pending' (no skip)", () => {
+    const state: ConversationState = {
+      ...emptyConversationState(),
+      entityType: { kind: "confirmed", value: "product" },
+    };
+    render(
+      <DimensionSidebar
+        state={state}
+        allDimensionsConfirmed={false}
+        onGeneratePlan={vi.fn()}
+        isGenerating={false}
+      />,
+    );
+    expect(screen.queryByText("Skipped (vehicle mode)")).toBeNull();
+    // entityType confirmed + product/objectives/timeline/audience all Pending.
+    expect(screen.getAllByText("Pending")).toHaveLength(4);
+  });
+
   it("isGenerating=true: button shows 'Generating...' + disabled", () => {
     render(
       <DimensionSidebar
