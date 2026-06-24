@@ -19,23 +19,25 @@
  * - Q5 — multi-select via `selectedIds` set; the parent reads it back
  *   for the Confirm action that writes Campaign.targetEntityIds.
  *
+ * # KAN-1230 B2.3 — auto-prefill from vehicleTargetDescriptor
+ *
+ * In vehicle mode the LLM-proposed `vehicleTargetDescriptor`
+ * ({condition,bodyStyle,make,model,year,priceMin/Max,maxCount}) is passed via
+ * `vehicleDescriptor`. The panel translates it to the API's array filters
+ * (descriptorToVehicleSearch), shows removable filter CHIPS, seeds the search
+ * box with make/model, and drives a cardinality affordance off `maxCount`
+ * (auto-select matching, warn when matching ≠ requested — Memo 19/42 honesty).
+ *
  * # Memo 19/42 affordance-honesty
  *
  * "Selected: N / matching: M" counts are explicit. The "Select all
  * matching" affordance is bounded by the API limit (200) and surfaces an
- * honest message when the result set is truncated.
- *
- * # Slice G2 wiring posture
- *
- * Built against the dark Slice G1 substrate. NOT YET wired into
- * BuilderChatThread — G3 promotes `entityType` to DIMENSION_ORDER + then
- * mounts this panel during the confirmation flow. The component is
- * intentionally usable as a standalone surface for testing without the
- * orchestrator.
+ * honest message when the result set is truncated. Cardinality mismatches
+ * (fewer matching than requested) are surfaced, never silently auto-fixed.
  */
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Search, CheckSquare, Square } from "lucide-react";
+import { Search, CheckSquare, Square, X } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -47,12 +49,22 @@ import {
 } from "@/lib/api";
 import { ProductTargetCard } from "./ProductTargetCard";
 import { VehicleTargetCard } from "./VehicleTargetCard";
+import {
+  descriptorToVehicleSearch,
+  chipsToFilterSpec,
+  type DescriptorFilterChip,
+} from "./vehicleTargetDescriptor";
 
 export type TargetEntityType = "product" | "vehicle";
 
 export interface TargetEntityPanelProps {
   entityType: TargetEntityType;
   initialFilterSpec?: Record<string, unknown>;
+  /**
+   * KAN-1230 B2.3 — vehicle-mode LLM target descriptor. When present the panel
+   * auto-applies its filters + drives the maxCount cardinality affordance.
+   */
+  vehicleDescriptor?: Record<string, unknown> | null;
   initialSelectedIds?: string[];
   onSelectionChange?: (selectedIds: string[]) => void;
   onConfirm?: (selectedIds: string[]) => void;
@@ -62,26 +74,53 @@ export interface TargetEntityPanelProps {
 export function TargetEntityPanel({
   entityType,
   initialFilterSpec,
+  vehicleDescriptor,
   initialSelectedIds,
   onSelectionChange,
   onConfirm,
   className,
 }: TargetEntityPanelProps): JSX.Element {
+  const isVehicle = entityType === "vehicle";
+
+  // KAN-1230 B2.3 — derive chips / search seed / maxCount from the descriptor.
+  const derived = useMemo(
+    () => descriptorToVehicleSearch(isVehicle ? vehicleDescriptor : undefined),
+    [isVehicle, vehicleDescriptor],
+  );
+  const maxCount = derived.maxCount;
+
+  const [activeChips, setActiveChips] = useState<DescriptorFilterChip[]>(
+    derived.chips,
+  );
   const [searchText, setSearchText] = useState<string>(
-    typeof initialFilterSpec?.searchText === "string"
-      ? (initialFilterSpec.searchText as string)
-      : "",
+    isVehicle
+      ? derived.searchSeed
+      : typeof initialFilterSpec?.searchText === "string"
+        ? (initialFilterSpec.searchText as string)
+        : "",
   );
   const [selectedIds, setSelectedIds] = useState<Set<string>>(
     () => new Set(initialSelectedIds ?? []),
   );
 
+  // Re-seed when the descriptor changes (operator re-engaged chat → new
+  // proposal). Edge case 3 — re-applies the proposed filters.
+  useEffect(() => {
+    if (!isVehicle) return;
+    setActiveChips(derived.chips);
+    setSearchText(derived.searchSeed);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [derived]);
+
   const queryInput = useMemo<Record<string, unknown>>(() => {
+    if (isVehicle) {
+      return { ...chipsToFilterSpec(activeChips, searchText), limit: 50 };
+    }
     const base: Record<string, unknown> = { ...initialFilterSpec, limit: 50 };
     if (searchText) base.searchText = searchText;
     else delete base.searchText;
     return base;
-  }, [initialFilterSpec, searchText]);
+  }, [isVehicle, activeChips, searchText, initialFilterSpec]);
 
   const productQuery = useQuery({
     queryKey: ["campaigns", "target-search", "product", queryInput],
@@ -113,6 +152,23 @@ export function TargetEntityPanel({
     onSelectionChange?.(Array.from(next));
   }
 
+  // KAN-1230 B2.3 — cardinality auto-select. Once per distinct query result,
+  // pre-select up to maxCount matching vehicles so the operator just clicks
+  // Confirm (matching ≤ maxCount → all; matching > maxCount → first maxCount).
+  // Manual edits persist (the key guard skips re-firing for the same result);
+  // a filter change produces a new key → re-applies.
+  const autoSelectedKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!isVehicle || maxCount === undefined) return;
+    if (isLoading || isError || !active.data) return;
+    const key = JSON.stringify(queryInput);
+    if (autoSelectedKeyRef.current === key) return;
+    autoSelectedKeyRef.current = key;
+    const ids = entities.slice(0, maxCount).map((e) => e.id);
+    notifySelection(new Set(ids));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isVehicle, maxCount, active.data, isLoading, isError, queryInput]);
+
   function toggleOne(id: string, nextSelected: boolean): void {
     const next = new Set(selectedIds);
     if (nextSelected) next.add(id);
@@ -130,8 +186,37 @@ export function TargetEntityPanel({
     notifySelection(new Set());
   }
 
+  function removeChip(key: string): void {
+    // Reset the auto-select guard so the new (broader) result re-applies.
+    autoSelectedKeyRef.current = null;
+    setActiveChips((prev) => prev.filter((c) => c.key !== key));
+  }
+
   const allShownSelected =
     entities.length > 0 && entities.every((e) => selectedIds.has(e.id));
+
+  // KAN-1230 B2.3 — cardinality message (Memo 19/42 — honest, never auto-fixed).
+  const cardinality = useMemo<
+    { tone: "amber" | "info" | "ok"; text: string } | null
+  >(() => {
+    if (!isVehicle || maxCount === undefined || isLoading || isError || !active.data) {
+      return null;
+    }
+    if (totalCount === 0) return null;
+    if (totalCount < maxCount) {
+      return {
+        tone: "amber",
+        text: `${maxCount} requested, ${totalCount} matching — confirm ${totalCount}?`,
+      };
+    }
+    if (totalCount > maxCount) {
+      return {
+        tone: "info",
+        text: `${maxCount} requested; ${totalCount} match. First ${maxCount} selected — use "Select all matching" or refine the filter.`,
+      };
+    }
+    return { tone: "ok", text: `${maxCount} of ${totalCount} matching selected.` };
+  }, [isVehicle, maxCount, isLoading, isError, active.data, totalCount]);
 
   return (
     <Card className={className} aria-label="Campaign target selection panel">
@@ -174,6 +259,44 @@ export function TargetEntityPanel({
             )}
           </div>
         </div>
+
+        {/* KAN-1230 B2.3 — auto-applied filter chips (removable) */}
+        {activeChips.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1.5" aria-label="Active filters">
+            {activeChips.map((chip) => (
+              <span
+                key={chip.key}
+                className="inline-flex items-center gap-1 rounded-[var(--ds-radius-pill)] bg-muted px-2.5 py-1 text-xs text-foreground"
+              >
+                {chip.label}
+                <button
+                  type="button"
+                  onClick={() => removeChip(chip.key)}
+                  aria-label={`Remove filter ${chip.label}`}
+                  className="text-muted-foreground hover:text-foreground"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+
+        {/* KAN-1230 B2.3 — cardinality affordance */}
+        {cardinality && (
+          <div
+            role="status"
+            className={`rounded-md px-3 py-2 text-xs ${
+              cardinality.tone === "amber"
+                ? "border border-amber-300 bg-amber-50 text-amber-900"
+                : cardinality.tone === "info"
+                  ? "border border-border bg-muted/40 text-muted-foreground"
+                  : "border border-emerald-300 bg-emerald-50 text-emerald-900"
+            }`}
+          >
+            {cardinality.text}
+          </div>
+        )}
 
         {/* Search input */}
         <div className="relative">

@@ -225,3 +225,147 @@ describe("KAN-1219 Slice G2 — TargetEntityPanel", () => {
     });
   });
 });
+
+// ─────────────────────────────────────────────
+// KAN-1230 B2.3 — auto-prefill from vehicleTargetDescriptor + R3 cardinality
+//
+// Canonical sentence (Memo 56 #10): "sell 10 used cars by end of month" →
+// descriptor {condition:'used', maxCount:10} → panel pre-filters to used cars
+// and pre-selects up to 10.
+// ─────────────────────────────────────────────
+
+describe("KAN-1230 B2.3 — TargetEntityPanel auto-prefill + cardinality", () => {
+  it('"sell 10 used cars" → condition=used filter applied + chip shown', async () => {
+    vehiclesSearchMock.mockResolvedValue({
+      entities: [fixtureVehicle({ id: "v-1", condition: "used" })],
+      totalCount: 1,
+      filterSpec: {},
+    });
+    renderPanel({
+      entityType: "vehicle",
+      vehicleDescriptor: { condition: "used", maxCount: 10 },
+    });
+    await waitFor(() => {
+      // the search query was sent with the API array filter, not the raw descriptor
+      expect(vehiclesSearchMock).toHaveBeenCalledWith(
+        expect.objectContaining({ conditionIn: ["used"] }),
+      );
+    });
+    // removable filter chip is visible
+    expect(screen.getByText(/Condition: Used/i)).toBeInTheDocument();
+    // raw descriptor fields are NOT forwarded as-is
+    expect(vehiclesSearchMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ condition: "used" }),
+    );
+    expect(vehiclesSearchMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ maxCount: 10 }),
+    );
+  });
+
+  it("specific descriptor (make+model) → search box seeded with 'Honda CR-V'", async () => {
+    vehiclesSearchMock.mockResolvedValue({ entities: [], totalCount: 0, filterSpec: {} });
+    renderPanel({
+      entityType: "vehicle",
+      vehicleDescriptor: { make: "Honda", model: "CR-V", maxCount: 5 },
+    });
+    await waitFor(() => {
+      const box = screen.getByLabelText(/Search vehicles/i) as HTMLInputElement;
+      expect(box.value).toBe("Honda CR-V");
+    });
+  });
+
+  it("no descriptor → no chips, no cardinality message (current behaviour)", async () => {
+    vehiclesSearchMock.mockResolvedValue({
+      entities: [fixtureVehicle({ id: "v-1" })],
+      totalCount: 1,
+      filterSpec: {},
+    });
+    renderPanel({ entityType: "vehicle" });
+    await waitFor(() => expect(screen.getByText(/2023 Toyota Camry/i)).toBeInTheDocument());
+    expect(screen.queryByLabelText("Active filters")).toBeNull();
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("matching > maxCount → info message + first N auto-selected", async () => {
+    vehiclesSearchMock.mockResolvedValue({
+      entities: [
+        fixtureVehicle({ id: "v-1", condition: "used" }),
+        fixtureVehicle({ id: "v-2", condition: "used" }),
+        fixtureVehicle({ id: "v-3", condition: "used" }),
+      ],
+      totalCount: 3,
+      filterSpec: {},
+    });
+    const onSelection = vi.fn();
+    renderPanel({
+      entityType: "vehicle",
+      vehicleDescriptor: { condition: "used", maxCount: 2 },
+      onSelectionChange: onSelection,
+    });
+    await waitFor(() => {
+      // first 2 of 3 auto-selected
+      expect(onSelection).toHaveBeenLastCalledWith(["v-1", "v-2"]);
+    });
+    expect(screen.getByText(/2 requested; 3 match/i)).toBeInTheDocument();
+  });
+
+  it("matching < maxCount → amber warning + all matching auto-selected", async () => {
+    vehiclesSearchMock.mockResolvedValue({
+      entities: [
+        fixtureVehicle({ id: "v-1", condition: "used" }),
+        fixtureVehicle({ id: "v-2", condition: "used" }),
+      ],
+      totalCount: 2,
+      filterSpec: {},
+    });
+    const onSelection = vi.fn();
+    renderPanel({
+      entityType: "vehicle",
+      vehicleDescriptor: { condition: "used", maxCount: 5 },
+      onSelectionChange: onSelection,
+    });
+    await waitFor(() => {
+      expect(onSelection).toHaveBeenLastCalledWith(["v-1", "v-2"]);
+    });
+    expect(screen.getByText(/5 requested, 2 matching — confirm 2\?/i)).toBeInTheDocument();
+  });
+
+  it("matching == maxCount → ok message + all auto-selected", async () => {
+    vehiclesSearchMock.mockResolvedValue({
+      entities: [
+        fixtureVehicle({ id: "v-1", condition: "used" }),
+        fixtureVehicle({ id: "v-2", condition: "used" }),
+      ],
+      totalCount: 2,
+      filterSpec: {},
+    });
+    renderPanel({
+      entityType: "vehicle",
+      vehicleDescriptor: { condition: "used", maxCount: 2 },
+    });
+    await waitFor(() => {
+      expect(screen.getByText(/2 of 2 matching selected/i)).toBeInTheDocument();
+    });
+  });
+
+  it("removing the condition chip drops conditionIn from the query", async () => {
+    vehiclesSearchMock.mockResolvedValue({
+      entities: [fixtureVehicle({ id: "v-1", condition: "used" })],
+      totalCount: 1,
+      filterSpec: {},
+    });
+    renderPanel({
+      entityType: "vehicle",
+      vehicleDescriptor: { condition: "used", maxCount: 10 },
+    });
+    const removeBtn = await screen.findByRole("button", {
+      name: /Remove filter Condition: Used/i,
+    });
+    await userEvent.click(removeBtn);
+    await waitFor(() => {
+      const lastCall = vehiclesSearchMock.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+      expect(lastCall.conditionIn).toBeUndefined();
+    });
+    expect(screen.queryByText(/Condition: Used/i)).toBeNull();
+  });
+});
