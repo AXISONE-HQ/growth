@@ -83,6 +83,22 @@ function llmQueue(responses: Array<Record<string, unknown>>) {
   };
 }
 
+/**
+ * KAN-1230 B1 — these persistence scenarios all start with ≥2 dimensions
+ * undetermined, so the orchestrator now routes them through the multi-dim
+ * extraction path. `md()` wraps a single dimension's value in the multi-dim
+ * response envelope the path expects. The persistence assertions are
+ * unchanged — `persistDimensionToCampaign` is reused by both paths, so the
+ * LLM-natural-shape normalization contract still holds.
+ */
+function md(
+  dim: string,
+  value: unknown,
+  confidence = 0.9,
+): Record<string, unknown> {
+  return { [dim]: { extracted: true, value, confidence, reason: 'test' } };
+}
+
 const STUB_AUDIENCE_COUNT = async () => ({
   count: 0,
   isThin: false,
@@ -113,14 +129,7 @@ describe('KAN-1203 product persistence — canonical string + LLM-natural object
     const { handleChatTurn } = (await import(orchestratorSpec)) as OrchestratorModule;
     await withRollback(async (prisma) => {
       const tenant = await createTenant(prisma);
-      const llm = llmQueue([
-        {
-          kind: 'extracted',
-          value: 'Growth Platform Pro',
-          confidence: 'high',
-          aiMessage: 'Got Growth Platform Pro.',
-        },
-      ]);
+      const llm = llmQueue([md('product', 'Growth Platform Pro')]);
       const result = await handleChatTurn(
         prisma,
         llm,
@@ -141,14 +150,9 @@ describe('KAN-1203 product persistence — canonical string + LLM-natural object
     const { handleChatTurn } = (await import(orchestratorSpec)) as OrchestratorModule;
     await withRollback(async (prisma) => {
       const tenant = await createTenant(prisma);
+      // Pre-KAN-1203 this object would be silently dropped; normalizer extracts `name`.
       const llm = llmQueue([
-        {
-          kind: 'extracted',
-          // Pre-KAN-1203 this object would be silently dropped; normalizer extracts `name`.
-          value: { name: 'Growth Platform Essential', description: "AxisOne's flagship tier" },
-          confidence: 'high',
-          aiMessage: 'Got Growth Platform Essential.',
-        },
+        md('product', { name: 'Growth Platform Essential', description: "AxisOne's flagship tier" }),
       ]);
       const result = await handleChatTurn(
         prisma,
@@ -177,12 +181,7 @@ describe('KAN-1203 objectives persistence — canonical + Fred-confirmed LLM-nat
     await withRollback(async (prisma) => {
       const tenant = await createTenant(prisma);
       const llm = llmQueue([
-        {
-          kind: 'extracted',
-          value: { goalType: 'units', goalTarget: 50, goalDescription: 'Sell 50 units' },
-          confidence: 'high',
-          aiMessage: 'Got it.',
-        },
+        md('objectives', { goalType: 'units', goalTarget: 50, goalDescription: 'Sell 50 units' }),
       ]);
       // Reach objectives by injecting product already confirmed
       const stateWithProduct: ConversationState = {
@@ -215,16 +214,11 @@ describe('KAN-1203 objectives persistence — canonical + Fred-confirmed LLM-nat
     await withRollback(async (prisma) => {
       const tenant = await createTenant(prisma);
       const llm = llmQueue([
-        {
-          kind: 'extracted',
-          value: {
-            numericTarget: 50,
-            outcomeType: 'units',
-            description: 'Sell 50 units of Growth Platform',
-          },
-          confidence: 'high',
-          aiMessage: 'Got 50 units.',
-        },
+        md('objectives', {
+          numericTarget: 50,
+          outcomeType: 'units',
+          description: 'Sell 50 units of Growth Platform',
+        }),
       ]);
       const stateWithProduct: ConversationState = {
         ...productCampaignSeed(),
@@ -257,12 +251,7 @@ describe('KAN-1203 objectives persistence — canonical + Fred-confirmed LLM-nat
     await withRollback(async (prisma) => {
       const tenant = await createTenant(prisma);
       const llm = llmQueue([
-        {
-          kind: 'extracted',
-          value: { outcomeType: 'customers', numericTarget: 50, description: '50 new paying customers' },
-          confidence: 'high',
-          aiMessage: 'Got 50 customers.',
-        },
+        md('objectives', { outcomeType: 'customers', numericTarget: 50, description: '50 new paying customers' }),
       ]);
       const stateWithProduct: ConversationState = {
         ...productCampaignSeed(),
@@ -296,15 +285,10 @@ describe('KAN-1203 timeline persistence — ISO strings + bad-date guards', () =
     await withRollback(async (prisma) => {
       const tenant = await createTenant(prisma);
       const llm = llmQueue([
-        {
-          kind: 'extracted',
-          value: {
-            windowStart: '2026-07-01T00:00:00.000Z',
-            windowEnd: '2026-07-31T23:59:59.999Z',
-          },
-          confidence: 'high',
-          aiMessage: 'Got timeline.',
-        },
+        md('timeline', {
+          windowStart: '2026-07-01T00:00:00.000Z',
+          windowEnd: '2026-07-31T23:59:59.999Z',
+        }),
       ]);
       const stateWithObj: ConversationState = {
         ...productCampaignSeed(),
@@ -337,12 +321,7 @@ describe('KAN-1203 timeline persistence — ISO strings + bad-date guards', () =
     await withRollback(async (prisma) => {
       const tenant = await createTenant(prisma);
       const llm = llmQueue([
-        {
-          kind: 'extracted',
-          value: { windowStart: 'next month', windowEnd: 'sometime later' },
-          confidence: 'high',
-          aiMessage: 'Got timeline.',
-        },
+        md('timeline', { windowStart: 'next month', windowEnd: 'sometime later' }),
       ]);
       const stateWithObj: ConversationState = {
         ...productCampaignSeed(),
@@ -382,29 +361,18 @@ describe('KAN-1203 full-chain reproduction — Fred-confirmed PROD shapes', () =
     const { handleChatTurn } = (await import(orchestratorSpec)) as OrchestratorModule;
     await withRollback(async (prisma) => {
       const tenant = await createTenant(prisma);
+      // KAN-1230 B1 — turns 1–3 run the multi-dim path (≥2 dims undetermined,
+      // one dimension answered per turn). Turn 4 has only `audience` left → the
+      // single-dim path handles the final dimension. This chain exercises BOTH
+      // paths end-to-end with Fred's LLM-natural PROD shapes.
       const llm = llmQueue([
-        // Turn 1 — product (LLM-natural object shape)
-        {
-          kind: 'extracted',
-          value: { name: 'Growth Platform', description: "AxisOne's growth platform" },
-          confidence: 'high',
-          aiMessage: 'Got Growth Platform.',
-        },
-        // Turn 2 — objectives (Fred's exact PROD shape)
-        {
-          kind: 'extracted',
-          value: { numericTarget: 50, outcomeType: 'customers', description: '50 new paying customers' },
-          confidence: 'high',
-          aiMessage: 'Got 50 customers.',
-        },
-        // Turn 3 — timeline
-        {
-          kind: 'extracted',
-          value: { windowStart: '2026-07-01T00:00:00.000Z', windowEnd: '2026-07-31T23:59:59.999Z' },
-          confidence: 'high',
-          aiMessage: 'Got timeline July 2026.',
-        },
-        // Turn 4 — audience
+        // Turn 1 — product (LLM-natural object shape) via multi-dim
+        md('product', { name: 'Growth Platform', description: "AxisOne's growth platform" }),
+        // Turn 2 — objectives (Fred's exact PROD shape) via multi-dim
+        md('objectives', { numericTarget: 50, outcomeType: 'customers', description: '50 new paying customers' }),
+        // Turn 3 — timeline via multi-dim
+        md('timeline', { windowStart: '2026-07-01T00:00:00.000Z', windowEnd: '2026-07-31T23:59:59.999Z' }),
+        // Turn 4 — audience (last dim → single-dim path → single-dim shape)
         {
           kind: 'extracted',
           value: { field: 'lifecycleStage', op: 'in', values: ['customer'] },
@@ -434,8 +402,10 @@ describe('KAN-1203 full-chain reproduction — Fred-confirmed PROD shapes', () =
           TODAY,
         );
         if (t < 3) {
-          expect(result.kind).toBe('dimension_confirmed');
+          // multi-dim path advances one dim per turn here
+          expect(result.kind).toBe('dimensions_extracted');
         } else {
+          // single-dim path on the final (audience) dimension closes the set
           expect(result.kind).toBe('all_dimensions_confirmed');
         }
         if ('state' in result) state = result.state;
