@@ -202,12 +202,19 @@ function numericToConfidence(n: number): 'high' | 'medium' | 'low' {
   return 'low';
 }
 
-/** Dimensions not yet confirmed (vehicle campaigns skip audience per Q3). */
-function undeterminedDimensions(state: ConversationState): DimensionKey[] {
-  const isVehicle =
-    state.entityType.kind === 'confirmed' && state.entityType.value === 'vehicle';
+/** Dimensions not yet confirmed.
+ *
+ * KAN-1230 B2.5 / KAN-1232 — audience is a PRODUCT-only dimension. It is left
+ * OUT of the multi-dim ask until entityType is confirmed 'product'. This stops
+ * the LLM asking "what's your target audience?" on vehicle campaigns (Q3 lock)
+ * AND avoids asking it before the entity type is even known (an unknown-type
+ * campaign can't meaningfully answer audience). Once entityType resolves to
+ * product, audience re-enters the undetermined set on the next turn. */
+export function undeterminedDimensions(state: ConversationState): DimensionKey[] {
+  const isConfirmedProduct =
+    state.entityType.kind === 'confirmed' && state.entityType.value === 'product';
   return DIMENSION_ORDER.filter((d) => {
-    if (d === 'audience' && isVehicle) return false;
+    if (d === 'audience' && !isConfirmedProduct) return false;
     return state[d].kind !== 'confirmed';
   });
 }
@@ -275,6 +282,16 @@ For EACH dimension above, include a key with this exact shape:
 - >= 0.85 — unambiguous; the operator clearly stated this
 - 0.6 .. 0.85 — plausible but the operator should confirm
 - < 0.6 — too vague to act on; set extracted=false
+
+# KAN-1230 — compound-message examples (raise confidence on these patterns)
+
+- "sell 10 used cars by end of month" → entityType=vehicle (0.95); product={condition:"used", maxCount:10} (0.9); objectives={goalType:"sales", goalTarget:10, goalDescription:"Sell 10 used cars"} (0.9); timeline={windowEnd:"end of month"} (0.9). A single count like "10" maps to BOTH objectives.goalTarget AND the vehicle maxCount.
+- "Sell 5 Honda CR-Vs" → entityType=vehicle (0.95); product={make:"Honda", model:"CR-V", maxCount:5} (0.9); objectives={goalType:"sales", goalTarget:5, goalDescription:"Sell 5 Honda CR-Vs"} (0.9). The number is BOTH the sales goal and the inventory cap — emit it in both.
+- "Promote my used SUVs" → entityType=vehicle (0.9); product={condition:"used", bodyStyle:"suv"} (0.85); no count → objectives.extracted=false.
+- "Sell 50 units of Growth Platform" → entityType=product (0.9, NOT vehicle — "units of <product>"); objectives={goalType:"units", goalTarget:50} (0.9).
+- "10 leads by end of month" → objectives={goalType:"leads", goalTarget:10} (0.9); timeline={windowEnd:"end of month"} (0.9). (goalType "leads"/"sales" are accepted; legacy "units"/"deals"/"revenue"/"meetings"/"custom" also valid.)
+
+Relative dates: you may emit timeline as a phrase ("end of month", "in 30 days", "end of Q3") — the server resolves it against today's date above.
 
 Be honest. A dimension the operator didn't address → extracted: false.`;
 }
@@ -420,6 +437,7 @@ async function runMultiDimExtraction(
       dim,
       norm.value,
       entityTypeForPersist,
+      todayUtc,
     );
 
     // Memo 53 — emit one campaign.dimension_advanced per CONFIRMED dim so the
@@ -761,6 +779,7 @@ export async function handleChatTurn(
     targetDim,
     extraction.value,
     postUpdateEntityType,
+    todayUtc,
   );
 
   const aiMessage = `${extraction.aiMessage}${audienceCountAnnotation}`;
@@ -1674,26 +1693,102 @@ function normalizeAudienceTree(
   }
 }
 
+/**
+ * KAN-1230 B2.2 — resolve a relative timeline phrase to a concrete UTC Date,
+ * relative to `today`. Returns null when the phrase isn't a recognized
+ * relative pattern (caller then falls back to `new Date()` ISO parsing).
+ *
+ * UTC-only — tenant timezone isn't plumbed yet (documented default). End-of-
+ * period phrases resolve to the last instant (23:59:59.999) of the period.
+ */
+export function resolveRelativeDate(raw: string, today: Date): Date | null {
+  const s = raw.toLowerCase().trim();
+  const y = today.getUTCFullYear();
+  const m = today.getUTCMonth();
+  const endOfDay = (dt: Date) =>
+    new Date(Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth(), dt.getUTCDate(), 23, 59, 59, 999));
+
+  // "end of month" / "end of this month" → last day of current month
+  if (/\bend of (this )?month\b/.test(s)) {
+    return new Date(Date.UTC(y, m + 1, 0, 23, 59, 59, 999)); // day 0 of next month
+  }
+  // "end of Q[1-4]" / "end of quarter" → last day of the named (or current) quarter
+  const qMatch = s.match(/\bend of q([1-4])\b/);
+  if (qMatch || /\bend of (the )?(current )?quarter\b/.test(s)) {
+    const q = qMatch ? Number(qMatch[1]) : Math.floor(m / 3) + 1;
+    const lastMonthOfQ = q * 3 - 1; // Q1→2(Mar) Q2→5(Jun) Q3→8(Sep) Q4→11(Dec)
+    return new Date(Date.UTC(y, lastMonthOfQ + 1, 0, 23, 59, 59, 999));
+  }
+  // "next quarter" → first day of the next calendar quarter
+  if (/\bnext quarter\b/.test(s)) {
+    const nextQStartMonth = (Math.floor(m / 3) + 1) * 3; // may roll into next year
+    return new Date(Date.UTC(y, nextQStartMonth, 1, 0, 0, 0, 0));
+  }
+  // "in N days" / "N days" → today + N days (end of that day)
+  const nDays = s.match(/\bin (\d{1,4}) days?\b/) ?? s.match(/^(\d{1,4}) days?$/);
+  if (nDays) {
+    const d = new Date(today.getTime());
+    d.setUTCDate(d.getUTCDate() + Number(nDays[1]));
+    return endOfDay(d);
+  }
+  // "next week" → +7 days
+  if (/\bnext week\b/.test(s)) {
+    const d = new Date(today.getTime());
+    d.setUTCDate(d.getUTCDate() + 7);
+    return endOfDay(d);
+  }
+  // "end of week" / "by friday" etc. → upcoming weekday (default Sunday)
+  const byDay = s.match(/\bby (monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/);
+  if (byDay || /\bend of (this )?week\b/.test(s)) {
+    const targetDow = byDay
+      ? ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'].indexOf(byDay[1])
+      : 0; // end of week → Sunday
+    const d = new Date(today.getTime());
+    const delta = (targetDow - d.getUTCDay() + 7) % 7 || 7; // strictly upcoming
+    d.setUTCDate(d.getUTCDate() + delta);
+    return endOfDay(d);
+  }
+  return null;
+}
+
 /** Normalize the LLM's timeline-dimension value to {windowStart, windowEnd}
  *  as Date objects. Pre-KAN-1203 accepted only ISO strings via `new Date()`
  *  (which silently returns Invalid Date on bad input); KAN-1203 surfaces
  *  Invalid Date as a normalization failure so the field stays NULL rather
- *  than corrupting the column. */
-function normalizeTimeline(value: unknown): Partial<{ windowStart: Date; windowEnd: Date }> {
+ *  than corrupting the column. KAN-1230 B2.2 — resolves relative phrases
+ *  ("end of month", "in 30 days", "end of Q3") against `today` before the ISO
+ *  fallback; windowStart defaults to `today` when only an end is given. */
+function normalizeTimeline(
+  value: unknown,
+  today: Date = new Date(),
+): Partial<{ windowStart: Date; windowEnd: Date }> {
   if (!value || typeof value !== 'object') return {};
   const v = value as Record<string, unknown>;
   const result: Partial<{ windowStart: Date; windowEnd: Date }> = {};
 
+  const parseOne = (rawStr: string): Date | undefined => {
+    const relative = resolveRelativeDate(rawStr, today);
+    if (relative) return relative;
+    const d = new Date(rawStr);
+    return Number.isNaN(d.getTime()) ? undefined : d;
+  };
+
   const startRaw = pickString(v, ['windowStart', 'start', 'startDate', 'from', 'beginAt']);
   if (startRaw) {
-    const d = new Date(startRaw);
-    if (!Number.isNaN(d.getTime())) result.windowStart = d;
+    const d = parseOne(startRaw);
+    if (d) result.windowStart = d;
   }
 
   const endRaw = pickString(v, ['windowEnd', 'end', 'endDate', 'to', 'finishAt']);
   if (endRaw) {
-    const d = new Date(endRaw);
-    if (!Number.isNaN(d.getTime())) result.windowEnd = d;
+    const d = parseOne(endRaw);
+    if (d) result.windowEnd = d;
+  }
+
+  // KAN-1230 B2.2 — a relative end with no start defaults the window open from
+  // today ("by end of month" → window is now → end of month).
+  if (result.windowEnd && !result.windowStart) {
+    result.windowStart = today;
   }
 
   return result;
@@ -1706,6 +1801,9 @@ async function persistDimensionToCampaign(
   dim: DimensionKey,
   value: unknown,
   entityType: CampaignTargetEntityType | null,
+  // KAN-1230 B2.2 — reference date for relative-timeline resolution. Defaults
+  // to now; callers pass the turn's todayUtc for deterministic resolution.
+  today: Date = new Date(),
 ): Promise<void> {
   const data: Record<string, unknown> = {};
   switch (dim) {
@@ -1771,7 +1869,7 @@ async function persistDimensionToCampaign(
       break;
     }
     case 'timeline': {
-      const normalized = normalizeTimeline(value);
+      const normalized = normalizeTimeline(value, today);
       if (normalized.windowStart) data.windowStart = normalized.windowStart;
       if (normalized.windowEnd) data.windowEnd = normalized.windowEnd;
       const dropped: string[] = [];
