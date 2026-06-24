@@ -66,6 +66,20 @@ export interface OrchestratorPrisma {
       };
     }) => Promise<unknown>;
   };
+  // KAN-1230 B1 — multi-dim confirmations emit a campaign.dimension_advanced
+  // audit row per confirmed dimension (Memo 53), mirroring the panel-commit
+  // audit added in KAN-1224 Phase A.
+  auditLog: {
+    create: (args: {
+      data: {
+        tenantId: string;
+        actor: string;
+        actionType: string;
+        payload: Record<string, unknown>;
+        reasoning?: string;
+      };
+    }) => Promise<unknown>;
+  };
 }
 
 export interface LLMCompleteFn {
@@ -167,6 +181,291 @@ function extractVehicleTargetDescriptor(proposedPlan: unknown): unknown | null {
       .vehicleTargetDescriptor;
   }
   return null;
+}
+
+// ─────────────────────────────────────────────
+// KAN-1230 B1 — multi-dimension extraction
+//
+// One LLM pass attempts EVERY undetermined dimension from a single (possibly
+// compound) operator message. Per-dimension confidence routes each result
+// independently (Memo: multi-dim-llm-response-confidence-routing): a low-
+// confidence dimension is skipped (stays Pending) while high-confidence ones
+// advance — partial extraction ≠ turn failure. entityType is resolved FIRST so
+// the polymorphic `product` dimension routes through the correct normalizer
+// (vehicle vs product) within the same turn.
+// ─────────────────────────────────────────────
+
+/** Numeric LLM confidence → the 3-band scale the per-dim normalizers expect. */
+function numericToConfidence(n: number): 'high' | 'medium' | 'low' {
+  if (n >= 0.85) return 'high';
+  if (n >= 0.6) return 'medium';
+  return 'low';
+}
+
+/** Dimensions not yet confirmed (vehicle campaigns skip audience per Q3). */
+function undeterminedDimensions(state: ConversationState): DimensionKey[] {
+  const isVehicle =
+    state.entityType.kind === 'confirmed' && state.entityType.value === 'vehicle';
+  return DIMENSION_ORDER.filter((d) => {
+    if (d === 'audience' && isVehicle) return false;
+    return state[d].kind !== 'confirmed';
+  });
+}
+
+export interface MultiDimExtractionEntry {
+  extracted: boolean;
+  value?: unknown;
+  confidence: number;
+  reason?: string;
+}
+
+export function buildMultiDimExtractionPrompt(
+  dims: DimensionKey[],
+  state: ConversationState,
+  todayUtc: Date,
+): string {
+  const today = todayUtc.toISOString();
+  const isVehicleCampaign =
+    state.entityType.kind === 'confirmed' &&
+    state.entityType.value === 'vehicle';
+  const stateJson = JSON.stringify(state, null, 2);
+  const vocabulary = dims.includes('audience') ? `\n\n${AUDIENCE_VOCABULARY}` : '';
+
+  const perDim = dims
+    .map((dim) => {
+      const descriptor = describeDimension(dim, isVehicleCampaign);
+      const shape = dimensionValueExample(dim, isVehicleCampaign);
+      return `### ${dim}\n${descriptor}\n\nValue shape:\n${shape}`;
+    })
+    .join('\n\n');
+
+  return `${DOCTRINE_PREAMBLE}
+
+Current capture state:
+${stateJson}
+
+Today's date (UTC): ${today}${vocabulary}
+
+# KAN-1230 — Multi-dimension extraction
+
+The operator's message may answer SEVERAL dimensions at once (a compound
+message like "sell 10 used cars by end of month"). Extract EVERY dimension you
+can from this ONE message. Do NOT invent values — only extract what the
+operator actually expressed; leave the rest unextracted.
+
+# Dimensions to attempt
+
+${perDim}
+
+# Output envelope (return ONE JSON object)
+
+For EACH dimension above, include a key with this exact shape:
+
+{
+  "<dimensionKey>": {
+    "extracted": true | false,
+    "value": <the dimension's value shape above; omit when extracted=false>,
+    "confidence": <number 0..1 — certainty this value is what the operator meant>,
+    "reason": "<one short phrase>"
+  }
+}
+
+# Confidence guidance
+
+- >= 0.85 — unambiguous; the operator clearly stated this
+- 0.6 .. 0.85 — plausible but the operator should confirm
+- < 0.6 — too vague to act on; set extracted=false
+
+Be honest. A dimension the operator didn't address → extracted: false.`;
+}
+
+export function parseMultiDimExtraction(
+  text: string,
+  dims: DimensionKey[],
+): Partial<Record<DimensionKey, MultiDimExtractionEntry>> | null {
+  const cleaned = text
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/, '');
+  let obj: unknown;
+  try {
+    obj = JSON.parse(cleaned);
+  } catch {
+    return null;
+  }
+  if (!obj || typeof obj !== 'object') return null;
+  const rec = obj as Record<string, unknown>;
+  const out: Partial<Record<DimensionKey, MultiDimExtractionEntry>> = {};
+  for (const dim of dims) {
+    const entry = rec[dim];
+    if (!entry || typeof entry !== 'object') continue;
+    const e = entry as Record<string, unknown>;
+    const extracted = e.extracted === true;
+    const confidence =
+      typeof e.confidence === 'number' ? e.confidence : extracted ? 0.7 : 0;
+    out[dim] = {
+      extracted,
+      value: e.value,
+      confidence,
+      reason: typeof e.reason === 'string' ? e.reason : undefined,
+    };
+  }
+  return out;
+}
+
+function buildMultiDimAck(
+  advanced: { dimensionKey: DimensionKey; kind: 'confirmed' | 'proposed' }[],
+): string {
+  const confirmed = advanced.filter((a) => a.kind === 'confirmed').map((a) => a.dimensionKey);
+  const proposed = advanced.filter((a) => a.kind === 'proposed').map((a) => a.dimensionKey);
+  const parts: string[] = [];
+  if (confirmed.length) parts.push(`Confirmed ${confirmed.join(', ')}`);
+  if (proposed.length) parts.push(`proposed ${proposed.join(', ')} (confirm or correct)`);
+  return parts.length
+    ? `${parts.join('; ')} from your message.`
+    : 'Captured your message.';
+}
+
+/**
+ * Attempt multi-dimension extraction. Returns a ChatTurnResult when at least
+ * one dimension advanced, or `null` to fall through to the single-dim path
+ * (LLM error / unparseable / nothing extracted / low-token fallback).
+ */
+async function runMultiDimExtraction(
+  prisma: OrchestratorPrisma,
+  llm: LLMCompleteFn,
+  audienceCount: AudienceCountFn,
+  params: OrchestratorParams,
+  campaignId: string,
+  dims: DimensionKey[],
+  todayUtc: Date,
+): Promise<ChatTurnResult | null> {
+  const systemPrompt = buildMultiDimExtractionPrompt(dims, params.state, todayUtc);
+  let llmResponse;
+  try {
+    llmResponse = await llm({
+      tenantId: params.tenantId,
+      tier: selectTier(params.message, params.state),
+      systemPrompt,
+      userPrompt: params.message,
+      callerTag: 'orchestrator:multidim',
+      jsonMode: true,
+      maxTokens: 1536,
+    });
+  } catch (_err) {
+    return null; // fall through to single-dim
+  }
+
+  const parsed = parseMultiDimExtraction(llmResponse.text, dims);
+  if (!parsed) return null;
+
+  // Process in canonical order so entityType resolves BEFORE product (Risk A).
+  const orderedDims = DIMENSION_ORDER.filter((d) => dims.includes(d));
+  let workingState = params.state;
+  const advanced: { dimensionKey: DimensionKey; kind: 'confirmed' | 'proposed' }[] = [];
+  let audienceAnnotation = '';
+
+  for (const dim of orderedDims) {
+    const ext = parsed[dim];
+    if (!ext || !ext.extracted) continue;
+    if (ext.confidence < 0.6) continue; // low → skip (stays Pending)
+
+    const norm = normalizeForDimension(
+      {
+        kind: 'extracted',
+        value: ext.value,
+        confidence: numericToConfidence(ext.confidence),
+        aiMessage: '',
+      },
+      dim,
+      workingState,
+    );
+    if (norm.kind === 'clarification') continue; // unmappable shape → skip
+
+    const targetKind: 'confirmed' | 'proposed' =
+      ext.confidence >= 0.85 ? 'confirmed' : 'proposed';
+    workingState = {
+      ...workingState,
+      [dim]:
+        targetKind === 'confirmed'
+          ? ({ kind: 'confirmed', value: norm.value } as DimensionState)
+          : ({
+              kind: 'proposed',
+              value: norm.value,
+              confidence: numericToConfidence(ext.confidence),
+            } as DimensionState),
+    };
+    advanced.push({ dimensionKey: dim, kind: targetKind });
+
+    // Inline audience count annotation (Q-ADD C4 parity with single-dim path).
+    if (dim === 'audience' && norm.value) {
+      try {
+        const r = await audienceCount(prisma, params.tenantId, {
+          conditions: norm.value,
+        });
+        audienceAnnotation = ` ${r.count.toLocaleString()} contacts match.`;
+      } catch (_e) {
+        /* count unavailable — proceed */
+      }
+    }
+
+    const entityTypeForPersist: CampaignTargetEntityType | null =
+      workingState.entityType.kind === 'confirmed'
+        ? (workingState.entityType.value as CampaignTargetEntityType)
+        : null;
+    await persistDimensionToCampaign(
+      prisma,
+      campaignId,
+      params.tenantId,
+      dim,
+      norm.value,
+      entityTypeForPersist,
+    );
+
+    // Memo 53 — emit one campaign.dimension_advanced per CONFIRMED dim so the
+    // KAN-1230 avg_turns_to_commit metric can attribute confirmations to a
+    // multi-dim chat turn (mirrors KAN-1224 panel_commit audit).
+    if (targetKind === 'confirmed') {
+      await prisma.auditLog.create({
+        data: {
+          tenantId: params.tenantId,
+          actor: 'system',
+          actionType: 'campaign.dimension_advanced',
+          payload: {
+            campaignId,
+            dimension: dim,
+            action: 'confirm',
+            via: 'chat_multidim',
+          },
+          reasoning: `Dimension ${dim} confirmed via multi-dimension chat extraction`,
+        },
+      });
+    }
+  }
+
+  if (advanced.length === 0) return null; // nothing usable → single-dim fallback
+
+  const aiMessage = `${buildMultiDimAck(advanced)}${audienceAnnotation}`;
+  await prisma.campaignConversationTurn.create({
+    data: {
+      tenantId: params.tenantId,
+      campaignId,
+      turnType: 'ai',
+      content: aiMessage,
+      proposalSnapshot: { multiDim: advanced },
+    },
+  });
+
+  if (allRequiredConfirmed(workingState)) {
+    return { kind: 'all_dimensions_confirmed', aiMessage, state: workingState, campaignId };
+  }
+  return {
+    kind: 'dimensions_extracted',
+    aiMessage,
+    state: workingState,
+    campaignId,
+    advanced,
+  };
 }
 
 /**
@@ -310,6 +609,27 @@ export async function handleChatTurn(
       campaignId,
       dimensionKey: targetDim,
     };
+  }
+
+  // KAN-1230 B1 — multi-dimension extraction. When ≥2 dimensions remain
+  // undetermined, attempt them all in ONE LLM pass (compound-message handling).
+  // Returns when ≥1 dimension advanced; otherwise falls through to the single-
+  // dim path below (LLM error / unparseable / nothing extracted). Skipped when
+  // only the final dimension remains, and AFTER the operator-confirmation early-
+  // exit above — so that path and the low-token single-dim path stay intact
+  // (Risk B: multi-dim is additive, not a replacement).
+  const undetermined = undeterminedDimensions(params.state);
+  if (undetermined.length >= 2) {
+    const multiResult = await runMultiDimExtraction(
+      prisma,
+      llm,
+      audienceCount,
+      params,
+      campaignId,
+      undetermined,
+      todayUtc,
+    );
+    if (multiResult) return multiResult;
   }
 
   // Build extraction prompt for the target dimension

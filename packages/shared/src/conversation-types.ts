@@ -203,6 +203,17 @@ export type ChatTurnResult =
       campaignId: string;
     }
   | {
+      // KAN-1230 B1 — multiple dimensions advanced in a single turn from one
+      // compound operator message. `advanced` lists each dimension that moved
+      // and whether it landed confirmed or proposed. The client applies
+      // `state` like any other turn (setState(result.state)).
+      kind: 'dimensions_extracted';
+      aiMessage: string;
+      state: ConversationState;
+      campaignId: string;
+      advanced: { dimensionKey: DimensionKey; kind: 'confirmed' | 'proposed' }[];
+    }
+  | {
       kind: 'reset';
       aiMessage: string;
       state: ConversationState;
