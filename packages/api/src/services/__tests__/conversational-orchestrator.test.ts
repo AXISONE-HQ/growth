@@ -21,7 +21,10 @@ import {
   isResetIntent,
   parseDimensionExtraction,
   buildExtractionPrompt,
+  buildMultiDimExtractionPrompt,
   reconcileCommittedTargetState,
+  resolveRelativeDate,
+  undeterminedDimensions,
   type OrchestratorPrisma,
   type LLMCompleteFn,
   type AudienceCountFn,
@@ -911,5 +914,117 @@ describe('KAN-1230 B1 — multi-dimension extraction', () => {
     // single-dim path → caller tag is the dimension, not multidim.
     expect((llm as ReturnType<typeof vi.fn>).mock.calls[0][0].callerTag).toBe('orchestrator:audience');
     expect(ENTITY_TYPE_FIRST).toBe('entityType');
+  });
+});
+
+// ─────────────────────────────────────────────
+// KAN-1230 B2 — filter targets + relative timeline + audience-prompt fix
+//
+// Canonical acceptance sentence (Memo 56 #10): "sell 10 used cars by end of
+// month" → all 4 dimensions extracted in one turn, audience skipped.
+// ─────────────────────────────────────────────
+
+describe('KAN-1230 B2.2 — resolveRelativeDate (UTC)', () => {
+  const TODAY = new Date('2026-06-24T12:00:00.000Z'); // Wednesday
+
+  it('"end of month" → last instant of current month', () => {
+    expect(resolveRelativeDate('end of month', TODAY)?.toISOString()).toBe('2026-06-30T23:59:59.999Z');
+  });
+  it('"by end of this month" (embedded) → same', () => {
+    expect(resolveRelativeDate('sell them by end of this month', TODAY)?.toISOString()).toBe('2026-06-30T23:59:59.999Z');
+  });
+  it('"end of Q3" → 2026-09-30', () => {
+    expect(resolveRelativeDate('end of Q3', TODAY)?.toISOString()).toBe('2026-09-30T23:59:59.999Z');
+  });
+  it('"end of quarter" (current = Q2) → 2026-06-30', () => {
+    expect(resolveRelativeDate('end of quarter', TODAY)?.toISOString()).toBe('2026-06-30T23:59:59.999Z');
+  });
+  it('"in 30 days" → today + 30, end of day', () => {
+    expect(resolveRelativeDate('in 30 days', TODAY)?.toISOString()).toBe('2026-07-24T23:59:59.999Z');
+  });
+  it('"next week" → +7 days end of day', () => {
+    expect(resolveRelativeDate('next week', TODAY)?.toISOString()).toBe('2026-07-01T23:59:59.999Z');
+  });
+  it('"next quarter" → first day of Q3', () => {
+    expect(resolveRelativeDate('next quarter', TODAY)?.toISOString()).toBe('2026-07-01T00:00:00.000Z');
+  });
+  it('"by Friday" → upcoming Friday (2026-06-26)', () => {
+    expect(resolveRelativeDate('by Friday', TODAY)?.toISOString()).toBe('2026-06-26T23:59:59.999Z');
+  });
+  it('unrecognized phrase → null (caller falls back to ISO parse)', () => {
+    expect(resolveRelativeDate('whenever we feel like it', TODAY)).toBeNull();
+    expect(resolveRelativeDate('2026-09-30T00:00:00.000Z', TODAY)).toBeNull();
+  });
+});
+
+describe('KAN-1230 B2.5 / KAN-1232 — undeterminedDimensions excludes audience until entityType=product', () => {
+  it('empty state (entityType unknown) → audience NOT included', () => {
+    expect(undeterminedDimensions(emptyConversationState())).not.toContain('audience');
+  });
+  it('vehicle campaign → audience NOT included', () => {
+    const s: ConversationState = {
+      ...emptyConversationState(),
+      entityType: { kind: 'confirmed', value: 'vehicle' },
+    };
+    expect(undeterminedDimensions(s)).not.toContain('audience');
+  });
+  it('confirmed product campaign → audience IS included', () => {
+    const s: ConversationState = {
+      ...emptyConversationState(),
+      entityType: { kind: 'confirmed', value: 'product' },
+    };
+    expect(undeterminedDimensions(s)).toContain('audience');
+  });
+  it('multi-dim prompt for a vehicle campaign does not list ### audience', () => {
+    const s: ConversationState = {
+      ...emptyConversationState(),
+      entityType: { kind: 'confirmed', value: 'vehicle' },
+    };
+    const prompt = buildMultiDimExtractionPrompt(undeterminedDimensions(s), s, new Date('2026-06-24T00:00:00Z'));
+    expect(prompt).not.toContain('### audience');
+  });
+});
+
+describe('KAN-1230 B2 — "sell 10 used cars by end of month" extracts 4 dims in one turn', () => {
+  it('entityType + filter descriptor + objectives + timeline all advance; audience never asked', async () => {
+    const { prisma } = makePrismaMock();
+    const llm = makeLlm(
+      JSON.stringify({
+        entityType: { extracted: true, value: 'vehicle', confidence: 0.95 },
+        // B2.1 — filter-based vehicleTargetDescriptor (condition + maxCount, no specific VIN)
+        product: { extracted: true, value: { condition: 'used', maxCount: 10 }, confidence: 0.9 },
+        objectives: {
+          extracted: true,
+          value: { goalType: 'units', goalTarget: 10, goalDescription: 'Sell 10 used cars' },
+          confidence: 0.9,
+        },
+        // B2.2 — relative phrase; server resolves against todayUtc
+        timeline: { extracted: true, value: { windowEnd: 'end of month' }, confidence: 0.9 },
+      }),
+    );
+    const result = await handleChatTurn(prisma, llm, makeAudienceCount(), {
+      campaignId: 'camp-1',
+      tenantId: 'tenant-1',
+      message: 'sell 10 used cars by end of month',
+      state: emptyConversationState(),
+    });
+
+    // Vehicle mode needs only 4 dims (audience skipped) — all confirmed in ONE
+    // turn → the canonical 1-turn extraction, ready for Action Plan generation.
+    expect(result.kind).toBe('all_dimensions_confirmed');
+    if (!('state' in result)) return;
+    expect(result.state.entityType).toEqual({ kind: 'confirmed', value: 'vehicle' });
+    expect(result.state.product.kind).toBe('confirmed');
+    // B2.1 — filter descriptor (condition/maxCount), NOT a specific year/make/model
+    expect(result.state.product).toMatchObject({
+      kind: 'confirmed',
+      value: { condition: 'used', maxCount: 10 },
+    });
+    expect(result.state.objectives.kind).toBe('confirmed');
+    expect(result.state.timeline.kind).toBe('confirmed');
+    // audience never entered the ask (vehicle mode) — stays empty/skipped
+    expect(result.state.audience.kind).toBe('empty');
+    // the multi-dim prompt the LLM saw did not mention audience
+    expect((llm as ReturnType<typeof vi.fn>).mock.calls[0][0].systemPrompt).not.toContain('### audience');
   });
 });
