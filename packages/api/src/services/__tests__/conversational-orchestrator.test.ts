@@ -41,11 +41,13 @@ function makePrismaMock(): {
     campaignCreate: ReturnType<typeof vi.fn>;
     campaignUpdate: ReturnType<typeof vi.fn>;
     turnCreate: ReturnType<typeof vi.fn>;
+    auditCreate: ReturnType<typeof vi.fn>;
   };
 } {
   const campaignCreate = vi.fn().mockResolvedValue({ id: 'camp-new-1' });
   const campaignUpdate = vi.fn().mockResolvedValue({});
   const turnCreate = vi.fn().mockResolvedValue({});
+  const auditCreate = vi.fn().mockResolvedValue({});
   const prisma: OrchestratorPrisma = {
     campaign: {
       create: campaignCreate as never,
@@ -55,8 +57,14 @@ function makePrismaMock(): {
     campaignConversationTurn: {
       create: turnCreate as never,
     },
+    auditLog: {
+      create: auditCreate as never,
+    },
   };
-  return { prisma, spies: { campaignCreate, campaignUpdate, turnCreate } };
+  return {
+    prisma,
+    spies: { campaignCreate, campaignUpdate, turnCreate, auditCreate },
+  };
 }
 
 function makeLlm(text: string): LLMCompleteFn {
@@ -659,12 +667,17 @@ describe('KAN-1224 Phase A — handleChatTurn skips panel-committed product', ()
         vehicleTargetDescriptor: { maxCount: 1, make: 'Honda', model: 'CR-V' },
       },
     });
+    // Post-reconcile, entityType + product are confirmed → only objectives +
+    // timeline remain → KAN-1230 multi-dim path. The prompt must NOT re-ask
+    // product (it was reconciled from the panel commit).
     const llm = makeLlm(
       JSON.stringify({
-        kind: 'extracted',
-        value: { goalType: 'sales', goalTarget: 1, goalDescription: 'Sell the CR-V' },
-        confidence: 'high',
-        aiMessage: 'Got it — sell 1.',
+        objectives: {
+          extracted: true,
+          value: { goalType: 'units', goalTarget: 1, goalDescription: 'Sell the CR-V' },
+          confidence: 0.9,
+        },
+        timeline: { extracted: false, confidence: 0.2 },
       }),
     );
     const audience = makeAudienceCount();
@@ -683,15 +696,220 @@ describe('KAN-1224 Phase A — handleChatTurn skips panel-committed product', ()
       state: staleState,
     });
 
-    // The LLM was asked about OBJECTIVES — product was skipped via reconciliation.
-    const callerTag = (llm as ReturnType<typeof vi.fn>).mock.calls[0][0]
-      .callerTag as string;
-    expect(callerTag).toBe('orchestrator:objectives');
-    expect(callerTag).not.toBe('orchestrator:product');
-    // Returned state confirms product (self-heals the client on setState).
-    expect(result.kind === 'dimension_confirmed' || result.kind === 'dimension_proposed').toBe(true);
+    // Multi-dim extraction ran for the remaining dims; product was NOT re-asked.
+    const firstCall = (llm as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(firstCall.callerTag).toBe('orchestrator:multidim');
+    // The multi-dim prompt only covered the still-undetermined dims (no product).
+    expect(firstCall.systemPrompt).not.toContain('### product');
+    // Reconciliation confirmed product (self-heals the client on setState).
     if ('state' in result && result.state) {
       expect(result.state.product.kind).toBe('confirmed');
+      expect(result.state.objectives.kind).toBe('confirmed');
     }
+    if (result.kind === 'dimensions_extracted') {
+      expect(result.advanced.map((a) => a.dimensionKey)).not.toContain('product');
+    }
+  });
+});
+
+// ─────────────────────────────────────────────
+// KAN-1230 B1 — multi-dimension extraction
+//
+// One LLM pass extracts several dimensions from a compound operator message.
+// Per-dim confidence routes each independently (≥0.85 confirm, 0.6–0.85
+// propose, <0.6 skip). entityType resolves first so `product` routes through
+// the vehicle normalizer in the same turn (Risk A).
+// ─────────────────────────────────────────────
+
+describe('KAN-1230 B1 — multi-dimension extraction', () => {
+  const ENTITY_TYPE_FIRST = 'entityType';
+
+  it('"Generate 100 leads by 2026-09-30" → objectives + timeline confirmed in one turn', async () => {
+    const { prisma } = makePrismaMock();
+    const llm = makeLlm(
+      JSON.stringify({
+        entityType: { extracted: false, confidence: 0.3 },
+        product: { extracted: false, confidence: 0.2 },
+        objectives: {
+          extracted: true,
+          value: { goalType: 'units', goalTarget: 100, goalDescription: 'Generate 100 leads' },
+          confidence: 0.9,
+        },
+        timeline: {
+          extracted: true,
+          value: { windowStart: '2026-06-23T00:00:00.000Z', windowEnd: '2026-09-30T00:00:00.000Z' },
+          confidence: 0.9,
+        },
+        audience: { extracted: false, confidence: 0.2 },
+      }),
+    );
+    const result = await handleChatTurn(prisma, llm, makeAudienceCount(), {
+      campaignId: 'camp-1',
+      tenantId: 'tenant-1',
+      message: 'Generate 100 leads by 2026-09-30',
+      state: emptyConversationState(),
+    });
+
+    // multi-dim caller tag proves the multi-dim path ran (not single-dim).
+    expect((llm as ReturnType<typeof vi.fn>).mock.calls[0][0].callerTag).toBe('orchestrator:multidim');
+    expect(result.kind).toBe('dimensions_extracted');
+    if (result.kind !== 'dimensions_extracted') return;
+    expect(result.state.objectives.kind).toBe('confirmed');
+    expect(result.state.timeline.kind).toBe('confirmed');
+    const advancedDims = result.advanced.map((a) => a.dimensionKey).sort();
+    expect(advancedDims).toEqual(['objectives', 'timeline']);
+  });
+
+  it('Risk A — "Sell 5 Honda CR-Vs": entityType resolves first, product routes through VEHICLE normalizer', async () => {
+    const { prisma, spies } = makePrismaMock();
+    const llm = makeLlm(
+      JSON.stringify({
+        entityType: { extracted: true, value: 'vehicle', confidence: 0.95 },
+        product: {
+          extracted: true,
+          value: { make: 'Honda', model: 'CR-V', maxCount: 5 },
+          confidence: 0.9,
+        },
+        objectives: {
+          extracted: true,
+          value: { goalType: 'units', goalTarget: 5, goalDescription: 'Sell 5 Honda CR-Vs' },
+          confidence: 0.88,
+        },
+        timeline: { extracted: false, confidence: 0.2 },
+        audience: { extracted: false, confidence: 0.1 },
+      }),
+    );
+    const result = await handleChatTurn(prisma, llm, makeAudienceCount(), {
+      campaignId: 'camp-1',
+      tenantId: 'tenant-1',
+      message: 'Sell 5 Honda CR-Vs',
+      state: emptyConversationState(),
+    });
+
+    expect(result.kind).toBe('dimensions_extracted');
+    if (result.kind !== 'dimensions_extracted') return;
+    expect(result.state.entityType).toEqual({ kind: 'confirmed', value: 'vehicle' });
+    expect(result.state.product.kind).toBe('confirmed');
+    // 3 dims advanced in one turn
+    expect(result.advanced.map((a) => a.dimensionKey).sort()).toEqual(
+      ['entityType', 'objectives', 'product'].sort(),
+    );
+
+    // LOAD-BEARING Risk A proof: product was persisted to
+    // proposedPlan.vehicleTargetDescriptor (the vehicle-normalizer path),
+    // NOT to goalProductId (the product passthrough path). If entityType had
+    // not resolved first, product would have routed through product-normalizer.
+    const planUpdate = spies.campaignUpdate.mock.calls.find(
+      (c) => (c[0] as { data?: { proposedPlan?: { vehicleTargetDescriptor?: unknown } } }).data?.proposedPlan?.vehicleTargetDescriptor,
+    );
+    expect(planUpdate).toBeDefined();
+    expect(
+      (planUpdate?.[0] as { data: { proposedPlan: { vehicleTargetDescriptor: Record<string, unknown> } } }).data.proposedPlan.vehicleTargetDescriptor,
+    ).toMatchObject({ make: 'Honda', model: 'CR-V', maxCount: 5 });
+    // and NOT persisted as a product (goalProductId)
+    const productUpdate = spies.campaignUpdate.mock.calls.find(
+      (c) => (c[0] as { data?: { goalProductId?: unknown } }).data?.goalProductId,
+    );
+    expect(productUpdate).toBeUndefined();
+  });
+
+  it('mixed-confidence — "Maybe like 10 leads soon": objectives confirmed, vague timeline skipped (stays Pending)', async () => {
+    const { prisma } = makePrismaMock();
+    const llm = makeLlm(
+      JSON.stringify({
+        entityType: { extracted: false, confidence: 0.3 },
+        product: { extracted: false, confidence: 0.2 },
+        objectives: {
+          extracted: true,
+          value: { goalType: 'units', goalTarget: 10, goalDescription: '10 leads' },
+          confidence: 0.9,
+        },
+        timeline: {
+          extracted: true,
+          value: { windowStart: '2026-06-23T00:00:00.000Z', windowEnd: '2026-07-23T00:00:00.000Z' },
+          confidence: 0.4,
+          reason: "vague 'soon'",
+        },
+        audience: { extracted: false, confidence: 0.2 },
+      }),
+    );
+    const result = await handleChatTurn(prisma, llm, makeAudienceCount(), {
+      campaignId: 'camp-1',
+      tenantId: 'tenant-1',
+      message: 'Maybe like 10 leads soon',
+      state: emptyConversationState(),
+    });
+
+    expect(result.kind).toBe('dimensions_extracted');
+    if (result.kind !== 'dimensions_extracted') return;
+    expect(result.state.objectives.kind).toBe('confirmed');
+    // low-confidence timeline skipped — stays Pending, turn does not crash.
+    expect(result.state.timeline.kind).toBe('empty');
+    expect(result.advanced.map((a) => a.dimensionKey)).toEqual(['objectives']);
+  });
+
+  it('multi-audit — emits one campaign.dimension_advanced per confirmed dim', async () => {
+    const { prisma, spies } = makePrismaMock();
+    const llm = makeLlm(
+      JSON.stringify({
+        entityType: { extracted: false, confidence: 0.3 },
+        product: { extracted: false, confidence: 0.2 },
+        objectives: {
+          extracted: true,
+          value: { goalType: 'units', goalTarget: 100, goalDescription: 'Generate 100 leads' },
+          confidence: 0.9,
+        },
+        timeline: {
+          extracted: true,
+          value: { windowStart: '2026-06-23T00:00:00.000Z', windowEnd: '2026-09-30T00:00:00.000Z' },
+          confidence: 0.9,
+        },
+        audience: { extracted: false, confidence: 0.2 },
+      }),
+    );
+    await handleChatTurn(prisma, llm, makeAudienceCount(), {
+      campaignId: 'camp-1',
+      tenantId: 'tenant-1',
+      message: 'Generate 100 leads by 2026-09-30',
+      state: emptyConversationState(),
+    });
+
+    const dimAdvanced = spies.auditCreate.mock.calls.filter(
+      (c) => (c[0] as { data: { actionType: string } }).data.actionType === 'campaign.dimension_advanced',
+    );
+    expect(dimAdvanced).toHaveLength(2);
+    const dims = dimAdvanced
+      .map((c) => (c[0] as { data: { payload: { dimension: string } } }).data.payload.dimension)
+      .sort();
+    expect(dims).toEqual(['objectives', 'timeline']);
+    // payload shape (Memo 53): action + via for metric attribution
+    expect((dimAdvanced[0][0] as { data: { payload: Record<string, unknown> } }).data.payload).toMatchObject({
+      action: 'confirm',
+      via: 'chat_multidim',
+    });
+  });
+
+  it('does NOT trigger multi-dim when only one dimension remains (single-dim fallback — Risk B)', async () => {
+    const { prisma } = makePrismaMock();
+    // entityType + product + objectives + timeline confirmed; only audience left.
+    const oneLeft: ConversationState = {
+      ...emptyConversationState(),
+      entityType: { kind: 'confirmed', value: 'product' },
+      product: { kind: 'confirmed', value: 'Widget' },
+      objectives: { kind: 'confirmed', value: { goalType: 'units', goalTarget: 10, goalDescription: 'x' } },
+      timeline: { kind: 'confirmed', value: { windowStart: '2026-06-23T00:00:00.000Z', windowEnd: '2026-07-23T00:00:00.000Z' } },
+    };
+    const llm = makeLlm(
+      JSON.stringify({ kind: 'extracted', value: { field: 'lifecycleStage', op: 'in', values: ['lead'] }, confidence: 'high', aiMessage: 'Audience set.' }),
+    );
+    await handleChatTurn(prisma, llm, makeAudienceCount(), {
+      campaignId: 'camp-1',
+      tenantId: 'tenant-1',
+      message: 'leads only',
+      state: oneLeft,
+    });
+    // single-dim path → caller tag is the dimension, not multidim.
+    expect((llm as ReturnType<typeof vi.fn>).mock.calls[0][0].callerTag).toBe('orchestrator:audience');
+    expect(ENTITY_TYPE_FIRST).toBe('entityType');
   });
 });

@@ -99,6 +99,21 @@ function llmQueue(responses: Array<Record<string, unknown>>) {
   };
 }
 
+/**
+ * KAN-1230 B1 — when ≥2 dimensions are undetermined the orchestrator routes
+ * to the multi-dim extraction path. `md()` wraps a single dimension's value in
+ * the multi-dim response envelope (confidence ≥0.85 → confirm, 0.6–0.85 →
+ * propose). L1 operator-confirmation and reset still fire BEFORE multi-dim, so
+ * those scenarios are unchanged.
+ */
+function md(
+  dim: string,
+  value: unknown,
+  confidence = 0.9,
+): Record<string, unknown> {
+  return { [dim]: { extracted: true, value, confidence, reason: 'test' } };
+}
+
 const STUB_AUDIENCE_COUNT = async () => ({
   count: 0,
   isThin: false,
@@ -181,10 +196,13 @@ describe('KAN-1201 L1 — bare confirmation upgrades proposed → confirmed (ski
     )) as OrchestratorModule;
     await withRollback(async (prisma) => {
       const tenant = await createTenant(prisma);
-      // Empty state — operator typing "yes" is meaningless. KAN-1219 G3:
-      // first dimension is now entityType, so the clarification asks about
-      // entity type rather than product.
+      // Empty state — operator typing "yes" is meaningless. L1 does NOT fire
+      // (no proposed dim). KAN-1230 B1: multi-dim runs first but extracts
+      // nothing from "yes" (response 1 = empty envelope → no dim advances →
+      // falls through), then the single-dim entityType path returns the
+      // clarification (response 2).
       const llm = llmQueue([
+        {},
         {
           kind: 'clarification',
           aiMessage: 'Is this campaign about a product in your catalog, or a vehicle from your dealer inventory?',
@@ -199,7 +217,7 @@ describe('KAN-1201 L1 — bare confirmation upgrades proposed → confirmed (ski
         TODAY,
       );
 
-      // L1 does NOT fire (no proposed dim) → falls through to LLM → clarification
+      // Multi-dim found nothing → single-dim fallback → clarification.
       expect(result.kind).toBe('clarification');
     });
   });
@@ -219,14 +237,7 @@ describe('KAN-1201 L2 — HIGH confidence on empty dim → auto-confirm', () => 
     )) as OrchestratorModule;
     await withRollback(async (prisma) => {
       const tenant = await createTenant(prisma);
-      const llm = llmQueue([
-        {
-          kind: 'extracted',
-          value: 'Growth Platform Essential',
-          confidence: 'high',
-          aiMessage: "Got it — Growth Platform Essential. Moving on to your objective.",
-        },
-      ]);
+      const llm = llmQueue([md('product', 'Growth Platform Essential')]);
 
       const result = await handleChatTurn(
         prisma,
@@ -240,11 +251,11 @@ describe('KAN-1201 L2 — HIGH confidence on empty dim → auto-confirm', () => 
         TODAY,
       );
 
-      expect(result.kind).toBe('dimension_confirmed');
-      if (result.kind === 'dimension_confirmed') {
-        expect(result.dimensionKey).toBe('product');
+      // KAN-1230 B1 — HIGH confidence (≥0.85) auto-confirms via the multi-dim path.
+      expect(result.kind).toBe('dimensions_extracted');
+      if (result.kind === 'dimensions_extracted') {
         expect(result.state.product.kind).toBe('confirmed');
-        // Subsequent turn should now target `objectives` (state advances)
+        expect(result.advanced).toContainEqual({ dimensionKey: 'product', kind: 'confirmed' });
       }
     });
   });
@@ -270,14 +281,7 @@ describe('KAN-1201 L3 — HIGH confidence on proposed dim → implicit confirmat
         ...productCampaignSeed(),
         product: { kind: 'proposed', value: 'Growth Platform', confidence: 'medium' },
       };
-      const llm = llmQueue([
-        {
-          kind: 'extracted',
-          value: 'Growth Platform Pro tier',
-          confidence: 'high',
-          aiMessage: 'Got it — Growth Platform Pro tier confirmed.',
-        },
-      ]);
+      const llm = llmQueue([md('product', 'Growth Platform Pro tier')]);
 
       const result = await handleChatTurn(
         prisma,
@@ -291,8 +295,9 @@ describe('KAN-1201 L3 — HIGH confidence on proposed dim → implicit confirmat
         TODAY,
       );
 
-      expect(result.kind).toBe('dimension_confirmed');
-      if (result.kind === 'dimension_confirmed') {
+      // HIGH confidence upgrades the proposed dim → confirmed (multi-dim path).
+      expect(result.kind).toBe('dimensions_extracted');
+      if (result.kind === 'dimensions_extracted') {
         expect(result.state.product.kind).toBe('confirmed');
       }
     });
@@ -314,14 +319,8 @@ describe('KAN-1201 L4 — MEDIUM confidence → propose (no auto-confirm)', () =
     )) as OrchestratorModule;
     await withRollback(async (prisma) => {
       const tenant = await createTenant(prisma);
-      const llm = llmQueue([
-        {
-          kind: 'extracted',
-          value: 'Some product',
-          confidence: 'medium',
-          aiMessage: 'I think you mean Some product — is that right?',
-        },
-      ]);
+      // MEDIUM confidence (0.6–0.85) → propose, not auto-confirm.
+      const llm = llmQueue([md('product', 'Some product', 0.7)]);
 
       const result = await handleChatTurn(
         prisma,
@@ -335,9 +334,10 @@ describe('KAN-1201 L4 — MEDIUM confidence → propose (no auto-confirm)', () =
         TODAY,
       );
 
-      expect(result.kind).toBe('dimension_proposed');
-      if (result.kind === 'dimension_proposed') {
+      expect(result.kind).toBe('dimensions_extracted');
+      if (result.kind === 'dimensions_extracted') {
         expect(result.state.product.kind).toBe('proposed');
+        expect(result.advanced).toContainEqual({ dimensionKey: 'product', kind: 'proposed' });
       }
     });
   });
@@ -358,36 +358,16 @@ describe('KAN-1201 L5 — full 4-dimension confirmation chain', () => {
     )) as OrchestratorModule;
     await withRollback(async (prisma) => {
       const tenant = await createTenant(prisma);
+      // KAN-1230 B1 — turns 1–3 advance one dim each via the multi-dim path
+      // (≥2 dims undetermined); turn 4 has only audience left → single-dim path.
       const llm = llmQueue([
-        // Turn 1 — product
-        {
-          kind: 'extracted',
-          value: 'Growth Platform',
-          confidence: 'high',
-          aiMessage: 'Got Growth Platform.',
-        },
-        // Turn 2 — objectives
-        {
-          kind: 'extracted',
-          value: {
-            goalType: 'units',
-            goalTarget: 50,
-            goalDescription: '50 subscriptions',
-          },
-          confidence: 'high',
-          aiMessage: 'Got 50 units.',
-        },
-        // Turn 3 — timeline
-        {
-          kind: 'extracted',
-          value: {
-            windowStart: '2026-06-16T00:00:00.000Z',
-            windowEnd: '2026-07-31T23:59:59.999Z',
-          },
-          confidence: 'high',
-          aiMessage: 'Got timeline June–July 2026.',
-        },
-        // Turn 4 — audience
+        // Turn 1 — product (multi-dim)
+        md('product', 'Growth Platform'),
+        // Turn 2 — objectives (multi-dim)
+        md('objectives', { goalType: 'units', goalTarget: 50, goalDescription: '50 subscriptions' }),
+        // Turn 3 — timeline (multi-dim)
+        md('timeline', { windowStart: '2026-06-16T00:00:00.000Z', windowEnd: '2026-07-31T23:59:59.999Z' }),
+        // Turn 4 — audience (last dim → single-dim shape)
         {
           kind: 'extracted',
           value: { field: 'lifecycleStage', op: 'in', values: ['lead'] },
@@ -433,14 +413,15 @@ describe('KAN-1201 L5 — full 4-dimension confirmation chain', () => {
         );
 
         if (t < 3) {
-          expect(result.kind).toBe('dimension_confirmed');
-          if (result.kind === 'dimension_confirmed') {
-            expect(result.dimensionKey).toBe(dimensions[t]);
+          // multi-dim path advances dimensions[t] (confirmed) this turn
+          expect(result.kind).toBe('dimensions_extracted');
+          if (result.kind === 'dimensions_extracted') {
+            expect(result.advanced).toContainEqual({ dimensionKey: dimensions[t], kind: 'confirmed' });
             state = result.state;
             campaignId = result.campaignId;
           }
         } else {
-          // Turn 4 closes the 4-set → L5 early-return fires
+          // Turn 4 — only audience left → single-dim path closes the 4-set (L5)
           expect(result.kind).toBe('all_dimensions_confirmed');
           if (result.kind === 'all_dimensions_confirmed') {
             state = result.state;
