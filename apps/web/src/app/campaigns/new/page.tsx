@@ -153,9 +153,17 @@ export default function CampaignBuilderPage() {
            *   chat once entityType is confirmed so the operator can narrow
            *   the LLM's descriptive proposal to concrete IDs. */}
           {confirmedEntityType && campaignId && committedTargetIds === null && (
+            // KAN-1230 B2.3 — vehicle mode auto-prefills from the LLM descriptor
+            // (condition/make/maxCount → filters + cardinality); product mode
+            // keeps the raw filter spec.
             <TargetEntityPanel
               entityType={confirmedEntityType}
-              initialFilterSpec={targetProposalFilter}
+              vehicleDescriptor={
+                confirmedEntityType === "vehicle" ? targetProposalFilter : undefined
+              }
+              initialFilterSpec={
+                confirmedEntityType === "product" ? targetProposalFilter : undefined
+              }
               onConfirm={(ids) =>
                 commitTargetMutation.mutate({
                   entityType: confirmedEntityType,
