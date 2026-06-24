@@ -1028,3 +1028,39 @@ describe('KAN-1230 B2 — "sell 10 used cars by end of month" extracts 4 dims in
     expect((llm as ReturnType<typeof vi.fn>).mock.calls[0][0].systemPrompt).not.toContain('### audience');
   });
 });
+
+// ─────────────────────────────────────────────
+// KAN-1233 — multi-dim product value-shape contract when entityType is
+// undetermined. Operator can state entityType + product in one message
+// ("sell 10 used cars"); the product contract must offer BOTH the vehicle
+// descriptor OBJECT and the product STRING so the LLM binds to the right shape.
+// ─────────────────────────────────────────────
+
+describe('KAN-1233 — multi-dim product contract presents both shapes pre-entityType', () => {
+  const TODAY = new Date('2026-06-24T00:00:00.000Z');
+
+  it('entityType undetermined → product shape offers vehicle OBJECT + product STRING', () => {
+    const dims = undeterminedDimensions(emptyConversationState());
+    const prompt = buildMultiDimExtractionPrompt(dims, emptyConversationState(), TODAY);
+    // Pull the ### product section
+    const productSection = prompt.split('### product')[1]?.split('### ')[0] ?? '';
+    expect(productSection).toMatch(/entityType = "vehicle"/);
+    expect(productSection).toMatch(/JSON OBJECT/);
+    expect(productSection).toMatch(/entityType = "product"/);
+    expect(productSection).toMatch(/STRING/);
+    // the explicit "10 used cars" → object cue
+    expect(productSection).toMatch(/condition.*used.*maxCount/);
+  });
+
+  it('confirmed PRODUCT campaign → product shape is the STRING contract only', () => {
+    const s: ConversationState = {
+      ...emptyConversationState(),
+      entityType: { kind: 'confirmed', value: 'product' },
+    };
+    const prompt = buildMultiDimExtractionPrompt(undeterminedDimensions(s), s, TODAY);
+    const productSection = prompt.split('### product')[1]?.split('### ')[0] ?? '';
+    // Not the dual-shape KAN-1233 block (no "entityType = \"vehicle\"" cue)
+    expect(productSection).not.toMatch(/entityType = "vehicle"/);
+    expect(productSection).toMatch(/STRING/);
+  });
+});

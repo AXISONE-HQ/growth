@@ -238,10 +238,29 @@ export function buildMultiDimExtractionPrompt(
   const stateJson = JSON.stringify(state, null, 2);
   const vocabulary = dims.includes('audience') ? `\n\n${AUDIENCE_VOCABULARY}` : '';
 
+  // KAN-1233 — in a multi-dim turn the operator can state BOTH entityType and
+  // product in one message ("sell 10 used cars"). At prompt-build time
+  // entityType isn't confirmed yet (isVehicleCampaign === false), so the
+  // single-dim product contract would tell the LLM to return product as a
+  // STRING — contradicting the vehicle descriptor OBJECT it must emit once it
+  // classifies entityType=vehicle THIS turn. When entityType is undetermined,
+  // present BOTH product shapes and route on the entityType the LLM picks.
+  const entityTypeUndetermined = state.entityType.kind !== 'confirmed';
+
   const perDim = dims
     .map((dim) => {
       const descriptor = describeDimension(dim, isVehicleCampaign);
-      const shape = dimensionValueExample(dim, isVehicleCampaign);
+      const shape =
+        dim === 'product' && entityTypeUndetermined
+          ? `The shape depends on the entityType you classify for THIS message:
+
+- entityType = "vehicle" → return a JSON OBJECT (vehicle target descriptor):
+${VEHICLE_DIMENSION_PROMPT_EXAMPLE}
+
+- entityType = "product" → return a STRING (the catalog product/offering name), e.g. "value": "Growth Platform Pro".
+
+Vehicle signals → use the OBJECT shape: "cars"/"SUVs"/"trucks", year/make/model, VINs, or a condition like "used"/"new"/"cpo". Catalog-product signals → use the STRING shape. If you set entityType=vehicle above, you MUST return product as the descriptor OBJECT, never a string (e.g. "10 used cars" → {"condition":"used","maxCount":10}).`
+          : dimensionValueExample(dim, isVehicleCampaign);
       return `### ${dim}\n${descriptor}\n\nValue shape:\n${shape}`;
     })
     .join('\n\n');
