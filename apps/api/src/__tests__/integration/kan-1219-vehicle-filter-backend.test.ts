@@ -184,6 +184,47 @@ describe("KAN-1219 Slice B — listVehicles filter + sort", () => {
     );
   });
 
+  it("KAN-1228 — compound query 'Tesla Model 3' tokenizes + matches across make/model", async () => {
+    let tenantId = "";
+    await withCleanup(
+      async (prisma: PrismaClient) => {
+        tenantId = (await createTenant(prisma)).id;
+        await seedFleet(prisma, tenantId);
+
+        // Pre-KAN-1228 the whole-string `contains "Tesla Model 3"` matched NO
+        // single field → 0 results. Tokenization matches make=Tesla +
+        // model="Model 3" across fields.
+        const compound = await svc.listVehicles(
+          prisma,
+          tenantId,
+          { searchText: "Tesla Model 3" },
+          { limit: 50 },
+        );
+        expect(compound.totalCount).toBe(1);
+        expect(compound.items[0]!.make).toBe("Tesla");
+
+        // Hyphen split too ("model-3").
+        const hyphen = await svc.listVehicles(
+          prisma,
+          tenantId,
+          { searchText: "tesla model-3" },
+          { limit: 50 },
+        );
+        expect(hyphen.totalCount).toBe(1);
+
+        // Backward compat — single make token still returns the make.
+        const byMake = await svc.listVehicles(
+          prisma,
+          tenantId,
+          { searchText: "Tesla" },
+          { limit: 50 },
+        );
+        expect(byMake.totalCount).toBe(1);
+      },
+      (prisma: PrismaClient) => cleanupTenant(prisma, tenantId),
+    );
+  });
+
   it("makeIn narrows to specific make set", async () => {
     let tenantId = "";
     await withCleanup(

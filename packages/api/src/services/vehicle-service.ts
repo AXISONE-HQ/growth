@@ -456,6 +456,20 @@ function buildRange(
   return range;
 }
 
+/**
+ * KAN-1228 — split a search query into lowercased tokens on whitespace AND
+ * hyphens. "Honda CR-V" → ["honda","cr","v"]; "  HONDA  cr-v " → same. Blank /
+ * punctuation-only → []. Used by listVehicles so compound + hyphenated model
+ * names match across the make/model/vin/stockNumber fields.
+ */
+export function tokenizeSearch(q: string): string[] {
+  return q
+    .toLowerCase()
+    .split(/[\s-]+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0);
+}
+
 export async function listVehicles(
   prisma: VehiclePrisma,
   tenantId: string,
@@ -475,14 +489,21 @@ export async function listVehicles(
     where.status = filters.status;
   }
   if (filters.searchText) {
-    const q = filters.searchText.trim();
-    if (q.length > 0) {
-      where.OR = [
-        { make: { contains: q, mode: "insensitive" } },
-        { model: { contains: q, mode: "insensitive" } },
-        { vin: { contains: q, mode: "insensitive" } },
-        { stockNumber: { contains: q, mode: "insensitive" } },
-      ];
+    // KAN-1228 — tokenize the query so compound terms match across fields:
+    // "Honda CR-V" → tokens ["honda","cr","v"], each of which must match some
+    // searchable field (make=Honda, model=CR-V). Pre-KAN-1228 a single
+    // whole-string `contains` matched nothing because no one field held the
+    // full "Honda CR-V" string. Tokens AND together; fields within a token OR.
+    const tokens = tokenizeSearch(filters.searchText);
+    if (tokens.length > 0) {
+      where.AND = tokens.map((token) => ({
+        OR: [
+          { make: { contains: token, mode: "insensitive" } },
+          { model: { contains: token, mode: "insensitive" } },
+          { vin: { contains: token, mode: "insensitive" } },
+          { stockNumber: { contains: token, mode: "insensitive" } },
+        ],
+      }));
     }
   }
   if (filters.makeIn && filters.makeIn.length > 0) {
