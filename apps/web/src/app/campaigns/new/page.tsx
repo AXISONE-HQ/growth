@@ -107,9 +107,9 @@ export default function CampaignBuilderPage() {
       <div className="mb-6 flex flex-col gap-1">
         <h1 className="text-h2 font-semibold">New Campaign</h1>
         <p className="text-sm text-muted-foreground">
-          Describe what you want to build. The AI will walk you through Product,
-          Objectives, Timeline, and Audience — then propose an Action Plan you
-          can edit.
+          Describe what you want to build. The AI will walk you through Target
+          type, Product, Objectives, and Timeline (plus Audience for product
+          campaigns) — then propose an Action Plan you can edit.
         </p>
       </div>
 
