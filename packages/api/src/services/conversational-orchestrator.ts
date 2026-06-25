@@ -302,15 +302,37 @@ For EACH dimension above, include a key with this exact shape:
 - 0.6 .. 0.85 — plausible but the operator should confirm
 - < 0.6 — too vague to act on; set extracted=false
 
-# KAN-1230 — compound-message examples (raise confidence on these patterns)
+# KAN-1235 — number semantics: GOAL vs TARGET (critical for vehicle campaigns)
 
-- "sell 10 used cars by end of month" → entityType=vehicle (0.95); product={condition:"used", maxCount:10} (0.9); objectives={goalType:"sales", goalTarget:10, goalDescription:"Sell 10 used cars"} (0.9); timeline={windowEnd:"end of month"} (0.9). A single count like "10" maps to BOTH objectives.goalTarget AND the vehicle maxCount.
-- "Sell 5 Honda CR-Vs" → entityType=vehicle (0.95); product={make:"Honda", model:"CR-V", maxCount:5} (0.9); objectives={goalType:"sales", goalTarget:5, goalDescription:"Sell 5 Honda CR-Vs"} (0.9). The number is BOTH the sales goal and the inventory cap — emit it in both.
-- "Promote my used SUVs" → entityType=vehicle (0.9); product={condition:"used", bodyStyle:"suv"} (0.85); no count → objectives.extracted=false.
-- "Sell 50 units of Growth Platform" → entityType=product (0.9, NOT vehicle — "units of <product>"); objectives={goalType:"units", goalTarget:50} (0.9).
-- "10 leads by end of month" → objectives={goalType:"leads", goalTarget:10} (0.9); timeline={windowEnd:"end of month"} (0.9). (goalType "leads"/"sales" are accepted; legacy "units"/"deals"/"revenue"/"meetings"/"custom" also valid.)
+A number is the GOAL (objectives.goalTarget) by DEFAULT — it is NOT a cap on how
+many vehicles to target. The vehicle target defaults to ALL matching inventory.
+ONLY set product.maxCount when the operator is explicitly PICKING a specific
+number of vehicles to feature. NEVER emit the same number as both goalTarget AND
+maxCount.
 
-Relative dates: you may emit timeline as a phrase ("end of month", "in 30 days", "end of Q3") — the server resolves it against today's date above.
+- GOAL-context verbs (sell / generate / close / move / achieve) → the number is
+  goalTarget ONLY; do NOT set product.maxCount (target = all matching inventory):
+  - "sell 50 cars next month" → entityType=vehicle (0.95); product={} (NO maxCount); objectives={goalType:"sales", goalTarget:50, goalDescription:"Sell 50 cars"} (0.9); timeline={windowEnd:"next month"} (0.9).
+  - "sell 10 used cars by end of month" → product={condition:"used"} (NO maxCount); objectives={goalType:"sales", goalTarget:10, goalDescription:"Sell 10 used cars"}; timeline={windowEnd:"end of month"}.
+  - "Sell 5 Honda CR-Vs" → product={make:"Honda", model:"CR-V"} (NO maxCount); objectives={goalType:"sales", goalTarget:5, goalDescription:"Sell 5 Honda CR-Vs"}.
+  - "close 10 deals this quarter" → objectives={goalType:"deals", goalTarget:10}; no maxCount.
+
+- TARGET-context verbs (promote / pick / feature / highlight / "specifically
+  these" / "top N") → the number is product.maxCount (explicit inventory pick);
+  do NOT turn it into goalTarget:
+  - "promote my 5 BMWs" → product={make:"BMW", maxCount:5}; objectives.extracted=false.
+  - "pick 10 used cars to feature" → product={condition:"used", maxCount:10}.
+  - "specifically these 3 vehicles" → product={maxCount:3}.
+  - "sell my top 10 used cars" → product={condition:"used", maxCount:10} ("top N" = pick N, even with the "sell" verb).
+
+- NO number → no maxCount and no goalTarget for that dimension:
+  - "sell my used Honda inventory" → product={condition:"used", make:"Honda"}; no maxCount.
+  - "promote my SUVs" → product={bodyStyle:"suv"}; no maxCount.
+
+- Catalog products are unaffected: "Sell 50 units of Growth Platform" → entityType=product; objectives={goalType:"units", goalTarget:50}.
+- "10 leads by end of month" → objectives={goalType:"leads", goalTarget:10}; timeline={windowEnd:"end of month"}. (goalType "leads"/"sales" accepted; legacy "units"/"deals"/"revenue"/"meetings"/"custom" also valid.)
+
+Relative dates: you may emit timeline as a phrase ("end of month", "next month", "in 30 days", "end of Q3") — the server resolves it against today's date above.
 
 Be honest. A dimension the operator didn't address → extracted: false.`;
 }
@@ -401,6 +423,21 @@ async function runMultiDimExtraction(
   const advanced: { dimensionKey: DimensionKey; kind: 'confirmed' | 'proposed' }[] = [];
   let audienceAnnotation = '';
 
+  // KAN-1235 — goal-vs-target guard. A number defaults to the GOAL
+  // (objectives.goalTarget), NOT a cap on the vehicle target. B1 teaches the
+  // LLM this; this is defense-in-depth: if the model still echoes the goal
+  // number into the vehicle maxCount AND the operator used no explicit
+  // target-cardinality phrasing, strip the conflated maxCount.
+  const hasTargetCardinalitySignal = /\b(promote|pick|feature|highlight|specifically these|top \d+)\b/i.test(
+    params.message,
+  );
+  const objectivesGoalTarget =
+    parsed.objectives?.extracted &&
+    parsed.objectives.value &&
+    typeof parsed.objectives.value === 'object'
+      ? (parsed.objectives.value as { goalTarget?: unknown }).goalTarget
+      : undefined;
+
   for (const dim of orderedDims) {
     const ext = parsed[dim];
     if (!ext || !ext.extracted) continue;
@@ -417,6 +454,24 @@ async function runMultiDimExtraction(
       workingState,
     );
     if (norm.kind === 'clarification') continue; // unmappable shape → skip
+
+    // KAN-1235 B2 — strip a vehicle maxCount that merely echoes the goalTarget.
+    if (
+      dim === 'product' &&
+      !hasTargetCardinalitySignal &&
+      norm.value &&
+      typeof norm.value === 'object'
+    ) {
+      const v = norm.value as Record<string, unknown>;
+      if (
+        typeof v.maxCount === 'number' &&
+        typeof objectivesGoalTarget === 'number' &&
+        v.maxCount === objectivesGoalTarget
+      ) {
+        const { maxCount: _conflated, ...rest } = v;
+        (norm as { value: unknown }).value = rest;
+      }
+    }
 
     const targetKind: 'confirmed' | 'proposed' =
       ext.confidence >= 0.85 ? 'confirmed' : 'proposed';
@@ -482,7 +537,32 @@ async function runMultiDimExtraction(
 
   if (advanced.length === 0) return null; // nothing usable → single-dim fallback
 
-  const aiMessage = `${buildMultiDimAck(advanced)}${audienceAnnotation}`;
+  // KAN-1235 B3 — non-blocking refinement invitation. When a vehicle target was
+  // advanced this turn with a BROAD descriptor (no make/model, no maxCount → it
+  // will target all matching inventory), invite the operator to narrow by
+  // make/model. Doctrine #1 / Memo 19/42 — offered, never required (the operator
+  // can just confirm via the panel). Skipped when the descriptor is already
+  // make/model-specific (would be noise).
+  let refinement = '';
+  const productAdvanced = advanced.some((a) => a.dimensionKey === 'product');
+  const isVehicleTarget =
+    workingState.entityType.kind === 'confirmed' &&
+    workingState.entityType.value === 'vehicle';
+  if (productAdvanced && isVehicleTarget && workingState.product.kind !== 'empty') {
+    const d = workingState.product.value as Record<string, unknown> | null;
+    const broad =
+      d != null &&
+      typeof d === 'object' &&
+      !d.make &&
+      !d.model &&
+      d.maxCount == null;
+    if (broad) {
+      refinement =
+        " I'll target all matching vehicles — any specific makes or models you want to focus on? (Or just confirm via the panel to proceed with all.)";
+    }
+  }
+
+  const aiMessage = `${buildMultiDimAck(advanced)}${audienceAnnotation}${refinement}`;
   await prisma.campaignConversationTurn.create({
     data: {
       tenantId: params.tenantId,

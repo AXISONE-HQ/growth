@@ -88,6 +88,10 @@ export function TargetEntityPanel({
     [isVehicle, vehicleDescriptor],
   );
   const maxCount = derived.maxCount;
+  // KAN-1235 — a descriptor signals an LLM-proposed target → the panel
+  // auto-selects (all matching when no maxCount, first maxCount otherwise).
+  // Without a descriptor the panel is a manual browser (no auto-select).
+  const hasDescriptor = isVehicle && vehicleDescriptor != null;
 
   const [activeChips, setActiveChips] = useState<DescriptorFilterChip[]>(
     derived.chips,
@@ -152,22 +156,26 @@ export function TargetEntityPanel({
     onSelectionChange?.(Array.from(next));
   }
 
-  // KAN-1230 B2.3 — cardinality auto-select. Once per distinct query result,
-  // pre-select up to maxCount matching vehicles so the operator just clicks
-  // Confirm (matching ≤ maxCount → all; matching > maxCount → first maxCount).
-  // Manual edits persist (the key guard skips re-firing for the same result);
-  // a filter change produces a new key → re-applies.
+  // KAN-1230 B2.3 / KAN-1235 — auto-select from an LLM-proposed descriptor.
+  // Once per distinct query result: no maxCount (goal-context / "target all") →
+  // pre-select ALL matching for max reach; maxCount set (explicit pick) → first
+  // maxCount. Manual edits persist (the key guard skips re-firing); a filter
+  // change produces a new key → re-applies. No-descriptor panels don't auto-
+  // select (manual browse).
   const autoSelectedKeyRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!isVehicle || maxCount === undefined) return;
+    if (!hasDescriptor) return;
     if (isLoading || isError || !active.data) return;
     const key = JSON.stringify(queryInput);
     if (autoSelectedKeyRef.current === key) return;
     autoSelectedKeyRef.current = key;
-    const ids = entities.slice(0, maxCount).map((e) => e.id);
+    const ids =
+      maxCount === undefined
+        ? entities.map((e) => e.id)
+        : entities.slice(0, maxCount).map((e) => e.id);
     notifySelection(new Set(ids));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isVehicle, maxCount, active.data, isLoading, isError, queryInput]);
+  }, [hasDescriptor, maxCount, active.data, isLoading, isError, queryInput]);
 
   function toggleOne(id: string, nextSelected: boolean): void {
     const next = new Set(selectedIds);
@@ -195,14 +203,19 @@ export function TargetEntityPanel({
   const allShownSelected =
     entities.length > 0 && entities.every((e) => selectedIds.has(e.id));
 
-  // KAN-1230 B2.3 — cardinality message (Memo 19/42 — honest, never auto-fixed).
+  // KAN-1230 B2.3 / KAN-1235 — cardinality message (Memo 19/42 — honest).
   const cardinality = useMemo<
     { tone: "amber" | "info" | "ok"; text: string } | null
   >(() => {
-    if (!isVehicle || maxCount === undefined || isLoading || isError || !active.data) {
-      return null;
-    }
+    if (!hasDescriptor || isLoading || isError || !active.data) return null;
     if (totalCount === 0) return null;
+    // KAN-1235 — no maxCount → targeting ALL matching inventory (max reach).
+    if (maxCount === undefined) {
+      return {
+        tone: "info",
+        text: `${totalCount} selected (all matching) — refine the filter to narrow.`,
+      };
+    }
     if (totalCount < maxCount) {
       return {
         tone: "amber",
@@ -216,7 +229,7 @@ export function TargetEntityPanel({
       };
     }
     return { tone: "ok", text: `${maxCount} of ${totalCount} matching selected.` };
-  }, [isVehicle, maxCount, isLoading, isError, active.data, totalCount]);
+  }, [hasDescriptor, maxCount, isLoading, isError, active.data, totalCount]);
 
   return (
     <Card className={className} aria-label="Campaign target selection panel">
