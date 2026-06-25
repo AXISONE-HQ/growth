@@ -41,6 +41,7 @@ import {
 import type { ActionPlan, CommittedPlanSnapshot } from "@growth/shared";
 import { ActionPlanSnapshotCard } from "./ActionPlanSnapshotCard";
 import { CommittedPipelineCard } from "./CommittedPipelineCard";
+import { TargetSection } from "./TargetSection";
 
 export interface CommittedCampaignViewProps {
   campaign: CampaignDetail;
@@ -220,6 +221,13 @@ export function CommittedCampaignView({
       {statusError && (
         <p className="text-xs text-destructive">{statusError}</p>
       )}
+
+      {/* KAN-1229 — committed vehicle target (descriptor + actual VINs). */}
+      <TargetSection
+        targetEntityType={campaign.targetEntityType}
+        targetEntityIds={campaign.targetEntityIds}
+        proposedPlan={campaign.proposedPlan}
+      />
 
       {committedPlan ? (
         <ActionPlanSnapshotCard
