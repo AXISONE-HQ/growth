@@ -369,3 +369,73 @@ describe("KAN-1230 B2.3 — TargetEntityPanel auto-prefill + cardinality", () =>
     expect(screen.queryByText(/Condition: Used/i)).toBeNull();
   });
 });
+
+// ─────────────────────────────────────────────
+// KAN-1235 — goal-vs-target: descriptor with NO maxCount targets ALL matching.
+// "sell 50 cars next month" → goalTarget=50, descriptor has no maxCount → the
+// panel pre-selects ALL matching inventory (max reach), not first-50.
+// ─────────────────────────────────────────────
+
+describe("KAN-1235 — panel selects ALL matching when descriptor has no maxCount", () => {
+  it("no maxCount → all matching pre-selected + (all matching) affordance", async () => {
+    vehiclesSearchMock.mockResolvedValue({
+      entities: [
+        fixtureVehicle({ id: "v-1", condition: "used" }),
+        fixtureVehicle({ id: "v-2", condition: "used" }),
+        fixtureVehicle({ id: "v-3", condition: "used" }),
+      ],
+      totalCount: 3,
+      filterSpec: {},
+    });
+    const onSelection = vi.fn();
+    renderPanel({
+      entityType: "vehicle",
+      vehicleDescriptor: { condition: "used" }, // NO maxCount (goal-context)
+      onSelectionChange: onSelection,
+    });
+    await waitFor(() => {
+      // ALL 3 matching pre-selected (not a first-N slice)
+      expect(onSelection).toHaveBeenLastCalledWith(["v-1", "v-2", "v-3"]);
+    });
+    expect(screen.getByText(/3 selected \(all matching\)/i)).toBeInTheDocument();
+  });
+
+  it("maxCount still pre-selects first N (regression — explicit pick preserved)", async () => {
+    vehiclesSearchMock.mockResolvedValue({
+      entities: [
+        fixtureVehicle({ id: "v-1" }),
+        fixtureVehicle({ id: "v-2" }),
+        fixtureVehicle({ id: "v-3" }),
+      ],
+      totalCount: 3,
+      filterSpec: {},
+    });
+    const onSelection = vi.fn();
+    renderPanel({
+      entityType: "vehicle",
+      vehicleDescriptor: { make: "BMW", maxCount: 2 }, // target-context pick
+      onSelectionChange: onSelection,
+    });
+    await waitFor(() => {
+      expect(onSelection).toHaveBeenLastCalledWith(["v-1", "v-2"]);
+    });
+    expect(screen.getByText(/2 requested; 3 match/i)).toBeInTheDocument();
+  });
+
+  it("vehicle mode with NO descriptor → no auto-select (manual browse)", async () => {
+    vehiclesSearchMock.mockResolvedValue({
+      entities: [
+        fixtureVehicle({ id: "v-1" }),
+        fixtureVehicle({ id: "v-2", make: "Honda", model: "Accord" }),
+      ],
+      totalCount: 2,
+      filterSpec: {},
+    });
+    renderPanel({ entityType: "vehicle" });
+    await waitFor(() => expect(screen.getByText(/Honda Accord/i)).toBeInTheDocument());
+    // nothing auto-selected (no descriptor → manual browse)
+    expect(screen.getByText(/Selected: 0 \/ matching: 2/i)).toBeInTheDocument();
+    // and no "(all matching)" cardinality affordance (that's descriptor-driven)
+    expect(screen.queryByText(/\(all matching\)/i)).toBeNull();
+  });
+});

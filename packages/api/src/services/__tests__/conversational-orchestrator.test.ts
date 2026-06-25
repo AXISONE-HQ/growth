@@ -806,9 +806,15 @@ describe('KAN-1230 B1 — multi-dimension extraction', () => {
       (c) => (c[0] as { data?: { proposedPlan?: { vehicleTargetDescriptor?: unknown } } }).data?.proposedPlan?.vehicleTargetDescriptor,
     );
     expect(planUpdate).toBeDefined();
-    expect(
-      (planUpdate?.[0] as { data: { proposedPlan: { vehicleTargetDescriptor: Record<string, unknown> } } }).data.proposedPlan.vehicleTargetDescriptor,
-    ).toMatchObject({ make: 'Honda', model: 'CR-V', maxCount: 5 });
+    // KAN-1235 — "Sell 5 …" is goal-context; the echoed maxCount is stripped
+    // (== goalTarget, no target-context signal) → target ALL matching CR-Vs.
+    const persistedDescriptor = (
+      planUpdate?.[0] as {
+        data: { proposedPlan: { vehicleTargetDescriptor: Record<string, unknown> } };
+      }
+    ).data.proposedPlan.vehicleTargetDescriptor;
+    expect(persistedDescriptor).toMatchObject({ make: 'Honda', model: 'CR-V' });
+    expect(persistedDescriptor.maxCount).toBeUndefined();
     // and NOT persisted as a product (goalProductId)
     const productUpdate = spies.campaignUpdate.mock.calls.find(
       (c) => (c[0] as { data?: { goalProductId?: unknown } }).data?.goalProductId,
@@ -991,7 +997,9 @@ describe('KAN-1230 B2 — "sell 10 used cars by end of month" extracts 4 dims in
     const llm = makeLlm(
       JSON.stringify({
         entityType: { extracted: true, value: 'vehicle', confidence: 0.95 },
-        // B2.1 — filter-based vehicleTargetDescriptor (condition + maxCount, no specific VIN)
+        // KAN-1235 — simulate the LLM still echoing the goal number into
+        // maxCount; B2 must strip it (goal-vs-target). Post-B1 the LLM should
+        // not emit maxCount here at all.
         product: { extracted: true, value: { condition: 'used', maxCount: 10 }, confidence: 0.9 },
         objectives: {
           extracted: true,
@@ -1015,11 +1023,16 @@ describe('KAN-1230 B2 — "sell 10 used cars by end of month" extracts 4 dims in
     if (!('state' in result)) return;
     expect(result.state.entityType).toEqual({ kind: 'confirmed', value: 'vehicle' });
     expect(result.state.product.kind).toBe('confirmed');
-    // B2.1 — filter descriptor (condition/maxCount), NOT a specific year/make/model
+    // KAN-1235 — "sell 10" is the GOAL, not a vehicle cap. B2 strips the
+    // echoed maxCount (== goalTarget, no target-context signal) → the descriptor
+    // targets ALL matching used cars, not first 10.
     expect(result.state.product).toMatchObject({
       kind: 'confirmed',
-      value: { condition: 'used', maxCount: 10 },
+      value: { condition: 'used' },
     });
+    expect(
+      (result.state.product.value as Record<string, unknown>).maxCount,
+    ).toBeUndefined();
     expect(result.state.objectives.kind).toBe('confirmed');
     expect(result.state.timeline.kind).toBe('confirmed');
     // audience never entered the ask (vehicle mode) — stays empty/skipped
@@ -1062,5 +1075,87 @@ describe('KAN-1233 — multi-dim product contract presents both shapes pre-entit
     // Not the dual-shape KAN-1233 block (no "entityType = \"vehicle\"" cue)
     expect(productSection).not.toMatch(/entityType = "vehicle"/);
     expect(productSection).toMatch(/STRING/);
+  });
+});
+
+// ─────────────────────────────────────────────
+// KAN-1235 — goal-vs-target maxCount semantics + refinement affordance.
+// ─────────────────────────────────────────────
+
+describe('KAN-1235 — goal vs target maxCount', () => {
+  it('B2 — target-context ("promote my 5 BMWs") PRESERVES maxCount', async () => {
+    const { prisma } = makePrismaMock();
+    const llm = makeLlm(
+      JSON.stringify({
+        entityType: { extracted: true, value: 'vehicle', confidence: 0.95 },
+        product: { extracted: true, value: { make: 'BMW', maxCount: 5 }, confidence: 0.9 },
+        // no objectives (promote ≠ a sales goal)
+      }),
+    );
+    const result = await handleChatTurn(prisma, llm, makeAudienceCount(), {
+      campaignId: 'camp-1',
+      tenantId: 'tenant-1',
+      message: 'promote my 5 BMWs',
+      state: emptyConversationState(),
+    });
+    if (!('state' in result)) throw new Error('expected state');
+    expect(result.state.product).toMatchObject({
+      kind: 'confirmed',
+      value: { make: 'BMW', maxCount: 5 },
+    });
+  });
+
+  it('B3 — broad descriptor ("sell 50 used cars") → refinement invitation', async () => {
+    const { prisma } = makePrismaMock();
+    const llm = makeLlm(
+      JSON.stringify({
+        entityType: { extracted: true, value: 'vehicle', confidence: 0.95 },
+        // LLM still echoes maxCount; B2 strips it → broad descriptor
+        product: { extracted: true, value: { condition: 'used', maxCount: 50 }, confidence: 0.9 },
+        objectives: {
+          extracted: true,
+          value: { goalType: 'units', goalTarget: 50, goalDescription: 'Sell 50 used cars' },
+          confidence: 0.9,
+        },
+      }),
+    );
+    const result = await handleChatTurn(prisma, llm, makeAudienceCount(), {
+      campaignId: 'camp-1',
+      tenantId: 'tenant-1',
+      message: 'sell 50 used cars',
+      state: emptyConversationState(),
+    });
+    if (!('state' in result)) throw new Error('expected state');
+    // maxCount stripped (goal-context)
+    expect((result.state.product.value as Record<string, unknown>).maxCount).toBeUndefined();
+    // refinement invitation appended (broad descriptor — no make/model)
+    expect(result.aiMessage).toMatch(/specific makes or models/i);
+  });
+
+  it('B3 — specific descriptor ("sell 10 used Hondas") → NO refinement (would be noise)', async () => {
+    const { prisma } = makePrismaMock();
+    const llm = makeLlm(
+      JSON.stringify({
+        entityType: { extracted: true, value: 'vehicle', confidence: 0.95 },
+        product: { extracted: true, value: { condition: 'used', make: 'Honda', maxCount: 10 }, confidence: 0.9 },
+        objectives: {
+          extracted: true,
+          value: { goalType: 'units', goalTarget: 10, goalDescription: 'Sell 10 used Hondas' },
+          confidence: 0.9,
+        },
+      }),
+    );
+    const result = await handleChatTurn(prisma, llm, makeAudienceCount(), {
+      campaignId: 'camp-1',
+      tenantId: 'tenant-1',
+      message: 'sell 10 used Hondas',
+      state: emptyConversationState(),
+    });
+    if (!('state' in result)) throw new Error('expected state');
+    // make present → descriptor specific → no refinement noise
+    expect(result.aiMessage).not.toMatch(/specific makes or models/i);
+    // maxCount still stripped (goal-context, make≠target signal)
+    expect((result.state.product.value as Record<string, unknown>).maxCount).toBeUndefined();
+    expect((result.state.product.value as Record<string, unknown>).make).toBe('Honda');
   });
 });
