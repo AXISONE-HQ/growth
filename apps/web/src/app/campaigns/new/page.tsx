@@ -31,6 +31,7 @@ import { Button } from "@/components/ui/button";
 import { LoadingState } from "../_components/LoadingState";
 import { BuilderChatThread } from "./_components/BuilderChatThread";
 import { DimensionSidebar } from "./_components/DimensionSidebar";
+import { CampaignScoreboard } from "./_components/CampaignScoreboard";
 import { ActionPlanCard } from "./_components/ActionPlanCard";
 import { TargetEntityPanel } from "../_components/TargetEntityPanel";
 import { campaignsApi } from "@/lib/api";
@@ -185,13 +186,18 @@ export default function CampaignBuilderPage() {
             </p>
           )}
         </div>
-        <DimensionSidebar
-          className="md:basis-1/4 md:sticky md:top-6 md:self-start"
-          state={state}
-          allDimensionsConfirmed={allDimensionsConfirmed}
-          onGeneratePlan={generatePlan}
-          isGenerating={isGenerating}
-        />
+        {/* KAN-1234 — sidebar column: dimension chips + Decision Scoreboard */}
+        <div className="md:basis-1/4 md:sticky md:top-6 md:self-start flex flex-col gap-4">
+          <DimensionSidebar
+            state={state}
+            allDimensionsConfirmed={allDimensionsConfirmed}
+            onGeneratePlan={generatePlan}
+            isGenerating={isGenerating}
+          />
+          {campaignId && (
+            <CampaignScoreboard campaignId={campaignId} state={state} />
+          )}
+        </div>
       </div>
 
       {/* G10 — ActionPlanCard fills the KAN-1187 F8 placeholder slot once

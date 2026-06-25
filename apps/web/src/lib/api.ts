@@ -2589,6 +2589,20 @@ export interface CampaignListItem {
   updatedAt: string;
 }
 
+// KAN-1234 Phase A — Decision Scoreboard projection result. All fields nullable
+// to support progressive disclosure (reachable-only → +rate/projected/goal →
+// +gap/verdict). `closingRateSource: 'industry'` drives the honest baseline label.
+export interface CampaignProjection {
+  reachableContacts: number | null;
+  closingRate: number | null;
+  closingRateSource: 'tenant' | 'industry' | null;
+  projected: number | null;
+  goal: number | null;
+  gap: number | null;
+  verdict: 'on_track' | 'stretch' | 'unrealistic' | null;
+  daysInWindow: number | null;
+}
+
 export const campaignsApi = {
   /**
    * KAN-1183 — Filterable Campaign list for the operator-facing /campaigns
@@ -2604,6 +2618,14 @@ export const campaignsApi = {
     includeAlwaysOn?: boolean;
   }) =>
     trpcQuery<CursorPage<CampaignListItem>>('campaigns.list', input),
+
+  /**
+   * KAN-1234 Phase A — Decision Scoreboard projection. Read-only; fields are
+   * null for dimensions not yet confirmed (the scoreboard gates progressive
+   * disclosure off these + the dimension state).
+   */
+  computeProjection: (campaignId: string) =>
+    trpcQuery<CampaignProjection>('campaigns.computeProjection', { campaignId }),
 
   /**
    * KAN-1166 PR 3 — Campaign read for the chat UI. Tenant-scoped on the
