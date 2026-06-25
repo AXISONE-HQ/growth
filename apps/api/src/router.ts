@@ -7200,6 +7200,38 @@ interface CampaignsRouterModule {
   ) => Promise<unknown>;
 }
 
+// KAN-1234 Phase A — Decision Scoreboard projection (pure). Loaded via
+// variable-specifier dynamic import (cross-rootDir, same pattern as above).
+interface ProjectionModule {
+  computeProjection: (inp: {
+    reachableContacts: number | null;
+    goalTarget: number | null;
+    windowStart: Date | null;
+    windowEnd: Date | null;
+    industry: string | null;
+    measuredOutcomes: { total: number; hits: number };
+  }) => {
+    reachableContacts: number | null;
+    closingRate: number | null;
+    closingRateSource: "tenant" | "industry" | null;
+    projected: number | null;
+    goal: number | null;
+    gap: number | null;
+    verdict: "on_track" | "stretch" | "unrealistic" | null;
+    daysInWindow: number | null;
+  };
+  descriptorToVehicleFilters: (descriptor: unknown) => {
+    conditionIn?: string[];
+    makeIn?: string[];
+    bodyStyleIn?: string[];
+    yearMin?: number;
+    yearMax?: number;
+    priceMin?: number;
+    priceMax?: number;
+    searchText?: string;
+  };
+}
+
 // KAN-1001 Campaign Layer Slice 3a — commit & materialize (INERT).
 // Lives in packages/api/src/services/campaign-commit.ts; loaded via
 // variable-specifier dynamic import (same pattern as the rest of the
@@ -7313,6 +7345,15 @@ async function loadCampaignsModule(): Promise<CampaignsRouterModule> {
   const spec = "../../../packages/api/src/services/audience-router.js";
   _campaignsModule = (await import(spec)) as CampaignsRouterModule;
   return _campaignsModule;
+}
+
+// KAN-1234 Phase A — projection-service loader.
+let _projectionModule: ProjectionModule | null = null;
+async function loadProjectionModule(): Promise<ProjectionModule> {
+  if (_projectionModule) return _projectionModule;
+  const spec = "../../../packages/api/src/services/projection-service.js";
+  _projectionModule = (await import(spec)) as ProjectionModule;
+  return _projectionModule;
 }
 
 // KAN-1183 — campaigns-list loader. Same KAN-689 cohort variable-specifier
@@ -8065,6 +8106,116 @@ const campaignsRouter = router({
         entityType: updated.targetEntityType,
         entityIds: updated.targetEntityIds,
       };
+    }),
+
+  // KAN-1234 Phase A — Decision Scoreboard projection. Read-only; surfaces a
+  // realistic outcome estimate (reachable × closingRate × time) BEFORE the
+  // operator clicks Generate Action Plan (Doctrine #5). Returns null fields for
+  // dimensions not yet confirmed (frontend gates progressive disclosure).
+  computeProjection: protectedProcedure
+    .input(z.object({ campaignId: z.string().uuid() }))
+    .query(async ({ ctx, input }) => {
+      const proj = await loadProjectionModule();
+      const [campaign, tenant] = await Promise.all([
+        ctx.prisma.campaign.findFirst({
+          where: { id: input.campaignId, tenantId: ctx.tenantId },
+          select: {
+            goalTarget: true,
+            windowStart: true,
+            windowEnd: true,
+            targetEntityType: true,
+            proposedPlan: true,
+            audienceConditions: true,
+          },
+        }),
+        ctx.prisma.tenant.findUnique({
+          where: { id: ctx.tenantId },
+          select: { industry: true },
+        }),
+      ]);
+      const industry = tenant?.industry ?? null;
+      if (!campaign) {
+        return proj.computeProjection({
+          reachableContacts: null,
+          goalTarget: null,
+          windowStart: null,
+          windowEnd: null,
+          industry,
+          measuredOutcomes: { total: 0, hits: 0 },
+        });
+      }
+
+      // Tenant measured outcomes (Phase A: none written yet → industry source).
+      // JS-side filter avoids Prisma JSON-null filter ceremony; DB-side count is
+      // a Phase C optimization (campaign volume per tenant is small).
+      const outcomeRows = await ctx.prisma.campaign.findMany({
+        where: { tenantId: ctx.tenantId },
+        select: { actualOutcome: true },
+      });
+      const measured = outcomeRows.filter((c) => c.actualOutcome != null);
+      const measuredOutcomes = {
+        total: measured.length,
+        hits: measured.filter(
+          (c) => (c.actualOutcome as { goalHit?: boolean } | null)?.goalHit === true,
+        ).length,
+      };
+
+      // Reachable: vehicle → target inventory count (R2); product → audience.
+      let reachableContacts: number | null = null;
+      if (campaign.targetEntityType === "vehicle") {
+        const descriptor = (
+          campaign.proposedPlan as { vehicleTargetDescriptor?: unknown } | null
+        )?.vehicleTargetDescriptor;
+        const f = proj.descriptorToVehicleFilters(descriptor);
+        reachableContacts = await ctx.prisma.vehicle.count({
+          where: {
+            tenantId: ctx.tenantId,
+            status: "active",
+            archivedAt: null,
+            ...(f.conditionIn ? { condition: { in: f.conditionIn as never } } : {}),
+            ...(f.makeIn ? { make: { in: f.makeIn } } : {}),
+            ...(f.bodyStyleIn ? { bodyStyle: { in: f.bodyStyleIn as never } } : {}),
+            ...(f.yearMin != null || f.yearMax != null
+              ? {
+                  year: {
+                    ...(f.yearMin != null ? { gte: f.yearMin } : {}),
+                    ...(f.yearMax != null ? { lte: f.yearMax } : {}),
+                  },
+                }
+              : {}),
+            ...(f.priceMin != null || f.priceMax != null
+              ? {
+                  price: {
+                    ...(f.priceMin != null ? { gte: f.priceMin } : {}),
+                    ...(f.priceMax != null ? { lte: f.priceMax } : {}),
+                  },
+                }
+              : {}),
+            ...(f.searchText
+              ? { model: { contains: f.searchText, mode: "insensitive" } }
+              : {}),
+          },
+        });
+      } else if (campaign.targetEntityType === "product" && campaign.audienceConditions) {
+        try {
+          const { countAudience } = await loadCampaignsModule();
+          const r = await countAudience(ctx.prisma, ctx.tenantId, {
+            conditions: campaign.audienceConditions,
+          });
+          reachableContacts = r.count;
+        } catch {
+          reachableContacts = null; // fail-safe — scoreboard degrades, never blocks
+        }
+      }
+
+      return proj.computeProjection({
+        reachableContacts,
+        goalTarget: campaign.goalTarget,
+        windowStart: campaign.windowStart,
+        windowEnd: campaign.windowEnd,
+        industry,
+        measuredOutcomes,
+      });
     }),
 
   // KAN-1185 — Action Plan generator (Campaign Module Reset PR 4).
