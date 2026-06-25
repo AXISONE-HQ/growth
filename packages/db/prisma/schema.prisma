@@ -24,6 +24,11 @@ model Tenant {
   name                            String
   slug                            String                @unique
   planTier                        String                @default("free") @map("plan_tier")
+  // KAN-1234 Phase A — vertical for the Decision Scoreboard's industry-default
+  // closing rate (used until the tenant has ≥3 measured outcomes). Normalized
+  // keys: 'used_auto' | 'new_auto' | 'saas_b2b' | 'real_estate' | 'ecommerce'
+  // | 'unknown'. Default 'unknown' → the 5% generic baseline.
+  industry                        String                @default("unknown")
   blueprintId                     String?               @map("blueprint_id")
   aiPermissions                   Json                  @default("{}") @map("ai_permissions")
   confidenceThreshold             Int                   @default(70) @map("confidence_threshold")
@@ -662,6 +667,14 @@ model Campaign {
   committedPlan       Json? @map("committed_plan")
   // Override-with-logging (Q5 lock) — schema lands in PR 1; surface in PR 6.
   overrideHistory     Json? @map("override_history")
+
+  // ─── KAN-1234 Phase A — Decision Scoreboard substrate (DARK) ───
+  // Measured campaign outcome, written by KAN-1234 Phase B outcome tracking
+  // (NOT populated in Phase A — substrate-staged per Memo 56 #13 so Phase B
+  // needs no schema change / backfill). Phase A's computeProjection only READS
+  // it (IS NOT NULL → tenant closing-rate source; else industry default).
+  // Shape: { unitsAchieved: number, goalHit: boolean, measuredAt: ISO string }.
+  actualOutcome       Json? @map("actual_outcome")
 
   // Drift detection state — populated by daily monitoring cron in PR 7+.
   lastConfidenceCheck DateTime? @map("last_confidence_check")
