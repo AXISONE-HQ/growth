@@ -7894,6 +7894,11 @@ const campaignsRouter = router({
           goalTarget: true,
           goalProductId: true,
           goalDescription: true,
+          // KAN-1229 — polymorphic target so the destination view can show the
+          // committed vehicles/products (targetEntityIds resolved via
+          // vehicles.getByIds in the UI).
+          targetEntityType: true,
+          targetEntityIds: true,
           feasibilityAnalysis: true,
           proposedPlan: true,
           committedPlan: true,
@@ -9584,6 +9589,38 @@ const vehiclesRouter = router({
         entities: result.items,
         totalCount: result.totalCount,
         filterSpec: input,
+      };
+    }),
+
+  // KAN-1229 — resolve committed campaign-target vehicles by id for the
+  // destination view's Target section. Tenant-scoped; returns a compact display
+  // shape (the Target section only needs identity + price + lifecycle status).
+  getByIds: protectedProcedure
+    .input(z.object({ ids: z.array(z.string().uuid()).max(500) }))
+    .query(async ({ ctx, input }) => {
+      if (input.ids.length === 0) return { entities: [] };
+      const rows = await ctx.prisma.vehicle.findMany({
+        where: { id: { in: input.ids }, tenantId: ctx.tenantId },
+        select: {
+          id: true,
+          year: true,
+          make: true,
+          model: true,
+          trim: true,
+          vin: true,
+          price: true,
+          condition: true,
+          status: true,
+          removedAt: true,
+        },
+        orderBy: [{ year: "desc" }, { make: "asc" }, { model: "asc" }],
+      });
+      return {
+        entities: rows.map((v) => ({
+          ...v,
+          price: v.price != null ? Number(v.price) : null,
+          removedAt: v.removedAt ? v.removedAt.toISOString() : null,
+        })),
       };
     }),
 });

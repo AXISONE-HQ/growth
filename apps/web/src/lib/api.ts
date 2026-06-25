@@ -2551,6 +2551,9 @@ export interface CampaignDetail {
   goalTarget: number | null;
   goalProductId: string | null;
   goalDescription: string | null;
+  // KAN-1229 — polymorphic committed target (destination-view Target section).
+  targetEntityType: 'product' | 'vehicle' | null;
+  targetEntityIds: string[];
   feasibilityAnalysis: FeasibilityCounselResult | null;
   proposedPlan: unknown | null;
   committedPlan: unknown | null;
@@ -3329,7 +3332,26 @@ export const vehiclesApi = {
       'vehicles.searchForCampaignTarget',
       input,
     ),
+
+  // KAN-1229 — resolve committed campaign-target vehicles by id (destination
+  // Target section). Compact display shape.
+  getByIds: (ids: string[]) =>
+    trpcQuery<{ entities: CampaignTargetVehicle[] }>('vehicles.getByIds', { ids }),
 };
+
+// KAN-1229 — compact vehicle shape for the destination Target section.
+export interface CampaignTargetVehicle {
+  id: string;
+  year: number;
+  make: string;
+  model: string;
+  trim: string | null;
+  vin: string | null;
+  price: number | null;
+  condition: string;
+  status: string;
+  removedAt: string | null;
+}
 
 export interface VehicleActivityEvent {
   id: string;

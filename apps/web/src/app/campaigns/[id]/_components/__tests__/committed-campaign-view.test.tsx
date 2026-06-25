@@ -99,6 +99,8 @@ function baseCampaign(
     goalType: "units",
     goalTarget: 50,
     goalProductId: null,
+    targetEntityType: null,
+    targetEntityIds: [],
     goalDescription: "Sell 50 units in 90 days",
     feasibilityAnalysis: null,
     proposedPlan: null,
