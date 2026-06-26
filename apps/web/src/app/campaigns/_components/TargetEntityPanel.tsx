@@ -57,6 +57,14 @@ import {
 
 export type TargetEntityType = "product" | "vehicle";
 
+// KAN-1235c — when a descriptor drives auto-select ("all matching" or a maxCount
+// pick), fetch up to this many rows so the selection covers the full matching
+// set, not just the first visible page. Matches the router's max limit (200).
+// INTERIM: KAN-1236 will replace this page-cap with a filter-vs-enumerated
+// target-mode toggle so inventories >200 commit by filter instead of an
+// enumerated id list.
+const ALL_MATCH_LIMIT = 200;
+
 export interface TargetEntityPanelProps {
   entityType: TargetEntityType;
   initialFilterSpec?: Record<string, unknown>;
@@ -118,13 +126,17 @@ export function TargetEntityPanel({
 
   const queryInput = useMemo<Record<string, unknown>>(() => {
     if (isVehicle) {
-      return { ...chipsToFilterSpec(activeChips, searchText), limit: 50 };
+      // KAN-1235c — descriptor-driven selection needs the full matching set
+      // (up to ALL_MATCH_LIMIT), not just the first page, or "all matching"
+      // would silently commit only the first 50.
+      const limit = hasDescriptor ? ALL_MATCH_LIMIT : 50;
+      return { ...chipsToFilterSpec(activeChips, searchText), limit };
     }
     const base: Record<string, unknown> = { ...initialFilterSpec, limit: 50 };
     if (searchText) base.searchText = searchText;
     else delete base.searchText;
     return base;
-  }, [isVehicle, activeChips, searchText, initialFilterSpec]);
+  }, [isVehicle, hasDescriptor, activeChips, searchText, initialFilterSpec]);
 
   const productQuery = useQuery({
     queryKey: ["campaigns", "target-search", "product", queryInput],
@@ -211,6 +223,14 @@ export function TargetEntityPanel({
     if (totalCount === 0) return null;
     // KAN-1235 — no maxCount → targeting ALL matching inventory (max reach).
     if (maxCount === undefined) {
+      // KAN-1235c — honest cap disclosure (Memo 19/42). We can only select up
+      // to ALL_MATCH_LIMIT; beyond that, say so rather than claim "all".
+      if (totalCount > ALL_MATCH_LIMIT) {
+        return {
+          tone: "amber",
+          text: `${ALL_MATCH_LIMIT} of ${totalCount} matching selected — narrow the filter to include all.`,
+        };
+      }
       return {
         tone: "info",
         text: `${totalCount} selected (all matching) — refine the filter to narrow.`,
