@@ -1159,3 +1159,68 @@ describe('KAN-1235 — goal vs target maxCount', () => {
     expect((result.state.product.value as Record<string, unknown>).make).toBe('Honda');
   });
 });
+
+// ─────────────────────────────────────────────
+// KAN-1235b — generic vehicle target with no filter confirms an EMPTY
+// descriptor ({} = all matching) instead of leaving product Pending, so the
+// panel + scoreboard engage.
+// ─────────────────────────────────────────────
+
+describe('KAN-1235b — empty-descriptor confirm for bare "cars"', () => {
+  it('"sell 50 cars next month" (no product filter) → product confirms as {} + refinement', async () => {
+    const { prisma, spies } = makePrismaMock();
+    const llm = makeLlm(
+      JSON.stringify({
+        entityType: { extracted: true, value: 'vehicle', confidence: 0.95 },
+        product: { extracted: false }, // no filter signal in "cars"
+        objectives: {
+          extracted: true,
+          value: { goalType: 'units', goalTarget: 50, goalDescription: 'Sell 50 cars' },
+          confidence: 0.9,
+        },
+        timeline: { extracted: true, value: { windowEnd: 'next month' }, confidence: 0.9 },
+      }),
+    );
+    const result = await handleChatTurn(prisma, llm, makeAudienceCount(), {
+      campaignId: 'camp-1',
+      tenantId: 'tenant-1',
+      message: 'sell 50 cars next month',
+      state: emptyConversationState(),
+    });
+    if (!('state' in result)) throw new Error('expected state');
+    // product defaulted to ALL matching (empty descriptor), not left Pending
+    expect(result.state.product).toEqual({ kind: 'confirmed', value: {} });
+    // refinement invitation fires (broad descriptor)
+    expect(result.aiMessage).toMatch(/specific makes or models/i);
+    // persisted as an empty vehicleTargetDescriptor
+    const planUpdate = spies.campaignUpdate.mock.calls.find(
+      (c) =>
+        (c[0] as { data?: { proposedPlan?: { vehicleTargetDescriptor?: unknown } } }).data
+          ?.proposedPlan?.vehicleTargetDescriptor !== undefined,
+    );
+    expect(planUpdate).toBeDefined();
+    expect(
+      (planUpdate?.[0] as { data: { proposedPlan: { vehicleTargetDescriptor: unknown } } }).data
+        .proposedPlan.vehicleTargetDescriptor,
+    ).toEqual({});
+  });
+
+  it('does NOT override a real product proposal (filter present stays as extracted)', async () => {
+    const { prisma } = makePrismaMock();
+    const llm = makeLlm(
+      JSON.stringify({
+        entityType: { extracted: true, value: 'vehicle', confidence: 0.95 },
+        product: { extracted: true, value: { condition: 'used' }, confidence: 0.9 },
+      }),
+    );
+    const result = await handleChatTurn(prisma, llm, makeAudienceCount(), {
+      campaignId: 'camp-1',
+      tenantId: 'tenant-1',
+      message: 'promote my used cars',
+      state: emptyConversationState(),
+    });
+    if (!('state' in result)) throw new Error('expected state');
+    // the extracted filter is preserved (NOT clobbered to {})
+    expect(result.state.product).toMatchObject({ kind: 'confirmed', value: { condition: 'used' } });
+  });
+});

@@ -537,6 +537,48 @@ async function runMultiDimExtraction(
 
   if (advanced.length === 0) return null; // nothing usable → single-dim fallback
 
+  // KAN-1235b — generic vehicle target with no filter ("sell 50 cars"): the
+  // product dimension comes back empty (no make/model/condition to extract), so
+  // it would otherwise stay Pending and the panel/scoreboard never engage.
+  // Confirm an EMPTY descriptor ({} = ALL matching) so the panel auto-selects
+  // all matching and the scoreboard renders; the B3 refinement invitation below
+  // then offers to narrow. Fires only when the vehicle entityType is confirmed
+  // and product is still unset (a real proposal/clarification takes precedence).
+  const vehicleEntityConfirmed =
+    workingState.entityType.kind === 'confirmed' &&
+    workingState.entityType.value === 'vehicle';
+  if (vehicleEntityConfirmed && workingState.product.kind === 'empty') {
+    workingState = {
+      ...workingState,
+      product: { kind: 'confirmed', value: {} } as DimensionState,
+    };
+    advanced.push({ dimensionKey: 'product', kind: 'confirmed' });
+    await persistDimensionToCampaign(
+      prisma,
+      campaignId,
+      params.tenantId,
+      'product',
+      {},
+      'vehicle',
+      todayUtc,
+    );
+    await prisma.auditLog.create({
+      data: {
+        tenantId: params.tenantId,
+        actor: 'system',
+        actionType: 'campaign.dimension_advanced',
+        payload: {
+          campaignId,
+          dimension: 'product',
+          action: 'confirm',
+          via: 'chat_multidim_default_all',
+        },
+        reasoning:
+          'Vehicle entityType confirmed with no product filter → default to empty descriptor (all matching)',
+      },
+    });
+  }
+
   // KAN-1235 B3 — non-blocking refinement invitation. When a vehicle target was
   // advanced this turn with a BROAD descriptor (no make/model, no maxCount → it
   // will target all matching inventory), invite the operator to narrow by
