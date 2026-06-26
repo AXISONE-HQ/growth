@@ -439,3 +439,73 @@ describe("KAN-1235 — panel selects ALL matching when descriptor has no maxCoun
     expect(screen.queryByText(/\(all matching\)/i)).toBeNull();
   });
 });
+
+// ─────────────────────────────────────────────
+// KAN-1235c — "all matching" must select the FULL matching set (up to the
+// ALL_MATCH_LIMIT=200 cap), not just the first visible page, and disclose the
+// cap honestly when matching exceeds it (Memo 19/42).
+// ─────────────────────────────────────────────
+
+describe("KAN-1235c — all-matching selects full set + honest cap disclosure", () => {
+  it("descriptor present → query requests limit 200 (full matching set, not page 50)", async () => {
+    vehiclesSearchMock.mockResolvedValue({
+      entities: [fixtureVehicle({ id: "v-1", condition: "used" })],
+      totalCount: 1,
+      filterSpec: {},
+    });
+    renderPanel({ entityType: "vehicle", vehicleDescriptor: { condition: "used" } });
+    await waitFor(() =>
+      expect(vehiclesSearchMock).toHaveBeenCalledWith(
+        expect.objectContaining({ limit: 200 }),
+      ),
+    );
+  });
+
+  it("no descriptor → query stays at limit 50 (paginated manual browse)", async () => {
+    vehiclesSearchMock.mockResolvedValue({
+      entities: [fixtureVehicle({ id: "v-1" })],
+      totalCount: 1,
+      filterSpec: {},
+    });
+    renderPanel({ entityType: "vehicle" });
+    await waitFor(() =>
+      expect(vehiclesSearchMock).toHaveBeenCalledWith(
+        expect.objectContaining({ limit: 50 }),
+      ),
+    );
+  });
+
+  it("matching > 200 → selects 200 + honest '200 of M — narrow' disclosure", async () => {
+    const entities = Array.from({ length: 200 }, (_, i) =>
+      fixtureVehicle({ id: `v-${i}`, condition: "used" }),
+    );
+    vehiclesSearchMock.mockResolvedValue({ entities, totalCount: 250, filterSpec: {} });
+    const onSelection = vi.fn();
+    renderPanel({
+      entityType: "vehicle",
+      vehicleDescriptor: { condition: "used" }, // no maxCount → all matching
+      onSelectionChange: onSelection,
+    });
+    await waitFor(() => {
+      // all 200 returned rows selected (not a 50-row page)
+      expect(onSelection).toHaveBeenLastCalledWith(entities.map((e) => e.id));
+    });
+    expect(onSelection.mock.lastCall?.[0]).toHaveLength(200);
+    // honest cap disclosure — does NOT claim "all matching"
+    expect(
+      screen.getByText(/200 of 250 matching selected — narrow the filter to include all/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/\(all matching\)/i)).toBeNull();
+  });
+
+  it("matching ≤ 200 → '(all matching)' (no cap disclosure)", async () => {
+    const entities = Array.from({ length: 137 }, (_, i) =>
+      fixtureVehicle({ id: `v-${i}`, condition: "used" }),
+    );
+    vehiclesSearchMock.mockResolvedValue({ entities, totalCount: 137, filterSpec: {} });
+    renderPanel({ entityType: "vehicle", vehicleDescriptor: { condition: "used" } });
+    await waitFor(() =>
+      expect(screen.getByText(/137 selected \(all matching\)/i)).toBeInTheDocument(),
+    );
+  });
+});
