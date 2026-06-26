@@ -627,6 +627,124 @@ async function runMultiDimExtraction(
   };
 }
 
+// KAN-1235d — words that signal the operator is NARROWING an already-confirmed
+// vehicle target ("actually just Hondas", "narrow to SUVs", "only new ones").
+const REFINEMENT_SIGNAL =
+  /\b(actually|instead|rather|just|only|narrow|focus on|specifically)\b/i;
+
+/**
+ * KAN-1235d — post-confirmation refinement re-extraction.
+ *
+ * Once the vehicle product dimension is confirmed (incl. KAN-1235b's empty
+ * "all matching"), a follow-up like "actually just Hondas" would otherwise hit
+ * the all-confirmed early-return and be ignored. When a refinement signal is
+ * present, re-extract the product descriptor and MERGE the new filter into the
+ * confirmed one (e.g. {condition:'used'} + "just Hondas" → +make:'Honda') so the
+ * panel re-filters. Returns null (→ normal flow) when it doesn't apply or the
+ * re-extraction finds nothing usable.
+ */
+async function maybeRefineVehicleProduct(
+  prisma: OrchestratorPrisma,
+  llm: LLMCompleteFn,
+  params: OrchestratorParams,
+  campaignId: string,
+  todayUtc: Date,
+): Promise<ChatTurnResult | null> {
+  const { state, message } = params;
+  const isVehicle =
+    state.entityType.kind === 'confirmed' && state.entityType.value === 'vehicle';
+  if (!isVehicle) return null;
+  if (state.product.kind !== 'confirmed') return null;
+  if (!REFINEMENT_SIGNAL.test(message)) return null;
+  if (isOperatorConfirmation(message)) return null; // "just confirm" / "only proceed"
+
+  let llmResponse;
+  try {
+    llmResponse = await llm({
+      tenantId: params.tenantId,
+      tier: selectTier(message, state),
+      systemPrompt: buildExtractionPrompt('product', state, todayUtc),
+      userPrompt: message,
+      callerTag: 'orchestrator:product_refine',
+      jsonMode: true,
+      maxTokens: 1024,
+    });
+  } catch (_err) {
+    return null; // analyzer hiccup → fall through to normal flow
+  }
+
+  const raw = parseDimensionExtraction(llmResponse.text, 'product');
+  const norm = normalizeForDimension(raw, 'product', state);
+  if (norm.kind === 'clarification') return null; // nothing usable → normal flow
+
+  const existing =
+    state.product.value && typeof state.product.value === 'object'
+      ? (state.product.value as Record<string, unknown>)
+      : {};
+  const incoming =
+    norm.value && typeof norm.value === 'object'
+      ? (norm.value as Record<string, unknown>)
+      : {};
+  // Nothing new to apply → let the normal flow handle the message.
+  if (Object.keys(incoming).length === 0) return null;
+  const merged = { ...existing, ...incoming };
+
+  const refinedState: ConversationState = {
+    ...state,
+    product: { kind: 'confirmed', value: merged } as DimensionState,
+  };
+  params.state = refinedState;
+
+  await persistDimensionToCampaign(
+    prisma,
+    campaignId,
+    params.tenantId,
+    'product',
+    merged,
+    'vehicle',
+    todayUtc,
+  );
+
+  const summaryParts = [
+    merged.make,
+    merged.model,
+    merged.condition,
+    merged.bodyStyle,
+  ]
+    .filter((v) => typeof v === 'string')
+    .map((v) => String(v));
+  const summary = summaryParts.length > 0 ? summaryParts.join(' ') : 'all matching vehicles';
+  const aiMessage = `Updated the target to ${summary} — re-check the panel and confirm.`;
+
+  await prisma.campaignConversationTurn.create({
+    data: {
+      tenantId: params.tenantId,
+      campaignId,
+      turnType: 'ai',
+      content: aiMessage,
+      proposalSnapshot: { productRefined: merged },
+    },
+  });
+  await prisma.auditLog.create({
+    data: {
+      tenantId: params.tenantId,
+      actor: 'system',
+      actionType: 'campaign.dimension_advanced',
+      payload: { campaignId, dimension: 'product', action: 'refine', via: 'chat_refinement' },
+      reasoning:
+        'Post-confirmation refinement re-extracted + merged the vehicle product descriptor',
+    },
+  });
+
+  return {
+    kind: 'dimensions_extracted',
+    aiMessage,
+    state: refinedState,
+    campaignId,
+    advanced: [{ dimensionKey: 'product', kind: 'confirmed' }],
+  };
+}
+
 /**
  * Handle one chat turn. Detects reset intent first; otherwise extracts the
  * next-needed dimension; updates state + persists turns + returns the next
@@ -691,6 +809,18 @@ export async function handleChatTurn(
     select: { targetEntityType: true, targetEntityIds: true, proposedPlan: true },
   });
   params.state = reconcileCommittedTargetState(params.state, committedTarget);
+
+  // KAN-1235d — post-confirmation refinement re-extraction. Runs BEFORE the
+  // all-confirmed early-return so "actually just Hondas" on a confirmed vehicle
+  // target re-filters instead of being swallowed as a proceed-signal.
+  const refined = await maybeRefineVehicleProduct(
+    prisma,
+    llm,
+    params,
+    campaignId,
+    todayUtc,
+  );
+  if (refined) return refined;
 
   // C2 — Deterministic transition: which dimension to extract next
   const targetDim = nextDimensionToExtract(params.state);

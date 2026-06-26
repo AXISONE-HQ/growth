@@ -1224,3 +1224,69 @@ describe('KAN-1235b — empty-descriptor confirm for bare "cars"', () => {
     expect(result.state.product).toMatchObject({ kind: 'confirmed', value: { condition: 'used' } });
   });
 });
+
+// ─────────────────────────────────────────────
+// KAN-1235d — post-confirmation refinement re-extraction. After the vehicle
+// product is confirmed, "actually just Hondas" must re-filter (merge make into
+// the descriptor), not be swallowed by the all-confirmed early-return.
+// ─────────────────────────────────────────────
+
+describe('KAN-1235d — post-confirmation refinement', () => {
+  const confirmedVehicleState = (): ConversationState => ({
+    entityType: { kind: 'confirmed', value: 'vehicle' },
+    product: { kind: 'confirmed', value: { condition: 'used' } },
+    objectives: { kind: 'confirmed', value: { goalType: 'units', goalTarget: 50 } },
+    timeline: { kind: 'confirmed', value: { windowEnd: '2026-07-31' } },
+    audience: { kind: 'empty' },
+  });
+
+  it('"actually just Hondas" → merges make:Honda into the confirmed descriptor', async () => {
+    const { prisma, spies } = makePrismaMock();
+    const llm = makeLlm(
+      '{"kind":"extracted","value":{"make":"Honda"},"confidence":"high","aiMessage":"ok"}',
+    );
+    const result = await handleChatTurn(prisma, llm, makeAudienceCount(), {
+      campaignId: 'camp-1',
+      tenantId: 'tenant-1',
+      message: 'actually just Hondas',
+      state: confirmedVehicleState(),
+    });
+    expect(result.kind).toBe('dimensions_extracted');
+    if (!('state' in result)) throw new Error('expected state');
+    // merged — existing condition kept, make added
+    expect(result.state.product).toEqual({
+      kind: 'confirmed',
+      value: { condition: 'used', make: 'Honda' },
+    });
+    expect(result.aiMessage).toMatch(/Honda/);
+    // persisted + audited as a refine
+    const auditRefine = spies.auditCreate.mock.calls.find(
+      (c) => (c[0] as { data?: { payload?: { action?: string } } }).data?.payload?.action === 'refine',
+    );
+    expect(auditRefine).toBeDefined();
+  });
+
+  it('"just confirm" → bare confirmation, NOT a refinement → all-confirmed', async () => {
+    const { prisma } = makePrismaMock();
+    const llm = makeLlm('{}');
+    const result = await handleChatTurn(prisma, llm, makeAudienceCount(), {
+      campaignId: 'camp-1',
+      tenantId: 'tenant-1',
+      message: 'just confirm',
+      state: confirmedVehicleState(),
+    });
+    expect(result.kind).toBe('all_dimensions_confirmed');
+  });
+
+  it('"looks good" → no refinement signal → all-confirmed (no re-extraction)', async () => {
+    const { prisma } = makePrismaMock();
+    const llm = makeLlm('{}');
+    const result = await handleChatTurn(prisma, llm, makeAudienceCount(), {
+      campaignId: 'camp-1',
+      tenantId: 'tenant-1',
+      message: 'looks good',
+      state: confirmedVehicleState(),
+    });
+    expect(result.kind).toBe('all_dimensions_confirmed');
+  });
+});
