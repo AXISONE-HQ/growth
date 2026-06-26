@@ -223,12 +223,17 @@ export function TargetEntityPanel({
     if (totalCount === 0) return null;
     // KAN-1235 — no maxCount → targeting ALL matching inventory (max reach).
     if (maxCount === undefined) {
-      // KAN-1235c — honest cap disclosure (Memo 19/42). We can only select up
-      // to ALL_MATCH_LIMIT; beyond that, say so rather than claim "all".
-      if (totalCount > ALL_MATCH_LIMIT) {
+      // KAN-1235c-fix — base the affordance on the ACTUAL fetched/selected set
+      // (entities.length), NOT an assumed "all matching". The PROD regression:
+      // the API page-capped at 100 while this text claimed totalCount (137) were
+      // "all matching" — only 100 were selected. Now: claim "all matching" ONLY
+      // when we actually hold every matching row; otherwise disclose "N of M".
+      // (Memo 19/42 — honest about real state, not an assumed invariant.)
+      const selectedCount = entities.length;
+      if (selectedCount < totalCount) {
         return {
           tone: "amber",
-          text: `${ALL_MATCH_LIMIT} of ${totalCount} matching selected — narrow the filter to include all.`,
+          text: `${selectedCount} of ${totalCount} matching selected — narrow the filter to include all.`,
         };
       }
       return {
@@ -249,7 +254,7 @@ export function TargetEntityPanel({
       };
     }
     return { tone: "ok", text: `${maxCount} of ${totalCount} matching selected.` };
-  }, [hasDescriptor, maxCount, isLoading, isError, active.data, totalCount]);
+  }, [hasDescriptor, maxCount, isLoading, isError, active.data, totalCount, entities.length]);
 
   return (
     <Card className={className} aria-label="Campaign target selection panel">

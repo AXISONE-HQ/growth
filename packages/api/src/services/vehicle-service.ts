@@ -419,7 +419,22 @@ export interface ListVehiclesFilters {
 }
 
 const LIST_DEFAULT_LIMIT = 50;
-const LIST_MAX_LIMIT = 100;
+// KAN-1235c-fix — align the service cap with the tRPC contract: every caller's
+// limit is z.number().max(200). This was 100, which SILENTLY truncated the
+// campaign-target "all matching" selection to 100-of-N even when the panel
+// requested 200 — a Memo 19/42 honesty bug surfaced in PROD operator validation
+// (the affordance claimed "all matching" while only 100 were selected). 200 rows
+// is well within perf budget. KAN-1236 (filter-vs-enumerated mode) removes the
+// page-cap dependency entirely for inventories >200.
+const LIST_MAX_LIMIT = 200;
+
+/**
+ * KAN-1235c-fix — clamp a requested page size into [1, LIST_MAX_LIMIT]. Exported
+ * so the cap is unit-testable without seeding >100 rows in the integration DB.
+ */
+export function clampListLimit(requested?: number): number {
+  return Math.min(Math.max(requested ?? LIST_DEFAULT_LIMIT, 1), LIST_MAX_LIMIT);
+}
 
 function buildSortOrderBy(
   sort: VehicleListSort | undefined,
@@ -476,10 +491,7 @@ export async function listVehicles(
   filters: ListVehiclesFilters,
   pagination: { cursor?: string; limit?: number },
 ): Promise<ListVehiclesResult> {
-  const limit = Math.min(
-    Math.max(pagination.limit ?? LIST_DEFAULT_LIMIT, 1),
-    LIST_MAX_LIMIT,
-  );
+  const limit = clampListLimit(pagination.limit);
 
   const where: Record<string, unknown> = { tenantId };
   if (!filters.includeArchived) {

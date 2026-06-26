@@ -509,3 +509,45 @@ describe("KAN-1235c — all-matching selects full set + honest cap disclosure", 
     );
   });
 });
+
+// ─────────────────────────────────────────────
+// KAN-1235c-fix — affordance must reflect the ACTUAL selected set, not assume
+// entities.length === totalCount. Regression: PROD API page-capped at 100 while
+// the text claimed 137 "all matching". Mock that exact divergence.
+// ─────────────────────────────────────────────
+
+describe("KAN-1235c-fix — honest affordance when fetched < matching (the PROD bug)", () => {
+  it("API returns fewer than match (100 of 137) → 'N of M — narrow', NOT '(all matching)'", async () => {
+    // Simulate the real cap: only 100 rows returned though 137 match.
+    const entities = Array.from({ length: 100 }, (_, i) =>
+      fixtureVehicle({ id: `v-${i}`, condition: "used" }),
+    );
+    vehiclesSearchMock.mockResolvedValue({ entities, totalCount: 137, filterSpec: {} });
+    const onSelection = vi.fn();
+    renderPanel({
+      entityType: "vehicle",
+      vehicleDescriptor: { condition: "used" },
+      onSelectionChange: onSelection,
+    });
+    await waitFor(() =>
+      expect(
+        screen.getByText(/100 of 137 matching selected — narrow the filter to include all/i),
+      ).toBeInTheDocument(),
+    );
+    // honest: does NOT claim "all matching" when only 100 of 137 are held
+    expect(screen.queryByText(/\(all matching\)/i)).toBeNull();
+    // and the actual selection is the 100 returned, not 137
+    expect(onSelection.mock.lastCall?.[0]).toHaveLength(100);
+  });
+
+  it("API returns the full match (137 of 137) → '(all matching)' (true claim)", async () => {
+    const entities = Array.from({ length: 137 }, (_, i) =>
+      fixtureVehicle({ id: `v-${i}`, condition: "used" }),
+    );
+    vehiclesSearchMock.mockResolvedValue({ entities, totalCount: 137, filterSpec: {} });
+    renderPanel({ entityType: "vehicle", vehicleDescriptor: { condition: "used" } });
+    await waitFor(() =>
+      expect(screen.getByText(/137 selected \(all matching\)/i)).toBeInTheDocument(),
+    );
+  });
+});
