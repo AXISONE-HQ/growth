@@ -411,7 +411,7 @@ function projectConfidence(
 // columns; GoalShape is the discriminated union from KAN-1166 PR 2a.
 // ─────────────────────────────────────────────
 
-function parseGoalShape(
+export function parseGoalShape(
   goalType: string | null,
   goalProductId: string | null,
   goalDescription: string | null,
@@ -422,10 +422,12 @@ function parseGoalShape(
         ? { type: "revenue", productId: goalProductId }
         : { type: "revenue" };
     case "units":
-      // GoalShape units variant requires productId — without it the
-      // projection math has no anchor; treat as insufficient_dimensions.
-      if (!goalProductId) return null;
-      return { type: "units", productId: goalProductId };
+      // KAN-1237 — vehicle 'units' campaigns ("sell 50 cars") have NO
+      // goalProductId (the vehicle target is the anchor); catalog 'units' carry
+      // it. Both are valid — no longer rejected for a missing product.
+      return goalProductId
+        ? { type: "units", productId: goalProductId }
+        : { type: "units" };
     case "deals":
       return { type: "deals" };
     case "meetings":
@@ -436,7 +438,19 @@ function parseGoalShape(
         description: goalDescription ?? "operator-defined custom goal",
       };
     default:
-      return null;
+      // KAN-1237 sanitize-at-boundary (Memo 56 #37 defense-in-depth) — NEVER
+      // return null for an unknown goalType (the "Unrecognized goalType" yellow
+      // error that blocked Action Plan generation). Fall back to a custom goal
+      // preserving the operator's description + log the original value for retro.
+      // Covers 'leads'/'sales' until they become first-class GoalShapes in
+      // KAN-1230 Phase C.
+      console.warn(
+        `[action-plan-generator] goalType-fallback original=${String(goalType)} -> custom`,
+      );
+      return {
+        type: "custom",
+        description: goalDescription ?? "operator-defined custom goal",
+      };
   }
 }
 

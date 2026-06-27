@@ -473,8 +473,10 @@ function parseGoalShape(
         ? { type: "revenue", productId: goalProductId }
         : { type: "revenue" };
     case "units":
-      if (!goalProductId) return null;
-      return { type: "units", productId: goalProductId };
+      // KAN-1237 — vehicle 'units' has no goalProductId (mirror of generator).
+      return goalProductId
+        ? { type: "units", productId: goalProductId }
+        : { type: "units" };
     case "deals":
       return { type: "deals" };
     case "meetings":
@@ -485,7 +487,15 @@ function parseGoalShape(
         description: goalDescription ?? "operator-defined custom goal",
       };
     default:
-      return null;
+      // KAN-1237 sanitize-at-boundary (mirror of generator) — never null; fall
+      // back to custom + log so refinement never re-introduces the yellow error.
+      console.warn(
+        `[action-plan-refiner] goalType-fallback original=${String(goalType)} -> custom`,
+      );
+      return {
+        type: "custom",
+        description: goalDescription ?? "operator-defined custom goal",
+      };
   }
 }
 

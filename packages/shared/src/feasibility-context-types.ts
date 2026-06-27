@@ -39,7 +39,11 @@ export const GoalShapeRevenueSchema = z.object({
 
 export const GoalShapeUnitsSchema = z.object({
   type: z.literal('units'),
-  productId: z.string(),
+  // KAN-1237 — productId is OPTIONAL: VEHICLE 'units' campaigns ("sell 50 cars")
+  // anchor on the vehicle target (targetEntityIds), not a single catalog
+  // product. Catalog 'units' goals still carry productId. Was required, which
+  // rejected vehicle-units with a misleading "Unrecognized goalType" error.
+  productId: z.string().optional(),
   segmentId: z.string().optional(),
 });
 
