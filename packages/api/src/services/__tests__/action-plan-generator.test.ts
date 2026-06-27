@@ -31,6 +31,7 @@ vi.mock("../feasibility-context-service.js", () => ({
 import {
   computeGoalWindowDays,
   generateActionPlan,
+  parseGoalShape,
   persistActionPlan,
   splitAudienceIntoPipelines,
   VEHICLE_FULL_AUDIENCE,
@@ -636,7 +637,12 @@ describe("Dimensions input parsing (insufficient_dimensions on gaps)", () => {
     expect(result.kind).toBe("insufficient_dimensions");
   });
 
-  it("returns insufficient_dimensions on unrecognized goalType", async () => {
+  it("KAN-1237 — unrecognized goalType sanitizes to custom + generates (rejection is GONE)", async () => {
+    // Pre-KAN-1237 this returned insufficient_dimensions ("Unrecognized
+    // goalType: garbage_value") — the P1 yellow error. Now sanitize-at-boundary
+    // falls back to a custom goal (preserving goalDescription) + the plan
+    // generates. This is the failure-encoding flip (Memo 56 #38): the assertion
+    // changed from reject → generate to lock in the new behavior.
     const prisma = makePrisma(makeCampaign({ goalType: "garbage_value" }));
     const result = await generateActionPlan(
       prisma,
@@ -645,7 +651,7 @@ describe("Dimensions input parsing (insufficient_dimensions on gaps)", () => {
       makeCount(100),
       { campaignId: "campaign-1", tenantId: "t1", todayUtc: new Date("2026-06-15T12:00:00Z") },
     );
-    expect(result.kind).toBe("insufficient_dimensions");
+    expect(result.kind).toBe("action_plan");
   });
 
   it("returns insufficient_dimensions when audienceConditions fails schema validation", async () => {
@@ -808,5 +814,50 @@ describe("SUFFICIENT_CONTEXT fixture sanity", () => {
   it("has the shape expected by FCS dominantConfidence", () => {
     expect(SUFFICIENT_CONTEXT.conversionRate.confidence).toBe("high");
     expect(SUFFICIENT_CONTEXT.salesVelocity.confidence).toBe("high");
+  });
+});
+
+// ─────────────────────────────────────────────
+// KAN-1237 — parseGoalShape: vehicle 'units' (no productId) is valid, and
+// unknown goalTypes sanitize to 'custom' instead of throwing "Unrecognized
+// goalType" (the PROD P1 that blocked Action Plan generation).
+// ─────────────────────────────────────────────
+
+describe("KAN-1237 — parseGoalShape goalType handling", () => {
+  it("vehicle 'units' (no productId) → {type:'units'} — was null pre-fix (P1)", () => {
+    // Pre-fix this returned null → "Unrecognized goalType: units" yellow error.
+    expect(parseGoalShape("units", null, "Sell 50 cars")).toEqual({ type: "units" });
+  });
+
+  it("catalog 'units' (with productId) → carries productId (regression)", () => {
+    expect(parseGoalShape("units", "prod-1", "Sell 50 widgets")).toEqual({
+      type: "units",
+      productId: "prod-1",
+    });
+  });
+
+  it("unknown goalType 'leads' → sanitizes to custom (never null) — was null pre-fix", () => {
+    const shape = parseGoalShape("leads", null, "Generate 100 leads");
+    expect(shape).toEqual({ type: "custom", description: "Generate 100 leads" });
+  });
+
+  it("unknown goalType 'sales' → sanitizes to custom", () => {
+    const shape = parseGoalShape("sales", null, "Close 20 sales");
+    expect(shape).toEqual({ type: "custom", description: "Close 20 sales" });
+  });
+
+  it("typo / garbage goalType → custom fallback (defense-in-depth, never throws)", () => {
+    const shape = parseGoalShape("widgets_sold", null, null);
+    expect(shape).toEqual({ type: "custom", description: "operator-defined custom goal" });
+  });
+
+  it("known types unchanged (revenue/deals/meetings/custom regression)", () => {
+    expect(parseGoalShape("revenue", null, null)).toEqual({ type: "revenue" });
+    expect(parseGoalShape("deals", null, null)).toEqual({ type: "deals" });
+    expect(parseGoalShape("meetings", null, null)).toEqual({ type: "meetings" });
+    expect(parseGoalShape("custom", null, "my goal")).toEqual({
+      type: "custom",
+      description: "my goal",
+    });
   });
 });
