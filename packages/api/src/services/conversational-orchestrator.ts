@@ -627,10 +627,14 @@ async function runMultiDimExtraction(
   };
 }
 
-// KAN-1235d — words that signal the operator is NARROWING an already-confirmed
-// vehicle target ("actually just Hondas", "narrow to SUVs", "only new ones").
+// KAN-1235d / KAN-1238 — words that signal the operator is NARROWING an already-
+// confirmed vehicle target ("actually just Hondas", "narrow to SUVs", "only new
+// ones", "any used cars", "limit to SUVs", "make it Hondas"). KAN-1238 added
+// "any"/"limit to"/"make it" after PROD validation showed "any used cars" wasn't
+// recognized. False positives are harmless: maybeRefineVehicleProduct re-extracts
+// and returns null when nothing new is found (the empty-incoming guard).
 const REFINEMENT_SIGNAL =
-  /\b(actually|instead|rather|just|only|narrow|focus on|specifically)\b/i;
+  /\b(actually|instead|rather|just|only|narrow|focus on|specifically|any|limit to|make it)\b/i;
 
 /**
  * KAN-1235d — post-confirmation refinement re-extraction.
