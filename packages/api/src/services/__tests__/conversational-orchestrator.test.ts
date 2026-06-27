@@ -1290,3 +1290,69 @@ describe('KAN-1235d — post-confirmation refinement', () => {
     expect(result.kind).toBe('all_dimensions_confirmed');
   });
 });
+
+// ─────────────────────────────────────────────
+// KAN-1238 — REFINEMENT_SIGNAL expansion. PROD validation showed "any used
+// cars" wasn't recognized as a refinement. Added any/limit-to/make-it.
+// ─────────────────────────────────────────────
+
+describe('KAN-1238 — expanded refinement signals', () => {
+  // Broad (empty) confirmed vehicle target — the realistic post-"sell 50 cars"
+  // state where the operator then narrows.
+  const broadVehicleState = (): ConversationState => ({
+    entityType: { kind: 'confirmed', value: 'vehicle' },
+    product: { kind: 'confirmed', value: {} },
+    objectives: { kind: 'confirmed', value: { goalType: 'units', goalTarget: 50 } },
+    timeline: { kind: 'confirmed', value: { windowEnd: '2026-07-31' } },
+    audience: { kind: 'empty' },
+  });
+
+  async function refine(message: string, llmJson: string) {
+    const { prisma } = makePrismaMock();
+    const llm = makeLlm(llmJson);
+    return handleChatTurn(prisma, llm, makeAudienceCount(), {
+      campaignId: 'camp-1',
+      tenantId: 'tenant-1',
+      message,
+      state: broadVehicleState(),
+    });
+  }
+
+  it('"any used cars" → merges condition=used (the PROD miss)', async () => {
+    const result = await refine(
+      'any used cars',
+      '{"kind":"extracted","value":{"condition":"used"},"confidence":"high","aiMessage":"ok"}',
+    );
+    expect(result.kind).toBe('dimensions_extracted');
+    if (!('state' in result)) throw new Error('expected state');
+    expect(result.state.product).toEqual({ kind: 'confirmed', value: { condition: 'used' } });
+  });
+
+  it('"limit to SUVs" → merges bodyStyle', async () => {
+    const result = await refine(
+      'limit to SUVs',
+      '{"kind":"extracted","value":{"bodyStyle":"suv"},"confidence":"high","aiMessage":"ok"}',
+    );
+    if (!('state' in result)) throw new Error('expected state');
+    expect(result.state.product).toMatchObject({ kind: 'confirmed', value: { bodyStyle: 'suv' } });
+  });
+
+  it('"make it Hondas" → merges make=Honda', async () => {
+    const result = await refine(
+      'make it Hondas',
+      '{"kind":"extracted","value":{"make":"Honda"},"confidence":"high","aiMessage":"ok"}',
+    );
+    if (!('state' in result)) throw new Error('expected state');
+    expect(result.state.product).toMatchObject({ kind: 'confirmed', value: { make: 'Honda' } });
+  });
+
+  it('regression — "just confirm" still a bare confirmation → all-confirmed', async () => {
+    const result = await refine('just confirm', '{}');
+    expect(result.kind).toBe('all_dimensions_confirmed');
+  });
+
+  it('regression — "looks good" still no-signal → all-confirmed', async () => {
+    const result = await refine('looks good', '{}');
+    expect(result.kind).toBe('all_dimensions_confirmed');
+  });
+});
